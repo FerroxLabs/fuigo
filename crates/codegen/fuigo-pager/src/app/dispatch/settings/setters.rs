@@ -93,6 +93,39 @@ pub(super) fn set_hunk_tracker_mode_inner(app: &mut AppView, canonical: &str) {
     app.current_ui.hunk_tracker_mode = Some(canonical.to_string());
 }
 
+/// Mirror the canonical startup density into `app.current_ui` so new sessions pick it up and `current_value_for` stays in sync.
+pub(super) fn set_tool_density_inner(app: &mut AppView, canonical: &str) {
+    app.current_ui.tool_density = Some(canonical.to_string());
+}
+
+/// Persist `[ui].tool_density` (`compact` | `detailed`), the density new sessions start with.
+/// Also applies it to the active session now. `/density` never reaches this path, so it never writes the setting.
+pub(in crate::app::dispatch) fn set_tool_density_default(
+    app: &mut AppView,
+    value: String,
+) -> Vec<Effect> {
+    let canonical = crate::settings::canonical_tool_density(Some(&value));
+    let prev_raw = app.current_ui.tool_density.as_deref();
+    let prev = crate::settings::canonical_tool_density(prev_raw);
+    if prev_raw.is_some() && prev == canonical {
+        return vec![];
+    }
+    set_tool_density_inner(app, canonical);
+    refresh_open_settings_modals(app);
+    tracing::info!(target: "settings", key = "tool_density", value = canonical, "setting changed");
+    app.show_toast(&format!("\u{2713} Tool call density: {canonical}"));
+    if let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&id)
+    {
+        agent.scrollback.set_tool_density(canonical == "compact");
+    }
+    vec![Effect::PersistSetting {
+        key: "tool_density",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev),
+    }]
+}
+
 pub(super) fn set_screen_mode_inner(app: &mut AppView, canonical: &str) {
     app.current_ui.screen_mode = Some(canonical.to_string());
 }
@@ -397,6 +430,51 @@ pub(in crate::app::dispatch) fn set_ask_user_question_timeout_enabled(
     ));
     vec![Effect::PersistSetting {
         key: "toolset.ask_user_question.timeout_enabled",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev_effective),
+    }]
+}
+
+/// Mirror the just-written `[features]` value in `app` so the modal reflects it (the flag is re-resolved at agent build).
+pub(super) fn set_subagent_model_inheritance_inner(app: &mut AppView, new: bool) {
+    app.subagent_model_inheritance.config = Some(new);
+}
+
+/// SHELL-owned setter for `[features] subagent_model_inheritance`; persists via `Effect::PersistSetting`.
+/// Applies to new sessions (restart-required). A tier that outranks the config file (a pin or the environment
+/// variable) wins whatever is written here, so the row says so and writes nothing.
+pub(in crate::app::dispatch) fn set_subagent_model_inheritance(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    use fuigo_shell::agent::config::Feature;
+    let feature = Feature::SubagentModelInheritance;
+    if let Some(label) = app.subagent_model_inheritance.override_label(feature) {
+        app.show_toast(&format!(
+            "Subagent model inheritance is set by {label}; change it there"
+        ));
+        refresh_open_settings_modals(app);
+        return vec![];
+    }
+    let prev_state = app.subagent_model_inheritance.config;
+    let prev_effective = app.subagent_model_inheritance.effective(feature);
+    if prev_effective == new && prev_state.is_some() {
+        return vec![];
+    }
+    set_subagent_model_inheritance_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "features.subagent_model_inheritance",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&format!(
+        "{} (restart to apply)",
+        save_success_toast("Subagent model inheritance", new),
+    ));
+    vec![Effect::PersistSetting {
+        key: "features.subagent_model_inheritance",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev_effective),
     }]

@@ -2,7 +2,8 @@ use super::*;
 use crate::implementations::fuigo_build::task::admission::{LimitBehavior, SubagentLimits};
 use crate::implementations::fuigo_build::task::backend::{ChannelBackend, SubagentBackend};
 use crate::implementations::fuigo_build::task::types::{
-    ActiveAgentMessageDelivery, ActiveAgentMessageRequest, SubagentCancelRequest,
+    ActiveAgentMessageDelivery, ActiveAgentMessageRequest, HandedOffForegroundSubagent,
+    SubagentCancelRequest,
     SubagentClearUsageNotAppliedRequest, SubagentCompletionsRequest, SubagentListActiveRequest,
     SubagentLoopUnitActiveRequest, SubagentMarkUsageNotAppliedRequest, SubagentOutstandingReply,
     SubagentOutstandingRequest, SubagentOwner, SubagentRegistryCounts, SubagentRequest,
@@ -211,6 +212,7 @@ pub(super) fn request(id: &str, background: bool) -> SubagentRequest {
         fork_context: false,
         owner: SubagentOwner::Task,
         cancel_token: CancellationToken::new(),
+        tool_call_id: None,
     }
 }
 
@@ -1014,6 +1016,234 @@ async fn two_parked_drains_on_one_scope_both_fire() {
         second.await.expect("second waiter fires"),
         SubagentOutstandingReply::default(),
         "the second waiter on the scope must also fire"
+    );
+    harness.actor.abort();
+}
+
+fn spawned_by_call(id: &str, tool_call_id: &str, background: bool) -> SubagentRequest {
+    let mut spawned = request(id, background);
+    spawned.tool_call_id = Some(tool_call_id.to_owned());
+    spawned
+}
+
+#[tokio::test]
+async fn turn_end_hands_a_running_foreground_child_to_the_background_before_its_caller_drops() {
+    use fuigo_tool_types::HandedOffSubagentState;
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let _spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move {
+            backend
+                .spawn(spawned_by_call("fg", "call-fg", false), None)
+                .await
+        }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("fg"));
+    assert_eq!(
+        outstanding(&harness.backend, "prompt").await.live_ids,
+        vec!["fg".to_owned()],
+        "the live foreground child blocks the turn until it is handed off"
+    );
+
+    let handed_off = parent_backend(&harness)
+        .hand_off_foreground_for_prompt("prompt")
+        .await;
+    assert_eq!(
+        vec![HandedOffForegroundSubagent {
+            subagent_id: "fg".to_owned(),
+            tool_call_id: "call-fg".to_owned(),
+            subagent_type: "explore".to_owned(),
+            description: "test child".to_owned(),
+            state: HandedOffSubagentState::Running,
+        }],
+        handed_off
+    );
+    // The caller is still waiting here: the hand-off must not depend on it dropping.
+    assert_eq!(
+        outstanding(&harness.backend, "prompt").await,
+        SubagentOutstandingReply {
+            live_ids: Vec::new(),
+            background_live: true,
+            subagent_usage_not_applied: false,
+        },
+        "a handed-off child no longer blocks the turn"
+    );
+    assert!(
+        harness
+            .backend
+            .query("fg", false, None)
+            .await
+            .unwrap()
+            .is_running(),
+        "handing off does not cancel the child"
+    );
+    let _ = harness.finish.send(());
+    let disposition = harness.completions.recv().await.unwrap();
+    assert!(disposition.backgrounded && disposition.should_surface);
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn turn_end_hand_off_only_reports_this_prompts_foreground_children_with_a_tool_call() {
+    use fuigo_tool_types::HandedOffSubagentState;
+    let mut harness = harness_with_config(false, limited(1, LimitBehavior::Queue));
+    // Holds the only slot; background, so it is never handed off.
+    let _held = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move {
+            backend
+                .spawn(spawned_by_call("held", "call-held", true), None)
+                .await
+        }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("held"));
+    // Queued behind it: handed off as queued.
+    let _queued = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move {
+            backend
+                .spawn(spawned_by_call("queued", "call-queued", false), None)
+                .await
+        }
+    });
+    await_queued(&harness.backend, 1).await;
+    // A harness-internal spawn (no model tool call) and another prompt's spawn are not this turn's calls.
+    let mut internal = request("internal", false);
+    internal.tool_call_id = None;
+    let _internal = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(internal, None).await }
+    });
+    let mut other_prompt = spawned_by_call("other", "call-other", false);
+    other_prompt.parent_prompt_id = Some("other-prompt".to_owned());
+    let _other = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(other_prompt, None).await }
+    });
+    await_queued(&harness.backend, 3).await;
+
+    let handed_off = parent_backend(&harness)
+        .hand_off_foreground_for_prompt("prompt")
+        .await;
+    let summary: Vec<(String, String, HandedOffSubagentState)> = handed_off
+        .into_iter()
+        .map(|child| (child.subagent_id, child.tool_call_id, child.state))
+        .collect();
+    assert_eq!(
+        vec![(
+            "queued".to_owned(),
+            "call-queued".to_owned(),
+            HandedOffSubagentState::Queued
+        )],
+        summary
+    );
+    // An unbound backend has no parent session to answer for.
+    assert!(
+        harness
+            .backend
+            .hand_off_foreground_for_prompt("prompt")
+            .await
+            .is_empty()
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn turn_end_hand_off_reports_a_child_that_finished_before_its_result_was_delivered() {
+    use fuigo_tool_types::HandedOffSubagentState;
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move {
+            backend
+                .spawn(spawned_by_call("done", "call-done", false), None)
+                .await
+        }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("done"));
+    let _ = harness.finish.send(());
+    let _ = harness.completions.recv().await;
+    let _ = spawn.await;
+
+    let handed_off = parent_backend(&harness)
+        .hand_off_foreground_for_prompt("prompt")
+        .await;
+    assert_eq!(
+        vec![("done".to_owned(), HandedOffSubagentState::Finished)],
+        handed_off
+            .into_iter()
+            .map(|child| (child.subagent_id, child.state))
+            .collect::<Vec<_>>()
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn turn_end_hand_off_reports_a_child_that_was_cancelled_before_its_result_was_delivered() {
+    use fuigo_tool_types::HandedOffSubagentState;
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let request = spawned_by_call("gone", "call-gone", false);
+    let cancel_token = request.cancel_token.clone();
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request, None).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("gone"));
+    cancel_token.cancel();
+    let result = spawn.await.unwrap().unwrap();
+    assert!(result.cancelled, "{result:?}");
+
+    let handed_off = parent_backend(&harness)
+        .hand_off_foreground_for_prompt("prompt")
+        .await;
+    assert_eq!(
+        vec![("gone".to_owned(), HandedOffSubagentState::Cancelled)],
+        handed_off
+            .into_iter()
+            .map(|child| (child.subagent_id, child.state))
+            .collect::<Vec<_>>()
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn turn_end_hand_off_makes_a_queued_child_a_background_child_when_it_later_starts() {
+    use fuigo_tool_types::HandedOffSubagentState;
+    let mut harness = harness_with_config(false, limited(1, LimitBehavior::Queue));
+    let _held = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move {
+            backend
+                .spawn(spawned_by_call("held", "call-held", true), None)
+                .await
+        }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("held"));
+    let _queued = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move {
+            backend
+                .spawn(spawned_by_call("queued", "call-queued", false), None)
+                .await
+        }
+    });
+    await_queued(&harness.backend, 1).await;
+    let handed_off = parent_backend(&harness)
+        .hand_off_foreground_for_prompt("prompt")
+        .await;
+    assert_eq!(
+        vec![HandedOffSubagentState::Queued],
+        handed_off.iter().map(|child| child.state).collect::<Vec<_>>()
+    );
+
+    let _ = harness.finish.send(());
+    let _held_done = harness.completions.recv().await.unwrap();
+    assert_eq!(harness.started.recv().await.as_deref(), Some("queued"));
+    let _ = harness.finish.send(());
+    let queued_done = harness.completions.recv().await.unwrap();
+    assert!(
+        queued_done.backgrounded && queued_done.should_surface && !queued_done.foreground_delivered,
+        "a handed-off queued child finishes as a background child whose result is surfaced, not delivered to the dropped caller"
     );
     harness.actor.abort();
 }

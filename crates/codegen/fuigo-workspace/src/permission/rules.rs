@@ -235,7 +235,9 @@ pub fn parse_permission_rule(
             });
         }
 
-        if let Some(tool) = tool_name_to_filter(rule) {
+        // A bare lowercase `grep` is also an ordinary command word; it stays a literal pattern, and only `grep(...)`
+        // names the tool
+        if let Some(tool) = tool_name_to_filter(rule).filter(|_| rule != "grep") {
             return Ok(PermissionRule {
                 action,
                 tool,
@@ -287,13 +289,14 @@ pub fn parse_permission_rule(
 
 pub(crate) fn tool_name_to_filter(name: &str) -> Option<ToolFilter> {
     match name {
-        "Bash" => Some(ToolFilter::Bash),
-        "Read" => Some(ToolFilter::Read),
-        "Edit" | "Write" => Some(ToolFilter::Edit),
+        // The tools' own names work too, so a rule can be written the way the model sees the tool
+        "Bash" | "Shell" | "run_terminal_command" => Some(ToolFilter::Bash),
+        "Read" | "read_file" | "list_dir" => Some(ToolFilter::Read),
+        "Edit" | "Write" | "search_replace" => Some(ToolFilter::Edit),
         "MCPTool" => Some(ToolFilter::Mcp),
-        "Grep" | "Glob" => Some(ToolFilter::Grep),
-        "WebFetch" => Some(ToolFilter::WebFetch),
-        "WebSearch" => Some(ToolFilter::WebSearch),
+        "Grep" | "Glob" | "grep" => Some(ToolFilter::Grep),
+        "WebFetch" | "web_fetch" => Some(ToolFilter::WebFetch),
+        "WebSearch" | "web_search" => Some(ToolFilter::WebSearch),
         "AgentMessage" | "SendSubagentMessage" | "SendAgentMessage" => {
             Some(ToolFilter::AgentMessage)
         }
@@ -373,6 +376,51 @@ mod tests {
             assert_eq!(rule.action, action, "{rule_str}");
             assert_eq!(rule.tool, ToolFilter::AgentMessage, "{rule_str}");
             assert!(rule.pattern.is_none(), "{rule_str}");
+        }
+    }
+
+    #[test]
+    fn native_tool_names_work_as_rule_prefixes() {
+        for (rule_str, tool, pattern) in [
+            ("run_terminal_command(git status)", ToolFilter::Bash, Some("git status")),
+            ("Shell(git status)", ToolFilter::Bash, Some("git status")),
+            ("read_file(src/**)", ToolFilter::Read, Some("src/**")),
+            ("list_dir(src)", ToolFilter::Read, Some("src")),
+            ("search_replace(src/**/*.rs)", ToolFilter::Edit, Some("src/**/*.rs")),
+            ("grep(TODO)", ToolFilter::Grep, Some("TODO")),
+            ("web_search", ToolFilter::WebSearch, None),
+            ("web_fetch", ToolFilter::WebFetch, None),
+            ("run_terminal_command", ToolFilter::Bash, None),
+            ("Shell", ToolFilter::Bash, None),
+            ("read_file(*)", ToolFilter::Read, None),
+        ] {
+            for action in [RuleAction::Allow, RuleAction::Deny, RuleAction::Ask] {
+                let rule = parse_permission_rule(rule_str, action)
+                    .unwrap_or_else(|e| panic!("{rule_str} must parse: {e:?}"));
+                assert_eq!(rule.tool, tool, "{rule_str}");
+                assert_eq!(rule.pattern.as_deref(), pattern, "{rule_str}");
+                assert_eq!(rule.action, action, "{rule_str}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_bare_grep_stays_a_literal_pattern_not_a_tool() {
+        let rule = parse_permission_rule("grep", RuleAction::Deny).unwrap();
+        assert_eq!(rule.tool, ToolFilter::Any);
+        assert_eq!(rule.pattern.as_deref(), Some("grep"));
+    }
+
+    #[test]
+    fn unknown_tool_prefixes_are_still_rejected() {
+        for rule_str in ["frobnicate(x)", "run_terminal(x)", "readfile(x)"] {
+            assert!(
+                matches!(
+                    parse_permission_rule(rule_str, RuleAction::Allow),
+                    Err(RuleParseError::UnknownToolPrefix { .. })
+                ),
+                "{rule_str}"
+            );
         }
     }
 

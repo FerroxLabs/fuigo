@@ -2,8 +2,9 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::permission::bash_command_splitting::{
     MAX_INLINE_SHELL_DEPTH, all_commands_from_script, env_split_string_script,
-    normalize_command_words,
+    normalize_command_words, try_parse_shell,
 };
+use crate::permission::bash_permission_script::PermissionScript;
 use crate::permission::types::{
     AccessKind, Decision, PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
 };
@@ -175,7 +176,20 @@ impl CompiledPolicy {
         inline_depth_remaining: usize,
     ) -> Option<GateDecision> {
         let Some(segments) = all_commands_from_script(cmd) else {
-            return Some(GateDecision::AskFailClosed);
+            // Word-only decomposition failed. A recovered script (quoted filename variables) still has its commands
+            // checked against deny/ask rules; anything not covered by an allow rule stays a fail-closed Ask.
+            let Some((projections, covered)) = self.recovered_commands(cmd, AllowRuleScope::Any)
+            else {
+                return Some(GateDecision::AskFailClosed);
+            };
+            let mut decision = (!covered).then_some(GateDecision::AskFailClosed);
+            for words in &projections {
+                decision = combine_gate_decisions(
+                    decision,
+                    self.evaluate_command_words(words, inline_depth_remaining),
+                );
+            }
+            return decision;
         };
         let mut decision = None;
         for parsed in &segments {
@@ -497,7 +511,9 @@ impl CompiledPolicy {
         scope: AllowRuleScope,
     ) -> bool {
         let Some(segments) = all_commands_from_script(cmd) else {
-            return false;
+            return self
+                .recovered_commands(cmd, scope)
+                .is_some_and(|(_, covered)| covered);
         };
         if segments.is_empty() {
             return false;
@@ -531,6 +547,24 @@ impl CompiledPolicy {
             }
         }
         true
+    }
+
+    /// Recovered command projections of a script the word-only splitter could not decompose, and whether allow rules in
+    /// `scope` cover every one of them; `None` when nothing parses. Coverage needs an eligible script (reviewed readers
+    /// over quoted filename variables, see `PermissionScript`), never a guessed variable value.
+    fn recovered_commands(
+        &self,
+        cmd: &str,
+        scope: AllowRuleScope,
+    ) -> Option<(Vec<Vec<String>>, bool)> {
+        let tree = try_parse_shell(cmd)?;
+        let script = PermissionScript::analyze(&tree, cmd);
+        let projections = script.projections();
+        let covered = script.is_eligible()
+            && projections
+                .iter()
+                .all(|words| self.bash_words_allowed(words, scope));
+        Some((projections, covered))
     }
 
     fn bash_words_allowed(&self, words: &[String], scope: AllowRuleScope) -> bool {
@@ -1415,6 +1449,7 @@ mod tests {
             prompt: "edit config.toml".into(),
             description: "spawn".into(),
             subagent_type: "general-purpose".into(),
+            subagent_type_specified: false,
             run_in_background: false,
             capability_mode: None,
             isolation: None,
@@ -1994,13 +2029,26 @@ mod tests {
             );
         }
         // Scripts that cannot be decomposed must fail closed (prompt), not allow.
-        for cmd in ["OUT=$(id); echo \"$OUT\" > M.txt", "echo \"`id`\" > M.txt"] {
+        for cmd in [
+            "OUT=$(whoami); echo \"$OUT\" > M.txt",
+            "echo \"`whoami`\" > M.txt",
+        ] {
             assert!(
                 matches!(
                     policy.evaluate_bash_command_policy(cmd),
                     Some(Decision::Ask)
                 ),
                 "an undecomposable script must escalate, not fall through to allow: {cmd}"
+            );
+        }
+        // A denied command inside a substitution is rejected, not merely escalated.
+        for cmd in ["OUT=$(id); echo \"$OUT\" > M.txt", "echo \"`id`\" > M.txt"] {
+            assert!(
+                matches!(
+                    policy.evaluate_bash_command_policy(cmd),
+                    Some(Decision::Reject(_))
+                ),
+                "a denied command in a substitution must be rejected: {cmd}"
             );
         }
         // Alternating normalization still reaches the denied command through pure `env` wrappers.

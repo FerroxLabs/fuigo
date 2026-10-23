@@ -473,7 +473,7 @@ pub(super) fn handle_credit_limit_recheck_complete(
         agent.credit_limit_stashed_prompt = None;
     }
 
-    let mut drain = maybe_drain_queue(agent);
+    let mut drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
     drain.effects.push(Effect::FetchBilling {
         agent_id,
         silent: true,
@@ -501,7 +501,7 @@ pub(super) fn dispatch_retry_credit_limit_prompt(app: &mut AppView) -> Vec<Effec
         return vec![];
     };
     agent.session.enqueue_in_flight_prompt_front(prompt);
-    let drain = maybe_drain_queue(agent);
+    let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
     if drain.effects.iter().any(|effect| {
         matches!(
             effect,
@@ -517,4 +517,3 @@ pub(super) fn dispatch_retry_credit_limit_prompt(app: &mut AppView) -> Vec<Effec
     note_peek_page_flip(app, agent_id, drain.page_flip_entry);
     drain.effects
 }
-

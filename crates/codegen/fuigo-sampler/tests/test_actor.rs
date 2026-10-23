@@ -82,6 +82,7 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         query_params: IndexMap::new(),
         env_http_headers: IndexMap::new(),
         context_window: 128_000,
+        max_request_bytes: None,
         force_http1: false,
         // Keep retries minimal so tests don't take forever.
         max_retries: Some(2),

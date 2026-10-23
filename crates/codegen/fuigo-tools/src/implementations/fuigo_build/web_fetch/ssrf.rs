@@ -134,13 +134,27 @@ pub(crate) async fn check_ssrf(url: &Url, allow_local: bool) -> Result<(), WebFe
             host: String::new(),
         })?;
 
-    // If the host is already a literal IP, check it directly.
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    // If the host is already a literal IP, check it directly. The typed host is read, not the
+    // string: the URL parser has reduced every spelling (decimal, hex, octal, short forms,
+    // bracketed IPv6, IPv4-mapped) to the address that will be dialled.
+    let literal = match url.host() {
+        Some(url::Host::Ipv4(ip)) => Some(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => Some(IpAddr::V6(ip)),
+        _ => None,
+    };
+    if let Some(ip) = literal {
         if is_blocked_for_host(ip, host, allow_local) {
             return Err(WebFetchError::SsrfBlocked {
                 host: host.to_string(),
                 ip,
             });
+        }
+        // The vendor egress guard refuses names; a literal has none, so a public address cannot
+        // be told from an upstream vendor's. Refused unless the guard is lifted.
+        if !is_non_public_ip(ip) && fuigo_extra_ca::egress::refuses_public_ip_literals() {
+            return Err(WebFetchError::EgressPolicy(
+                fuigo_extra_ca::egress::PUBLIC_IP_LITERAL_REFUSED,
+            ));
         }
         return Ok(());
     }
@@ -172,6 +186,11 @@ pub(crate) async fn check_ssrf(url: &Url, allow_local: bool) -> Result<(), WebFe
                 ip: addr.ip(),
             })
         })
+}
+
+#[cfg(test)]
+fn literal_refused_under(allowance: &fuigo_extra_ca::egress::UpstreamAllowance) -> bool {
+    fuigo_extra_ca::egress::refuses_public_ip_literals_under(allowance)
 }
 
 #[cfg(test)]
@@ -407,10 +426,68 @@ mod tests {
         assert!(check_ssrf(&url, true).await.is_ok());
     }
 
+    /// The vendor egress guard refuses names, and a literal has none: a public IP literal in a
+    /// tool URL cannot be told from an upstream vendor address, so web_fetch refuses every one
+    /// (any spelling the URL parser reduces to an address) unless the guard is lifted.
     #[tokio::test]
-    async fn ssrf_allows_ip_literal_public() {
-        let url = Url::parse("https://1.1.1.1/").unwrap();
-        let result = check_ssrf(&url, false).await;
-        assert!(result.is_ok());
+    async fn ssrf_refuses_public_ip_literals_the_vendor_guard_cannot_name() {
+        for raw in [
+            "https://1.1.1.1/",
+            "http://8.8.8.8/",
+            "https://8.8.8.8./",
+            // Other spellings of 8.8.8.8, reduced to the address by the URL parser
+            "http://134744072/",
+            "http://0x08080808/",
+            "http://010.010.010.010/",
+            "http://8.8.2056/",
+            // IPv6, bracketed; and an IPv4-mapped public address
+            "https://[2606:4700:4700::1111]/",
+            "https://[::ffff:8.8.8.8]/",
+        ] {
+            let url = Url::parse(raw).unwrap();
+            for allow_local in [false, true] {
+                let result = check_ssrf(&url, allow_local).await;
+                assert!(
+                    matches!(result, Err(WebFetchError::EgressPolicy(_))),
+                    "{raw} (allow_local={allow_local}): {result:?}"
+                );
+            }
+        }
+    }
+
+    /// The refusal is for public literals only: private and loopback literals keep their own
+    /// SSRF verdict (blocked by default, loopback allowed when opted in), and hostnames are
+    /// untouched.
+    #[tokio::test]
+    async fn ssrf_ip_literal_refusal_leaves_the_other_verdicts_alone() {
+        let private = Url::parse("https://10.0.0.1/").unwrap();
+        assert!(matches!(
+            check_ssrf(&private, false).await,
+            Err(WebFetchError::SsrfBlocked { .. })
+        ));
+        let loopback = Url::parse("http://127.0.0.1:8080/").unwrap();
+        assert!(check_ssrf(&loopback, true).await.is_ok());
+        let loopback6 = Url::parse("http://[::1]:8080/").unwrap();
+        assert!(check_ssrf(&loopback6, true).await.is_ok());
+        assert!(matches!(
+            check_ssrf(&loopback6, false).await,
+            Err(WebFetchError::SsrfBlocked { .. })
+        ));
+    }
+
+    /// The one explicit allowance is the guard's own escape hatch (`FUIGO_ALLOW_UPSTREAM_HOSTS=1`,
+    /// process-wide): with the guard lifted a public literal passes as it always did.
+    #[test]
+    fn the_public_literal_refusal_follows_the_guards_full_lift() {
+        use fuigo_extra_ca::egress::{UpstreamAllowance, parse_upstream_allowance};
+        let lifted = parse_upstream_allowance(Some("1")).unwrap();
+        assert_eq!(UpstreamAllowance::All, lifted);
+        assert!(!literal_refused_under(&lifted));
+        for not_lifted in [None, Some("0"), Some("api.x.ai"), Some("")] {
+            let allowance = parse_upstream_allowance(not_lifted).unwrap();
+            assert!(literal_refused_under(&allowance), "{not_lifted:?}");
+        }
+        // A host list names hostnames; an address is not one, so it cannot lift the refusal
+        assert!(parse_upstream_allowance(Some("8.8.8.8")).is_err());
     }
 }

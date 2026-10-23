@@ -25,7 +25,6 @@ use crate::app::dispatch::status::notify_session_ready;
 use crate::app::dispatch::transcript::extensions_modal_tab_fetches;
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
-use crate::scrollback::state::ScrollbackState;
 use crate::views::session_picker_surface::SessionPickerHost;
 use agent_client_protocol as acp;
 /// Create a placeholder agent and load an existing session by ID.
@@ -151,8 +150,7 @@ fn dispatch_load_session_ungated(
     let acp_session_id = clear_stale_session_id(app, &session_id);
     let agent_id = AgentId(app.next_agent_id);
     app.next_agent_id += 1;
-    let mut scrollback = ScrollbackState::new();
-    scrollback.set_appearance(app.appearance.clone());
+    let mut scrollback = app.new_scrollback();
     let loading_msg = if matches!(app.restore_code, Some(true)) {
         format!("Restoring code for session {}...", &session_id)
     } else {
@@ -244,7 +242,10 @@ fn dispatch_load_session_ungated(
         .registry_mut()
         .set_plugins_visible(!app.appearance.disable_plugins);
     switch_to_agent(app, agent_id, SwitchCause::Load);
-    let attempt = app.agents.get_mut(&agent_id).map_or(0, |a| a.begin_load_attempt());
+    let attempt = app
+        .agents
+        .get_mut(&agent_id)
+        .map_or(0, |a| a.begin_load_attempt());
     effects.push(Effect::LoadSession {
         agent_id,
         session_id,
@@ -932,7 +933,10 @@ pub(in crate::app::dispatch) fn dispatch_pick_content_session(
     app.session_picker_content_loading = false;
     // Close the `/resume` modal as a row pick does; left open, it covered the tab the load came from.
     if let Some(agent) = get_active_agent_mut(app)
-        && matches!(agent.active_modal, Some(crate::views::modal::ActiveModal::SessionPicker { .. }))
+        && matches!(
+            agent.active_modal,
+            Some(crate::views::modal::ActiveModal::SessionPicker { .. })
+        )
     {
         agent.active_modal = None;
     }
@@ -979,8 +983,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
     }
     let agent_id = AgentId(app.next_agent_id);
     app.next_agent_id += 1;
-    let mut scrollback = ScrollbackState::new();
-    scrollback.set_appearance(app.appearance.clone());
+    let mut scrollback = app.new_scrollback();
     scrollback.push_block(RenderBlock::system(format!(
         "Restoring session {session_id} from remote..."
     )));
@@ -1159,7 +1162,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         if let Some(directive) = agent.pending_first_prompt.take() {
             agent.session.enqueue_prompt_front(directive);
         }
-        let drain = maybe_drain_queue(agent);
+        let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         let page_flip_entry = drain.page_flip_entry;
         effects.extend(drain.effects);
         let cwd = agent.session.cwd.clone();
@@ -1176,7 +1179,11 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             cwd,
             session_id: hydrate_sid.to_string(),
         });
-        effects.extend(crate::app::dispatch::peer::startup_effects(agent, agent_id, &hydrate_sid.to_string()));
+        effects.extend(crate::app::dispatch::peer::startup_effects(
+            agent,
+            agent_id,
+            &hydrate_sid.to_string(),
+        ));
         effects.push(Effect::FetchSessionAgentName {
             agent_id,
             session_id: hydrate_sid.clone(),
@@ -1256,7 +1263,10 @@ pub(in crate::app::dispatch) fn handle_session_load_failed(
         agent
             .scrollback
             .push_block(RenderBlock::session_event(SessionEvent::TurnFailed {
-                error: format!("Couldn't load session: {}", fuigo_tty_utils::untrusted(&error)),
+                error: format!(
+                    "Couldn't load session: {}",
+                    fuigo_tty_utils::untrusted(&error)
+                ),
                 elapsed: None,
             }));
     }
@@ -1267,7 +1277,11 @@ pub(in crate::app::dispatch) fn handle_session_load_failed(
 /// and the window goes back to the tab it came from, which keeps working; the refusal is shown there. When that tab was
 /// the unused empty session the load dropped, a new session takes its place. Anything typed while the load ran keeps the
 /// usual failed-tab handling, so it is never lost.
-fn return_from_load_held_elsewhere(app: &mut AppView, failed: AgentId, error: &str) -> Option<Vec<Effect>> {
+fn return_from_load_held_elsewhere(
+    app: &mut AppView,
+    failed: AgentId,
+    error: &str,
+) -> Option<Vec<Effect>> {
     if error != fuigo_shell::session::session_writer_lock::HELD_ELSEWHERE {
         return None;
     }
@@ -1298,14 +1312,20 @@ fn return_from_load_held_elsewhere(app: &mut AppView, failed: AgentId, error: &s
     let mut picker_closed = false;
     if let Some(agent) = app.agents.get_mut(&target) {
         // A `/resume` picker still open here would cover the refusal.
-        if matches!(agent.active_modal, Some(crate::views::modal::ActiveModal::SessionPicker { .. })) {
+        if matches!(
+            agent.active_modal,
+            Some(crate::views::modal::ActiveModal::SessionPicker { .. })
+        ) {
             agent.active_modal = None;
             picker_closed = true;
         }
         agent
             .scrollback
             .push_block(RenderBlock::session_event(SessionEvent::TurnFailed {
-                error: format!("Couldn't load session: {}", fuigo_tty_utils::untrusted(error)),
+                error: format!(
+                    "Couldn't load session: {}",
+                    fuigo_tty_utils::untrusted(error)
+                ),
                 elapsed: None,
             }));
     }
@@ -1323,9 +1343,9 @@ pub(crate) fn fail_agent_after_failed_reconnect(agent: &mut AgentView) {
     agent.load_failed = true;
     restore_prompts_held_during_load(agent);
     // Minimal mode shows no toasts, so the notice also goes to the scrollback
-    agent
-        .scrollback
-        .push_block(RenderBlock::system(crate::app::dispatch::prompt::LOAD_FAILED_NOTICE.to_owned()));
+    agent.scrollback.push_block(RenderBlock::system(
+        crate::app::dispatch::prompt::LOAD_FAILED_NOTICE.to_owned(),
+    ));
     agent.show_toast(crate::app::dispatch::prompt::LOAD_FAILED_NOTICE);
 }
 /// A single row held during the load returns whole when the composer is empty, as a queue edit would.
@@ -1486,7 +1506,10 @@ pub(in crate::app::dispatch) fn handle_session_restored(
         )));
     }
     let cwd = app.cwd.clone();
-    let attempt = app.agents.get_mut(&agent_id).map_or(0, |a| a.begin_load_attempt());
+    let attempt = app
+        .agents
+        .get_mut(&agent_id)
+        .map_or(0, |a| a.begin_load_attempt());
     vec![Effect::LoadSession {
         agent_id,
         session_id: local_session_id,
@@ -1517,7 +1540,10 @@ pub(in crate::app::dispatch) fn handle_session_restore_failed(
         agent
             .scrollback
             .push_block(RenderBlock::session_event(SessionEvent::TurnFailed {
-                error: format!("Couldn't restore session: {}", fuigo_tty_utils::untrusted(&error)),
+                error: format!(
+                    "Couldn't restore session: {}",
+                    fuigo_tty_utils::untrusted(&error)
+                ),
                 elapsed: None,
             }));
         if agent.load_failed {
@@ -1551,6 +1577,43 @@ pub(in crate::app::dispatch) fn handle_deep_search_results(
     *target.content_results = Some(results);
     *target.content_loading = false;
     vec![]
+}
+/// `/resume <id or name>`.
+///
+/// A session id, or text that names exactly one session of this directory, opens that session at once.
+/// Anything else (several matches, none) opens the picker already filtered by the text.
+pub(in crate::app::dispatch) fn dispatch_resume_by_query(
+    app: &mut AppView,
+    query: String,
+) -> Vec<Effect> {
+    use crate::app::session_title_resolve::{is_uuid_shaped, resume_candidates};
+    use crate::views::modal::ActiveModal;
+    let query = query.trim().to_owned();
+    if query.is_empty() {
+        return dispatch_show_session_picker(app);
+    }
+    if is_uuid_shaped(&query) {
+        return dispatch_load_session(app, query, None, false);
+    }
+    let fallback_cwd = app.cwd.to_string_lossy().into_owned();
+    let cwd = get_active_agent_mut(app).map_or(fallback_cwd, |agent| {
+        agent.session.cwd.to_string_lossy().into_owned()
+    });
+    let summaries = fuigo_shell::session::persistence::local_summaries_for_cwd_sync(
+        &cwd,
+        fuigo_shell::session::persistence::RecentSessionSelection::Interactive,
+    )
+    .unwrap_or_default();
+    if let [only] = resume_candidates(&query, &summaries).as_slice() {
+        return dispatch_load_session(app, only.info.id.to_string(), None, false);
+    }
+    let effects = dispatch_show_session_picker(app);
+    with_active_agent(app, |agent| {
+        if let Some(ActiveModal::SessionPicker { state, .. }) = agent.active_modal.as_mut() {
+            state.set_query(query.clone());
+        }
+    });
+    effects
 }
 pub(in crate::app::dispatch) fn dispatch_show_session_picker(app: &mut AppView) -> Vec<Effect> {
     use crate::views::modal::ActiveModal;

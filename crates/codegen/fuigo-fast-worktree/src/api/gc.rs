@@ -293,6 +293,36 @@ fn rec_cwd_within(rec: &crate::db::WorktreeRecord, live_cwds: &[PathBuf]) -> boo
     cwd_within(path, live_cwds)
 }
 
+/// What holds a worktree open at this moment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InUse {
+    /// A running process has its working directory inside the worktree.
+    Process,
+    /// The Fuigo process that created it is still running.
+    Creator(u32),
+    /// The process scan could not answer, so the worktree is treated as busy.
+    Unknown,
+}
+
+/// Why `path` must not be removed on request without `force`, or `None` when nothing holds it.
+/// The same guards `gc` applies: a live creator pid or a live process working directory inside it
+/// (`rec` is the worktree's record when it has one; a scan that fails answers `Unknown`, fail closed).
+pub fn worktree_in_use(path: &Path, rec: Option<&crate::db::WorktreeRecord>) -> Option<InUse> {
+    let scan = live_process_cwds();
+    let Some(cwds) = usable_cwds(&scan, false) else {
+        return Some(InUse::Unknown);
+    };
+    match rec {
+        Some(rec) => {
+            if let Some(pid) = rec.creator_pid.filter(|pid| is_pid_alive(*pid)) {
+                return Some(InUse::Creator(pid));
+            }
+            rec_cwd_within(rec, cwds).then_some(InUse::Process)
+        }
+        None => cwd_within(path, cwds).then_some(InUse::Process),
+    }
+}
+
 fn is_guarded(rec: &crate::db::WorktreeRecord, live_cwds: &[PathBuf]) -> bool {
     rec.creator_pid.is_some_and(is_pid_alive) || rec_cwd_within(rec, live_cwds)
 }
@@ -382,6 +412,10 @@ fn reclaim_dead_records(db: &WorktreeDb, opts: &GcOptions, report: &mut GcReport
         ..Default::default()
     })?;
     for rec in dead {
+        // A folder deleted by hand leaves git's registration of it behind; without this the path and branch stay claimed.
+        if rec.source_repo.is_dir() {
+            crate::git::remove_stale_worktree_registration(&rec.source_repo, &rec.path);
+        }
         if unregister_logged(db, &rec.id) {
             report.dead_removed += 1;
         }
@@ -645,6 +679,10 @@ fn run_pass(
 /// Union-liveness pin sweep. Never fails the worktree GC pass: one grove
 /// data dir must not block dead/age reclaim.
 fn reclaim_orphan_pins(db: &WorktreeDb, opts: &GcOptions, now: i64, report: &mut GcReport) {
+    // Tests share one process; the sweep reads process-global grove env, so
+    // it must not run while another test owns (and has pointed) that env.
+    #[cfg(test)]
+    let _grove_env = crate::test_support::grove_env_fence();
     let recs = match db.list(&ListFilter {
         include_dead: true,
         ..Default::default()

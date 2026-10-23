@@ -165,8 +165,8 @@ mod media;
 mod modals;
 mod notices;
 mod panes;
-mod peer;
 mod paste;
+mod peer;
 mod plan;
 mod prompt;
 mod prompt_stash;
@@ -175,20 +175,20 @@ pub use prompt_stash::{PromptStashEntry, StashCause};
 mod queue;
 mod render;
 pub use render::AppRenderParams;
+#[cfg(test)]
+mod dock_input_tests;
+#[cfg(test)]
+mod extensions_row_hint_tests;
+#[cfg(test)]
+mod header_tests;
+#[cfg(test)]
+mod model_notice_tests;
 mod rewind;
 mod selection;
 mod session;
 mod shell_completion;
 #[cfg(test)]
-mod dock_input_tests;
-#[cfg(test)]
-mod model_notice_tests;
-#[cfg(test)]
-mod extensions_row_hint_tests;
-#[cfg(test)]
 mod task_status_tests;
-#[cfg(test)]
-mod header_tests;
 mod viewer;
 mod workflows_overlay;
 use super::actions;
@@ -1279,6 +1279,8 @@ pub struct AgentView {
     pub hit_response_top_indicator: HitArea,
     /// CWD / worktree path in the status bar (click to copy).
     pub hit_cwd: HitArea,
+    /// Git branch label in the status bar (click copies the full branch name).
+    pub hit_branch: HitArea,
     /// Cancel button in turn status line (`[stop]`).
     pub hit_cancel_button: HitArea,
     /// Still-running watcher cue on the turn-status row (click opens the
@@ -1331,6 +1333,8 @@ pub struct AgentView {
     pub(crate) video_viewer: Option<crate::prompt_images::VideoViewerState>,
     /// Active `/gboom` easter-egg game modal.
     pub(crate) gboom: Option<crate::gboom::GboomState>,
+    /// Active `/stoke` easter-egg fire overlay. Pure view state: never touches the session or history.
+    pub(crate) stoke: Option<crate::stoke::StokeState>,
     /// Protocol-prepared image bytes keyed by file path. Used for dimension
     /// decoding and iTerm2 re-sends. Kitty transmits once and re-places.
     pub(crate) inline_media_cache: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
@@ -1469,6 +1473,12 @@ pub struct AgentView {
         fuigo_tools::mcp_elicitation::McpElicitExtRequest,
         tokio::sync::oneshot::Sender<fuigo_acp_lib::AcpResult<agent_client_protocol::ExtResponse>>,
     )>,
+    /// Input requests that arrived while a card was open, oldest first. Each gets its own card once the one before it is
+    /// answered; none is cancelled to make room.
+    pub(crate) queued_elicitations: std::collections::VecDeque<(
+        fuigo_tools::mcp_elicitation::McpElicitExtRequest,
+        tokio::sync::oneshot::Sender<fuigo_acp_lib::AcpResult<agent_client_protocol::ExtResponse>>,
+    )>,
     pub(crate) elicit_hits: Vec<(
         crate::views::elicitation_view::ElicitHit,
         ratatui::layout::Rect,
@@ -1588,12 +1598,6 @@ pub struct AgentView {
     pub(crate) cancel_trigger_hint: Option<crate::app::actions::CancelTrigger>,
     pub(crate) rewind_state: Option<crate::views::rewind::RewindState>,
     pub(crate) rewind_points: Option<Vec<crate::views::rewind::RewindPointInfo>>,
-    /// In-place edit of a previous user prompt. See `inline_edit.rs`.
-    pub(crate) inline_edit: Option<crate::app::inline_edit::InlineEditState>,
-    /// Edited text awaiting its rewind; `dispatch_rewind_success` resubmits it.
-    /// Set only when the rewind flow emits `Effect::RewindExecute` while the
-    /// inline editor is open (see `stash_inline_resubmit_if_editing`).
-    pub(crate) pending_inline_resubmit: Option<String>,
     /// `/jump` picker overlay (pure client-side turn navigation).
     pub(crate) jump_state: Option<crate::views::jump::JumpState>,
     /// Timeline sidebar rail geometry for the current frame (`None` means
@@ -1913,7 +1917,12 @@ fn worktree_choice_from_index(
 /// The option a typed ("Other") answer to the first question names (P152): its label, case-insensitive, or `y` / `n`
 /// for a "Yes" / "No" option. `None` when no typed answer was given or it names no option.
 fn typed_option_index(qv: &crate::views::question_view::QuestionViewState) -> Option<usize> {
-    if !qv.per_question_freeform_selected.first().copied().unwrap_or(false) {
+    if !qv
+        .per_question_freeform_selected
+        .first()
+        .copied()
+        .unwrap_or(false)
+    {
         return None;
     }
     let answer = qv
@@ -1955,8 +1964,10 @@ fn translate_local_submit(
     if matches!(
         kind,
         LocalQuestionKind::Fork { .. } | LocalQuestionKind::NewSession
-    ) && !matches!(qv.selections.first(), Some(QuestionSelection::Single(Some(_))))
-    {
+    ) && !matches!(
+        qv.selections.first(),
+        Some(QuestionSelection::Single(Some(_)))
+    ) {
         let Some(idx) = typed_option_index(qv) else {
             return InputOutcome::Changed;
         };

@@ -2168,7 +2168,10 @@ fn set_plan_mode_idempotency_uses_pending_over_active() {
 /// A fake agent that answers only `fuigo/session/owner_check`, with `answer`; counts `fuigo/yolo_mode_changed`.
 fn spawn_owner_check_agent(
     answer: fn() -> Result<(), acp::Error>,
-) -> (fuigo_acp_lib::AcpAgentTx, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+) -> (
+    fuigo_acp_lib::AcpAgentTx,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let notified = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter = notified.clone();
@@ -2179,7 +2182,8 @@ fn spawn_owner_check_agent(
                     if args.request.method.as_ref() == "fuigo/session/owner_check" =>
                 {
                     let reply = answer().map(|()| {
-                        let raw = serde_json::value::RawValue::from_string("{}".into()).expect("raw {}");
+                        let raw =
+                            serde_json::value::RawValue::from_string("{}".into()).expect("raw {}");
                         acp::ExtResponse::new(std::sync::Arc::from(raw))
                     });
                     let _ = args.response_tx.send(reply);
@@ -2221,15 +2225,21 @@ async fn shift_tab_and_save(app: &mut AppView, tx: fuigo_acp_lib::AcpAgentTx) ->
     let (canonical, session_id, persist) = effects
         .iter()
         .find_map(|e| match e {
-            Effect::PersistPermissionMode { canonical, session_id, persist } => {
-                Some((*canonical, session_id.clone(), *persist))
-            }
+            Effect::PersistPermissionMode {
+                canonical,
+                session_id,
+                persist,
+            } => Some((*canonical, session_id.clone(), *persist)),
             _ => None,
         })
         .expect("Shift+Tab saves the mode");
     assert_eq!(canonical, "always-approve");
-    assert!(app.agents[&AgentId(0)].session.is_yolo(), "optimistically Always-Approve");
-    crate::app::effects::persist_permission_mode_and_notify(canonical, session_id, persist, tx).await
+    assert!(
+        app.agents[&AgentId(0)].session.is_yolo(),
+        "optimistically Always-Approve"
+    );
+    crate::app::effects::persist_permission_mode_and_notify(canonical, session_id, persist, tx)
+        .await
 }
 
 /// 1.0.30 (Windows check, shared leader): a Shift+Tab the leader refuses (this window does not own the session) rolls the
@@ -2248,16 +2258,31 @@ async fn refused_shift_tab_rolls_the_window_back_and_new_tabs_start_in_the_previ
     let result = shift_tab_and_save(&mut app, tx).await;
     dispatch(Action::TaskComplete(result), &mut app);
     let agent = &app.agents[&AgentId(0)];
-    assert!(!agent.session.is_yolo(), "the refused Always-Approve is rolled back");
+    assert!(
+        !agent.session.is_yolo(),
+        "the refused Always-Approve is rolled back"
+    );
     assert!(agent.session.is_auto(), "the indicator is back on Auto");
     assert_eq!(app.current_ui.permission_mode.as_deref(), Some("auto"));
-    assert!(!app.default_yolo, "new tabs do not start in the refused Always-Approve");
+    assert!(
+        !app.default_yolo,
+        "new tabs do not start in the refused Always-Approve"
+    );
     assert_eq!(notified.load(std::sync::atomic::Ordering::SeqCst), 0);
     dispatch(Action::NewSession, &mut app);
-    let ActiveView::Agent(new_tab) = app.active_view else { panic!("a new tab") };
+    let ActiveView::Agent(new_tab) = app.active_view else {
+        panic!("a new tab")
+    };
     assert_ne!(new_tab, AgentId(0));
-    assert!(!app.agents[&new_tab].session.is_yolo(), "/new starts in the previous mode");
-    assert_eq!(app.current_ui.permission_mode.as_deref(), Some("auto"), "/new starts in the previous mode");
+    assert!(
+        !app.agents[&new_tab].session.is_yolo(),
+        "/new starts in the previous mode"
+    );
+    assert_eq!(
+        app.current_ui.permission_mode.as_deref(),
+        Some("auto"),
+        "/new starts in the previous mode"
+    );
 }
 
 /// The owner's Shift+Tab is unchanged: kept, saved and announced.
@@ -2286,7 +2311,11 @@ async fn an_out_of_date_leader_does_not_save_the_mode_and_says_so_once() {
         return;
     }
     let (mut app, home) = auto_mode_app_in_temp_home();
-    let old_leader = || Err(fuigo_shell::acp_error::unknown_ext_method("fuigo/session/owner_check"));
+    let old_leader = || {
+        Err(fuigo_shell::acp_error::unknown_ext_method(
+            "fuigo/session/owner_check",
+        ))
+    };
     let (tx, notified) = spawn_owner_check_agent(old_leader);
     let result = shift_tab_and_save(&mut app, tx).await;
     app.agents.get_mut(&AgentId(0)).unwrap().toast = None;
@@ -2295,7 +2324,10 @@ async fn an_out_of_date_leader_does_not_save_the_mode_and_says_so_once() {
     assert!(!saved.contains("always-approve"), "not saved: {saved}");
     assert_eq!(notified.load(std::sync::atomic::Ordering::SeqCst), 0);
     let toast = read_toast(&app);
-    assert!(toast.contains("out of date") && toast.contains("fuigo leader kill"), "{toast}");
+    assert!(
+        toast.contains("out of date") && toast.contains("fuigo leader kill"),
+        "{toast}"
+    );
     // Second time: no toast.
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     agent.session.yolo_mode = false;
@@ -2305,7 +2337,10 @@ async fn an_out_of_date_leader_does_not_save_the_mode_and_says_so_once() {
     let result = shift_tab_and_save(&mut app, tx).await;
     app.agents.get_mut(&AgentId(0)).unwrap().toast = None;
     dispatch(Action::TaskComplete(result), &mut app);
-    assert!(app.agents[&AgentId(0)].toast.is_none(), "the out-of-date notice is shown once");
+    assert!(
+        app.agents[&AgentId(0)].toast.is_none(),
+        "the out-of-date notice is shown once"
+    );
 }
 
 /// A refused `session/set_mode` (Shift+Tab into Plan from a window that does not own the session) puts the plan indicator
@@ -2325,11 +2360,16 @@ fn refused_set_mode_drops_the_optimistic_plan_state() {
     dispatch(
         Action::TaskComplete(TaskResult::SessionModeChangeFailed {
             session_id,
-            error: "this session is driven by another client; only the driving client can change it".into(),
+            error:
+                "this session is driven by another client; only the driving client can change it"
+                    .into(),
         }),
         &mut app,
     );
     let agent = &app.agents[&AgentId(0)];
     assert_eq!(agent.plan_mode_pending, None);
-    assert!(!agent.plan_mode_active, "back on the confirmed (not plan) state");
+    assert!(
+        !agent.plan_mode_active,
+        "back on the confirmed (not plan) state"
+    );
 }

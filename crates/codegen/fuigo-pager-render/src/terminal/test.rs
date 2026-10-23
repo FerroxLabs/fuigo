@@ -1,4 +1,5 @@
 use super::*;
+use fuigo_ratatui_inline::WidthShrink;
 
 // -- terminal_name_from_term_program (existing coverage) ------------------
 
@@ -49,24 +50,6 @@ fn brand_otty_from_term_program() {
     assert_eq!(detect_terminal_brand_from_env(&env), TerminalName::Otty);
     let env = env_from(&[("TERM_PROGRAM", "Otty")]);
     assert_eq!(detect_terminal_brand_from_env(&env), TerminalName::Otty);
-}
-
-#[test]
-fn otty_delivers_ime_as_bracketed_paste_only() {
-    assert!(TerminalName::Otty.delivers_ime_as_bracketed_paste());
-    for brand in [
-        TerminalName::AppleTerminal,
-        TerminalName::Ghostty,
-        TerminalName::Iterm2,
-        TerminalName::Unknown,
-        TerminalName::WezTerm,
-        TerminalName::Kitty,
-    ] {
-        assert!(
-            !brand.delivers_ime_as_bracketed_paste(),
-            "{brand:?} must not gate IME bracketed-paste origin"
-        );
-    }
 }
 
 #[test]
@@ -1990,4 +1973,50 @@ fn repaints_pane_out_of_band_per_arm() {
         ..Default::default()
     };
     assert!(!plain.repaints_pane_out_of_band());
+}
+
+#[test]
+fn width_shrink_rewraps_only_for_known_reflowing_layers() {
+    let brand = |brand: TerminalName| TerminalContext {
+        brand,
+        env_brand: brand,
+        ..Default::default()
+    };
+    assert_eq!(
+        WidthShrink::Rewraps,
+        brand(TerminalName::Ghostty).width_shrink()
+    );
+    assert_eq!(
+        WidthShrink::Truncates,
+        brand(TerminalName::Unknown).width_shrink()
+    );
+    assert_eq!(
+        WidthShrink::Truncates,
+        brand(TerminalName::JetBrains).width_shrink()
+    );
+
+    // Only `env_brand` counts, never the assumed native-Windows fallback `brand`
+    let assumed = TerminalContext {
+        brand: TerminalName::WindowsTerminal,
+        env_brand: TerminalName::Unknown,
+        ..Default::default()
+    };
+    assert_eq!(WidthShrink::Truncates, assumed.width_shrink());
+
+    // The innermost layer decides
+    let tmux = TerminalContext {
+        multiplexer: MultiplexerKind::Tmux,
+        ..brand(TerminalName::Unknown)
+    };
+    assert_eq!(WidthShrink::Rewraps, tmux.width_shrink());
+    let screen = TerminalContext {
+        multiplexer: MultiplexerKind::Screen,
+        ..brand(TerminalName::Ghostty)
+    };
+    assert_eq!(WidthShrink::Truncates, screen.width_shrink());
+    let editor = TerminalContext {
+        embedded_editor: Some(EmbeddedEditor::Vim),
+        ..brand(TerminalName::Ghostty)
+    };
+    assert_eq!(WidthShrink::Truncates, editor.width_shrink());
 }

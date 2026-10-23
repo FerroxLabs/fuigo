@@ -145,6 +145,10 @@ Open prompt-history search: fuzzy-search this session's prompts newest-first, th
 
 For quick recall, press `↑` on an empty prompt instead. With prompts queued, that moves focus into the queue pane, highlighting the last row; otherwise the panel opens with your most recent prompt already filled in, and `↑`/`↓` step through entries (each lands in the input), `↓` past the newest entry closes the panel, and typing edits the recalled prompt in place.
 
+### `/density`
+
+Choose how much of each tool call the transcript shows. `/density compact` folds every tool call to its header line, `/density detailed` unfolds them, and bare `/density` flips between the two. The choice also applies to tool calls that arrive later in the session. It lasts for the session; it does not change your saved settings. The density a new session starts with is the "Tool call density" setting in `/settings`.
+
 ### `/compact-mode`
 
 Toggle compact display — less padding and tighter spacing for denser output.

@@ -213,7 +213,7 @@ impl BlockContent for MemorySearchToolCallBlock {
                         .collect();
                     for sl in &snippet_lines {
                         let trimmed = sl.trim();
-                        let display = truncate_str(trimmed, ctx.content_width().saturating_sub(4));
+                        let display = snippet_window(trimmed, &self.query, ctx.content_width().saturating_sub(4));
                         lines.push(
                             BlockLine::from(Line::from(Span::styled(
                                 format!("    {display}"),
@@ -295,6 +295,34 @@ impl BlockContent for MemorySearchToolCallBlock {
     fn collapse_mode(&self, _is_running: bool) -> DisplayMode {
         DisplayMode::Collapsed
     }
+}
+
+/// The part of a snippet line to show in `width` columns. A line that fits is shown whole. A longer one is cut around the
+/// first word of the query it holds, with `…` where text is dropped, so the part that matched is what the user sees. A line
+/// that holds no query word shows its start.
+fn snippet_window(line: &str, query: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    if UnicodeWidthStr::width(line) <= width {
+        return line.to_owned();
+    }
+    let fold = |s: &str| -> Vec<char> { s.chars().map(|c| c.to_lowercase().next().unwrap_or(c)).collect() };
+    let haystack = fold(line);
+    let first_hit = query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|term| term.chars().count() >= 2)
+        .filter_map(|term| {
+            let needle = fold(term);
+            haystack.windows(needle.len()).position(|w| w == needle.as_slice())
+        })
+        .min();
+    let Some(hit) = first_hit else {
+        return truncate_str(line, width);
+    };
+    let chars: Vec<char> = line.chars().collect();
+    let start = hit.saturating_sub(width / 4);
+    let prefix = if start > 0 { "…" } else { "" };
+    let rest: String = chars[start..].iter().collect();
+    format!("{prefix}{}", truncate_str(&rest, width.saturating_sub(prefix.width())))
 }
 
 fn shorten_path(path: &str) -> &str {
@@ -389,6 +417,7 @@ pub fn parse_memory_results(output: &str) -> Vec<MemoryResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scrollback::types::{BlockContext, DisplayMode};
 
     #[test]
     fn parse_single_result() {
@@ -440,6 +469,59 @@ session content
         let output = "No memory results found for query.";
         let results = parse_memory_results(output);
         assert!(results.is_empty());
+    }
+
+    fn render_text(block: &MemorySearchToolCallBlock, width: u16) -> Vec<String> {
+        let ctx = BlockContext {
+            width,
+            mode: DisplayMode::Expanded,
+            is_running: false,
+            raw: false,
+            max_lines: None,
+            appearance: Default::default(),
+            is_selected: false,
+            cwd: None,
+        };
+        block
+            .output(&ctx)
+            .lines
+            .iter()
+            .map(|l| l.content.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect()
+    }
+
+    fn block_with_snippet(query: &str, snippet: &str) -> MemorySearchToolCallBlock {
+        let mut block = MemorySearchToolCallBlock::new(query);
+        block.results.push(MemoryResult {
+            score: 0.9,
+            source: "workspace".into(),
+            path: "/some/other/notes.md".into(),
+            start_line: 1,
+            end_line: 1,
+            snippet: snippet.into(),
+        });
+        block
+    }
+
+    #[test]
+    fn a_long_line_shows_the_part_that_matched_the_query() {
+        let long = format!("{} the graphite stack is required for PRs {}", "filler words ".repeat(30), "tail ".repeat(30));
+        let lines = render_text(&block_with_snippet("graphite stack", &long), 80);
+        let preview = lines
+            .iter()
+            .find(|l| l.starts_with("    ") && l.contains("graphite stack"))
+            .unwrap_or_else(|| panic!("the matched part must be in the preview: {lines:#?}"));
+        assert!(preview.chars().count() <= 80, "{preview:?}");
+        assert!(preview.contains('…'), "a cut line says so: {preview:?}");
+    }
+
+    #[test]
+    fn a_short_line_and_a_line_without_a_match_are_shown_as_before() {
+        let lines = render_text(&block_with_snippet("graphite", "use graphite for PRs"), 80);
+        assert!(lines.iter().any(|l| l.trim() == "use graphite for PRs"), "{lines:#?}");
+        let long = "unrelated words ".repeat(20);
+        let lines = render_text(&block_with_snippet("graphite", &long), 80);
+        assert!(lines.iter().any(|l| l.trim_start().starts_with("unrelated words")), "{lines:#?}");
     }
 
     #[test]

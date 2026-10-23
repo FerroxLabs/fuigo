@@ -1959,9 +1959,11 @@ fn prompt_response_refused_destination_is_not_stashed_for_reauth() {
         "http://127.0.0.1:9/v1",
         "  Model:     p42-model\n  Auth:      Oidc\n  Version:   1.0.21",
     );
-    let kind = crate::app::error_display::wire_error_kind(Some(AUTH_DESTINATION_REFUSED_ERROR_TYPE));
+    let kind =
+        crate::app::error_display::wire_error_kind(Some(AUTH_DESTINATION_REFUSED_ERROR_TYPE));
     // The PromptResponse text as the effect layer formats the shell's typed error (no status on the wire).
-    let refused_text = crate::app::error_display::format_request_failure(None, kind, &raw).message();
+    let refused_text =
+        crate::app::error_display::format_request_failure(None, kind, &raw).message();
     let has = |app: &AppView, id: AgentId, want: fn(&SessionEvent) -> bool| {
         let agent = &app.agents[&id];
         (0..agent.scrollback.len()).any(|idx| {
@@ -2038,7 +2040,10 @@ fn prompt_response_refused_destination_is_not_stashed_for_reauth() {
         Some(401),
     );
     assert_eq!(
-        app.agents[&id].reauth_stashed_prompt.as_ref().map(|p| p.text.as_str()),
+        app.agents[&id]
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|p| p.text.as_str()),
         Some("resend me"),
         "control: the harness stashes a real 401"
     );
@@ -2859,7 +2864,11 @@ fn p152_prompt_sent_while_leader_reconnecting_is_kept_not_lost() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     crate::app::leader_outage::on_leader_reconnecting(&mut app, 1);
-    app.agents.get_mut(&id).unwrap().prompt.set_text("keep this prompt");
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .prompt
+        .set_text("keep this prompt");
 
     let effects = dispatch(Action::SendPrompt("keep this prompt".into()), &mut app);
 
@@ -2929,7 +2938,10 @@ fn p152_input_after_a_started_reconnect_cannot_send() {
         &ConnectionStatus::Connected { generation: 3 },
         3,
     );
-    assert!(!app.reconnect_pending, "an already-handled generation holds nothing");
+    assert!(
+        !app.reconnect_pending,
+        "an already-handled generation holds nothing"
+    );
     crate::app::leader_outage::hold_sends_if_reconnecting(
         &mut app,
         &ConnectionStatus::Connected { generation: 4 },
@@ -2945,7 +2957,10 @@ fn p152_input_after_a_started_reconnect_cannot_send() {
         &ConnectionStatus::Reconnecting { attempt: 1 },
         0,
     );
-    let effects = dispatch(Action::SendPrompt("typed during the outage".into()), &mut app);
+    let effects = dispatch(
+        Action::SendPrompt("typed during the outage".into()),
+        &mut app,
+    );
     assert!(
         effects
             .iter()
@@ -2966,16 +2981,18 @@ fn p152_a_lost_queued_prompt_is_reported_not_dropped() {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.session.state = AgentState::TurnRunning;
             agent.session.current_prompt_id = Some("running".into());
-            agent.shared_queue.push(crate::app::prompt_queue::QueueEntryWire {
-                id: "q1".into(),
-                version: 1,
-                owner: None,
-                last_editor: None,
-                kind: "prompt".into(),
-                text: "queued during the outage".into(),
-                position: 0,
-                combined_texts: None,
-            });
+            agent
+                .shared_queue
+                .push(crate::app::prompt_queue::QueueEntryWire {
+                    id: "q1".into(),
+                    version: 1,
+                    owner: None,
+                    last_editor: None,
+                    kind: "prompt".into(),
+                    text: "queued during the outage".into(),
+                    position: 0,
+                    combined_texts: None,
+                });
         }
         let _ = dispatch(
             Action::TaskComplete(TaskResult::PromptResponse {
@@ -3006,22 +3023,33 @@ fn p152_a_lost_queued_prompt_is_reported_not_dropped() {
     ));
     assert!(
         lost.iter()
-            .any(|t| t.contains("A queued message may not have been sent") && t.contains("queued during the outage")),
+            .any(|t| t.contains("A queued message may not have been sent")
+                && t.contains("queued during the outage")),
         "the lost queued prompt is reported with its text: {lost:?}"
     );
     // The transport-loss branch is unchanged: exactly one line, none of the new wording.
     assert!(
-        lost.iter().all(|t| !t.contains("Your message was not sent")),
+        lost.iter()
+            .all(|t| !t.contains("Your message was not sent")),
         "transport loss keeps its own wording: {lost:?}"
     );
     // W3B item 3: any other error is no longer silent. One line says it was not sent, and carries the text
     // (the queued text is not in the composer, so the line is where it stays recoverable, as in the branch above).
     let other = run("unknown session id");
-    let not_sent: Vec<_> = other.iter().filter(|t| t.contains("Your message was not sent")).collect();
+    let not_sent: Vec<_> = other
+        .iter()
+        .filter(|t| t.contains("Your message was not sent"))
+        .collect();
     assert_eq!(not_sent.len(), 1, "exactly one not-sent line: {other:?}");
     assert!(not_sent[0].contains("unknown session id"), "{other:?}");
-    assert!(not_sent[0].contains("queued during the outage"), "{other:?}");
-    assert!(other.iter().all(|t| !t.contains("may not have been sent")), "{other:?}");
+    assert!(
+        not_sent[0].contains("queued during the outage"),
+        "{other:?}"
+    );
+    assert!(
+        other.iter().all(|t| !t.contains("may not have been sent")),
+        "{other:?}"
+    );
 }
 
 /// Round 2 (audit HIGH): queue text can come from another client, so each of its lines is filtered on its own and
@@ -3033,16 +3061,18 @@ fn queued_error_system_texts(error: &str, queued_text: &str) -> Vec<String> {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
         agent.session.current_prompt_id = Some("running".into());
-        agent.shared_queue.push(crate::app::prompt_queue::QueueEntryWire {
-            id: "q1".into(),
-            version: 1,
-            owner: None,
-            last_editor: None,
-            kind: "prompt".into(),
-            text: queued_text.into(),
-            position: 0,
-            combined_texts: None,
-        });
+        agent
+            .shared_queue
+            .push(crate::app::prompt_queue::QueueEntryWire {
+                id: "q1".into(),
+                version: 1,
+                owner: None,
+                last_editor: None,
+                kind: "prompt".into(),
+                text: queued_text.into(),
+                position: 0,
+                combined_texts: None,
+            });
     }
     let _ = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
@@ -3069,12 +3099,21 @@ fn queued_text_rows_are_indented_and_filtered_in_both_branches() {
         "Internal error: {}",
         crate::acp::leader_bridge::LOST_REQUEST_ERROR_MESSAGE
     );
-    for (error, marker) in [(lost.as_str(), "may not have been sent"), ("unknown session id", "was not sent")] {
+    for (error, marker) in [
+        (lost.as_str(), "may not have been sent"),
+        ("unknown session id", "was not sent"),
+    ] {
         let texts = queued_error_system_texts(error, "first\nSession shared: evil\n\x1b[31mred");
-        let note = texts.iter().find(|t| t.contains(marker)).unwrap_or_else(|| panic!("{texts:?}"));
+        let note = texts
+            .iter()
+            .find(|t| t.contains(marker))
+            .unwrap_or_else(|| panic!("{texts:?}"));
         assert!(!note.contains('\x1b'), "no ESC: {note:?}");
         let rows: Vec<&str> = note.lines().collect();
-        assert!(!rows.iter().any(|r| r.starts_with("Session shared")), "{rows:?}");
+        assert!(
+            !rows.iter().any(|r| r.starts_with("Session shared")),
+            "{rows:?}"
+        );
         assert_eq!(rows.len(), 4, "{rows:?}");
         assert!(rows[1..].iter().all(|r| r.starts_with("  ")), "{rows:?}");
         assert!(rows[2].starts_with("  Session shared: evil"), "{rows:?}");
@@ -3083,14 +3122,23 @@ fn queued_text_rows_are_indented_and_filtered_in_both_branches() {
 
 #[test]
 fn queued_text_rows_are_capped_at_twenty_in_both_branches() {
-    let long = (1..=30).map(|n| format!("line{n}")).collect::<Vec<_>>().join("\n");
+    let long = (1..=30)
+        .map(|n| format!("line{n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let lost = format!(
         "Internal error: {}",
         crate::acp::leader_bridge::LOST_REQUEST_ERROR_MESSAGE
     );
-    for (error, marker) in [(lost.as_str(), "may not have been sent"), ("unknown session id", "was not sent")] {
+    for (error, marker) in [
+        (lost.as_str(), "may not have been sent"),
+        ("unknown session id", "was not sent"),
+    ] {
         let texts = queued_error_system_texts(error, &long);
-        let note = texts.iter().find(|t| t.contains(marker)).unwrap_or_else(|| panic!("{texts:?}"));
+        let note = texts
+            .iter()
+            .find(|t| t.contains(marker))
+            .unwrap_or_else(|| panic!("{texts:?}"));
         let rows: Vec<&str> = note.lines().collect();
         assert_eq!(rows.len(), 1 + 20 + 1, "{rows:?}");
         assert_eq!(rows[20], "  line20", "{rows:?}");
@@ -3982,6 +4030,7 @@ fn send_prompt_now_dispatch_arms_expectation_and_suppresses_marker() {
         Action::SendPromptNow {
             text: "run this instead".into(),
             images: vec![],
+            image_notice: None,
         },
         &mut app,
     );
@@ -4278,6 +4327,7 @@ fn send_now_during_active_goal_does_not_arm_expectation() {
         Action::SendPromptNow {
             text: "goal steer".into(),
             images: vec![],
+            image_notice: None,
         },
         &mut app,
     );
@@ -4326,6 +4376,7 @@ fn goal_send_now_painted_block_survives_removed_from_queue_response() {
         Action::SendPromptNow {
             text: "goal steer".into(),
             images: vec![],
+            image_notice: None,
         },
         &mut app,
     );
@@ -4390,6 +4441,7 @@ fn goal_send_now_painted_block_survives_queue_changed_removal() {
         Action::SendPromptNow {
             text: "goal steer".into(),
             images: vec![],
+            image_notice: None,
         },
         &mut app,
     );
@@ -4448,6 +4500,7 @@ fn send_prompt_now_during_reconnect_requeues_locally() {
         Action::SendPromptNow {
             text: "typed mid-outage".into(),
             images: vec![],
+            image_notice: None,
         },
         &mut app,
     );
@@ -4485,6 +4538,7 @@ fn failed_send_now_requeues_payload_and_retires_echo() {
         Action::SendPromptNow {
             text: "gets lost on the wire".into(),
             images: vec![],
+            image_notice: None,
         },
         &mut app,
     );
@@ -4601,7 +4655,7 @@ fn local_drain_holds_while_server_row_queued() {
 
     let agent = app.agents.get_mut(&id).unwrap();
     assert!(agent.session.state.is_idle());
-    let effects = maybe_drain_queue(agent).effects;
+    let effects = maybe_drain_queue(agent, &mut app.pending_image_notices).effects;
     assert!(
         effects.is_empty(),
         "local drain must hold while the server owns the next turn, got {effects:?}"
@@ -4615,7 +4669,7 @@ fn local_drain_holds_while_server_row_queued() {
     // The running server row does NOT hold the drain (it is the in-flight turn, not a queued one)
     // Once it's marked running and the turn ends, the local row drains normally
     agent.session.current_prompt_id = Some("srv-1".into());
-    let effects = maybe_drain_queue(agent).effects;
+    let effects = maybe_drain_queue(agent, &mut app.pending_image_notices).effects;
     assert!(
         matches!(effects.as_slice(), [Effect::SendPrompt { .. }]),
         "a running-only shared queue must not hold the local drain, got {effects:?}"
@@ -5189,7 +5243,8 @@ mod prompt_history_recording_tests {
                 {
                     let agent = app.agents.get_mut(&id).unwrap();
                     agent.session.tracker.set_memory_enabled_for_test(state);
-                    agent.session.session_id = Some(agent_client_protocol::SessionId::new("s-note"));
+                    agent.session.session_id =
+                        Some(agent_client_protocol::SessionId::new("s-note"));
                 }
                 let before = app.agents.get(&id).unwrap().scrollback.len();
                 let action = if note_via == "#" {
@@ -5199,9 +5254,15 @@ mod prompt_history_recording_tests {
                 };
                 dispatch(action, &mut app);
                 let agent = app.agents.get(&id).unwrap();
-                assert!(agent.active_modal.is_some(), "{state:?}/{note_via}: the modal opens");
+                assert!(
+                    agent.active_modal.is_some(),
+                    "{state:?}/{note_via}: the modal opens"
+                );
                 if state == Some(false) {
-                    assert!(agent.scrollback.len() > before, "{state:?}/{note_via}: a notice is shown");
+                    assert!(
+                        agent.scrollback.len() > before,
+                        "{state:?}/{note_via}: a notice is shown"
+                    );
                 }
 
                 let effects = dispatch(Action::SaveRememberNoteFromModal, &mut app);
@@ -5230,10 +5291,23 @@ mod prompt_history_recording_tests {
         // Open a fresh modal while the cache says on, change the cache (the other client acted), then save THAT modal
         for (i, stale) in [Some(true), Some(false), None].into_iter().enumerate() {
             let note = format!("note {i}");
-            app.agents.get_mut(&id).unwrap().session.tracker.set_memory_enabled_for_test(Some(true));
+            app.agents
+                .get_mut(&id)
+                .unwrap()
+                .session
+                .tracker
+                .set_memory_enabled_for_test(Some(true));
             dispatch(Action::SendRememberNote(note.clone()), &mut app);
-            assert!(app.agents.get(&id).unwrap().active_modal.is_some(), "modal {i} opened");
-            app.agents.get_mut(&id).unwrap().session.tracker.set_memory_enabled_for_test(stale);
+            assert!(
+                app.agents.get(&id).unwrap().active_modal.is_some(),
+                "modal {i} opened"
+            );
+            app.agents
+                .get_mut(&id)
+                .unwrap()
+                .session
+                .tracker
+                .set_memory_enabled_for_test(stale);
 
             let effects = dispatch(Action::SaveRememberNoteFromModal, &mut app);
 
@@ -5253,9 +5327,16 @@ mod prompt_history_recording_tests {
         let mut app = test_app_with_agent();
         let id = AgentId(0);
         app.agents.get_mut(&id).unwrap().session.session_id = None;
-        dispatch(Action::SendRememberNote("deploys need the staging flag".into()), &mut app);
+        dispatch(
+            Action::SendRememberNote("deploys need the staging flag".into()),
+            &mut app,
+        );
         let effects = dispatch(Action::SaveRememberNoteFromModal, &mut app);
-        assert!(!effects.iter().any(|e| matches!(e, crate::app::actions::Effect::SaveMemoryNote { .. })));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, crate::app::actions::Effect::SaveMemoryNote { .. }))
+        );
     }
 
     #[test]
@@ -5407,6 +5488,7 @@ mod prompt_stash_dispatch_tests {
             Action::SendPromptNow {
                 text: "a queued row".into(),
                 images: vec![],
+                image_notice: None,
             },
             &mut app,
         );
@@ -5509,4 +5591,234 @@ mod prompt_stash_dispatch_tests {
         );
         assert!(agent.prompt_stash.is_some());
     }
+}
+
+// ---- Image notices: a send must say when a placeholder has no image behind it, or an image could not be read ----
+
+fn image_toast(app: &AppView, id: AgentId) -> Option<String> {
+    app.agents
+        .get(&id)
+        .and_then(|agent| agent.toast.as_ref().map(|(message, _)| message.clone()))
+}
+
+/// `[Image #1]` text with no record behind it goes out as plain text; the user is told once.
+#[test]
+fn unbound_image_placeholder_send_shows_a_notice() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.prompt.set_text("see [Image #1]");
+    }
+
+    dispatch(Action::SendPrompt("see [Image #1]".into()), &mut app);
+
+    assert_eq!(
+        image_toast(&app, id).as_deref(),
+        Some("Image #1 not attached — placeholder sent as text")
+    );
+    assert!(app.pending_image_notices.is_empty(), "flushed when the dispatch ends");
+}
+
+/// Minimal mode renders no toasts: the notice lands in the transcript instead.
+#[test]
+fn minimal_mode_image_notice_goes_to_scrollback() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.prompt.set_text("see [Image #1]");
+    }
+
+    dispatch(Action::SendPrompt("see [Image #1]".into()), &mut app);
+
+    assert!(image_toast(&app, id).is_none(), "minimal mode must not rely on a toast");
+    assert_eq!(
+        last_system_text(&app, id),
+        "Image #1 not attached — placeholder sent as text"
+    );
+}
+
+/// A queued image whose file vanished sends without its block and tells the user which one.
+#[test]
+fn unreadable_queued_image_shows_a_notice_on_drain() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    enqueue_local(&mut app, id, "look at [Image #2]");
+    if let Some(row) = app
+        .agents
+        .get_mut(&id)
+        .and_then(|agent| agent.session.pending_prompts.back_mut())
+    {
+        let mut image = crate::app::agent_view::test_fixtures::test_pasted_image();
+        image.display_number = 2;
+        image.encoded_bytes = None;
+        image.session_image_path = Some(dir.path().join("gone.png"));
+        row.images = vec![image];
+    }
+
+    let effects = {
+        let agent = app.agents.get_mut(&id).unwrap();
+        crate::app::dispatch::queue::maybe_drain_queue(agent, &mut app.pending_image_notices).effects
+    };
+
+    assert!(
+        matches!(effects.as_slice(), [Effect::SendPromptBlocks { .. }]),
+        "the prompt still sends, got {effects:?}"
+    );
+    assert_eq!(
+        app.pending_image_notices,
+        vec!["Image #2 couldn't be read — not sent".to_owned()]
+    );
+    assert!(app.flush_image_notices_if_root());
+    assert_eq!(
+        image_toast(&app, id).as_deref(),
+        Some("Image #2 couldn't be read — not sent")
+    );
+}
+
+/// A nested dispatch leaves the notices to the outermost one, so one submission is one message.
+#[test]
+fn nested_dispatch_defers_the_image_notice_to_the_outermost() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.dispatch_depth = 1;
+    app.pending_image_notices
+        .push("Image #1 not attached — placeholder sent as text".to_owned());
+
+    assert!(!app.flush_image_notices_if_root(), "an outer dispatch is still running");
+    assert_eq!(app.pending_image_notices.len(), 1);
+
+    app.dispatch_depth = 0;
+    assert!(app.flush_image_notices_if_root());
+    assert!(app.pending_image_notices.is_empty());
+    assert_eq!(
+        image_toast(&app, id).as_deref(),
+        Some("Image #1 not attached — placeholder sent as text")
+    );
+}
+
+/// The dashboard popup can raise a send-now while the dashboard, not a session, is on screen. The send
+/// bails; the carried notice still reaches the visible surface.
+#[test]
+fn send_now_from_dashboard_view_still_flushes_image_notice() {
+    let mut app = test_app_with_agent();
+    app.active_view = ActiveView::AgentDashboard;
+    crate::app::dispatch::dashboard::ensure_dashboard_state(&mut app);
+
+    let effects = dispatch(
+        Action::SendPromptNow {
+            text: "see [Image #1]".into(),
+            images: vec![],
+            image_notice: Some("Image #1 not attached — placeholder sent as text".into()),
+        },
+        &mut app,
+    );
+
+    assert!(effects.is_empty(), "no session view: the send bails, got {effects:?}");
+    assert_eq!(
+        app.dashboard.as_ref().and_then(|d| d.error_toast.as_deref()),
+        Some("Image #1 not attached — placeholder sent as text")
+    );
+}
+
+/// A send-now carries the unbound-placeholder notice the composer raised.
+#[test]
+fn composer_send_now_carries_the_unbound_placeholder_notice() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.session.state = AgentState::TurnRunning;
+        agent.prompt.set_text("steer [Image #3]");
+    }
+    let action = app
+        .agents
+        .get_mut(&id)
+        .and_then(|agent| agent.resume_deferred_send(crate::app::agent_view::AgentDeferredSend::Interject));
+    let Some(Action::SendPromptNow { image_notice, .. }) = action else {
+        panic!("expected a SendPromptNow action, got {action:?}");
+    };
+    assert_eq!(
+        image_notice.as_deref(),
+        Some("Image #3 not attached — placeholder sent as text")
+    );
+}
+
+// ---- Attached images that a command or skill cannot carry are dropped with a notice, not silently ----
+
+fn compose_with_image(app: &mut AppView, id: AgentId, text: &str) {
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.prompt.set_text(text);
+    let end = agent.prompt.text().len();
+    agent.prompt.set_cursor(end);
+    agent
+        .prompt
+        .insert_image(crate::app::agent_view::test_fixtures::test_pasted_image())
+        .expect("chip");
+}
+
+/// `/compact` takes text only: an attached image used to vanish without a word.
+#[test]
+fn compact_with_an_attached_image_says_the_image_was_removed() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    compose_with_image(&mut app, id, "/compact keep the plan ");
+    let composed = app.agents[&id].prompt.text().to_string();
+
+    dispatch(Action::SendPrompt(composed), &mut app);
+
+    assert_eq!(
+        image_toast(&app, id).as_deref(),
+        Some("Images removed (commands take text only)")
+    );
+}
+
+/// Minimal mode renders no toast: the same notice lands in the transcript.
+#[test]
+fn compact_with_an_attached_image_in_minimal_mode_writes_a_transcript_line() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    compose_with_image(&mut app, id, "/compact keep the plan ");
+    let composed = app.agents[&id].prompt.text().to_string();
+
+    dispatch(Action::SendPrompt(composed), &mut app);
+
+    assert!(image_toast(&app, id).is_none());
+    assert_eq!(
+        last_system_text(&app, id),
+        "Images removed (commands take text only)"
+    );
+}
+
+/// A skill prompt rides `wire_blocks` and drops prompt images; the notice must reach minimal mode too.
+#[test]
+fn skill_prompt_drops_images_with_a_notice_queued_for_both_modes() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    enqueue_local(&mut app, id, "run the skill");
+    compose_with_image(&mut app, id, "run the skill ");
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.pending_prompts.back_mut().unwrap().wire_blocks = Some(Vec::new());
+
+    crate::app::dispatch::queue::drain_prompt_state_to_last_queued(agent, &mut app.pending_image_notices);
+
+    assert_eq!(
+        app.pending_image_notices,
+        vec!["Images removed (skill prompt)".to_owned()]
+    );
+    assert!(app.flush_image_notices_if_root());
+    assert_eq!(
+        image_toast(&app, id).as_deref(),
+        Some("Images removed (skill prompt)")
+    );
+    assert!(
+        app.agents[&id]
+            .session
+            .pending_prompts
+            .back()
+            .unwrap()
+            .images
+            .is_empty()
+    );
 }

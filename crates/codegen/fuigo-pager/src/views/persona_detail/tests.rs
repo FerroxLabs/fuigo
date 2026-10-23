@@ -215,7 +215,10 @@ fn two_views_saving_different_fields_at_once_keep_both() {
     let saved: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(saved["model"].as_str(), Some("m24"));
     assert_eq!(saved["description"].as_str(), Some("d24"));
-    assert_eq!(saved["instructions"].as_str(), Some("read only instructions"));
+    assert_eq!(
+        saved["instructions"].as_str(),
+        Some("read only instructions")
+    );
     let names: Vec<String> = std::fs::read_dir(directory.path())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -239,7 +242,10 @@ fn saving_into_a_deleted_persona_is_refused() {
 /// P181 (Astra round 1): persona text holds no hidden character once wrapped.
 #[test]
 fn word_wrap_lines_drops_hidden_characters() {
-    assert_eq!(word_wrap_lines("ab\u{e0041}c\u{00ad} d\u{2028}e", 80), ["abc d e"]);
+    assert_eq!(
+        word_wrap_lines("ab\u{e0041}c\u{00ad} d\u{2028}e", 80),
+        ["abc d e"]
+    );
 }
 
 /// P181 (Grok round): the window title carries the persona name from a file, so it is scrubbed as a title.
@@ -253,6 +259,9 @@ fn window_title_and_name_never_paint_an_unsafe_character() {
     let mut buf = Buffer::empty(area);
     render_persona_detail(&mut buf, area, &mut state, &theme, false);
     let text: String = buf.content.iter().map(|c| c.symbol()).collect();
-    assert!(!text.chars().any(fuigo_tty_utils::is_unsafe_display_char), "{text:?}");
+    assert!(
+        !text.chars().any(fuigo_tty_utils::is_unsafe_display_char),
+        "{text:?}"
+    );
     assert!(text.contains("persona: reviewer"), "{text}");
 }

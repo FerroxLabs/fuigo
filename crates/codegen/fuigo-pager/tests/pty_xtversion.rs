@@ -1,11 +1,16 @@
 //! PTY e2e tests for the runtime XTVERSION probe, run with:
 //! `cargo test -p fuigo-pager --test pty_xtversion -- --ignored --nocapture`
 
+use std::path::Path;
 use std::time::Duration;
 
-use fuigo_pager_pty_harness::{PtyHarness, pager_binary};
+use fuigo_pager_pty_harness::{
+    ContentController, EnvOp, PtyHarness, oauth_credential_ops, oauth_provider_ops, pager_binary,
+    seed_fake_oauth,
+};
 
-const ROWS: u16 = 50;
+/// Tall enough for the whole `/doctor` report: a shorter screen shows only its tail, and the tests wait for text near its top.
+const ROWS: u16 = 110;
 const COLS: u16 = 120;
 const WELCOME_TIMEOUT: Duration = Duration::from_secs(20);
 const WELCOME_SCREEN_SENTINEL: &str = "Quit";
@@ -34,6 +39,33 @@ const UNKNOWN_BRAND_ENV: &[(&str, &str)] = &[
     ("ZELLIJ", ""),
     ("ZELLIJ_SESSION_NAME", ""),
 ];
+
+/// Spawn the pager against the harness's mock model endpoint, signed in with a seeded session credential, with the
+/// terminal-identity variables set as given. The content controller must outlive the pager.
+///
+/// The credential matters: a pager with no sign-in stops on the key prompt, which swallows `/doctor` as typed text.
+/// Fuigo ships with no OAuth issuer, so the one the seeded entry belongs to is named, and the mock is reached over the
+/// trusted HTTPS front that session auth requires.
+async fn spawn_pager(binary: &Path, env: &[(&str, &str)]) -> (PtyHarness, ContentController) {
+    let content = ContentController::start().await.expect("start content");
+    seed_fake_oauth(&content, "pty-xtversion");
+    let mut operations: Vec<EnvOp<'_>> = Vec::from(oauth_credential_ops());
+    operations.extend(oauth_provider_ops());
+    let front_env = content.session_front_env();
+    operations.extend(front_env.iter().map(|(key, value)| EnvOp::set(key, value)));
+    operations.extend(env.iter().map(|(key, value)| EnvOp::set(key, value)));
+    let harness = PtyHarness::spawn_with_content_env_ops_in_dir(
+        binary,
+        ROWS,
+        COLS,
+        &content,
+        &[],
+        &operations,
+        Some(content.home()),
+    )
+    .expect("spawn pager");
+    (harness, content)
+}
 
 /// Headline safety property: a mishandled probe/reply must never render as typed garbage on screen.
 fn assert_no_probe_garbage_on_screen(harness: &PtyHarness) {
@@ -66,9 +98,7 @@ fn wait_for_raw_bytes(harness: &mut PtyHarness, needle: &[u8], timeout: Duration
 #[ignore]
 async fn unknown_brand_probe_round_trip() {
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness =
-        PtyHarness::new_inherited_env(&binary, ROWS, COLS, &[], UNKNOWN_BRAND_ENV, None)
-            .expect("spawn pager");
+    let (mut harness, _content) = spawn_pager(&binary, UNKNOWN_BRAND_ENV).await;
 
     assert!(
         wait_for_raw_bytes(&mut harness, XTVERSION_QUERY, WELCOME_TIMEOUT),
@@ -103,8 +133,7 @@ async fn allowlisted_brand_probe_fires() {
     let binary = pager_binary().expect("resolve pager binary");
     let mut env = UNKNOWN_BRAND_ENV.to_vec();
     env.push(("TERM_PROGRAM", "WezTerm"));
-    let mut harness =
-        PtyHarness::new_inherited_env(&binary, ROWS, COLS, &[], &env, None).expect("spawn pager");
+    let (mut harness, _content) = spawn_pager(&binary, &env).await;
 
     assert!(
         wait_for_raw_bytes(&mut harness, XTVERSION_QUERY, WELCOME_TIMEOUT),
@@ -165,8 +194,7 @@ async fn multiplexer_skips_probe() {
     let mut env = UNKNOWN_BRAND_ENV.to_vec();
     env.push(("TMUX", "/tmp/tmux-1000/default,12345,0"));
     env.push(("TMUX_PANE", "%0"));
-    let mut harness =
-        PtyHarness::new_inherited_env(&binary, ROWS, COLS, &[], &env, None).expect("spawn pager");
+    let (mut harness, _content) = spawn_pager(&binary, &env).await;
 
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
@@ -185,9 +213,7 @@ async fn multiplexer_skips_probe() {
 #[ignore]
 async fn unknown_brand_no_reply_starts_cleanly() {
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness =
-        PtyHarness::new_inherited_env(&binary, ROWS, COLS, &[], UNKNOWN_BRAND_ENV, None)
-            .expect("spawn pager");
+    let (mut harness, _content) = spawn_pager(&binary, UNKNOWN_BRAND_ENV).await;
 
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
@@ -214,9 +240,7 @@ async fn unknown_brand_no_reply_starts_cleanly() {
 #[ignore]
 async fn unknown_brand_malformed_reply_is_discarded() {
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness =
-        PtyHarness::new_inherited_env(&binary, ROWS, COLS, &[], UNKNOWN_BRAND_ENV, None)
-            .expect("spawn pager");
+    let (mut harness, _content) = spawn_pager(&binary, UNKNOWN_BRAND_ENV).await;
 
     assert!(
         wait_for_raw_bytes(&mut harness, XTVERSION_QUERY, WELCOME_TIMEOUT),
@@ -251,9 +275,7 @@ async fn unknown_brand_malformed_reply_is_discarded() {
 #[ignore]
 async fn unknown_brand_late_reply_swallowed_and_recorded() {
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness =
-        PtyHarness::new_inherited_env(&binary, ROWS, COLS, &[], UNKNOWN_BRAND_ENV, None)
-            .expect("spawn pager");
+    let (mut harness, _content) = spawn_pager(&binary, UNKNOWN_BRAND_ENV).await;
 
     assert!(
         wait_for_raw_bytes(&mut harness, XTVERSION_QUERY, WELCOME_TIMEOUT),
@@ -286,9 +308,7 @@ async fn unknown_brand_late_reply_swallowed_and_recorded() {
 #[ignore]
 async fn unknown_brand_keystrokes_interleaved_with_reply() {
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness =
-        PtyHarness::new_inherited_env(&binary, ROWS, COLS, &[], UNKNOWN_BRAND_ENV, None)
-            .expect("spawn pager");
+    let (mut harness, _content) = spawn_pager(&binary, UNKNOWN_BRAND_ENV).await;
 
     assert!(
         wait_for_raw_bytes(&mut harness, XTVERSION_QUERY, WELCOME_TIMEOUT),
@@ -319,9 +339,7 @@ async fn unknown_brand_keystrokes_interleaved_with_reply() {
 #[ignore]
 async fn unknown_brand_split_reply_round_trip() {
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness =
-        PtyHarness::new_inherited_env(&binary, ROWS, COLS, &[], UNKNOWN_BRAND_ENV, None)
-            .expect("spawn pager");
+    let (mut harness, _content) = spawn_pager(&binary, UNKNOWN_BRAND_ENV).await;
 
     assert!(
         wait_for_raw_bytes(&mut harness, XTVERSION_QUERY, WELCOME_TIMEOUT),

@@ -778,6 +778,19 @@ mod tests {
         ));
     }
 
+    /// 50.8: a session whose state outgrows 4 MiB stays connected: frames up to the 64 MiB cap go through whole.
+    #[tokio::test]
+    async fn a_frame_larger_than_four_mib_round_trips() {
+        let payload = vec![0xA5u8; 5 * 1024 * 1024];
+        let (mut client, mut server) = duplex(64 * 1024);
+        let expected = payload.clone();
+        let writer = tokio::spawn(async move { write_frame(&mut client, &payload).await });
+        let got = read_frame(&mut server).await.expect("a 5 MiB frame is within the cap");
+        writer.await.unwrap().expect("the write is accepted");
+        assert_eq!(got.len(), expected.len());
+        assert!(got == expected);
+    }
+
     #[tokio::test]
     async fn message_roundtrip() {
         let (mut client, mut server) = duplex(1024);

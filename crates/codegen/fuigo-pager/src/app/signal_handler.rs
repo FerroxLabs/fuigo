@@ -6,7 +6,7 @@
 //!
 //! SIGINT / SIGTERM / SIGHUP are handled in a tokio task.
 //! The handler runs in normal Rust context (not actual signal-handler context).
-//! It can therefore use the full [`super::emit_terminal_teardown_sequences`] path (locked stderr, conditional cursor-style reset, multiplexer flush).
+//! It can therefore use the full [`crate::app::terminal_restore::emit_terminal_teardown_sequences`] path (locked stderr, conditional cursor-style reset, multiplexer flush).
 //! It then runs `disable_raw_mode`, flushes Sentry/OpenTelemetry, and exits.
 //!
 //! SIGPIPE is intentionally left alone.
@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use agent_client_protocol as acp;
 
 use super::ScreenMode;
+use crate::signal_streams::SignalStreams;
 
 /// Whether the active screen mode is fullscreen. Set by [`install`].
 static SCREEN_MODE_FULLSCREEN: AtomicBool = AtomicBool::new(false);
@@ -81,29 +82,33 @@ pub(crate) fn mark_restored() {
 }
 
 fn spawn_async_signal_task() {
-    tokio::spawn(async {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{SignalKind, signal};
-            let mut sigterm = signal(SignalKind::terminate()).ok();
-            let mut sighup = signal(SignalKind::hangup()).ok();
+    #[cfg(unix)]
+    {
+        // Claimed before the task is polled: a signal between here and the first await must not take its default action
+        let mut streams = SignalStreams::install();
+        tokio::spawn(async move {
             // First signal requests the graceful quit; a second forces exit.
-            let code = next_signal_code(&mut sigterm, &mut sighup).await;
+            let code = streams.next_code().await;
             request_graceful_or_exit(code);
-            let code2 = next_signal_code(&mut sigterm, &mut sighup).await;
+            let code2 = streams.next_code().await;
             shutdown_with_terminal_restore(code2);
-        }
-        #[cfg(windows)]
-        {
-            // ctrl_c gets the first-graceful / second-force treatment
-            // Console close, logoff, and shutdown stay immediate: the OS grants only a short window, so graceful teardown may not finish
-            use tokio::signal::windows;
-            let mut ctrl_close = windows::ctrl_close().ok();
-            let mut ctrl_logoff = windows::ctrl_logoff().ok();
-            let mut ctrl_shutdown = windows::ctrl_shutdown().ok();
+        });
+    }
+    #[cfg(windows)]
+    {
+        // ctrl_c gets the first-graceful / second-force treatment
+        // Console close, logoff, and shutdown stay immediate: the OS grants only a short window, so graceful teardown may not finish
+        use tokio::signal::windows;
+        let mut streams = SignalStreams::install();
+        let mut ctrl_close = windows::ctrl_close().ok();
+        let mut ctrl_logoff = windows::ctrl_logoff().ok();
+        let mut ctrl_shutdown = windows::ctrl_shutdown().ok();
+        tokio::spawn(async move {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
-                    handle_windows_ctrl_c_double().await;
+                code = streams.next_code() => {
+                    request_graceful_or_exit(code);
+                    let code2 = streams.next_code().await;
+                    shutdown_with_terminal_restore(code2);
                 }
                 _ = recv_optional_ctrl_close(&mut ctrl_close) => {
                     shutdown_with_terminal_restore(1);
@@ -115,16 +120,18 @@ fn spawn_async_signal_task() {
                     shutdown_with_terminal_restore(0);
                 }
             }
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
+        });
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        tokio::spawn(async {
             if tokio::signal::ctrl_c().await.is_ok() {
                 request_graceful_or_exit(130);
                 let _ = tokio::signal::ctrl_c().await;
                 shutdown_with_terminal_restore(130);
             }
-        }
-    });
+        });
+    }
 }
 
 /// Wait for the next SIGINT/SIGTERM/SIGHUP and map it to its exit code.
@@ -150,13 +157,6 @@ pub async fn recv_optional_unix_signal(sig: &mut Option<tokio::signal::unix::Sig
     } else {
         std::future::pending::<()>().await;
     }
-}
-
-#[cfg(windows)]
-async fn handle_windows_ctrl_c_double() {
-    request_graceful_or_exit(130);
-    let _ = tokio::signal::ctrl_c().await;
-    shutdown_with_terminal_restore(130);
 }
 
 // Tokio exposes distinct CtrlClose / CtrlLogoff / CtrlShutdown types with no shared trait; generate the three identical recv helpers from one body
@@ -223,7 +223,7 @@ fn shutdown_with_terminal_restore(exit_code: i32) -> ! {
         ScreenMode::Inline
     };
     // Signal-path shutdown has no terminal handle, so fall back to the screen bottom for the final cursor position
-    super::emit_terminal_teardown_sequences(mode, None);
+    crate::app::terminal_restore::emit_terminal_teardown_sequences(mode, None);
     let _ = crossterm::terminal::disable_raw_mode();
     // Mark after teardown so concurrent paths see TERMINAL_OWNED == true until all escape sequences and tcsetattr have been written
     TERMINAL_OWNED.store(false, Ordering::Release);
@@ -248,7 +248,10 @@ fn flush_telemetry_and_exit(exit_code: i32) -> ! {
     // Flush the --debug firehose on TUI signal exit (this path bypasses main's flush).
     fuigo_telemetry::debug_log::flush();
     if let Some(path) = fuigo_telemetry::span_profile::finalize() {
-        fuigo_tty_utils::cli_eprintln!("fuigo: span profile written to {}", fuigo_tty_utils::untrusted(path.display()));
+        fuigo_tty_utils::cli_eprintln!(
+            "fuigo: span profile written to {}",
+            fuigo_tty_utils::untrusted(path.display())
+        );
     }
     std::process::exit(exit_code);
 }

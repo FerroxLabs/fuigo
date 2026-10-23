@@ -971,7 +971,7 @@ async fn diffs_head_to_working_reports_untracked_file_additions() {
 
     std::fs::write(tmp.path().join("new.txt"), "line1\nline2\nline3\n").unwrap();
 
-    let data = diffs(tmp.path(), None, "HEAD", "working", false, false, false)
+    let data = diffs_ungated(tmp.path(), None, "HEAD", "working", false, false, false)
         .await
         .unwrap();
 
@@ -1131,7 +1131,7 @@ async fn test_status_with_split_index_falls_back_to_cli() {
     std::fs::write(tmp.path().join("test.txt"), "hello").unwrap();
 
     // status() succeeds via the CLI fallback even though libgit2 can't read the split index
-    let result = status(tmp.path(), true, true, false, false).await;
+    let result = status_ungated(tmp.path(), true, true, false, false).await;
     assert!(result.is_ok(), "status() failed: {:?}", result.err());
 
     let data = result.unwrap();
@@ -1248,7 +1248,7 @@ async fn test_status_double_failure_preserves_original_error() {
         }
     }
 
-    let result = status(tmp.path(), true, true, false, false).await;
+    let result = status_ungated(tmp.path(), true, true, false, false).await;
     assert!(result.is_err(), "expected both libgit2 and CLI to fail");
 
     let err_msg = result.unwrap_err().to_string();
@@ -1530,7 +1530,7 @@ async fn status_reports_head_oid_when_object_missing() {
     let (repo, _) = init_git2_repo_with_commit(tmp.path());
     point_head_at_missing_object(&repo, MISSING_OID);
 
-    let data = status(
+    let data = status_ungated(
         tmp.path(),
         /*include_untracked*/ false,
         /*include_stats*/ false,
@@ -1553,4 +1553,210 @@ async fn checkout_commit_with_fetch_repairs_missing_head_object() {
 
     let resp = checkout_commit_with_fetch(tmp.path(), MISSING_OID, /*stash_if_dirty*/ false).await;
     assert!(!resp.checked_out);
+}
+
+// ---- uninitialised submodule at a staged-everything boundary --------------------------------
+
+const UNINIT_SUB_OID: &str = "1111111111111111111111111111111111111111";
+
+/// A repo whose HEAD tracks `libs/sub` as a gitlink with no checkout behind it, plus a
+/// worktree made by fuigo's own builder (the shape a session runs in).
+fn repo_with_uninitialised_submodule_worktree(
+    temp: &tempfile::TempDir,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-b", "main"]);
+    std::fs::write(repo.join("tracked.txt"), "original").unwrap();
+    std::fs::write(
+        repo.join(".gitmodules"),
+        "[submodule \"libs/sub\"]\n\tpath = libs/sub\n\turl = https://example.invalid/sub.git\n",
+    )
+    .unwrap();
+    git(
+        &repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{UNINIT_SUB_OID},libs/sub"),
+        ],
+    );
+    git(&repo, &["add", ".gitmodules", "tracked.txt"]);
+    git(&repo, &["commit", "-m", "initial with an uninitialised submodule"]);
+    let wt = temp.path().join("wt");
+    fuigo_fast_worktree::WorktreeBuilder::new(&repo, &wt)
+        .create()
+        .unwrap();
+    (repo, wt)
+}
+
+async fn head_lists_uninitialised_gitlink(dir: &Path) -> bool {
+    git_cli(dir, &["ls-tree", "-r", "HEAD"])
+        .await
+        .unwrap()
+        .contains(&format!("160000 commit {UNINIT_SUB_OID}\tlibs/sub"))
+}
+
+#[tokio::test]
+async fn commit_turn_keeps_an_uninitialised_submodule_gitlink() {
+    fuigo_test_utils::require_git!();
+    for state in ["as_created", "absent", "empty_dir"] {
+        let temp = tempfile::tempdir().unwrap();
+        let (_repo, wt) = repo_with_uninitialised_submodule_worktree(&temp);
+        let sub = wt.join("libs/sub");
+        match state {
+            "absent" => {
+                let _ = std::fs::remove_dir_all(&sub);
+            }
+            "empty_dir" => {
+                let _ = std::fs::remove_dir_all(&sub);
+                std::fs::create_dir_all(&sub).unwrap();
+            }
+            _ => {}
+        }
+        std::fs::write(wt.join("tracked.txt"), "edited by the agent").unwrap();
+        let sha = commit_turn_if_dirty(&wt, 3).await;
+        assert!(sha.is_some(), "{state}: dirty turn must commit");
+        assert!(
+            head_lists_uninitialised_gitlink(&wt).await,
+            "{state}: the turn commit dropped the uninitialised submodule gitlink"
+        );
+        let changed = git_cli(&wt, &["diff", "--name-status", "HEAD~1", "HEAD"])
+            .await
+            .unwrap();
+        assert_eq!(changed.trim(), "M\ttracked.txt", "{state}: {changed}");
+    }
+}
+
+#[tokio::test]
+async fn stage_all_keeps_an_uninitialised_submodule_gitlink() {
+    fuigo_test_utils::require_git!();
+    let temp = tempfile::tempdir().unwrap();
+    let (_repo, wt) = repo_with_uninitialised_submodule_worktree(&temp);
+    let _ = std::fs::remove_dir_all(wt.join("libs/sub"));
+    std::fs::write(wt.join("tracked.txt"), "edited").unwrap();
+    stage(&wt, None).await.unwrap();
+    let staged = git_cli(&wt, &["diff", "--cached", "--name-status"])
+        .await
+        .unwrap();
+    assert_eq!(staged.trim(), "M\ttracked.txt", "{staged}");
+}
+
+#[tokio::test]
+async fn commit_stage_all_keeps_an_uninitialised_submodule_gitlink() {
+    fuigo_test_utils::require_git!();
+    let temp = tempfile::tempdir().unwrap();
+    let (_repo, wt) = repo_with_uninitialised_submodule_worktree(&temp);
+    let _ = std::fs::remove_dir_all(wt.join("libs/sub"));
+    std::fs::write(wt.join("tracked.txt"), "edited").unwrap();
+    let req = GitCommitReq {
+        message: "edit".to_owned(),
+        stage_all: true,
+        ..Default::default()
+    };
+    commit(&wt, &req).await.unwrap();
+    assert!(head_lists_uninitialised_gitlink(&wt).await);
+}
+
+// ---- an initialised submodule that was deleted is a deletion --------------------------------
+
+fn git_ok(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+        .args(["-c", "protocol.file.allow=always"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+}
+
+/// A repo with a real, initialised submodule `libs/sub`; with `linked`, the returned
+/// directory is a linked worktree of it that has the submodule initialised itself.
+fn initialised_submodule_checkout(temp: &tempfile::TempDir, linked: bool) -> std::path::PathBuf {
+    let sub = temp.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    git_ok(&sub, &["init", "-b", "main"]);
+    git_ok(&sub, &["commit", "--allow-empty", "-m", "sub"]);
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git_ok(&repo, &["init", "-b", "main"]);
+    std::fs::write(repo.join("tracked.txt"), "original").unwrap();
+    git_ok(&repo, &["add", "tracked.txt"]);
+    git_ok(&repo, &["submodule", "add", sub.to_str().unwrap(), "libs/sub"]);
+    git_ok(&repo, &["commit", "-m", "initial with a submodule"]);
+    if !linked {
+        return repo;
+    }
+    let wt = temp.path().join("linked");
+    git_ok(&repo, &["worktree", "add", "--detach", wt.to_str().unwrap()]);
+    git_ok(&wt, &["submodule", "update", "--init"]);
+    wt
+}
+
+async fn head_has_gitlink(dir: &Path) -> bool {
+    git_cli(dir, &["ls-tree", "-r", "HEAD"])
+        .await
+        .unwrap()
+        .contains("160000 commit")
+}
+
+#[tokio::test]
+async fn initialised_submodule_deletion_is_recorded() {
+    fuigo_test_utils::require_git!();
+    for linked in [false, true] {
+        for how in ["turn", "stage_all", "commit_stage_all"] {
+            let temp = tempfile::tempdir().unwrap();
+            let wt = initialised_submodule_checkout(&temp, linked);
+            assert!(head_has_gitlink(&wt).await);
+            std::fs::remove_dir_all(wt.join("libs/sub")).unwrap();
+            std::fs::write(wt.join("tracked.txt"), "edited").unwrap();
+            let label = format!("linked={linked} {how}");
+            match how {
+                "turn" => {
+                    assert!(commit_turn_if_dirty(&wt, 3).await.is_some(), "{label}");
+                    assert!(!head_has_gitlink(&wt).await, "{label}: gitlink kept");
+                }
+                "stage_all" => {
+                    stage(&wt, None).await.unwrap();
+                    let staged = git_cli(&wt, &["diff", "--cached", "--name-status"])
+                        .await
+                        .unwrap();
+                    assert!(staged.contains("D\tlibs/sub"), "{label}: {staged}");
+                }
+                _ => {
+                    let req = GitCommitReq {
+                        message: "edit".to_owned(),
+                        stage_all: true,
+                        ..Default::default()
+                    };
+                    commit(&wt, &req).await.unwrap();
+                    assert!(!head_has_gitlink(&wt).await, "{label}: gitlink kept");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn git_rm_submodule_stays_removed() {
+    fuigo_test_utils::require_git!();
+    for linked in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let wt = initialised_submodule_checkout(&temp, linked);
+        git_ok(&wt, &["rm", "-f", "libs/sub"]);
+        std::fs::write(wt.join("tracked.txt"), "edited").unwrap();
+        assert!(commit_turn_if_dirty(&wt, 3).await.is_some());
+        assert!(!head_has_gitlink(&wt).await, "linked={linked}: restored");
+    }
 }

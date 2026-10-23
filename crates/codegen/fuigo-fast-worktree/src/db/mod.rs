@@ -462,8 +462,25 @@ pub fn now_epoch_secs() -> i64 {
 
 /// Resolve the fuigo home: `$FUIGO_HOME`, else `<home>/.fuigo`.
 pub fn resolve_fuigo_home() -> Result<PathBuf> {
+    // Tests share one process and `$FUIGO_HOME` is process-global: a production path that resolves the home
+    // (`open_default`: register, remove, auto-gc) on a thread that owns no fixture would resolve to the home a
+    // fixture-owning test installed and write its rows into that test's database (a GC pass there then reports
+    // `dead_removed` 2 or 3 instead of 1). Resolving under the fixture lock means a fixture-less thread sees
+    // the real environment, never another test's.
+    #[cfg(test)]
+    let _fence = fuigo_home_fence();
     fuigo_dirs::resolve_fuigo_home()
         .context("neither $FUIGO_HOME nor a home directory could be resolved")
+}
+
+/// Held while resolving the fuigo home inside a test; `None` on a thread that already owns the env (a fixture or
+/// a `GroveEnvGuard`), which must not take the lock again or take it in the opposite order to the fixture.
+#[cfg(test)]
+fn fuigo_home_fence() -> Option<std::sync::MutexGuard<'static, ()>> {
+    if crate::test_support::grove_env_held() {
+        return None;
+    }
+    Some(FUIGO_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// Serializes tests that mutate the process-global `FUIGO_HOME` env var so they
@@ -518,6 +535,7 @@ impl FuigoHomeFixture {
         let grove_lock = crate::nfs::GROVE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        crate::test_support::grove_env_held_adjust(1);
         let tmp = tempfile::TempDir::new().unwrap();
         let home = tmp.path().join("fuigo-home");
         std::fs::create_dir_all(&home).unwrap();
@@ -610,6 +628,7 @@ impl Drop for FuigoHomeFixture {
                 None => std::env::remove_var("GROVE_CONTROL_SOCK"),
             }
         }
+        crate::test_support::grove_env_held_adjust(-1);
     }
 }
 

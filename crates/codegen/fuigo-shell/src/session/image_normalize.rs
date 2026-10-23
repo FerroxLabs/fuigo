@@ -425,7 +425,11 @@ fn compute_normalized_blocking(
     }
     let exceeded_size = original_bytes > MAX_IMAGE_BYTES;
     let exceeded_dimensions = params.exceeds_dimension_caps(orig_w, orig_h);
-    if !exceeded_size && !exceeded_dimensions {
+    // A photo that carries "rotate me" in its EXIF is sideways to a reader that ignores the tag, so the pixels are
+    // turned and the tag dropped by a re-encode.
+    let needs_orientation = fuigo_tools::util::image_compress::exif_orientation(&raw_bytes)
+        != image::metadata::Orientation::NoTransforms;
+    if !exceeded_size && !exceeded_dimensions && !needs_orientation {
         if let Err(e) = fuigo_tools::util::image_validate::validate_image_bytes(&raw_bytes) {
             return Err(NormalizeError(format!("integrity check failed: {e}")));
         }
@@ -439,8 +443,8 @@ fn compute_normalized_blocking(
             "image {orig_w}x{orig_h} exceeds {MAX_DECODE_PIXELS} px decode limit",
         )));
     }
-    let decoded =
-        image::load_from_memory(&raw_bytes).map_err(|e| NormalizeError(format!("decode: {e}")))?;
+    let decoded = fuigo_tools::util::image_compress::decode_oriented(&raw_bytes)
+        .map_err(|e| NormalizeError(format!("decode: {e}")))?;
     let (buf, new_w, new_h, mime) = match re_encode_under_limit(&decoded, params) {
         Ok(v) => v,
         Err(e) => {
@@ -456,7 +460,7 @@ fn compute_normalized_blocking(
             });
         }
     };
-    if !exceeded_dimensions && buf.len() >= original_bytes {
+    if !exceeded_dimensions && !needs_orientation && buf.len() >= original_bytes {
         return Ok(NormalizedEntry::Unchanged {
             bytes: Bytes::from(raw_bytes),
             mime: Cow::Borrowed(orig_mime),

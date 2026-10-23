@@ -45,7 +45,11 @@ pub(crate) enum PendingEditorRequest {
 
 /// A user program launched on a file (`$EDITOR`, `$PAGER`). It is the user's own program, so Fuigo's secrets are
 /// removed from its environment (P120).
-pub(crate) fn user_program_command(program: &str, args: &[String], path: &Path) -> std::process::Command {
+pub(crate) fn user_program_command(
+    program: &str,
+    args: &[String],
+    path: &Path,
+) -> std::process::Command {
     let mut cmd = std::process::Command::new(program);
     fuigo_tty_utils::remove_fuigo_owned_secrets(&mut cmd);
     cmd.args(args).arg(path);
@@ -679,7 +683,9 @@ mod p120_tests {
         let dir = probe::scratch_dir("p120-editor");
         let out = dir.join("env.txt");
         let args = vec!["-c".to_string(), format!("env > '{}'", out.display())];
-        let status = user_program_command("sh", &args, &dir.join("draft.md")).status().unwrap();
+        let status = user_program_command("sh", &args, &dir.join("draft.md"))
+            .status()
+            .unwrap();
         assert!(status.success());
         let dump = std::fs::read_to_string(&out).unwrap();
         probe::assert_clean(&dump, &[]);

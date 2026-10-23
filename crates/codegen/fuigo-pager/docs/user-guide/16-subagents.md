@@ -245,6 +245,17 @@ explore = "grok-4.6"                 # route explore to a specific model
 
 Per-type model overrides apply for any parent. Without an override, a subagent inherits the parent's model.
 
+### Locking Subagents to the Parent Model
+
+The `task` tool normally offers the agent a `model` argument, and its description lists the model names it may pick when you explicitly ask for one. To keep every subagent on the parent's model, set:
+
+```toml
+[features]
+subagent_model_inheritance = true    # or FUIGO_SUBAGENT_MODEL_INHERITANCE=1
+```
+
+With it on, the `task` tool has no `model` argument and no model list, and a call that passes a model anyway is refused before any subagent starts. The setting is read when a session starts, so a change applies to the next session. Per-type `[subagents.models]` overrides and persona models that you configured yourself still apply.
+
 ### Custom Roles and Personas
 
 Define custom roles with their own capability and model defaults:

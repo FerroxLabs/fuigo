@@ -113,6 +113,12 @@ pub struct RawHandler {
     #[serde(rename = "type")]
     pub handler_type: String,
     pub command: Option<String>,
+    /// Arguments for the `command` + `args` form: the command is executed directly, without a shell.
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    /// The shell a shell-form `command` runs in, by name (`"bash"`). Absent means `sh`.
+    #[serde(default)]
+    pub shell: Option<String>,
     pub url: Option<String>,
     /// Seconds (converted to milliseconds internally).
     pub timeout: Option<u64>,
@@ -128,6 +134,8 @@ impl std::fmt::Debug for RawHandler {
         let Self {
             handler_type,
             command,
+            args,
+            shell,
             url,
             timeout,
             env,
@@ -135,6 +143,8 @@ impl std::fmt::Debug for RawHandler {
         f.debug_struct("RawHandler")
             .field("handler_type", handler_type)
             .field("command", &command.as_ref().map(|_| "<redacted>"))
+            .field("args", &args.as_ref().map(Vec::len))
+            .field("shell", shell)
             .field("url", &url.as_deref().map(fuigo_auth::redact_url))
             .field("timeout", timeout)
             .field("env", &env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
@@ -254,6 +264,13 @@ pub struct HookSpec {
     pub command: Option<PathBuf>,
     /// Pre-expansion `command` for display, so resolved secrets never leak.
     pub command_raw: Option<String>,
+    /// The `command` + `args` form: `command` is run directly (no shell) with these arguments. Known plugin placeholders
+    /// (see [`KNOWN_HOOK_PLACEHOLDERS`]) are expanded at run time; any other `${...}` is passed through literally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// The shell a shell-form `command` runs in, by name on `PATH` (`"bash"`); absent means `sh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
     /// URL (http handlers), env-expanded.
     /// Unlike `command`, the HTTP runner re-expands at run time before SSRF validation (deliberate asymmetry).
     pub url: Option<String>,
@@ -283,6 +300,8 @@ impl std::fmt::Debug for HookSpec {
             enabled,
             command,
             command_raw,
+            args,
+            shell,
             url,
             url_raw,
             timeout_ms,
@@ -299,6 +318,8 @@ impl std::fmt::Debug for HookSpec {
             .field("enabled", enabled)
             .field("command", &command.as_ref().map(|_| "<redacted>"))
             .field("command_raw", &command_raw.as_ref().map(|_| "<redacted>"))
+            .field("args", &args.as_ref().map(|a| a.len()))
+            .field("shell", shell)
             .field("url", &url.as_deref().map(fuigo_auth::redact_url))
             .field("url_raw", &url_raw.as_deref().map(fuigo_auth::redact_url))
             .field("timeout_ms", timeout_ms)
@@ -307,6 +328,31 @@ impl std::fmt::Debug for HookSpec {
             .field("layer", layer)
             .finish()
     }
+}
+
+/// The placeholders a hook may rely on Fuigo to provide, in a shell command or in `args`: the plugin root and data dir
+/// (Claude and Fuigo spellings, plus the bare `PLUGIN_ROOT` some plugins use), the project and config dirs, and the
+/// runner's own variables ([`RUNNER_ALWAYS_SET_ENV`]). Only these are validated before a hook runs: any other
+/// `${NAME}` in a shell command belongs to the script, which may define it itself (a loop variable, an assignment in a
+/// `case`), so it is left to the shell.
+pub const KNOWN_HOOK_PLACEHOLDERS: &[&str] = &[
+    "CLAUDE_PLUGIN_ROOT",
+    "FUIGO_PLUGIN_ROOT",
+    "PLUGIN_ROOT",
+    "CLAUDE_PLUGIN_DATA",
+    "FUIGO_PLUGIN_DATA",
+    "CLAUDE_PROJECT_DIR",
+    "CLAUDE_CONFIG_DIR",
+    "FUIGO_HOME",
+    "FUIGO_HOOK_EVENT",
+    "FUIGO_HOOK_NAME",
+    "FUIGO_SESSION_ID",
+    "FUIGO_WORKSPACE_ROOT",
+];
+
+/// Whether `name` is one of [`KNOWN_HOOK_PLACEHOLDERS`].
+pub fn is_known_hook_placeholder(name: &str) -> bool {
+    KNOWN_HOOK_PLACEHOLDERS.contains(&name)
 }
 
 pub const RUNNER_ALWAYS_SET_ENV: &[&str] = &[
@@ -761,6 +807,8 @@ fn build_one_spec(
         }
     };
 
+    let mut args: Option<Vec<String>> = None;
+    let shell = handler.shell.take();
     let (command, command_raw, url, url_raw) = match handler_type {
         HandlerType::Command => {
             let Some(command) = handler.command else {
@@ -776,6 +824,7 @@ fn build_one_spec(
                 RUNNER_ALWAYS_SET_ENV,
             );
             let expanded = refuse_expanded(expanded, ctx, &name, "command");
+            args = handler.args.take();
             (Some(PathBuf::from(expanded)), Some(command), None, None)
         }
         HandlerType::Http => {
@@ -792,6 +841,16 @@ fn build_one_spec(
                 RUNNER_ALWAYS_SET_ENV,
             );
             let expanded = refuse_expanded(expanded, ctx, &name, "url");
+            // A URL that still holds a `$` reference resolves at run time; any other is checked now.
+            if !expanded.contains('$')
+                && let Err(reason) = crate::runner::http::check_hook_url_shape(&expanded)
+            {
+                return Err(HookError::InvalidConfig {
+                    name,
+                    path: ctx.error_path.to_path_buf(),
+                    detail: format!("http handler 'url' is not usable: {reason}"),
+                });
+            }
             (None, None, Some(expanded), Some(url))
         }
     };
@@ -805,6 +864,8 @@ fn build_one_spec(
         enabled: true,
         command,
         command_raw,
+        args,
+        shell,
         url,
         url_raw,
         timeout_ms,
@@ -832,6 +893,9 @@ fn refuse_saved_key_references(handler: &mut RawHandler, hook_name: &str, file: 
     }
     if let Some(url) = handler.url.as_mut() {
         scrub(url, format!("{hook_name}.url"));
+    }
+    for (i, arg) in handler.args.iter_mut().flatten().enumerate() {
+        scrub(arg, format!("{hook_name}.args[{i}]"));
     }
     for (name, value) in handler.env.iter_mut() {
         scrub(value, format!("{hook_name}.env.{name}"));

@@ -49,7 +49,6 @@ pub(crate) fn sort_prefix_for(idx: usize) -> char {
     char::from(b'a' + u8::try_from(idx).unwrap_or(LAST).min(LAST))
 }
 
-
 /// Build effort rows for autocomplete from a per-model option list.
 ///
 /// - `mark_active` and `current_effort` mark the current session effort with `(active)`.
@@ -118,6 +117,11 @@ mod tests {
         assert!(items[0].match_text.starts_with("a "));
         assert!(items[25].match_text.starts_with("z "));
         assert!(items[159].match_text.starts_with("z "));
-        assert!(items.iter().all(|i| i.match_text.chars().next().is_some_and(|c| c.is_ascii_lowercase())));
+        assert!(items.iter().all(|i| {
+            i.match_text
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_lowercase())
+        }));
     }
 }

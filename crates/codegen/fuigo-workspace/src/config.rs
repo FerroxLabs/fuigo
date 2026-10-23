@@ -846,6 +846,9 @@ pub struct WorkspaceConfig {
     pub confine_fs_to_workspace_root: bool,
     /// MCP servers initialized for each admitted hub session bind.
     pub bind_mcp: Option<BindMcpConfig>,
+    /// The folder's per-command shell sandbox; `None` on hosts that do not sandbox commands (the
+    /// CLI, the remote sandbox server). The session factory must carry its launch hook.
+    pub sandbox: Option<Arc<crate::sandbox::WorkspaceSandbox>>,
 }
 /// Metadata a tool server announces so hub consumers can identify and route to it.
 /// Re-export of the protocol crate's single catalog of well-known registration-metadata keys; every field is optional and independently sourced.
@@ -894,6 +897,7 @@ impl WorkspaceConfig {
             require_explicit_toolset: false,
             confine_fs_to_workspace_root: false,
             bind_mcp: None,
+            sandbox: None,
             status_config,
         }
     }

@@ -63,6 +63,20 @@ pub enum WarningSeverity {
     Info,
 }
 
+/// The welcome-screen banner for "a sandbox profile is set but this platform cannot enforce it" (Windows).
+///
+/// The pre-TUI stderr line is overwritten when the TUI takes the screen, so this is what an interactive user sees.
+/// `warning` is the text from `fuigo_sandbox::unavailable_warning`; `None` means nothing to say.
+/// Split after the platform clause so both lines fit the single-slot banner, which does not wrap.
+pub fn sandbox_unavailable_startup_warning(warning: Option<&str>) -> Option<StartupWarning> {
+    let text = warning?;
+    Some(StartupWarning {
+        severity: WarningSeverity::Warning,
+        message: text.replacen(": ", ":\n", 1),
+        action: None,
+    })
+}
+
 /// Pick the warning the single-slot welcome banner shows: the first `Warning`-severity entry, else the last entry.
 ///
 /// `startup_warnings` grows at runtime while the user sits on the welcome screen (session-start failures, Claude import results).

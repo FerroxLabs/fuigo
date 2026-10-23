@@ -3,7 +3,7 @@
 use super::common::*;
 
 /// Regression test on the REAL macOS host pasteboard, exactly as reported.
-/// Only Otty (`TERM_PROGRAM=otty`) is known to deliver macOS IME commits as bracketed paste, so the test runs under it.
+/// The origin check is brand-agnostic, so the test leaves `TERM_PROGRAM` unset.
 /// With an image on the clipboard, an IME commit must not attach that image to the agent prompt.
 ///
 /// With no usable clipboard the test prints a SKIP line and returns, so a CI runner without a pasteboard does not fail on environment.
@@ -37,14 +37,13 @@ async fn bracketed_ime_paste_skips_clipboard_image_macos() {
 
     let content = ContentController::start().await.expect("start content");
     let binary = pager_binary().expect("resolve pager binary");
-    // The check for where a pasted payload came from only runs under Otty (TERM_PROGRAM=otty)
     let mut harness = PtyHarness::spawn_with_content_env_ops(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
         &[],
-        &[EnvOp::set("TERM_PROGRAM", "otty")],
+        &[EnvOp::remove("TERM_PROGRAM")],
     )
     .expect("spawn pager");
 

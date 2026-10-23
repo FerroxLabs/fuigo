@@ -46,7 +46,54 @@ pub struct RewindResponse {
     pub prompt_text: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+/// What a rewind restores. Mirrors the engine's `RewindMode` (`fuigo-shell` `acp_types`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RewindScope {
+    /// Conversation and files (the engine default).
+    All,
+    ConversationOnly,
+    FilesOnly,
+}
+
+impl RewindScope {
+    pub fn wire(self) -> &'static str {
+        match self {
+            RewindScope::All => "all",
+            RewindScope::ConversationOnly => "conversation_only",
+            RewindScope::FilesOnly => "files_only",
+        }
+    }
+}
+
+/// The answer to a "files changed outside Fuigo" prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictChoice {
+    /// Restore the checkpoint anyway (the engine's `force`).
+    Overwrite,
+    /// Rewind the conversation and leave every file as it is.
+    KeepFiles,
+    Cancel,
+}
+
+/// Rows of the conflict prompt for `scope`: key, label, choice. `KeepFiles` only makes sense when the conversation also rewinds.
+pub fn conflict_options(scope: RewindScope) -> Vec<(char, &'static str, ConflictChoice)> {
+    let mut rows = vec![('o', "Overwrite them with the checkpoint", ConflictChoice::Overwrite)];
+    if scope == RewindScope::All {
+        rows.push(('c', "Rewind the conversation only, keep these files", ConflictChoice::KeepFiles));
+    }
+    rows.push(('n', "Cancel", ConflictChoice::Cancel));
+    rows
+}
+
+const CONFLICT_LIST_MAX: usize = 4;
+
+/// (listed conflicts, whether a "+N more" line follows).
+fn conflict_list_rows(conflicts: &[RewindConflictInfo]) -> (usize, usize) {
+    let shown = conflicts.len().min(CONFLICT_LIST_MAX);
+    (shown, usize::from(conflicts.len() > shown))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct RewindConflictInfo {
     pub path: String,
     #[serde(alias = "conflictType")]
@@ -71,6 +118,18 @@ pub enum RewindPhase {
     },
     Executing {
         target_prompt_index: usize,
+    },
+    /// Dry run (`force: false`) asking the engine which files would change and which were edited outside Fuigo.
+    Previewing {
+        target_prompt_index: usize,
+        scope: RewindScope,
+    },
+    /// Files changed outside Fuigo since the checkpoint; nothing is overwritten until the user says so.
+    Conflicts {
+        target_prompt_index: usize,
+        scope: RewindScope,
+        conflicts: Vec<RewindConflictInfo>,
+        active_idx: usize,
     },
     Error {
         message: String,
@@ -107,6 +166,9 @@ pub enum RewindInput {
     Confirm(usize),
     /// Execute this rewind and turn off confirm-before-rewind.
     ConfirmNeverAsk(usize),
+    /// Execute this rewind with an explicit scope (not the default of conversation and files).
+    ConfirmScoped(usize, RewindScope),
+    Conflict(ConflictChoice),
     PickerSelect(usize),
     MoveUp,
     MoveDown,
@@ -114,9 +176,14 @@ pub enum RewindInput {
     Consumed,
 }
 
+/// Where the confirm dialog says exactly which files "files" covers (file-tool edits are checkpointed; shell commands are not).
+pub(crate) const REWIND_SCOPE_NOTE: [&str; 2] = [
+    "Files: restores what Fuigo's file tools wrote after that turn; asks first if you changed them since.",
+    "Changes made by shell commands or by you outside Fuigo are not tracked.",
+];
 const CANCEL_OFFER_OPTIONS: usize = 2;
-/// Yes / Yes, and don't ask again / No.
-const CONFIRM_OPTIONS: usize = 3;
+/// Yes (conversation and files) / Yes, conversation only / Yes, files only / Yes, and don't ask again / No.
+const CONFIRM_OPTIONS: usize = 5;
 
 pub fn handle_rewind_key(state: &RewindState, key: &KeyEvent) -> RewindInput {
     if key.kind == crossterm::event::KeyEventKind::Release {
@@ -150,12 +217,29 @@ pub fn handle_rewind_key(state: &RewindState, key: &KeyEvent) -> RewindInput {
             ..
         } => match key.code {
             KeyCode::Char('y') => RewindInput::Confirm(*target_prompt_index),
+            KeyCode::Char('c') => {
+                RewindInput::ConfirmScoped(*target_prompt_index, RewindScope::ConversationOnly)
+            }
+            KeyCode::Char('f') => {
+                RewindInput::ConfirmScoped(*target_prompt_index, RewindScope::FilesOnly)
+            }
             KeyCode::Char('n') => RewindInput::Dismissed,
             KeyCode::Char('a') => RewindInput::ConfirmNeverAsk(*target_prompt_index),
             KeyCode::Char('j') | KeyCode::Down => RewindInput::MoveDown,
             KeyCode::Char('k') | KeyCode::Up => RewindInput::MoveUp,
             KeyCode::Enter => RewindInput::ConfirmCursor,
             KeyCode::Esc => RewindInput::Dismissed,
+            _ => RewindInput::Consumed,
+        },
+        RewindPhase::Conflicts { scope, .. } => match key.code {
+            KeyCode::Char('j') | KeyCode::Down => RewindInput::MoveDown,
+            KeyCode::Char('k') | KeyCode::Up => RewindInput::MoveUp,
+            KeyCode::Enter => RewindInput::ConfirmCursor,
+            KeyCode::Esc => RewindInput::Conflict(ConflictChoice::Cancel),
+            KeyCode::Char(c) => conflict_options(*scope)
+                .into_iter()
+                .find(|(k, _, _)| *k == c)
+                .map_or(RewindInput::Consumed, |(_, _, choice)| RewindInput::Conflict(choice)),
             _ => RewindInput::Consumed,
         },
         RewindPhase::Error { .. } => match key.code {
@@ -166,7 +250,7 @@ pub fn handle_rewind_key(state: &RewindState, key: &KeyEvent) -> RewindInput {
             KeyCode::Esc => RewindInput::Dismissed,
             _ => RewindInput::Consumed,
         },
-        RewindPhase::Executing { .. } => RewindInput::Consumed,
+        RewindPhase::Executing { .. } | RewindPhase::Previewing { .. } => RewindInput::Consumed,
     }
 }
 
@@ -188,6 +272,10 @@ pub fn move_cursor(phase: &mut RewindPhase, delta: i32) {
             let new = (*active_idx as i32 + delta).clamp(0, CONFIRM_OPTIONS as i32 - 1);
             *active_idx = new as usize;
         }
+        RewindPhase::Conflicts { active_idx, scope, .. } => {
+            let max = conflict_options(*scope).len() as i32 - 1;
+            *active_idx = (*active_idx as i32 + delta).clamp(0, max) as usize;
+        }
         _ => {}
     }
 }
@@ -204,9 +292,16 @@ pub fn confirm_cursor(phase: &RewindPhase) -> RewindInput {
             ..
         } => match active_idx {
             0 => RewindInput::Confirm(*target_prompt_index),
-            1 => RewindInput::ConfirmNeverAsk(*target_prompt_index),
+            1 => RewindInput::ConfirmScoped(*target_prompt_index, RewindScope::ConversationOnly),
+            2 => RewindInput::ConfirmScoped(*target_prompt_index, RewindScope::FilesOnly),
+            3 => RewindInput::ConfirmNeverAsk(*target_prompt_index),
             _ => RewindInput::Dismissed,
         },
+        RewindPhase::Conflicts {
+            scope, active_idx, ..
+        } => conflict_options(*scope)
+            .get(*active_idx)
+            .map_or(RewindInput::Consumed, |(_, _, choice)| RewindInput::Conflict(*choice)),
         _ => RewindInput::Consumed,
     }
 }
@@ -239,11 +334,19 @@ pub fn rewind_row_at(phase: &RewindPhase, area: Rect, col: u16, row: u16) -> Opt
             _ => None,
         },
         RewindPhase::Confirm { .. } => match row.checked_sub(area.y + 2) {
-            Some(0) => Some(0),
-            Some(1) => Some(1),
-            Some(2) => Some(2),
+            Some(i) if (i as usize) < CONFIRM_OPTIONS => Some(i as usize),
             _ => None,
         },
+        RewindPhase::Conflicts {
+            conflicts, scope, ..
+        } => {
+            let (shown, more) = conflict_list_rows(conflicts);
+            let first = area.y + 2 + (shown + more) as u16;
+            match row.checked_sub(first) {
+                Some(i) if (i as usize) < conflict_options(*scope).len() => Some(i as usize),
+                _ => None,
+            }
+        }
         RewindPhase::Error { .. } => {
             if row == area.y + 3 {
                 Some(0)
@@ -251,7 +354,7 @@ pub fn rewind_row_at(phase: &RewindPhase, area: Rect, col: u16, row: u16) -> Opt
                 None
             }
         }
-        RewindPhase::Loading | RewindPhase::Executing { .. } => None,
+        RewindPhase::Loading | RewindPhase::Executing { .. } | RewindPhase::Previewing { .. } => None,
     }
 }
 
@@ -289,6 +392,15 @@ pub fn set_rewind_cursor(phase: &mut RewindPhase, idx: usize) -> bool {
                 false
             }
         }
+        RewindPhase::Conflicts { active_idx, scope, .. } => {
+            let new = idx.min(conflict_options(*scope).len() - 1);
+            if *active_idx != new {
+                *active_idx = new;
+                true
+            } else {
+                false
+            }
+        }
         _ => false,
     }
 }
@@ -316,8 +428,14 @@ pub fn rewind_overlay_height(phase: &RewindPhase, screen_h: u16) -> u16 {
             .height(screen_h);
         }
         RewindPhase::CancelOffer { .. } => 5,
-        RewindPhase::Executing { .. } => 2,
-        RewindPhase::Confirm { .. } => 5,
+        RewindPhase::Executing { .. } | RewindPhase::Previewing { .. } => 2,
+        RewindPhase::Confirm { .. } => 8,
+        RewindPhase::Conflicts {
+            conflicts, scope, ..
+        } => {
+            let (shown, more) = conflict_list_rows(conflicts);
+            (1 + shown + more + conflict_options(*scope).len()) as u16
+        }
         RewindPhase::Error { .. } => 4,
     };
     content + 1
@@ -434,13 +552,17 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 &theme,
             );
         }
-        RewindPhase::Executing { .. } => {
+        RewindPhase::Executing { .. } | RewindPhase::Previewing { .. } => {
             let y = area.y + 1;
             buf.set_line(
                 content_x,
                 y,
                 &Line::from(Span::styled(
-                    "Rewinding...",
+                    if matches!(phase, RewindPhase::Previewing { .. }) {
+                        "Checking files..."
+                    } else {
+                        "Rewinding..."
+                    },
                     Style::default().fg(theme.gray),
                 )),
                 content_w,
@@ -474,41 +596,86 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 content_w,
             );
             y += 1;
-            render_radio_row(
-                buf,
+            for (n, (key, label)) in [
+                ('y', "Yes, rewind conversation and files"),
+                ('c', "Yes, conversation only"),
+                ('f', "Yes, files only"),
+                ('a', "Yes, and don't ask again"),
+                ('n', "No"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                render_radio_row(
+                    buf,
+                    content_x,
+                    y,
+                    content_w,
+                    key,
+                    label,
+                    *active_idx == n,
+                    focused,
+                    &theme,
+                );
+                y += 1;
+            }
+            for note in REWIND_SCOPE_NOTE {
+                buf.set_line(
+                    content_x,
+                    y,
+                    &Line::from(Span::styled(note, Style::default().fg(theme.gray))),
+                    content_w,
+                );
+                y += 1;
+            }
+        }
+        RewindPhase::Conflicts {
+            conflicts,
+            scope,
+            active_idx,
+            ..
+        } => {
+            let mut y = area.y + 1;
+            buf.set_line(
                 content_x,
                 y,
+                &Line::from(Span::styled(
+                    "These files changed outside Fuigo since the checkpoint:",
+                    title_style,
+                )),
                 content_w,
-                'y',
-                "Yes",
-                *active_idx == 0,
-                focused,
-                &theme,
             );
             y += 1;
-            render_radio_row(
-                buf,
-                content_x,
-                y,
-                content_w,
-                'a',
-                "Yes, and don't ask again",
-                *active_idx == 1,
-                focused,
-                &theme,
-            );
-            y += 1;
-            render_radio_row(
-                buf,
-                content_x,
-                y,
-                content_w,
-                'n',
-                "No",
-                *active_idx == 2,
-                focused,
-                &theme,
-            );
+            let (shown, more) = conflict_list_rows(conflicts);
+            for c in conflicts.iter().take(shown) {
+                let text = format!("{} ({})", c.path, c.conflict_type.replace('_', " "));
+                let text: String = text.chars().take(content_w as usize).collect();
+                buf.set_line(
+                    content_x,
+                    y,
+                    &Line::from(Span::styled(text, Style::default().fg(theme.text_primary))),
+                    content_w,
+                );
+                y += 1;
+            }
+            if more == 1 {
+                buf.set_line(
+                    content_x,
+                    y,
+                    &Line::from(Span::styled(
+                        format!("+{} more", conflicts.len() - shown),
+                        Style::default().fg(theme.gray),
+                    )),
+                    content_w,
+                );
+                y += 1;
+            }
+            for (n, (key, label, _)) in conflict_options(*scope).into_iter().enumerate() {
+                render_radio_row(
+                    buf, content_x, y, content_w, key, label, *active_idx == n, focused, &theme,
+                );
+                y += 1;
+            }
         }
         RewindPhase::Error { message } => {
             let mut y = area.y + 1;
@@ -649,6 +816,95 @@ mod tests {
         }
     }
 
+    #[test]
+    fn confirm_offers_the_three_scopes_and_says_what_files_covers() {
+        let _theme = crate::theme::cache::pin_theme();
+        let phase = RewindPhase::Confirm {
+            target_prompt_index: 3,
+            active_idx: 0,
+            prompt_preview: Some("add a test".to_string()),
+        };
+        let h = rewind_overlay_height(&phase, 40);
+        let area = Rect { x: 0, y: 0, width: 90, height: h };
+        let mut buf = Buffer::empty(area);
+        render_rewind_overlay(&mut buf, area, &phase, true);
+        let text: String = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        assert!(text.contains("conversation and files"), "{text}");
+        assert!(text.contains("conversation only"), "{text}");
+        assert!(text.contains("files only"), "{text}");
+        assert!(text.contains("not tracked"), "{text}");
+        assert!(text.contains("No"), "options still fit: {text}");
+    }
+
+    #[test]
+    fn confirm_keys_pick_the_scope() {
+        let st = confirm_state();
+        assert!(matches!(handle_rewind_key(&st, &key(KeyCode::Char('y'))), RewindInput::Confirm(3)));
+        assert!(matches!(
+            handle_rewind_key(&st, &key(KeyCode::Char('c'))),
+            RewindInput::ConfirmScoped(3, RewindScope::ConversationOnly)
+        ));
+        assert!(matches!(
+            handle_rewind_key(&st, &key(KeyCode::Char('f'))),
+            RewindInput::ConfirmScoped(3, RewindScope::FilesOnly)
+        ));
+    }
+
+    fn conflict_phase(scope: RewindScope) -> RewindPhase {
+        RewindPhase::Conflicts {
+            target_prompt_index: 1,
+            scope,
+            conflicts: vec![RewindConflictInfo {
+                path: "src/a.rs".into(),
+                conflict_type: "modified_externally".into(),
+            }],
+            active_idx: 0,
+        }
+    }
+
+    #[test]
+    fn conflict_prompt_lists_files_and_never_defaults_to_overwrite_by_key_c() {
+        let _theme = crate::theme::cache::pin_theme();
+        let phase = conflict_phase(RewindScope::All);
+        let h = rewind_overlay_height(&phase, 40);
+        let area = Rect { x: 0, y: 0, width: 90, height: h };
+        let mut buf = Buffer::empty(area);
+        render_rewind_overlay(&mut buf, area, &phase, true);
+        let text: String = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        assert!(text.contains("changed outside Fuigo"), "{text}");
+        assert!(text.contains("src/a.rs"), "{text}");
+        assert!(text.contains("Overwrite"), "{text}");
+        assert!(text.contains("keep these files"), "{text}");
+        let st = RewindState {
+            phase,
+            anchor_entry_idx: 0,
+            stashed_draft: None,
+            selected_prompt_index: Some(1),
+        };
+        assert!(matches!(
+            handle_rewind_key(&st, &key(KeyCode::Char('c'))),
+            RewindInput::Conflict(ConflictChoice::KeepFiles)
+        ));
+        assert!(matches!(
+            handle_rewind_key(&st, &key(KeyCode::Esc)),
+            RewindInput::Conflict(ConflictChoice::Cancel)
+        ));
+        // Files-only has no "keep files" row: 'c' does nothing there.
+        let st = RewindState {
+            phase: conflict_phase(RewindScope::FilesOnly),
+            anchor_entry_idx: 0,
+            stashed_draft: None,
+            selected_prompt_index: Some(1),
+        };
+        assert!(matches!(handle_rewind_key(&st, &key(KeyCode::Char('c'))), RewindInput::Consumed));
+    }
+
     fn confirm_state() -> RewindState {
         RewindState {
             phase: RewindPhase::Confirm {
@@ -696,7 +952,9 @@ mod tests {
         assert_eq!(rewind_row_at(&phase, area(), 5, 2), Some(0));
         assert_eq!(rewind_row_at(&phase, area(), 5, 3), Some(1));
         assert_eq!(rewind_row_at(&phase, area(), 5, 4), Some(2));
-        assert_eq!(rewind_row_at(&phase, area(), 5, 5), None);
+        assert_eq!(rewind_row_at(&phase, area(), 5, 5), Some(3));
+        assert_eq!(rewind_row_at(&phase, area(), 5, 6), Some(4));
+        assert_eq!(rewind_row_at(&phase, area(), 5, 7), None);
     }
 
     #[test]
@@ -751,7 +1009,7 @@ mod tests {
         }
         set_rewind_cursor(&mut confirm, 99);
         if let RewindPhase::Confirm { active_idx, .. } = confirm {
-            assert_eq!(active_idx, 2);
+            assert_eq!(active_idx, 4);
         } else {
             panic!("expected confirm");
         }
@@ -783,9 +1041,21 @@ mod tests {
             RewindInput::Confirm(4)
         ));
 
+        for (idx, scope) in [(1, RewindScope::ConversationOnly), (2, RewindScope::FilesOnly)] {
+            let phase = RewindPhase::Confirm {
+                target_prompt_index: 4,
+                active_idx: idx,
+                prompt_preview: None,
+            };
+            assert!(
+                matches!(rewind_activate(&phase), RewindInput::ConfirmScoped(4, s) if s == scope),
+                "row {idx}"
+            );
+        }
+
         let confirm_never = RewindPhase::Confirm {
             target_prompt_index: 4,
-            active_idx: 1,
+            active_idx: 3,
             prompt_preview: None,
         };
         assert!(matches!(
@@ -795,7 +1065,7 @@ mod tests {
 
         let confirm_no = RewindPhase::Confirm {
             target_prompt_index: 4,
-            active_idx: 2,
+            active_idx: 4,
             prompt_preview: None,
         };
         assert!(matches!(

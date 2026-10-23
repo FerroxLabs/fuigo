@@ -33,6 +33,11 @@ impl SlashCommand for ModelCommand {
             return None;
         }
 
+        // Route phase: "<model> via " lists the other ways of reaching that model.
+        if let Some(items) = build_route_items(ctx.models, args_query) {
+            return Some(items);
+        }
+
         // Effort phase if input is "<reasoning-model> ", else model phase.
         if let Some(model_id) = detect_effort_phase(ctx.models, args_query) {
             return Some(build_effort_items(ctx.models, &model_id));
@@ -44,6 +49,22 @@ impl SlashCommand for ModelCommand {
         let trimmed = args.trim();
         if trimmed.is_empty() {
             return CommandResult::Error("Usage: /model <name> [effort]".into());
+        }
+
+        // "<model> via <route>": pick a route other than the one Fuigo ranked first.
+        if let Some((name, word)) = trimmed.rsplit_once(" via ") {
+            return match ctx.models.resolve_route(name.trim(), word) {
+                Ok(id) => CommandResult::Action(Action::SetDefaultModel(id)),
+                Err(words) if words.is_empty() => {
+                    CommandResult::Error(format!("Unknown model: {}", name.trim()))
+                }
+                Err(words) => CommandResult::Error(format!(
+                    "{} has no `{}` route. Routes: {}",
+                    name.trim(),
+                    word.trim(),
+                    words.join(", ")
+                )),
+            };
         }
 
         // Prefer an exact full-string catalog match first. Model display names often contain spaces ("Grok 4.5").
@@ -122,19 +143,40 @@ fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::Mod
 }
 
 /// One row per logical model.
+/// A model reachable more than one way is ONE row, naming the route Fuigo will use ("included in your Grok
+/// subscription"); its other routes sit behind `<model> via ` (see [`build_route_items`]). A model no route
+/// reaches is listed after the ones that work, saying what to connect.
 /// Reasoning models get a trailing space in `insert_text` so the prompt widget chains into the effort sub-menu.
 fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
+    use crate::acp::model_state::{alt_route_of, connect_hint, routes_of};
     let current_id = models.current.as_ref();
     let mut items: Vec<ArgItem> = Vec::with_capacity(models.available.len());
     for (id, info) in &models.available {
-        let is_current = current_id == Some(id);
+        // An alternate route to a model already listed under its primary route.
+        if alt_route_of(info).is_some() {
+            continue;
+        }
+        let is_current = current_id == Some(id)
+            || current_id
+                .and_then(|c| models.available.get(c))
+                .and_then(alt_route_of)
+                .is_some_and(|primary| primary == id.0.as_ref());
         let supports = supports_reasoning_effort(info);
+        let routes = routes_of(info);
+        let connect = connect_hint(info);
 
-        let display = if is_current {
-            format!("{} (current)", info.name)
+        let mut display = info.name.clone();
+        // Every row names the route Fuigo will use (Flux Router's badge is implied when the agent sends none),
+        // the same badge the welcome "Pick a model:" list shows.
+        let badge = crate::acp::model_state::badge_of(info);
+        if connect.is_some() {
+            display = format!("{display} \u{b7} connect");
         } else {
-            info.name.clone()
-        };
+            display = format!("{display} \u{b7} {badge}");
+        }
+        if is_current {
+            display = format!("{display} (current)");
+        }
 
         // A trailing space on reasoning models signals "more input expected" to the prompt widget
         // Enter then advances to the effort phase instead of submitting
@@ -144,14 +186,59 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
             info.name.clone()
         };
 
+        let mut description = info.description.clone().unwrap_or_default();
+        if let Some(hint) = connect {
+            description = format!("connect: {hint}");
+        } else if routes.len() > 1 {
+            let others: Vec<&str> = routes.iter().skip(1).map(|r| r.word.as_str()).collect();
+            description = format!(
+                "also via {}: press Right or Tab to choose a route",
+                others.join(", "),
+            );
+        }
+
         items.push(ArgItem {
             display,
             match_text: info.name.clone(),
             insert_text,
-            description: info.description.clone().unwrap_or_default(),
+            description,
         });
     }
     items
+}
+
+/// `"<model> via "` lists that model's routes, best first, each with its one-line reason.
+/// `None` when `args_query` is not in the route phase or the model has a single route.
+fn build_route_items(models: &ModelState, args_query: &str) -> Option<Vec<ArgItem>> {
+    use crate::acp::model_state::routes_of;
+    let (name, rest) = args_query.rsplit_once(" via")?;
+    if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+        return None;
+    }
+    let id = models.resolve_by_name_or_id(name.trim())?;
+    let info = models.available.get(&id)?;
+    let routes = routes_of(info);
+    if routes.len() < 2 {
+        return None;
+    }
+    Some(
+        routes
+            .into_iter()
+            .map(|r| ArgItem {
+                display: r.badge.clone(),
+                // Ranked against the whole typed text (`Grok 4.7 via g`), so the route word alone would never match.
+                match_text: format!("{} via {}", name.trim(), r.word),
+                insert_text: format!("{} via {}", name.trim(), r.word),
+                description: r.reason,
+            })
+            .collect(),
+    )
+}
+
+/// The route rows for `model_name` (a display name), as the `/model` picker opens them on Right or Tab.
+/// `None` when the model has a single route.
+pub(crate) fn route_items_for(models: &ModelState, model_name: &str) -> Option<Vec<ArgItem>> {
+    build_route_items(models, &format!("{} via ", model_name.trim()))
 }
 
 /// One row per effort level for the `/model` chained effort phase.
@@ -177,6 +264,190 @@ mod tests {
     use super::*;
     use fuigo_shell::sampling::types::ReasoningEffort;
     use std::sync::Arc;
+
+    // ---- one list that chooses for you ----
+
+    fn routed(id: &str, name: &str, routes: &[(&str, &str, &str, bool)], alt_of: Option<&str>, connect: Option<&str>)
+        -> (acp::ModelId, acp::ModelInfo)
+    {
+        let mut meta = serde_json::Map::new();
+        if alt_of.is_none() {
+            meta.insert(
+                "routes".into(),
+                serde_json::Value::Array(
+                    routes
+                        .iter()
+                        .map(|(key, word, badge, ready)| {
+                            serde_json::json!({
+                                "key": key, "label": word, "badge": badge,
+                                "reason": format!("reason for {word}"), "word": word, "ready": ready
+                            })
+                        })
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(primary) = alt_of {
+            meta.insert("altRouteOf".into(), serde_json::json!(primary));
+        }
+        if let Some(c) = connect {
+            meta.insert("connect".into(), serde_json::json!(c));
+        }
+        let id = acp::ModelId::new(std::sync::Arc::from(id));
+        (id.clone(), acp::ModelInfo::new(id, name.to_string()).meta(Some(meta)))
+    }
+
+    fn state(entries: Vec<(acp::ModelId, acp::ModelInfo)>, current: &str) -> ModelState {
+        let mut s = ModelState::default();
+        for (id, info) in entries {
+            s.available.insert(id, info);
+        }
+        s.current = Some(acp::ModelId::new(std::sync::Arc::from(current)));
+        s
+    }
+
+    fn three_way() -> ModelState {
+        let routes = [
+            ("grok-4.7", "flux", "via Flux Router", true),
+            ("xai/grok-4.7", "grok", "included in your Grok subscription", true),
+            ("k/grok-4.7", "xai", "your xAI key", true),
+        ];
+        state(
+            vec![
+                routed("grok-4.7", "Grok 4.7", &routes, None, None),
+                routed("xai/grok-4.7", "grok-4.7 (Grok subscription)", &[], Some("grok-4.7"), None),
+                routed("k/grok-4.7", "grok-4.7 (xAI key)", &[], Some("grok-4.7"), None),
+                routed("flux-only", "Flux Only", &[("flux-only", "flux", "via Flux Router", false)], None, Some("needs a Flux Router key (fluxrouter.ai)")),
+            ],
+            "grok-4.7",
+        )
+    }
+
+    #[test]
+    fn a_model_reachable_three_ways_is_one_row_naming_the_route_fuigo_will_use() {
+        let items = build_model_items(&three_way());
+        let grok: Vec<&ArgItem> = items.iter().filter(|i| i.match_text.contains("rok")).collect();
+        assert_eq!(grok.len(), 1, "one row, not three: {:?}", items.iter().map(|i| &i.display).collect::<Vec<_>>());
+        assert_eq!(grok[0].display, "Grok 4.7 \u{b7} via Flux Router (current)");
+        assert!(grok[0].description.contains("also via grok, xai"), "{}", grok[0].description);
+    }
+
+    /// Every row names its route: a single-route key model carries its own badge, and once the list
+    /// holds any non-Flux route an unmarked row reads "via Flux Router".
+    #[test]
+    fn single_route_rows_carry_a_badge_too() {
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "route".into(),
+            serde_json::json!({ "label": "OpenAI key from OPENAI_API_KEY", "badge": "your OpenAI key", "kind": "Key" }),
+        );
+        let key_id = acp::ModelId::new(std::sync::Arc::from("openai-key/gpt-5"));
+        let key_row = (key_id.clone(), acp::ModelInfo::new(key_id, "gpt-5".to_string()).meta(Some(meta)));
+        let plain_id = acp::ModelId::new(std::sync::Arc::from("flux-model"));
+        let plain = (plain_id.clone(), acp::ModelInfo::new(plain_id, "Flux Model".to_string()));
+        let items = build_model_items(&state(vec![plain.clone(), key_row], "flux-model"));
+        assert_eq!(items[0].display, "Flux Model \u{b7} via Flux Router (current)");
+        assert_eq!(items[1].display, "gpt-5 \u{b7} your OpenAI key");
+        // A list of Flux models only names the route too (it used to be left bare).
+        let only = build_model_items(&state(vec![plain], "flux-model"));
+        assert_eq!(only[0].display, "Flux Model \u{b7} via Flux Router (current)");
+    }
+
+    /// 125 Flux models from `FUIGO_API_KEY` showed as bare ids with no route text. Every row says "via Flux
+    /// Router", whatever else is or is not in the list.
+    #[test]
+    fn a_list_of_only_flux_models_badges_every_row() {
+        let rows: Vec<_> = (0..125)
+            .map(|n| {
+                let id = acp::ModelId::new(std::sync::Arc::from(format!("model-{n}")));
+                (id.clone(), acp::ModelInfo::new(id, format!("Model {n}")))
+            })
+            .collect();
+        let items = build_model_items(&state(rows, "model-0"));
+        assert_eq!(items.len(), 125);
+        for item in &items {
+            assert!(item.display.contains("\u{b7} via Flux Router"), "no badge on {:?}", item.display);
+        }
+    }
+
+    /// The welcome "Pick a model:" list and `/model` are one list: the same models, in the same order, each with
+    /// the same route badge.
+    #[test]
+    fn the_welcome_list_matches_the_model_list() {
+        let mut plain_rows = Vec::new();
+        for n in 0..3 {
+            let id = acp::ModelId::new(std::sync::Arc::from(format!("plain-{n}")));
+            plain_rows.push((id.clone(), acp::ModelInfo::new(id, format!("Plain {n}"))));
+        }
+        for models in [state(plain_rows, "plain-0"), three_way()] {
+            let welcome: Vec<String> = models
+                .usable_models()
+                .into_iter()
+                .map(|m| format!("{} \u{b7} {}", m.name, m.badge))
+                .collect();
+            let listed: Vec<String> = build_model_items(&models)
+                .into_iter()
+                .filter(|i| !i.display.contains("\u{b7} connect"))
+                .map(|i| i.display.trim_end_matches(" (current)").to_owned())
+                .collect();
+            assert!(!welcome.is_empty());
+            assert_eq!(welcome, listed, "welcome and /model disagree");
+            assert!(welcome.iter().all(|row| !row.ends_with("\u{b7} ")), "an empty badge: {welcome:?}");
+        }
+    }
+
+    #[test]
+    fn a_model_no_route_reaches_says_what_to_connect() {
+        let items = build_model_items(&three_way());
+        let flux_only = items.iter().find(|i| i.match_text == "Flux Only").unwrap();
+        assert_eq!(flux_only.description, "connect: needs a Flux Router key (fluxrouter.ai)");
+        assert!(flux_only.display.ends_with("connect"), "{}", flux_only.display);
+    }
+
+    #[test]
+    fn via_lists_the_other_routes_each_with_its_reason() {
+        let items = build_route_items(&three_way(), "Grok 4.7 via ").expect("route phase");
+        // The dropdown ranks rows against the whole typed text (`Grok 4.7 via `), so match_text is the
+        // full `<model> via <route>`; the bare route word matched nothing there.
+        let words: Vec<&str> = items.iter().map(|i| i.match_text.as_str()).collect();
+        assert_eq!(words, ["Grok 4.7 via flux", "Grok 4.7 via grok", "Grok 4.7 via xai"]);
+        assert_eq!(items[1].insert_text, "Grok 4.7 via grok");
+        assert_eq!(items[1].display, "included in your Grok subscription");
+        assert_eq!(items[1].description, "reason for grok");
+        // Not in the route phase, or a model with one route: nothing to offer.
+        assert!(build_route_items(&three_way(), "Grok 4.7").is_none());
+        assert!(build_route_items(&three_way(), "Flux Only via ").is_none());
+    }
+
+    #[test]
+    fn choosing_a_route_switches_to_that_routes_entry() {
+        let models = three_way();
+        let result = run_with(&models, "Grok 4.7 via grok");
+        match result {
+            CommandResult::Action(Action::SetDefaultModel(id)) => assert_eq!(id.0.as_ref(), "xai/grok-4.7"),
+            other => panic!("expected SetDefaultModel, got {other:?}"),
+        }
+        match run_with(&models, "Grok 4.7 via nope") {
+            CommandResult::Error(e) => {
+                assert!(e.contains("no `nope` route") && e.contains("flux, grok, xai"), "{e}")
+            }
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    fn run_with(models: &ModelState, args: &str) -> CommandResult {
+        let bundle = crate::app::bundle::BundleState::default();
+        let mut ctx = CommandExecCtx {
+            models,
+            session_id: None,
+            bundle_state: &bundle,
+            screen_mode: crate::app::ScreenMode::Inline,
+            billing_surface_visible: true,
+            usage_command_visible: true,
+            pager_state: crate::settings::PagerLocalSnapshot::default(),
+        };
+        ModelCommand.run(&mut ctx, args)
+    }
 
     fn model_with_reasoning(id: &str, name: &str) -> (acp::ModelId, acp::ModelInfo) {
         let id = acp::ModelId::new(Arc::from(id));

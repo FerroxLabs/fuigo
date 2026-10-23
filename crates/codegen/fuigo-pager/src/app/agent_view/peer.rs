@@ -22,6 +22,7 @@ impl AgentView {
             || self.image_viewer.is_some()
             || self.video_viewer.is_some()
             || self.gboom.is_some()
+            || self.stoke.is_some()
             || self.block_viewer.is_some()
             || self.agents_modal.is_some()
             || self.extensions_modal.is_some()
@@ -77,13 +78,21 @@ impl AgentView {
                 return Some(InputOutcome::Unchanged);
             }
             return Some(match self.peer.dialog_key(key) {
-                PeerDialogOutcome::Release => InputOutcome::Action(Action::PeerUi(PeerUiAction::Decide { refuse: false })),
-                PeerDialogOutcome::Refuse => InputOutcome::Action(Action::PeerUi(PeerUiAction::Decide { refuse: true })),
+                PeerDialogOutcome::Release => {
+                    InputOutcome::Action(Action::PeerUi(PeerUiAction::Decide { refuse: false }))
+                }
+                PeerDialogOutcome::Refuse => {
+                    InputOutcome::Action(Action::PeerUi(PeerUiAction::Decide { refuse: true }))
+                }
                 PeerDialogOutcome::Dismiss | PeerDialogOutcome::Changed => InputOutcome::Changed,
                 PeerDialogOutcome::Ignored => InputOutcome::Unchanged,
             });
         }
-        if self.peer.row_visible() && key.kind != KeyEventKind::Release && key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('h') && self.other_overlay_active()
+        if self.peer.row_visible()
+            && key.kind != KeyEventKind::Release
+            && key.modifiers == KeyModifiers::ALT
+            && key.code == KeyCode::Char('h')
+            && self.other_overlay_active()
         {
             self.peer_notice_row(OVERLAY_NOTICE.to_owned());
             return Some(InputOutcome::Changed);
@@ -93,13 +102,18 @@ impl AgentView {
             && key.modifiers == KeyModifiers::ALT
             && key.code == KeyCode::Char('h')
         {
-            return Some(InputOutcome::Action(Action::PeerUi(PeerUiAction::OpenDialog)));
+            return Some(InputOutcome::Action(Action::PeerUi(
+                PeerUiAction::OpenDialog,
+            )));
         }
         None
     }
 
     /// Show one plain line in the transcript (peer notices and errors).
     pub(crate) fn peer_notice_row(&mut self, text: String) {
-        self.scrollback.push_block(crate::scrollback::block::RenderBlock::system_single_line(text));
+        self.scrollback
+            .push_block(crate::scrollback::block::RenderBlock::system_single_line(
+                text,
+            ));
     }
 }

@@ -25,6 +25,7 @@
 //! ```
 mod allow_path;
 pub mod child_net;
+pub mod command;
 mod deny;
 mod git_write_deny;
 mod home_write_deny;
@@ -76,6 +77,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 static SANDBOX: OnceLock<GlobalSandboxState> = OnceLock::new();
 static CONFIGURED_PROFILE: OnceLock<String> = OnceLock::new();
+static CONFINEMENT_ROOT: OnceLock<std::path::PathBuf> = OnceLock::new();
 static AUTO_ALLOW_BASH: AtomicBool = AtomicBool::new(false);
 const BWRAP_ENV_VAR: &str = "__FUIGO_INSIDE_BWRAP";
 pub fn is_inside_bwrap() -> bool {
@@ -124,6 +126,15 @@ pub fn configured_profile_name() -> Option<&'static str> {
 /// A requested-but-unapplied profile already warns the user; keying on the request is the fail-closed choice.
 pub fn requested_confinement_profile() -> Option<&'static str> {
     configured_profile_name().filter(|name| profile_confines(name))
+}
+/// Record the workspace the startup sandbox is scoped to.
+pub fn set_confinement_root(workspace: &Path) {
+    let _ = CONFINEMENT_ROOT.set(workspace.to_path_buf());
+}
+/// The workspace that [`requested_confinement_profile`] confines this process to, or `None` without one.
+pub fn confinement_root() -> Option<&'static Path> {
+    requested_confinement_profile()?;
+    CONFINEMENT_ROOT.get().map(std::path::PathBuf::as_path)
 }
 fn profile_confines(name: &str) -> bool {
     name.parse::<ProfileName>()

@@ -165,7 +165,9 @@ fn truncate_title(text: &str) -> String {
 /// Returns `Cow::Borrowed(s)` when no sanitization is needed, so the common per-render call on a clean cached display_name does not allocate.
 pub(crate) fn sanitize_display_text(s: &str) -> Cow<'_, str> {
     use fuigo_shell::session::persistence::{is_forbidden_title_char, is_tag_char};
-    if s.chars().any(|c| is_tag_char(c) || is_forbidden_title_char(c)) {
+    if s.chars()
+        .any(|c| is_tag_char(c) || is_forbidden_title_char(c))
+    {
         // Only a valid subdivision flag keeps its tags; every other tag is dropped
         let untagged = fuigo_tty_utils::strip_loose_tags(s);
         Cow::Owned(
@@ -428,7 +430,8 @@ mod tests {
         let text = format!("{}{scotland}", "a".repeat(MAX_TITLE_CHARS - 3));
         let out = truncate_title(&text);
         assert!(
-            !out.chars().any(|c| ('\u{e0020}'..='\u{e007f}').contains(&c)),
+            !out.chars()
+                .any(|c| ('\u{e0020}'..='\u{e007f}').contains(&c)),
             "partial tags survived: {out:?}"
         );
         assert!(out.starts_with(&"a".repeat(MAX_TITLE_CHARS - 3)));

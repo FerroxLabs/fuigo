@@ -927,6 +927,8 @@ pub(super) async fn run_session(
                         SessionCommand::GetHooksList { respond_to } => {
                             let hooks = crate::extensions::hooks::current_hook_infos(
                                 session.hook_registry.borrow().as_deref(),
+                                &session.session_info.id.0,
+                                &session.hook_resolved_workspace_root,
                             );
 
                             // Report the folder-trust verdict so the flag matches the gated registry built above
@@ -1512,6 +1514,19 @@ pub(super) async fn run_session(
                                 let _ = respond_to.send(Ok(()));
                                 continue;
                             }
+                            // The pushed merge is disk + client servers; the agent definition's own servers go back on top.
+                            let mut mcp_servers = mcp_servers;
+                            for notice in crate::session::agent_mcp::apply_agent_mcp_overlay(
+                                &mut mcp_servers,
+                                session.agent.borrow().definition(),
+                                std::path::Path::new(&session.session_info.cwd),
+                            ) {
+                                if told_config_notices.insert(notice.clone()) {
+                                    session.send_fuigo_notification_transient(FuigoSessionUpdate::ConfigNotice {
+                                        message: notice,
+                                    });
+                                }
+                            }
                             tracing::info!(
                                 "Updating MCP servers for session '{}' ({} servers)",
                                 session.session_info.id.0,
@@ -2031,6 +2046,9 @@ pub(super) async fn run_session(
                                         if cancel.is_cancelled() {
                                             return;
                                         }
+                                        // Config failures (a placeholder that is not set, a program that is not found) are known
+                                        // before the first prompt, and told once.
+                                        s.check_hooks_after_load().await;
                                         let envelope = s.fire_hook(
                                             fuigo_hooks::event::HookEventName::SessionStart,
                                             None,
@@ -2458,6 +2476,7 @@ pub(super) async fn run_session(
                     }
                     let (turn_succeeded, suppress_goal_continuation, infra_pause_message) =
                         SessionActor::post_turn_goal_degradation_plan(&result);
+                    let goal_turn_activity = SessionActor::goal_turn_activity(&result);
                     // A `RemovedFromQueue` completion never started a turn, so there is nothing to summarize below
                     let turn_ran = !matches!(
                         &result,
@@ -2487,6 +2506,13 @@ pub(super) async fn run_session(
                     session.drain_monitor_buffer_to_pending().await;
                     if let Some(message) = infra_pause_message {
                         session.apply_infra_pause_after_turn_err(message).await;
+                    }
+                    // A goal that is continued again and again without ever calling a tool pauses here,
+                    // before the turn end below would queue yet another continuation
+                    if turn_succeeded {
+                        session
+                            .note_goal_turn_activity(&completed_prompt_id, goal_turn_activity)
+                            .await;
                     }
                     // Goal continuation (success) or back-off (non-success).
                     // Owns the streak-tracking and reminder-injection path.

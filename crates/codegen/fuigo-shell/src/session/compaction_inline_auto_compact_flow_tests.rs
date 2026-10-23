@@ -356,6 +356,7 @@ async fn create_test_actor(
             env_http_headers: Default::default(),
             context_window: std::num::NonZeroU64::new(context_window)
                 .expect("test context_window must be non-zero"),
+            max_request_bytes: None,
             reasoning_effort: None,
             stream_tool_calls: None,
             mtls_cert_dir: None,
@@ -430,6 +431,7 @@ async fn create_test_actor(
             context_window_selection: Default::default(),
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
+            overflow_compactions_since_response: std::cell::Cell::new(0),
             previous_model: std::cell::Cell::new(None),
             compaction_mode: fuigo_chat_state::CompactionMode::Transcript,
             verbatim_input: true,
@@ -2693,6 +2695,146 @@ async fn prefire_pass1_dispatched_before_a_park_makes_no_model_call_while_parked
             );
             drop(parked);
             let _ = tokio::time::timeout(std::time::Duration::from_secs(20), run).await;
+        })
+        .await;
+}
+/// A server's own context-length error compacts even when the response carries no context-window header.
+fn context_length_error_without_metadata() -> fuigo_sampler::SamplingErrorInfo {
+    fuigo_sampler::SamplingErrorInfo {
+        kind: fuigo_sampler::SamplingErrorKind::Api,
+        status_code: Some(400),
+        message: "This model's maximum context length is 200000 tokens".into(),
+        is_retryable: false,
+        retry_after_secs: None,
+        should_retry: None,
+        error_code: None,
+        model_metadata: None,
+        empty_response_context: None,
+        doom_loop_triggers: None,
+        doom_loop_aborted_at_chunk: None,
+        credential: fuigo_sampling_types::SentCredential::Unknown,
+    }
+}
+/// Runs `handle_sampling_failure` against a compaction backend that always answers 400, so an attempted compaction is observable as sticky suppression.
+/// Returns whether compaction was attempted and the counter afterwards.
+async fn overflow_recovery_attempts_compaction(
+    consecutive_before: u32,
+    error: fuigo_sampler::SamplingErrorInfo,
+) -> (bool, u32) {
+    use crate::session::compaction_config::SUPPRESS_NONE;
+    let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+    let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+    let actor = Arc::new(create_test_actor(50_000, 200_000, 85, gateway_tx, persistence_tx).await);
+    let base_url = spawn_deterministic_400_server().await;
+    let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+    cfg.base_url = base_url;
+    actor.chat_state_handle.update_sampling_config(cfg);
+    actor.chat_state_handle.replace_conversation(vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("hello"),
+    ]);
+    actor
+        .compaction
+        .overflow_compactions_since_response
+        .set(consecutive_before);
+    let result = actor
+        .handle_sampling_failure(error, 0, transient_state(0, true), false, TurnParkState::Fresh)
+        .await;
+    assert!(
+        result.is_err(),
+        "the mock backend rejects every request, so recovery cannot succeed"
+    );
+    (
+        actor.compaction.auto_compact_suppressed.load(Relaxed) != SUPPRESS_NONE,
+        actor.compaction.overflow_compactions_since_response.get(),
+    )
+}
+#[tokio::test(flavor = "current_thread")]
+async fn context_length_error_without_window_header_attempts_compaction() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (attempted, counted) =
+                overflow_recovery_attempts_compaction(0, context_length_error_without_metadata())
+                    .await;
+            assert!(attempted, "an overflow reported only in the message must compact");
+            assert_eq!(counted, 1, "the attempt is counted");
+        })
+        .await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn overflow_compaction_stops_after_three_consecutive_refills() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (attempted, _) =
+                overflow_recovery_attempts_compaction(2, context_length_error_without_metadata())
+                    .await;
+            assert!(attempted, "the third consecutive refill still runs");
+            let (attempted, counted) =
+                overflow_recovery_attempts_compaction(3, context_length_error_without_metadata())
+                    .await;
+            assert!(!attempted, "the fourth consecutive overflow must not compact again");
+            assert_eq!(counted, 3, "the cap leaves the counter alone");
+        })
+        .await;
+}
+/// A rate limit that happens to use size wording is not an overflow and never compacts.
+#[tokio::test(flavor = "current_thread")]
+async fn rate_limited_size_wording_does_not_compact() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut error = context_length_error_without_metadata();
+            error.kind = fuigo_sampler::SamplingErrorKind::RateLimited;
+            error.status_code = Some(429);
+            let (attempted, counted) = overflow_recovery_attempts_compaction(0, error).await;
+            assert!(!attempted);
+            assert_eq!(counted, 0);
+        })
+        .await;
+}
+/// A long tool turn whose PostToolUse hooks appended large notes: the notes are ordinary conversation items, so the very next
+/// request is gated by both the threshold check and the pre-flight overflow check. The turn compacts instead of overflowing.
+#[tokio::test(flavor = "current_thread")]
+async fn large_post_tool_use_hook_note_triggers_compaction_before_the_next_request() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let actor = create_test_actor(1_000, 10_000, 85, gateway_tx, persistence_tx).await;
+            assert!(
+                actor.check_preflight_overflow().await.is_none(),
+                "a small context is not an overflow"
+            );
+            let note = format!(
+                "Additional context from PostToolUse hook 'audit':\n{}",
+                "line of hook output\n".repeat(20_000)
+            );
+            actor
+                .chat_state_handle
+                .push_user_message(ConversationItem::system_reminder(&note));
+            assert!(
+                actor.check_preflight_overflow().await.is_some(),
+                "hook output that pushes the estimate past the window must trigger pre-flight compaction"
+            );
+            assert!(
+                actor.check_auto_compact_needed().await.is_some(),
+                "and the pre-sampling threshold check must see it too"
+            );
         })
         .await;
 }

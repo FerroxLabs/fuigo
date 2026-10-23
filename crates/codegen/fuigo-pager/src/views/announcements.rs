@@ -1431,7 +1431,11 @@ mod tests {
     #[test]
     fn render_promo_row_button_and_hide_affordances() {
         let _theme = crate::theme::cache::pin_theme();
-        let mut ann = promo("p", "New promo", Some(("Get Fuigo Pro", "https://example.com/pro")));
+        let mut ann = promo(
+            "p",
+            "New promo",
+            Some(("Get Fuigo Pro", "https://example.com/pro")),
+        );
         ann.cta.as_mut().unwrap().caption = Some("or use Ctrl+O".into());
         let anns = [ann];
         let area = Rect::new(0, 0, 80, 1);

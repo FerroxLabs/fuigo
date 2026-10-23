@@ -309,6 +309,14 @@ enum MutationKind {
     Replace,
 }
 
+/// Most bytes the undo and redo stacks may hold between them. Each step is a full copy of the text, so a depth limit alone
+/// lets a few large pastes pin hundreds of megabytes. The newest step is always kept.
+const UNDO_BYTES_BUDGET: usize = 16 << 20;
+
+/// Above this size typing no longer starts a new undo step at every word boundary: each step copies the whole text, so
+/// a word-by-word step would make every typed word cost the size of the buffer.
+const LARGE_TEXT_BYTES: usize = 256 << 10;
+
 /// Manages the undo/redo stacks.
 #[derive(Debug)]
 struct UndoState {
@@ -329,6 +337,22 @@ struct UndoState {
     /// Used by `end_undo_group` to push the checkpoint, or by
     /// `cancel_undo_group` to restore the pre-group state.
     group_checkpoint: Option<UndoEntry>,
+}
+
+impl UndoState {
+    /// Drop the oldest steps until both stacks fit the depth and byte limits (the newest step always stays).
+    fn trim(&mut self) {
+        while self.stack.len() > self.max_depth {
+            self.stack.remove(0);
+        }
+        let bytes = |s: &[UndoEntry]| s.iter().map(|e| e.text.len()).sum::<usize>();
+        while self.stack.len() > 1 && bytes(&self.stack) + bytes(&self.redo) > UNDO_BYTES_BUDGET {
+            self.stack.remove(0);
+        }
+        while self.redo.len() > 1 && bytes(&self.stack) + bytes(&self.redo) > UNDO_BYTES_BUDGET {
+            self.redo.remove(0);
+        }
+    }
 }
 
 impl Default for UndoState {
@@ -535,7 +559,7 @@ impl TextArea {
             {
                 self.selection = None;
             }
-            self.wrap_cache.replace(None);
+            self.patch_wrap_cache(&replaced, inserted_len);
             if mutation_kind == Some(MutationKind::Kill) {
                 self.kill_buffer = plan.into_removed_text();
             }
@@ -545,6 +569,42 @@ impl TextArea {
             self.scroll_override = None;
         }
         outcome
+    }
+
+    /// Keep the wrapped-row cache current after replacing `replaced` (old coordinates) with `inserted_len` bytes.
+    ///
+    /// Lines wrap independently of each other, so only the logical lines the edit touched are wrapped again; the rows
+    /// before them stay and the rows after them move by the change in length. Typing in a large buffer then costs the
+    /// edited line, not the buffer. A cache that was never built, or a buffer with display elements (which wrap as
+    /// atoms across lines), is simply dropped for the next read to rebuild.
+    fn patch_wrap_cache(&self, replaced: &Range<usize>, inserted_len: usize) {
+        let mut slot = self.wrap_cache.borrow_mut();
+        let Some(cache) = slot.as_mut() else { return };
+        let text: &str = self.text.text();
+        let new_end = replaced.start + inserted_len;
+        if self.elements.iter().any(|e| e.display.is_some()) || new_end > text.len() {
+            *slot = None;
+            return;
+        }
+        let line_start = text[..replaced.start].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = text[new_end..].find('\n').map_or(text.len(), |i| new_end + i);
+        let old_line_end = line_end + replaced.len() - inserted_len;
+        let first = cache.lines.partition_point(|r| r.start < line_start);
+        let last = cache.lines.partition_point(|r| r.start <= old_line_end);
+        #[cfg(test)]
+        perf_counters::WRAP_BYTES.with(|c| c.set(c.get() + (line_end - line_start)));
+        let fresh: Vec<Range<usize>> = crate::wrapping::wrap_ranges(
+            &text[line_start..line_end],
+            Options::new(cache.width as usize).wrap_algorithm(textwrap::WrapAlgorithm::FirstFit),
+        )
+        .into_iter()
+        .map(|r| r.start + line_start..r.end + line_start)
+        .collect();
+        for row in &mut cache.lines[last..] {
+            row.start = row.start + inserted_len - replaced.len();
+            row.end = row.end + inserted_len - replaced.len();
+        }
+        cache.lines.splice(first..last, fresh);
     }
 
     fn try_apply_edit_plan(
@@ -650,6 +710,7 @@ impl TextArea {
             let first_ws = first.is_whitespace();
             if self.undo.last_kind == Some(MutationKind::Insert)
                 && self.undo.last_insert_ws != first_ws
+                && self.text.len() <= LARGE_TEXT_BYTES
             {
                 // Force pre_mutate to see a "kind change" so it pushes a checkpoint.
                 self.undo.last_kind = None;
@@ -2200,6 +2261,8 @@ impl TextArea {
 
     /// Create a snapshot of the current textarea state.
     fn snapshot(&self) -> UndoEntry {
+        #[cfg(test)]
+        perf_counters::SNAPSHOT_BYTES.with(|c| c.set(c.get() + self.text().len()));
         UndoEntry {
             text: self.text().to_owned(),
             cursor: self.cursor(),
@@ -2249,9 +2312,7 @@ impl TextArea {
         if should_push {
             let entry = self.snapshot();
             self.undo.stack.push(entry);
-            if self.undo.stack.len() > self.undo.max_depth {
-                self.undo.stack.remove(0);
-            }
+            self.undo.trim();
         }
         self.undo.redo.clear();
         self.undo.last_kind = Some(kind);
@@ -2285,6 +2346,7 @@ impl TextArea {
             self.scroll_override = None;
             let current = self.snapshot();
             self.undo.redo.push(current);
+            self.undo.trim();
             self.restore(entry);
             // Reset batching — next mutation starts a fresh group.
             self.undo.last_kind = None;
@@ -2301,6 +2363,7 @@ impl TextArea {
             self.scroll_override = None;
             let current = self.snapshot();
             self.undo.stack.push(current);
+            self.undo.trim();
             self.restore(entry);
             // Reset batching — next mutation starts a fresh group.
             self.undo.last_kind = None;
@@ -2351,10 +2414,8 @@ impl TextArea {
                     || checkpoint.elements.len() != self.elements.len();
                 if changed {
                     self.undo.stack.push(checkpoint);
-                    if self.undo.stack.len() > self.undo.max_depth {
-                        self.undo.stack.remove(0);
-                    }
                     self.undo.redo.clear();
+                    self.undo.trim();
                 }
             }
             // Reset batching state so the next mutation starts fresh.
@@ -2842,6 +2903,25 @@ impl TextArea {
         self.wrap_cache.replace(None);
     }
 
+    /// Register one element over existing buffer text without editing. `None` when `range` is not a valid slice or
+    /// strictly intersects an existing element (adjacent ranges are accepted). Not undoable, like [`Self::restore_elements`].
+    pub fn restore_element(
+        &mut self,
+        range: Range<usize>,
+        kind: ElementKind,
+        display: Option<Line<'static>>,
+    ) -> Option<ElementId> {
+        self.get_range(range.clone())?;
+        let intersects = self
+            .elements
+            .iter()
+            .any(|e| e.range.start < range.end && range.start < e.range.end);
+        if intersects {
+            return None;
+        }
+        Some(self.add_element(range, kind, display))
+    }
+
     /// Inline an element: remove it from the element list so its buffer text
     /// becomes plain editable characters. The text content is unchanged.
     ///
@@ -3055,6 +3135,8 @@ impl TextArea {
                 None => true,
             };
             if needs_recalc {
+                #[cfg(test)]
+                perf_counters::WRAP_BYTES.with(|c| c.set(c.get() + self.text.len()));
                 let lines = if self.elements.iter().any(|e| e.display.is_some()) {
                     self.element_aware_wrap_ranges(width as usize)
                 } else {
@@ -3651,6 +3733,19 @@ fn truncate_line_display(line: &Line<'static>, max_width: usize) -> Line<'static
     }
 
     Line::from(new_spans)
+}
+
+/// Work counters the performance tests read: bytes handed to the wrapper and bytes copied into undo snapshots.
+#[cfg(test)]
+pub(crate) mod perf_counters {
+    use std::cell::Cell;
+    thread_local! {
+        pub static WRAP_BYTES: Cell<usize> = const { Cell::new(0) };
+        pub static SNAPSHOT_BYTES: Cell<usize> = const { Cell::new(0) };
+    }
+    pub fn take(counter: &'static std::thread::LocalKey<Cell<usize>>) -> usize {
+        counter.with(|c| c.replace(0))
+    }
 }
 
 #[cfg(test)]

@@ -69,6 +69,9 @@ pub struct SamplerConfig {
     /// Total context window size in tokens.
     /// The sampler does not enforce it; the session uses it for compaction decisions.
     pub context_window: u64,
+    /// Provider request-body cap, already defaulted from `api_backend` by model resolution; `None` budgets to 50 MiB.
+    #[serde(default)]
+    pub max_request_bytes: Option<std::num::NonZeroU64>,
     pub force_http1: bool,
     pub max_retries: Option<u32>,
     /// Total-attempt ceiling for rate-limited requests.
@@ -156,6 +159,7 @@ impl std::fmt::Debug for SamplerConfig {
             query_params,
             env_http_headers,
             context_window,
+            max_request_bytes,
             force_http1,
             max_retries,
             rate_limit_retry_threshold,
@@ -195,6 +199,7 @@ impl std::fmt::Debug for SamplerConfig {
             .field("query_params", &query_params.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
             .field("env_http_headers", env_http_headers)
             .field("context_window", context_window)
+            .field("max_request_bytes", max_request_bytes)
             .field("force_http1", force_http1)
             .field("max_retries", max_retries)
             .field("rate_limit_retry_threshold", rate_limit_retry_threshold)
@@ -240,6 +245,7 @@ impl Default for SamplerConfig {
             query_params: IndexMap::new(),
             env_http_headers: IndexMap::new(),
             context_window: 0,
+            max_request_bytes: None,
             force_http1: false,
             max_retries: None,
             rate_limit_retry_threshold: None,

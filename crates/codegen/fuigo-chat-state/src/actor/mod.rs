@@ -280,7 +280,7 @@ impl ChatStateActor {
                 self.increment_prompt_index();
             }
             ChatStateCommand::UpdateSamplingConfig { config } => {
-                self.state.sampling_config = config;
+                self.state.sampling_config = *config;
             }
             ChatStateCommand::RecordAgentEditedPath { path } => {
                 self.state.agent_edited_paths.insert(path);
@@ -385,8 +385,8 @@ impl ChatStateActor {
             ChatStateCommand::FlushHarnessTraceTurn => {
                 self.state.seal_harness_trace_turn();
             }
-            ChatStateCommand::RepairDanglingAfterHarnessHalt { class } => {
-                self.repair_dangling_after_harness_halt(class);
+            ChatStateCommand::RepairDanglingAfterHarnessHalt { class, answers } => {
+                self.repair_dangling_after_harness_halt(class, answers);
             }
             ChatStateCommand::PopStrandedContinueReminder => {
                 self.pop_stranded_continue_reminder();

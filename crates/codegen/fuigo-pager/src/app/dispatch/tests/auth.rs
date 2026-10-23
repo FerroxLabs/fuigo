@@ -864,3 +864,270 @@ async fn typed_and_discovered_keys_complete_acp_authentication() {
         ));
     }
 }
+
+// ---- the sign-in picker: one list for first run, `/login` and the CLI ----
+
+fn picker_app() -> crate::app::app_view::AppView {
+    let mut app = test_app();
+    app.auth_state = crate::app::app_view::AuthState::Pending { error: None };
+    app
+}
+
+/// `/login` used to start the OIDC flow (`Effect::Authenticate`), which errors "No OAuth2 issuer is
+/// configured" for almost every user. It opens the picker and contacts nothing.
+#[test]
+fn login_opens_the_picker_and_never_starts_the_oidc_flow() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.active_view = ActiveView::Agent(id);
+    app.auth_state = AuthState::Done;
+    let effects = dispatch(Action::OpenSignInPicker, &mut app);
+    assert!(effects.is_empty(), "opening the picker sends nothing: {effects:?}");
+    assert!(matches!(app.active_view, ActiveView::Welcome));
+    assert!(matches!(app.auth_state, AuthState::Pending { error: None }));
+    assert!(app.picker_modal);
+    assert!(matches!(app.auth_return_view, Some(ActiveView::Agent(a)) if a == id));
+}
+
+#[test]
+fn cancelling_the_picker_returns_to_the_session_and_changes_nothing() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.active_view = ActiveView::Agent(id);
+    app.auth_state = AuthState::Done;
+    dispatch(Action::OpenSignInPicker, &mut app);
+    let effects = dispatch(Action::CancelPicker, &mut app);
+    assert!(effects.is_empty());
+    assert!(matches!(app.active_view, ActiveView::Agent(a) if a == id));
+    assert!(matches!(app.auth_state, AuthState::Done));
+    assert!(!app.picker_modal);
+}
+
+#[test]
+fn choosing_a_subscription_starts_its_sign_in_and_polls_for_the_url() {
+    use fuigo_shell::auth::subscription::SubscriptionProvider;
+    let mut app = picker_app();
+    let effects = dispatch(Action::SignInSubscription(SubscriptionProvider::Xai), &mut app);
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::SubscriptionSignIn { provider: SubscriptionProvider::Xai, .. }
+    )));
+    assert!(effects.iter().any(|e| matches!(e, Effect::PollSubscriptionUrl { .. })));
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Authenticate { .. })),
+        "a subscription sign-in is not the OIDC flow"
+    );
+    assert!(matches!(app.auth_state, AuthState::Authenticating { .. }));
+    assert_eq!(app.subscription_signin, Some(SubscriptionProvider::Xai));
+}
+
+#[test]
+fn esc_during_a_subscription_sign_in_returns_to_the_picker() {
+    use fuigo_shell::auth::subscription::SubscriptionProvider;
+    let mut app = picker_app();
+    dispatch(Action::SignInSubscription(SubscriptionProvider::Chatgpt), &mut app);
+    let effects = dispatch(Action::CancelSignIn, &mut app);
+    assert!(effects.is_empty());
+    assert!(matches!(app.auth_state, AuthState::Pending { error: None }));
+    assert_eq!(app.subscription_signin, None);
+}
+
+/// A code pasted during a subscription sign-in belongs to that flow, not to the OIDC code exchange.
+#[test]
+fn a_pasted_code_during_a_subscription_sign_in_goes_to_the_subscription_flow() {
+    use fuigo_shell::auth::subscription::SubscriptionProvider;
+    let mut app = picker_app();
+    dispatch(Action::SignInSubscription(SubscriptionProvider::Xai), &mut app);
+    let effects = dispatch(Action::SubmitAuthCode("fake-pasted-code".into()), &mut app);
+    assert!(effects.iter().any(|e| matches!(e, Effect::SubscriptionCode { .. })), "{effects:?}");
+    assert!(!effects.iter().any(|e| matches!(e, Effect::SubmitAuthCode { .. })));
+    assert!(!format!("{effects:?}").contains("fake-pasted-code"), "a pasted code must not be Debug-printable");
+}
+
+#[test]
+fn the_provider_key_page_opens_and_goes_back() {
+    let mut app = picker_app();
+    dispatch(Action::ProviderKeysPage, &mut app);
+    assert_eq!(app.picker_page, crate::app::pending_menu::PickerPage::ProviderKeys);
+    dispatch(Action::PickerBack, &mut app);
+    assert_eq!(app.picker_page, crate::app::pending_menu::PickerPage::Main);
+}
+
+#[test]
+fn a_provider_key_row_with_no_key_says_what_to_export() {
+    let mut app = picker_app();
+    app.sign_in_status = fuigo_shell::auth::provider_status::ProviderStatus::collect(
+        std::path::Path::new("/nonexistent-fuigo-home"),
+        |_| None,
+        false,
+    );
+    dispatch(Action::ProviderKeyInfo("anthropic".into()), &mut app);
+    let note = app.sign_in_notice.expect("a note");
+    assert!(note.contains("not set") && note.contains("ANTHROPIC_API_KEY"), "{note}");
+}
+
+/// Signing in is the only step: when the browser sign-in completes the picker closes and the screen says
+/// who is signed in and what happens next, with no further instruction.
+#[test]
+fn a_finished_subscription_sign_in_closes_the_picker_and_says_what_happened() {
+    use fuigo_shell::auth::subscription::SubscriptionProvider;
+    let mut app = picker_app();
+    app.picker_modal = true;
+    let effects = dispatch(Action::SignInSubscription(SubscriptionProvider::Xai), &mut app);
+    let request_seq = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::SubscriptionSignIn { request_seq, .. } => Some(*request_seq),
+            _ => None,
+        })
+        .expect("sign-in effect");
+    dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete { request_seq, meta: None }),
+        &mut app,
+    );
+    assert!(matches!(app.auth_state, AuthState::Done));
+    assert!(!app.picker_modal);
+    assert_eq!(app.subscription_signin, None);
+    let notice = app.sign_in_notice.expect("a notice");
+    assert!(notice.starts_with("Signed in to Grok subscription"), "{notice}");
+    assert!(!notice.contains(" as "), "no display identity is known, so no opaque id is shown: {notice}");
+    assert!(notice.contains("Default model:") && notice.ends_with("Use /model to switch."), "{notice}");
+    assert!(!notice.contains("config.toml") && !notice.contains("models --provider"), "{notice}");
+}
+
+#[test]
+fn signing_out_reports_that_tokens_are_removed_locally_not_revoked() {
+    use fuigo_shell::auth::subscription::SubscriptionProvider;
+    let mut app = picker_app();
+    dispatch(
+        Action::TaskComplete(TaskResult::SubscriptionSignedOut {
+            provider: SubscriptionProvider::Chatgpt,
+            error: None,
+        }),
+        &mut app,
+    );
+    let notice = app.sign_in_notice.expect("a notice");
+    assert!(notice.contains("Signed out of ChatGPT subscription"), "{notice}");
+    assert!(notice.contains("not revoked"), "{notice}");
+}
+
+#[test]
+fn the_sign_out_row_asks_the_effect_to_remove_that_subscription() {
+    use fuigo_shell::auth::subscription::SubscriptionProvider;
+    let mut app = picker_app();
+    let effects = dispatch(Action::SignOutSubscription(SubscriptionProvider::Xai), &mut app);
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::SubscriptionSignOut { provider: SubscriptionProvider::Xai }
+    )));
+}
+
+// ---- an explicitly set default that nothing can reach: say why, offer the usable models ----
+
+fn pick_model_entry(id: &str, name: &str, meta: serde_json::Value) -> (acp::ModelId, acp::ModelInfo) {
+    let id = acp::ModelId::new(std::sync::Arc::from(id));
+    (id.clone(), acp::ModelInfo::new(id, name.to_string()).meta(meta.as_object().cloned()))
+}
+
+/// The user's default is a Flux Router model, Flux is not set up, a Grok subscription is.
+fn app_with_unusable_default() -> crate::app::app_view::AppView {
+    let mut app = test_app_with_agent();
+    app.auth_state = AuthState::Done;
+    for (id, info) in [
+        pick_model_entry(
+            "gpt-5",
+            "GPT-5",
+            serde_json::json!({ "connect": "needs a Flux Router key (fluxrouter.ai)",
+                "routes": [{ "key": "gpt-5", "label": "Flux Router", "badge": "via Flux Router",
+                            "reason": "needs a Flux Router key (fluxrouter.ai)", "word": "flux", "ready": false }] }),
+        ),
+        pick_model_entry(
+            "xai/grok-4.7",
+            "Grok 4.7",
+            serde_json::json!({ "routes": [{ "key": "xai/grok-4.7", "label": "Grok subscription",
+                "badge": "included in your Grok subscription", "reason": "included", "word": "grok", "ready": true },
+                { "key": "xai-key/grok-4.7", "label": "xAI key", "badge": "your xAI key", "reason": "billed", "word": "xai", "ready": true }] }),
+        ),
+        pick_model_entry("xai-key/grok-4.7", "grok-4.7 (xAI key)", serde_json::json!({ "altRouteOf": "xai/grok-4.7" })),
+    ] {
+        app.models.available.insert(id, info);
+    }
+    app.models.current = Some(acp::ModelId::new(std::sync::Arc::from("gpt-5")));
+    app
+}
+
+#[test]
+fn an_unusable_explicit_default_opens_pick_a_model_with_the_reason() {
+    let mut app = app_with_unusable_default();
+    assert!(app.open_model_pick_if_default_unusable(Some("gpt-5")));
+    assert!(matches!(app.auth_state, AuthState::Pending { error: None }));
+    assert_eq!(app.picker_page, crate::app::pending_menu::PickerPage::PickModel);
+    let note = app.sign_in_notice.clone().expect("a note");
+    assert!(note.contains("GPT-5") && note.contains("can't be used"), "{note}");
+    assert!(note.contains("needs a Flux Router key") && note.ends_with("Pick a model:"), "{note}");
+    let status = app.sign_in_menu_status();
+    let rows = crate::app::pending_menu::menu_entries_for(&status, false, app.picker_page, &app.models, false);
+    let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels[0], "Grok 4.7 \u{b7} included in your Grok subscription", "{labels:?}");
+    assert_eq!(labels.len(), 4, "one usable model, the toggle, more connections, quit: {labels:?}");
+    assert!(labels[1].contains("default model: off"), "{labels:?}");
+}
+
+#[test]
+fn a_usable_unset_or_hopeless_default_leaves_the_screen_alone() {
+    // No explicit default: the welcome screen is unchanged.
+    let mut app = app_with_unusable_default();
+    assert!(!app.open_model_pick_if_default_unusable(None));
+    assert!(matches!(app.auth_state, AuthState::Done));
+    // The explicit default is reachable: nothing to say.
+    let mut app = app_with_unusable_default();
+    assert!(!app.open_model_pick_if_default_unusable(Some("Grok 4.7")));
+    // Nothing is usable at all: the sign-in picker's job, not this page.
+    let mut app = app_with_unusable_default();
+    app.models.available.shift_remove(&acp::ModelId::new(std::sync::Arc::from("xai/grok-4.7")));
+    assert!(!app.open_model_pick_if_default_unusable(Some("gpt-5")));
+}
+
+#[test]
+fn choosing_a_model_starts_on_it_and_leaves_the_explicit_default_alone() {
+    let mut app = app_with_unusable_default();
+    app.open_model_pick_if_default_unusable(Some("gpt-5"));
+    let effects = dispatch(Action::PickWelcomeModel(0), &mut app);
+    assert!(matches!(app.auth_state, AuthState::Done));
+    assert_eq!(app.models.current.as_ref().map(|m| m.0.as_ref()), Some("xai/grok-4.7"));
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::PersistPreferredModel { .. } | Effect::PersistSetting { .. })),
+        "the explicit default is not saved over: {effects:?}"
+    );
+    let note = app.sign_in_notice.clone().unwrap();
+    assert!(note.contains("Grok 4.7") && note.contains("Your default model is unchanged"), "{note}");
+    // The completed switch to it is not saved as the default either.
+    let id = AgentId(0);
+    let model = acp::ModelId::new(std::sync::Arc::from("xai/grok-4.7"));
+    app.agents.get_mut(&id).unwrap().session.models.available = app.models.available.clone();
+    let done = dispatch(
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: id,
+            model_id: model,
+            effort: None,
+            result: Ok(()),
+            prev_model_id: None,
+        }),
+        &mut app,
+    );
+    assert!(!done.iter().any(|e| matches!(e, Effect::PersistPreferredModel { .. })), "{done:?}");
+}
+
+#[test]
+fn make_default_saves_the_pick_as_the_default() {
+    let mut app = app_with_unusable_default();
+    app.open_model_pick_if_default_unusable(Some("gpt-5"));
+    dispatch(Action::ToggleMakeDefault, &mut app);
+    assert!(app.pick_make_default);
+    let effects = dispatch(Action::PickWelcomeModel(0), &mut app);
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::PersistPreferredModel { model_id, .. } if model_id.0.as_ref() == "xai/grok-4.7")),
+        "{effects:?}"
+    );
+    assert!(app.sign_in_notice.clone().unwrap().contains("saved as your default"));
+}

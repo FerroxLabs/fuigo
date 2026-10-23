@@ -21,6 +21,9 @@ pub struct AgentMessageBlock {
     video_refs: Vec<crate::prompt_images::ScrollbackVideoRef>,
     /// Detected ` ```mermaid ` diagrams and render skeleton, populated at construction/finish (never per streaming chunk) like the media refs.
     mermaid: MermaidContent,
+    /// Whether the reply is complete. `[Copy]` rows under code blocks and tables appear only on a finished reply,
+    /// never while it streams (the fence may still be open and its body would change under the button).
+    finished: bool,
 }
 
 impl AgentMessageBlock {
@@ -36,6 +39,7 @@ impl AgentMessageBlock {
             image_refs,
             video_refs,
             mermaid,
+            finished: true,
         }
     }
 
@@ -46,6 +50,7 @@ impl AgentMessageBlock {
             image_refs: Vec::new(),
             video_refs: Vec::new(),
             mermaid: MermaidContent::default(),
+            finished: false,
         }
     }
 
@@ -77,6 +82,7 @@ impl AgentMessageBlock {
         self.video_refs = crate::prompt_images::extract_video_refs(&text);
         // Detection runs once the render is final, after the renderer freezes, never per streaming chunk
         self.mermaid = self.content.mermaid_content();
+        self.finished = true;
     }
 
     /// The detected Mermaid diagrams for this message (empty until finished or constructed from complete text).
@@ -140,25 +146,40 @@ impl AgentMessageBlock {
         let mut out = self.content.output(ctx.width as usize);
         // Diagram pre-wrap ranges in document order
         // The fence count and order are width-invariant, so range index `idx` pairs with the diagram's source (`self.mermaid.source(idx)`)
-        let ranges = self.content.mermaid_block_ranges();
-
-        match self.mermaid_display_mode() {
-            mermaid_content::MermaidDisplay::SourceOnly => (out, Vec::new()),
-            mermaid_content::MermaidDisplay::Affordances => {
-                let affordances =
-                    mermaid_content::apply_affordance_rows(&mut out, &ranges, |idx| {
-                        self.mermaid.source(idx).unwrap_or_default().to_string()
-                    });
-                (out, affordances)
-            }
+        let ranges = match self.mermaid_display_mode() {
+            mermaid_content::MermaidDisplay::SourceOnly => Vec::new(),
+            mermaid_content::MermaidDisplay::Affordances => self.content.mermaid_block_ranges(),
+        };
+        let copy_rows = if self.copy_rows_active() {
+            self.content.copy_row_specs()
+        } else {
+            Vec::new()
+        };
+        if ranges.is_empty() && copy_rows.is_empty() {
+            return (out, Vec::new());
         }
+        let affordances =
+            mermaid_content::apply_affordance_rows_with_copy(&mut out, &ranges, |idx| {
+                self.mermaid.source(idx).unwrap_or_default().to_string()
+            }, copy_rows);
+        (out, affordances)
+    }
+
+    /// Whether this message shows `[Copy]` rows under its code blocks and tables: finished, not raw, and drawn by the interactive loop.
+    fn copy_rows_active(&self) -> bool {
+        self.finished && !self.content.is_raw() && super::copy_rows::copy_rows_enabled()
+    }
+
+    /// Whether a finished reply has at least one block that gets a `[Copy]` row (cheap: no text is built).
+    fn has_copy_rows(&self) -> bool {
+        self.copy_rows_active() && self.content.copy_row_count() > 0
     }
 }
 
 impl BlockContent for AgentMessageBlock {
     fn output(&self, ctx: &BlockContext) -> BlockOutput {
         // Common path: no diagrams (or raw mode) renders plain markdown, with no affordance machinery and no extra output rebuild
-        if ctx.raw || self.mermaid.is_empty() {
+        if ctx.raw || (self.mermaid.is_empty() && !self.has_copy_rows()) {
             return self.content.output(ctx.width as usize);
         }
         self.rendered_output(ctx).0
@@ -167,10 +188,9 @@ impl BlockContent for AgentMessageBlock {
     fn diagram_affordances(&self, ctx: &BlockContext) -> Vec<mermaid_content::DiagramAffordance> {
         // Affordance rows exist only under the affordance display with diagrams
         // For every other (much more common) case, return without building output()
-        if ctx.raw
-            || self.mermaid.is_empty()
-            || self.mermaid_display_mode() != mermaid_content::MermaidDisplay::Affordances
-        {
+        let diagrams = !self.mermaid.is_empty()
+            && self.mermaid_display_mode() == mermaid_content::MermaidDisplay::Affordances;
+        if ctx.raw || (!diagrams && !self.has_copy_rows()) {
             return Vec::new();
         }
         self.rendered_output(ctx).1
@@ -180,13 +200,20 @@ impl BlockContent for AgentMessageBlock {
         // Each diagram inserts one treatment row (affordance row or fallback caption) into output() that the source-text estimate can't see
         // Count one per diagram (a safe over-estimate if a range is empty) so the off-screen estimate never under-reserves
         // Raw mode and the `off` setting add no such row
-        if self.mermaid.is_empty()
+        let copy_rows = if self.copy_rows_active() {
+            self.content.copy_row_count()
+        } else {
+            0
+        };
+        let diagram_rows = if self.mermaid.is_empty()
             || self.content.is_raw()
             || self.mermaid_display_mode() == mermaid_content::MermaidDisplay::SourceOnly
         {
-            return 0;
-        }
-        self.mermaid.len() as u16
+            0
+        } else {
+            self.mermaid.len()
+        };
+        (diagram_rows + copy_rows).min(u16::MAX as usize) as u16
     }
 
     fn accent(&self, _ctx: &BlockContext) -> Option<AccentStyle> {
@@ -366,6 +393,151 @@ mod tests {
     }
 
     // -- diagram affordance rows ---------------------------------------------
+
+    /// Inline tags in a reply (`<kbd>`, `<b>`, a stray `<tag>`) stay in their paragraph: no extra rows, no lost text.
+    #[test]
+    fn inline_tags_do_not_break_the_layout() {
+        let _modes = crate::theme::cache::pin_theme();
+        let plain = AgentMessageBlock::new("Press Ctrl and C to stop now, then <tag> end.\n\nNext paragraph");
+        let tagged = AgentMessageBlock::new(
+            "Press <kbd>Ctrl</kbd> and <kbd>C</kbd> to stop <b>now</b>, then <tag> end.\n\nNext paragraph",
+        );
+        let rows = |block: &AgentMessageBlock| -> Vec<String> {
+            block
+                .output(&ctx(100, false))
+                .lines
+                .iter()
+                .map(|l| l.content.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .collect()
+        };
+        let (plain_rows, tagged_rows) = (rows(&plain), rows(&tagged));
+        assert_eq!(tagged_rows.len(), plain_rows.len(), "{tagged_rows:?} vs {plain_rows:?}");
+        let first = &tagged_rows[0];
+        for word in ["Press", "Ctrl", "stop", "now", "end."] {
+            assert!(first.contains(word), "{word} kept on the paragraph's row: {first:?}");
+        }
+        assert_eq!(tagged_rows.last(), plain_rows.last());
+    }
+
+    /// `[Copy]` rows under the code blocks and tables of a finished reply.
+    mod copy_rows {
+        use super::*;
+        use crate::scrollback::block::RenderBlock;
+
+        const FENCE: &str = "intro\n\n```rust\nfn main() {\n\tlet x = 1;\n}\n```\n\nbye\n";
+        const TABLE: &str = "intro\n\n| name | note |\n|---|---|\n| a | x\\|y |\n| b | 2 |\n\nbye\n";
+
+        fn rows(block: &AgentMessageBlock) -> Vec<mermaid_content::DiagramAffordance> {
+            block.diagram_affordances(&ctx(60, false))
+        }
+
+        #[test]
+        fn finished_reply_gets_a_copy_row_under_each_code_block() {
+            let _modes = crate::theme::cache::pin_theme();
+            let block = AgentMessageBlock::new(FENCE);
+            let affs = rows(&block);
+            assert_eq!(affs.len(), 1, "one code block, one copy row");
+            let copy = affs[0].copy.as_ref().expect("a copy row, not a diagram row");
+            assert!(copy.label.ends_with(" rust"), "labelled with the language: {:?}", copy.label);
+            assert_eq!(copy.buttons.len(), 1);
+            assert_eq!(copy.buttons[0].label, "[Copy]");
+            assert_eq!(
+                copy.buttons[0].text, "fn main() {\n\tlet x = 1;\n}\n",
+                "the button copies the body verbatim, tab included"
+            );
+            // The reserved row is one extra, non-selectable row beneath the block body
+            let out = block.output(&ctx(60, false));
+            assert!(matches!(
+                out.lines[affs[0].row_offset as usize].selectable,
+                Selectable::None
+            ));
+            crate::terminal::image::set_inline_overlay_force_off(true);
+            let without = block.output(&ctx(60, false)).lines.len();
+            crate::terminal::image::set_inline_overlay_force_off(false);
+            assert_eq!(out.lines.len(), without + 1, "exactly one reserved row");
+            // And the estimate reserves it
+            assert!(block.estimate_extra_rows() >= 1);
+        }
+
+        #[test]
+        fn streaming_reply_has_no_copy_row_until_it_finishes() {
+            let _modes = crate::theme::cache::pin_theme();
+            let mut block = AgentMessageBlock::streaming();
+            block.push_chunk(FENCE);
+            assert!(rows(&block).is_empty(), "no copy row while streaming");
+            assert_eq!(block.estimate_extra_rows(), 0);
+            block.finish();
+            assert_eq!(rows(&block).len(), 1, "the copy row appears once the reply is finished");
+        }
+
+        #[test]
+        fn raw_mode_and_minimal_mode_have_no_copy_rows() {
+            let _modes = crate::theme::cache::pin_theme();
+            let block = AgentMessageBlock::new(FENCE);
+            assert!(block.diagram_affordances(&ctx(60, true)).is_empty(), "raw shows source only");
+            crate::terminal::image::set_inline_overlay_force_off(true);
+            let minimal = rows(&block);
+            let minimal_len = block.output(&ctx(60, false)).lines.len();
+            crate::terminal::image::set_inline_overlay_force_off(false);
+            assert!(minimal.is_empty(), "minimal never paints the row, so it reserves none");
+            assert_eq!(
+                block.output(&ctx(60, false)).lines.len(),
+                minimal_len + 1,
+                "switching back to fullscreen reserves the row again"
+            );
+        }
+
+        #[test]
+        fn mermaid_keeps_its_own_row_and_gets_no_copy_row() {
+            let _modes = crate::theme::cache::pin_theme();
+            crate::appearance::cache::set_render_mermaid(RenderMermaid::On);
+            let md = "```rust\nlet a = 1;\n```\n\n```mermaid\nA-->B\n```\n";
+            let affs = rows(&AgentMessageBlock::new(md));
+            assert_eq!(affs.len(), 2);
+            assert!(affs[0].copy.is_some() && affs[0].source.is_empty());
+            assert!(affs[1].copy.is_none() && affs[1].source == "A-->B\n");
+            assert!(affs[0].row_offset < affs[1].row_offset);
+        }
+
+        #[test]
+        fn table_copy_row_offers_markdown_and_tsv() {
+            let _modes = crate::theme::cache::pin_theme();
+            let affs = rows(&AgentMessageBlock::new(TABLE));
+            assert_eq!(affs.len(), 1);
+            let copy = affs[0].copy.as_ref().unwrap();
+            let labels: Vec<&str> = copy.buttons.iter().map(|b| b.label.as_str()).collect();
+            assert_eq!(labels, ["[Copy as Markdown]", "[Copy as TSV]"]);
+            assert_eq!(
+                copy.buttons[0].text,
+                "| name | note |\n| --- | --- |\n| a | x\\|y |\n| b | 2 |"
+            );
+            assert_eq!(copy.buttons[1].text, "name\tnote\na\tx|y\nb\t2");
+        }
+
+        /// Copying a code block or a whole reply keeps its tabs.
+        #[test]
+        fn copying_a_reply_keeps_tabs() {
+            let _modes = crate::theme::cache::pin_theme();
+            let block = RenderBlock::AgentMessage(AgentMessageBlock::new(FENCE));
+            for raw in [true, false] {
+                let copied = block.copy_text(raw).expect("copyable text");
+                assert!(
+                    copied.contains("\tlet x = 1;"),
+                    "raw={raw}: tab kept in the copied reply: {copied:?}"
+                );
+            }
+            assert_eq!(block.code_block_texts(), ["fn main() {\n\tlet x = 1;\n}\n"]);
+            // A reply streamed in pieces keeps them too
+            let mut streamed = AgentMessageBlock::streaming();
+            streamed.push_chunk("```\nif a {\n\tb();");
+            streamed.push_chunk("\n}\n```\n");
+            streamed.finish();
+            assert_eq!(
+                RenderBlock::AgentMessage(streamed).code_block_texts(),
+                ["if a {\n\tb();\n}\n"]
+            );
+        }
+    }
 
     mod affordances {
         use super::*;

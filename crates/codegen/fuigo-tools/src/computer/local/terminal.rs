@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::fs::File;
@@ -358,6 +359,20 @@ struct ProcessState {
     description: Option<String>,
 }
 
+/// A command still running when its state is dropped (the actor winding down at exit) must not leave its tree behind.
+/// The child handle kills only the leader on drop, and once this state is gone the scope's weak entry is dead, so the exit-time
+/// `kill_all` skips the group: anything the shell started would be orphaned. Kill the whole group here, while the pgid is still ours.
+impl Drop for ProcessState {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if self.child.id().is_some()
+            && let Some(group) = self.process_group.as_ref()
+        {
+            let _ = group.kill();
+        }
+    }
+}
+
 impl ProcessState {
     fn to_result(&self) -> TerminalRunResult {
         TerminalRunResult {
@@ -564,6 +579,10 @@ struct LocalTerminalActor {
     /// Baked in at construction; `None` inherits the full environment.
     shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
 
+    /// The daemon's per-command sandbox hook; `None` runs every command unwrapped. Baked in at
+    /// construction like the env policy, so a shared backend cannot be re-pointed by a session.
+    sandbox_launch: Option<Arc<dyn crate::sandbox_launch::SandboxLaunch>>,
+
     /// Lazily initialized on first command when `persistent_shell` is true.
     #[cfg(unix)]
     shell_state: Option<shell_state::ShellState>,
@@ -595,6 +614,7 @@ impl LocalTerminalActor {
         scope: crate::util::ProcessScope,
         session_scope: Option<crate::util::ProcessScope>,
         shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
+        sandbox_launch: Option<Arc<dyn crate::sandbox_launch::SandboxLaunch>>,
     ) -> Self {
         let ActorSettings {
             completed_task_ttl,
@@ -611,6 +631,7 @@ impl LocalTerminalActor {
             scope,
             session_scope,
             shell_env_policy,
+            sandbox_launch,
             processes: HashMap::new(),
             child_exit: ChildExitWake::new(),
             completion_waiters: HashMap::new(),
@@ -649,26 +670,36 @@ impl LocalTerminalActor {
         yields
     }
 
+    fn sandbox_hook(&self) -> Option<&dyn crate::sandbox_launch::SandboxLaunch> {
+        self.sandbox_launch.as_deref()
+    }
+
     async fn spawn_command(
         &mut self,
         command: &str,
         cwd: &std::path::Path,
         env: &HashMap<String, String>,
+        tool_call_id: &str,
     ) -> Result<SpawnResult, ComputerError> {
         #[cfg(unix)]
         if self.persistent_shell {
-            return self.spawn_persistent_command(command, cwd, env).await;
+            return self
+                .spawn_persistent_command(command, cwd, env, tool_call_id)
+                .await;
         }
 
         #[cfg(unix)]
         if self.login_shell_capture && login_env_capture_enabled() {
             self.ensure_static_shell_initialized(cwd).await;
-            return self.spawn_static_command(command, cwd, env).await;
+            return self
+                .spawn_static_command(command, cwd, env, tool_call_id)
+                .await;
         }
 
         #[cfg(unix)]
         if self.login_env.is_none() {
-            self.login_env = Some(capture_login_env(self.shell_env_policy.as_ref()).await);
+            self.login_env =
+                Some(capture_login_env(self.shell_env_policy.as_ref(), self.sandbox_hook()).await);
         }
 
         #[cfg(unix)]
@@ -684,6 +715,10 @@ impl LocalTerminalActor {
             self.search_shadows,
             self.shell_env_policy.as_ref(),
             self.session_scope.as_ref(),
+            SpawnSandbox {
+                hook: self.sandbox_hook(),
+                tool_call_id,
+            },
         )?;
         Ok(SpawnResult {
             child,
@@ -697,6 +732,7 @@ impl LocalTerminalActor {
         if self.static_shell.is_some() && self.login_env.is_some() {
             return;
         }
+        let hook = self.sandbox_hook();
         let (snapshot, login_env) = tokio::join!(
             async {
                 if self.static_shell.is_none() {
@@ -704,6 +740,7 @@ impl LocalTerminalActor {
                         super::static_shell::StaticShellSnapshot::init_with_policy(
                             cwd,
                             self.shell_env_policy.as_ref(),
+                            hook,
                         )
                         .await,
                     )
@@ -713,7 +750,7 @@ impl LocalTerminalActor {
             },
             async {
                 if self.login_env.is_none() {
-                    Some(capture_login_env(self.shell_env_policy.as_ref()).await)
+                    Some(capture_login_env(self.shell_env_policy.as_ref(), hook).await)
                 } else {
                     None
                 }
@@ -733,6 +770,7 @@ impl LocalTerminalActor {
         command: &str,
         cwd: &std::path::Path,
         env: &HashMap<String, String>,
+        tool_call_id: &str,
     ) -> Result<SpawnResult, ComputerError> {
         use command_fds::CommandFdExt;
 
@@ -741,31 +779,32 @@ impl LocalTerminalActor {
             .prepare_command(command, self.search_shadows)
             .map_err(|e| ComputerError::io(format!("prepare static command: {e}")))?;
 
-        let child = fuigo_tty_utils::ProcessScope::spawn_placed(self.session_scope.as_ref(), || tokio::process::Command::new(&prep.binary), |cmd, hook| {
+        // P189-placed: the sandbox hook rewrites a plain command; spawn_placed then rebuilds it from the
+        // captured parts so the session-cgroup placement stays the first pre_exec.
+        let mut plain = tokio::process::Command::new(&prep.binary);
+        plain.args(&prep.args).current_dir(cwd);
+        apply_child_env(
+            &mut plain,
+            self.shell_env_policy.as_ref(),
+            self.login_env.as_ref(),
+            env,
+        );
+        crate::sandbox_launch::prepare(
+            self.sandbox_hook(),
+            &mut plain,
+            &crate::sandbox_launch::CallId::tool(tool_call_id),
+        )?;
+        let parts = crate::sandbox_launch::CommandParts::capture(&plain);
+
+        let child = fuigo_tty_utils::ProcessScope::spawn_placed(self.session_scope.as_ref(), || parts.new_command(), |cmd, hook| {
             // P189: spawn_placed already registered the placement as the first pre_exec
             // (before fd_mappings' dup2).
-            cmd.args(&prep.args)
-                .current_dir(cwd)
-                .stdin(fuigo_tty_utils::null_stdio())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
-
-            apply_child_env(
-                cmd,
-                self.shell_env_policy.as_ref(),
-                self.login_env.as_ref(),
-                env,
-            );
+            parts.apply(cmd);
 
             cmd.fd_mappings(fd_mappings_for_spawn(hook, &mut prep.fd_mappings)?)
                 .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
 
-            unsafe {
-                cmd.pre_exec(fuigo_tty_utils::detach_pre_exec_hook());
-            }
-
-            fuigo_sandbox::child_net::restrict_child_network(cmd);
+            crate::sandbox_launch::wire_prepared(cmd, Stdio::piped());
             Ok(())
         })
         .map_err(|e| match e {
@@ -827,7 +866,15 @@ impl LocalTerminalActor {
         let init_cwd = previous_cwd.as_deref().unwrap_or(cwd);
         self.shell_state_generation = generation;
         let shell = shell_state::ShellKind::detect();
-        match shell_state::ShellState::init(shell, init_cwd, self.shell_env_policy.as_ref(), self.session_scope.as_ref()).await {
+        match shell_state::ShellState::init(
+            shell,
+            init_cwd,
+            self.shell_env_policy.as_ref(),
+            self.session_scope.as_ref(),
+            self.sandbox_hook(),
+        )
+        .await
+        {
             Ok(mut state) => {
                 // A re-initialization keeps the directory the session was in, even if a login
                 // startup file `cd`s elsewhere.
@@ -879,6 +926,7 @@ impl LocalTerminalActor {
         command: &str,
         cwd: &std::path::Path,
         env: &HashMap<String, String>,
+        tool_call_id: &str,
     ) -> Result<SpawnResult, ComputerError> {
         use command_fds::CommandFdExt;
 
@@ -931,28 +979,30 @@ impl LocalTerminalActor {
             )
             .map_err(|e| ComputerError::io(format!("prepare persistent command: {e}")))?;
 
-        let spawned = fuigo_tty_utils::ProcessScope::spawn_placed(self.session_scope.as_ref(), || tokio::process::Command::new(&prep.binary), |cmd, hook| {
+        // P189-placed: the sandbox hook rewrites a plain command; spawn_placed then rebuilds it from the
+        // captured parts so the session-cgroup placement stays the first pre_exec.
+        let mut plain = tokio::process::Command::new(&prep.binary);
+        plain.args(&prep.args).current_dir(&prep.cwd);
+        // The persistent backend restores login state from its snapshot, so no
+        // login-env layering here.
+        apply_child_env(&mut plain, self.shell_env_policy.as_ref(), None, env);
+        crate::sandbox_launch::prepare_restoring(
+            self.sandbox_hook(),
+            &mut plain,
+            || shell_state::snapshot_exports(&shell_state.snapshot),
+            &crate::sandbox_launch::CallId::tool(tool_call_id),
+        )?;
+        let parts = crate::sandbox_launch::CommandParts::capture(&plain);
+
+        let spawned = fuigo_tty_utils::ProcessScope::spawn_placed(self.session_scope.as_ref(), || parts.new_command(), |cmd, hook| {
             // P189: spawn_placed already registered the placement as the first pre_exec
             // (before fd_mappings' dup2).
-            cmd.args(&prep.args)
-                .current_dir(&prep.cwd)
-                .stdin(fuigo_tty_utils::null_stdio())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
-
-            // The persistent backend restores login state from its snapshot, so no
-            // login-env layering here.
-            apply_child_env(cmd, self.shell_env_policy.as_ref(), None, env);
+            parts.apply(cmd);
 
             cmd.fd_mappings(fd_mappings_for_spawn(hook, &mut prep.fd_mappings)?)
                 .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
 
-            unsafe {
-                cmd.pre_exec(fuigo_tty_utils::detach_pre_exec_hook());
-            }
-
-            fuigo_sandbox::child_net::restrict_child_network(cmd);
+            crate::sandbox_launch::wire_prepared(cmd, Stdio::piped());
             Ok(())
         });
         drop(denylist_fence);
@@ -1159,7 +1209,9 @@ impl LocalTerminalActor {
                 } else if self.login_shell_capture && login_env_capture_enabled() {
                     self.ensure_static_shell_initialized(&cwd).await;
                 } else if self.login_env.is_none() {
-                    self.login_env = Some(capture_login_env(self.shell_env_policy.as_ref()).await);
+                    self.login_env = Some(
+                        capture_login_env(self.shell_env_policy.as_ref(), self.sandbox_hook()).await,
+                    );
                 }
                 #[cfg(not(unix))]
                 let _ = cwd;
@@ -1240,7 +1292,12 @@ impl LocalTerminalActor {
             process_group,
             state_dump_handle,
         } = match self
-            .spawn_command(&request.command, &request.working_directory, &request.env)
+            .spawn_command(
+                &request.command,
+                &request.working_directory,
+                &request.env,
+                &request.tool_call_id,
+            )
             .await
         {
             Ok(r) => r,
@@ -1386,7 +1443,12 @@ impl LocalTerminalActor {
             process_group,
             state_dump_handle,
         } = match self
-            .spawn_command(&request.command, &request.working_directory, &request.env)
+            .spawn_command(
+                &request.command,
+                &request.working_directory,
+                &request.env,
+                &request.tool_call_id,
+            )
             .await
         {
             Ok(r) => r,
@@ -1774,6 +1836,10 @@ impl LocalTerminalActor {
         // reservation bookkeeping need them; wait-suppression lives in the bridge.
         for task_id in newly_completed {
             if let Some(process) = self.processes.get(&task_id) {
+                crate::sandbox_launch::exited(
+                    self.sandbox_hook(),
+                    &crate::sandbox_launch::CallId::tool(&process.tool_call_id),
+                );
                 let snapshot = process.to_task_snapshot(&task_id).await;
                 process.notification_handle.send_task_complete(snapshot);
             }
@@ -2051,11 +2117,18 @@ impl LocalTerminalActor {
     }
 
     async fn shutdown_all(&mut self) {
+        let sandbox_hook = self.sandbox_launch.as_deref();
         for (_, process) in self.processes.iter_mut() {
             send_sigkill_to_group(process);
             // The dump reader's spawn_blocking thread must not outlive the actor.
             if let Some(handle) = process.state_dump_handle.take() {
                 handle.abort();
+            }
+            if process.bg_status.is_backgrounded() && process.lifecycle.swept_at().is_none() {
+                crate::sandbox_launch::exited(
+                    sandbox_hook,
+                    &crate::sandbox_launch::CallId::tool(&process.tool_call_id),
+                );
             }
         }
         self.processes.clear();
@@ -2393,6 +2466,8 @@ struct LocalTerminalConfig {
     /// See [`LocalTerminalActor::scope`].
     scope: crate::util::ProcessScope,
     settings: ActorSettings,
+    /// See [`LocalTerminalActor::sandbox_launch`].
+    sandbox_launch: Option<Arc<dyn crate::sandbox_launch::SandboxLaunch>>,
 }
 
 impl Default for LocalTerminalConfig {
@@ -2407,6 +2482,7 @@ impl Default for LocalTerminalConfig {
             process_scope: None,
             scope: crate::util::global_process_scope().clone(),
             settings: ActorSettings::from_env(),
+            sandbox_launch: None,
         }
     }
 }
@@ -2414,6 +2490,15 @@ impl Default for LocalTerminalConfig {
 impl LocalTerminalBackend {
     pub fn new() -> Self {
         Self::new_inner(LocalTerminalConfig::default())
+    }
+
+    /// The default backend with the daemon's per-command sandbox hook: every spawn (tool commands
+    /// and the rc-sourcing shell captures) goes through [`crate::sandbox_launch::prepare`] first.
+    pub fn new_with_sandbox_launch(hook: Arc<dyn crate::sandbox_launch::SandboxLaunch>) -> Self {
+        Self::new_inner(LocalTerminalConfig {
+            sandbox_launch: Some(hook),
+            ..Default::default()
+        })
     }
 
     /// Env vars, cwd, functions, and aliases persist across commands; the login
@@ -2447,6 +2532,7 @@ impl LocalTerminalBackend {
         login_shell_capture: bool,
         shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
         process_scope: Option<crate::util::ProcessScope>,
+        sandbox_launch: Option<Arc<dyn crate::sandbox_launch::SandboxLaunch>>,
     ) -> Self {
         Self::new_inner(LocalTerminalConfig {
             use_spawn_local: true,
@@ -2454,6 +2540,7 @@ impl LocalTerminalBackend {
             search_shadows,
             shell_env_policy,
             process_scope,
+            sandbox_launch,
             ..Default::default()
         })
     }
@@ -2462,6 +2549,7 @@ impl LocalTerminalBackend {
         search_shadows: SearchShadowConfig,
         shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
         process_scope: Option<crate::util::ProcessScope>,
+        sandbox_launch: Option<Arc<dyn crate::sandbox_launch::SandboxLaunch>>,
     ) -> Self {
         Self::new_inner(LocalTerminalConfig {
             use_spawn_local: true,
@@ -2469,6 +2557,7 @@ impl LocalTerminalBackend {
             search_shadows,
             shell_env_policy,
             process_scope,
+            sandbox_launch,
             ..Default::default()
         })
     }
@@ -2545,6 +2634,7 @@ impl LocalTerminalBackend {
             process_scope: session_scope,
             scope,
             settings,
+            sandbox_launch,
         } = config;
         let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_SIZE);
         let actor_tx = cmd_tx.downgrade();
@@ -2573,6 +2663,7 @@ impl LocalTerminalBackend {
                 scope,
                 session_scope,
                 shell_env_policy,
+                sandbox_launch,
             );
             actor.run().await;
         };
@@ -3253,6 +3344,7 @@ fn parse_login_env_capture(stdout: &str) -> (Option<String>, HashMap<String, Str
 #[cfg(unix)]
 async fn capture_login_env(
     policy: Option<&crate::util::ShellEnvironmentPolicy>,
+    sandbox_hook: Option<&dyn crate::sandbox_launch::SandboxLaunch>,
 ) -> HashMap<String, String> {
     use tokio::io::AsyncReadExt;
 
@@ -3268,15 +3360,16 @@ async fn capture_login_env(
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         // P189-unplaced: login-env probe; stays UNPLACED on purpose: it runs the user's login shell start-up files with a Fuigo-chosen fixed script (never a model-chosen command), and a stop must not kill an ssh-agent or similar started by the profile. Stated limit: a process detached by the user's shell start-up files is outside the session cgroup and survives a stop.
         let mut cmd = tokio::process::Command::new(shell.binary_path());
-        cmd.args(["-lc", &script])
-            .stdin(fuigo_tty_utils::null_stdio())
-            .stdout(Stdio::piped())
-            .stderr(fuigo_tty_utils::null_stdio())
-            .kill_on_drop(true);
-        crate::util::detach_command(&mut cmd);
-        fuigo_sandbox::child_net::restrict_child_network(&mut cmd);
+        cmd.args(["-lc", &script]);
         crate::util::apply_shell_environment_policy(&mut cmd, policy);
         cmd.envs(crate::util::pager_env());
+        let call = crate::sandbox_launch::CallId::shell_init("login-env");
+        crate::sandbox_launch::prepare(sandbox_hook, &mut cmd, &call)
+            .inspect_err(|reason| {
+                tracing::warn!(%reason, "sandbox refused the login-env capture; using the plain environment")
+            })
+            .ok()?;
+        crate::sandbox_launch::wire_prepared(&mut cmd, fuigo_tty_utils::null_stdio());
         // P189-unplaced: see the login-env probe note above (awaited helper, killed on drop).
         #[allow(clippy::disallowed_methods)] // probe killed on drop
         let mut child = cmd.spawn().ok()?;
@@ -3428,6 +3521,14 @@ fn fd_mappings_for_spawn(
         .collect()
 }
 
+/// The sandbox side of one shell spawn: the hook that may wrap the command (`None` runs it as
+/// is) and the tool call the spawn belongs to.
+#[derive(Clone, Copy)]
+struct SpawnSandbox<'a> {
+    hook: Option<&'a dyn crate::sandbox_launch::SandboxLaunch>,
+    tool_call_id: &'a str,
+}
+
 fn spawn_shell_command(
     command: &str,
     cwd: &std::path::Path,
@@ -3436,6 +3537,7 @@ fn spawn_shell_command(
     search_shadows: SearchShadowConfig,
     shell_env_policy: Option<&crate::util::ShellEnvironmentPolicy>,
     session_scope: Option<&crate::util::ProcessScope>,
+    sandbox: SpawnSandbox<'_>,
 ) -> std::io::Result<(tokio::process::Child, crate::util::ProcessGroup)> {
     // Keep unix-only args live on Windows to avoid unused-arg warnings.
     #[cfg(not(unix))]
@@ -3451,38 +3553,40 @@ fn spawn_shell_command(
             format!("{inject}{command}")
         }
     };
+    // P189-placed: the sandbox hook rewrites a plain command; spawn_placed then rebuilds it from the captured
+    // parts so the session-cgroup placement stays the first pre_exec.
+    #[cfg(unix)]
+    let parts = {
+        let mut plain = tokio::process::Command::new(shell.binary_path());
+        // Non-interactive zsh still defaults to NOMATCH; pass via argv like init's -o extendedglob.
+        if matches!(shell, shell_state::ShellKind::Zsh) {
+            plain.arg("-o").arg("nonomatch");
+        }
+        plain.arg("-c").arg(&wrapped_command).current_dir(cwd);
+        apply_child_env(&mut plain, shell_env_policy, login_env, env);
+        crate::sandbox_launch::prepare(
+            sandbox.hook,
+            &mut plain,
+            &crate::sandbox_launch::CallId::tool(sandbox.tool_call_id),
+        )?;
+        crate::sandbox_launch::CommandParts::capture(&plain)
+    };
     #[cfg(unix)]
     // P189-placed: handed to ProcessScope::spawn_placed below, which registers the placement.
-    let new_command = || tokio::process::Command::new(shell.binary_path());
+    let new_command = || parts.new_command();
     #[cfg(unix)]
     let configure = |cmd: &mut tokio::process::Command, _hook: &fuigo_tty_utils::PlaceHook| -> std::io::Result<()> {
         // P189: spawn_placed already registered the placement as the first pre_exec.
-        // Non-interactive zsh still defaults to NOMATCH; pass via argv like init's -o extendedglob.
-        if matches!(shell, shell_state::ShellKind::Zsh) {
-            cmd.arg("-o").arg("nonomatch");
-        }
-        cmd.arg("-c")
-            .arg(&wrapped_command)
-            .current_dir(cwd)
-            .stdin(fuigo_tty_utils::null_stdio())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // Do NOT set .process_group(0): std runs setpgid() before pre_exec
-            // hooks, so setsid() in the detach hook would fail with EPERM.
-            .kill_on_drop(true);
-
-        apply_child_env(cmd, shell_env_policy, login_env, env);
-
-        // Detach from the controlling terminal so subprocesses cannot open
-        // /dev/tty and compete with the TUI for terminal input.
-        crate::util::detach_command(cmd);
-
-        fuigo_sandbox::child_net::restrict_child_network(cmd);
+        parts.apply(cmd);
+        // Detached from the controlling terminal, so subprocesses cannot open /dev/tty and
+        // compete with the TUI for terminal input. No process_group(0): std runs setpgid()
+        // before pre_exec hooks, so setsid() in the detach hook would fail with EPERM.
+        crate::sandbox_launch::wire_prepared(cmd, Stdio::piped());
         Ok(())
     };
 
     #[cfg(not(unix))]
-    let mut build_cmd = |with_breakaway: bool| {
+    let mut build_cmd = |with_breakaway: bool| -> std::io::Result<tokio::process::Command> {
         use windows::Win32::System::Threading::{
             CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
         };
@@ -3490,12 +3594,7 @@ fn spawn_shell_command(
         let inv = fuigo_config::shell::shell_command_argv(command);
         // P189-unplaced: non-unix (Windows) path; the session cgroup is Linux-only.
         let mut cmd = tokio::process::Command::new(&inv.program);
-        cmd.args(&inv.args)
-            .current_dir(cwd)
-            .stdin(fuigo_tty_utils::null_stdio())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+        cmd.args(&inv.args).current_dir(cwd);
 
         // Mirrors the unix `apply_child_env` order; `inv.env` is fuigo's trusted
         // shell setup, so it is not filtered.
@@ -3507,6 +3606,13 @@ fn spawn_shell_command(
         layer_request_env(&mut cmd, env, active_policy);
         cmd.envs(crate::util::pager_env());
         crate::util::apply_fuigo_agent_marker(&mut cmd);
+        crate::sandbox_launch::prepare(
+            sandbox.hook,
+            &mut cmd,
+            &crate::sandbox_launch::CallId::tool(sandbox.tool_call_id),
+        )
+        .map_err(std::io::Error::from)?;
+        crate::sandbox_launch::wire_prepared(&mut cmd, Stdio::piped());
 
         // Flags set inline: tokio's creation_flags is a SET, not OR, so the detach
         // helpers don't compose. CREATE_BREAKAWAY_FROM_JOB fails with os error 5 when
@@ -3516,7 +3622,7 @@ fn spawn_shell_command(
             flags |= CREATE_BREAKAWAY_FROM_JOB;
         }
         cmd.creation_flags(flags.0);
-        cmd
+        Ok(cmd)
     };
 
     #[cfg(unix)]
@@ -3537,7 +3643,7 @@ fn spawn_shell_command(
     #[allow(clippy::disallowed_methods)] // attached to the process group built in this block
     let (child, mut group) = {
         let group = crate::util::ProcessGroup::new()?;
-        let mut cmd = build_cmd(true);
+        let mut cmd = build_cmd(true)?;
         match cmd.spawn() {
             Ok(child) => (child, group),
             Err(e) if e.raw_os_error() == Some(5) => {
@@ -3549,7 +3655,7 @@ fn spawn_shell_command(
                 // P189-unplaced: non-unix (Windows) path; the session cgroup is Linux-only.
                 );
                 drop(cmd);
-                let mut cmd = build_cmd(false);
+                let mut cmd = build_cmd(false)?;
                 let child = cmd.spawn()?;
                 (child, group)
             }
@@ -3582,10 +3688,15 @@ fn extract_exit_status(status: std::process::ExitStatus) -> ExitStatus {
 // Tests
 // ============================================================================
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "terminal_cli_facing_unchanged_tests.rs"]
+mod cli_facing_unchanged_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::computer::types::TaskKind;
+    use std::ffi::OsString;
     use std::path::PathBuf;
 
     #[cfg(unix)]
@@ -3621,7 +3732,7 @@ mod tests {
         if crate::util::shell_env_policy::t05_fresh_process("t05_login_capture_and_replay") {
             return;
         }
-        let login = capture_login_env(None).await;
+        let login = capture_login_env(None, None).await;
         assert!(
             login
                 .keys()
@@ -5148,6 +5259,243 @@ mod tests {
         });
     }
 
+    /// A hook that leaves every command alone and records the calls reported exited.
+    #[derive(Default)]
+    struct ExitRecordingHook {
+        exited: std::sync::Mutex<Vec<crate::sandbox_launch::CallId>>,
+    }
+
+    impl crate::sandbox_launch::SandboxLaunch for ExitRecordingHook {
+        fn prepare(
+            &self,
+            _cmd: &mut tokio::process::Command,
+            _original: &crate::sandbox_launch::OriginalArgv,
+            _call: &crate::sandbox_launch::CallId,
+        ) -> Result<
+            Option<crate::sandbox_launch::LaunchReceipt>,
+            crate::sandbox_launch::SandboxLaunchError,
+        > {
+            Ok(None)
+        }
+
+        fn exited(&self, call: &crate::sandbox_launch::CallId) {
+            self.exited.lock().unwrap().push(call.clone());
+        }
+    }
+
+    impl ExitRecordingHook {
+        fn exits(&self) -> Vec<String> {
+            let mut exits: Vec<String> = self
+                .exited
+                .lock()
+                .unwrap()
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            exits.sort();
+            exits
+        }
+
+        async fn wait_for_exits(&self, count: usize) -> Vec<String> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while self.exits().len() < count && std::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            self.exits()
+        }
+    }
+
+    /// Every backgrounded spawn is reported exited to the sandbox hook exactly once, whether it
+    /// ends on its own, is killed or is torn down with the terminal; a foreground one never is.
+    #[tokio::test]
+    async fn backgrounded_spawns_are_reported_exited_to_the_sandbox_hook_once() {
+        let hook = Arc::new(ExitRecordingHook::default());
+        let backend = LocalTerminalBackend::new_with_sandbox_launch(hook.clone());
+        let call = |id: &str| crate::sandbox_launch::CallId::tool(id).to_string();
+
+        let mut foreground = make_request("true");
+        foreground.tool_call_id = "fg-exit".to_owned();
+        backend.run(foreground).await.expect("foreground run");
+        let mut done = make_request("sleep 0.2");
+        done.tool_call_id = "bg-done".to_owned();
+        backend
+            .run_background(done)
+            .await
+            .expect("background spawn");
+        let mut killed = make_request("sleep 60");
+        killed.tool_call_id = "bg-killed".to_owned();
+        let killed = backend
+            .run_background(killed)
+            .await
+            .expect("background spawn");
+        backend.kill_task(&killed.task_id).await;
+
+        let expected = vec![call("bg-done"), call("bg-killed")];
+        assert_eq!(expected, hook.wait_for_exits(2).await);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(expected, hook.exits(), "reported once each");
+
+        let mut torn_down = make_request("sleep 60");
+        torn_down.tool_call_id = "bg-torn-down".to_owned();
+        backend
+            .run_background(torn_down)
+            .await
+            .expect("background spawn");
+        backend.cancel();
+        assert_eq!(
+            vec![call("bg-done"), call("bg-killed"), call("bg-torn-down")],
+            hook.wait_for_exits(3).await
+        );
+    }
+
+    /// A spawn's call id and the variables its shell restored.
+    type RestoredSpawn = (String, Vec<(OsString, OsString)>);
+
+    /// A hook that leaves every command alone and records what a replaying shell restores.
+    #[derive(Default)]
+    struct RestoredRecordingHook {
+        restored: std::sync::Mutex<Vec<RestoredSpawn>>,
+    }
+
+    impl crate::sandbox_launch::SandboxLaunch for RestoredRecordingHook {
+        fn prepare(
+            &self,
+            _cmd: &mut tokio::process::Command,
+            _original: &crate::sandbox_launch::OriginalArgv,
+            _call: &crate::sandbox_launch::CallId,
+        ) -> Result<
+            Option<crate::sandbox_launch::LaunchReceipt>,
+            crate::sandbox_launch::SandboxLaunchError,
+        > {
+            Ok(None)
+        }
+
+        fn prepare_restoring(
+            &self,
+            _cmd: &mut tokio::process::Command,
+            _original: &crate::sandbox_launch::OriginalArgv,
+            restored: &[(OsString, OsString)],
+            call: &crate::sandbox_launch::CallId,
+        ) -> Result<
+            Option<crate::sandbox_launch::LaunchReceipt>,
+            crate::sandbox_launch::SandboxLaunchError,
+        > {
+            self.restored
+                .lock()
+                .unwrap()
+                .push((call.to_string(), restored.to_vec()));
+            Ok(None)
+        }
+    }
+
+    /// The persistent shell hands the sandbox hook what its snapshot exports: part of the
+    /// environment the next command runs under, though that command's `Command` never sets it.
+    #[tokio::test]
+    async fn the_persistent_shell_hands_the_sandbox_hook_what_its_snapshot_exports() {
+        let hook = Arc::new(RestoredRecordingHook::default());
+        let backend = LocalTerminalBackend::new_inner(LocalTerminalConfig {
+            persistent_shell: true,
+            sandbox_launch: Some(hook.clone()),
+            ..Default::default()
+        });
+        let mut export = make_request("export PYTHONUSERBASE=/opt/fuigo-restored");
+        export.tool_call_id = "export".to_owned();
+        backend.run(export).await.expect("export run");
+        let mut next = make_request("true");
+        next.tool_call_id = "next".to_owned();
+        backend.run(next).await.expect("next run");
+
+        let base = (
+            OsString::from("PYTHONUSERBASE"),
+            OsString::from("/opt/fuigo-restored"),
+        );
+        let next_call = crate::sandbox_launch::CallId::tool("next").to_string();
+        let restored = hook.restored.lock().unwrap().clone();
+        assert!(
+            restored
+                .iter()
+                .any(|(call, vars)| *call == next_call && vars.contains(&base)),
+            "{restored:?}"
+        );
+    }
+
+    /// A hook that replaces the command the way a backend does: a wrapper shell that prints a
+    /// marker and execs the original argv, keeping only program, args, directory and env edits.
+    struct MarkerWrapHook;
+
+    impl crate::sandbox_launch::SandboxLaunch for MarkerWrapHook {
+        fn prepare(
+            &self,
+            cmd: &mut tokio::process::Command,
+            original: &crate::sandbox_launch::OriginalArgv,
+            _call: &crate::sandbox_launch::CallId,
+        ) -> Result<
+            Option<crate::sandbox_launch::LaunchReceipt>,
+            crate::sandbox_launch::SandboxLaunchError,
+        > {
+            let envs: Vec<(OsString, Option<OsString>)> = cmd
+                .as_std()
+                .get_envs()
+                .map(|(name, value)| (name.to_os_string(), value.map(OsString::from)))
+                .collect();
+            let mut wrapped = tokio::process::Command::new("/bin/sh");
+            wrapped
+                .arg("-c")
+                .arg("printf 'SANDBOX-WRAPPED\\n'; exec \"$@\"")
+                .arg("sh")
+                .arg(&original.program)
+                .args(&original.args)
+                .current_dir(&original.cwd);
+            for (name, value) in envs {
+                match value {
+                    Some(value) => wrapped.env(name, value),
+                    None => wrapped.env_remove(name),
+                };
+            }
+            *cmd = wrapped;
+            Ok(Some(crate::sandbox_launch::LaunchReceipt {
+                sandboxed: true,
+                backend: None,
+            }))
+        }
+    }
+
+    /// The wrapper the hook returns is what runs on every spawn route: the plain shell, the static
+    /// login capture (fd 3 snapshot pipe) and the persistent shell (fds 3 and 4), each through the
+    /// session-cgroup-aware `spawn_placed` rebuild, so the mappings and the detach still follow the
+    /// wrapper's own argv.
+    #[tokio::test]
+    async fn a_wrapping_hook_runs_on_every_spawn_route() {
+        for route in 0..3 {
+            let backend = LocalTerminalBackend::new_inner(LocalTerminalConfig {
+                persistent_shell: route == 2,
+                login_shell_capture: route == 1,
+                sandbox_launch: Some(Arc::new(MarkerWrapHook)),
+                ..Default::default()
+            });
+            let result = backend
+                .run(make_request("echo route-ran-$((1+1))"))
+                .await
+                .unwrap();
+            assert_eq!(
+                result.exit_code,
+                Some(0),
+                "route {route}: {}",
+                result.combined_output
+            );
+            assert!(
+                result.combined_output.contains("SANDBOX-WRAPPED"),
+                "route {route}: {}",
+                result.combined_output
+            );
+            assert!(
+                result.combined_output.contains("route-ran-2"),
+                "route {route}: {}",
+                result.combined_output
+            );
+        }
+    }
+
     #[test]
     fn background_child_is_reaped_via_process_scope() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -6218,6 +6566,153 @@ mod tests {
         );
 
         backend.kill_task(&handle_b.task_id).await;
+    }
+
+    /// Stopping one of several commands that run in parallel (one tool call's command) leaves the others running.
+    #[tokio::test]
+    async fn killing_one_parallel_command_leaves_the_others_running() {
+        let backend = LocalTerminalBackend::new();
+        let mut handles = Vec::new();
+        for call in ["par-1", "par-2", "par-3"] {
+            let mut req = make_request("sleep 60");
+            req.tool_call_id = call.to_string();
+            req.timeout = Duration::from_secs(300);
+            handles.push(backend.run_background(req).await.unwrap());
+        }
+        backend.kill_task(&handles[1].task_id).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let state = |snap: Option<TaskSnapshot>| snap.map(|s| (s.completed, s.explicitly_killed));
+        assert_eq!(state(backend.get_task(&handles[1].task_id).await), Some((true, true)), "the stopped command is gone");
+        assert_eq!(state(backend.get_task(&handles[0].task_id).await), Some((false, false)), "the first keeps running");
+        assert_eq!(state(backend.get_task(&handles[2].task_id).await), Some((false, false)), "the third keeps running");
+        backend.kill_task(&handles[0].task_id).await;
+        backend.kill_task(&handles[2].task_id).await;
+    }
+
+    fn describe_run(r: &TerminalRunResult) -> String {
+        format!("exit={:?} signal={:?} timed_out={} output={:?}", r.exit_code, r.signal, r.timed_out, r.combined_output)
+    }
+
+    /// Row 48.5, path "per-command timeout": the command that times out is torn down on its own process group;
+    /// parallel commands from other tool calls finish normally (checked on both the static and the persistent shell).
+    #[tokio::test]
+    async fn a_command_timeout_leaves_parallel_commands_running() {
+        for persistent in [false, true] {
+            let backend = if persistent {
+                LocalTerminalBackend::with_persistent_shell()
+            } else {
+                LocalTerminalBackend::new()
+            };
+            let mut bg = make_request("sleep 60");
+            bg.tool_call_id = format!("to-bg-{persistent}");
+            bg.timeout = Duration::from_secs(300);
+            let bg = backend.run_background(bg).await.unwrap();
+
+            let mut slow = make_request("sleep 60");
+            slow.tool_call_id = format!("to-slow-{persistent}");
+            slow.timeout = Duration::from_millis(300);
+            let mut sibling = make_request("sleep 1; echo sibling-done");
+            sibling.tool_call_id = format!("to-sib-{persistent}");
+            sibling.timeout = Duration::from_secs(30);
+
+            let (timed, sib) = tokio::join!(backend.run(slow), backend.run(sibling));
+            let (timed, sib) = (timed.unwrap(), sib.unwrap());
+            assert!(timed.timed_out, "persistent={persistent}: the slow command must time out");
+            assert!(
+                !sib.timed_out && sib.exit_code == Some(0) && sib.combined_output.contains("sibling-done"),
+                "persistent={persistent}: a parallel command must finish normally, got {}",
+                describe_run(&sib)
+            );
+            assert!(
+                backend.get_task(&bg.task_id).await.is_some_and(|s| !s.completed),
+                "persistent={persistent}: a parallel background command must still be running"
+            );
+            backend.kill_task(&bg.task_id).await;
+        }
+    }
+
+    /// Row 48.5, path "subagent cancel/finish": the owner-scoped kills (foreground and background) stop only that
+    /// owner's commands; another session's and an unowned parallel command finish normally.
+    #[tokio::test]
+    async fn killing_one_owners_commands_leaves_parallel_commands_of_others_running() {
+        for persistent in [false, true] {
+            let backend = if persistent {
+                LocalTerminalBackend::with_persistent_shell()
+            } else {
+                LocalTerminalBackend::new()
+            };
+            let mut other_bg = make_owned_request("sleep 60", "parent");
+            other_bg.tool_call_id = format!("own-bg-{persistent}");
+            other_bg.timeout = Duration::from_secs(300);
+            let other_bg = backend.run_background(other_bg).await.unwrap();
+
+            let mut victim = make_owned_request("sleep 60", "sub-a");
+            victim.tool_call_id = format!("own-victim-{persistent}");
+            victim.timeout = Duration::from_secs(300);
+            let mut parent_call = make_owned_request("sleep 1; echo parent-done", "parent");
+            parent_call.tool_call_id = format!("own-parent-{persistent}");
+            let mut unowned_call = make_request("sleep 1; echo unowned-done");
+            unowned_call.tool_call_id = format!("own-unowned-{persistent}");
+            let driver = async {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                backend.kill_foreground_commands_by_owner("sub-a").await;
+                backend.kill_all_background_tasks_by_owner("sub-a").await;
+            };
+            let (v, p, u, ()) = tokio::join!(
+                backend.run(victim),
+                backend.run(parent_call),
+                backend.run(unowned_call),
+                driver
+            );
+            let (v, p, u) = (v.unwrap(), p.unwrap(), u.unwrap());
+            assert_eq!(v.signal.as_deref(), Some("cancelled"), "persistent={persistent}: the owner's command is stopped");
+            assert!(
+                p.exit_code == Some(0) && p.combined_output.contains("parent-done"),
+                "persistent={persistent}: another session's command must finish normally, got {}",
+                describe_run(&p)
+            );
+            assert!(
+                u.exit_code == Some(0) && u.combined_output.contains("unowned-done"),
+                "persistent={persistent}: an unowned command must finish normally, got {}",
+                describe_run(&u)
+            );
+            assert!(
+                backend.get_task(&other_bg.task_id).await.is_some_and(|s| !s.completed),
+                "persistent={persistent}: another session's background command must keep running"
+            );
+            backend.kill_task(&other_bg.task_id).await;
+        }
+    }
+
+    /// Row 48.5, path "kill_task": killing one background task (the model tool or the UI kill) leaves a parallel
+    /// foreground command running to its normal end. (A live foreground command has no task id to kill by.)
+    #[tokio::test]
+    async fn kill_task_on_one_background_task_leaves_a_parallel_foreground_command_running() {
+        for persistent in [false, true] {
+            let backend = if persistent {
+                LocalTerminalBackend::with_persistent_shell()
+            } else {
+                LocalTerminalBackend::new()
+            };
+            let mut victim = make_request("sleep 60");
+            victim.tool_call_id = format!("kt-victim-{persistent}");
+            victim.timeout = Duration::from_secs(300);
+            let victim = backend.run_background(victim).await.unwrap();
+            let mut sibling = make_request("sleep 1; echo kt-sibling-done");
+            sibling.tool_call_id = format!("kt-sib-{persistent}");
+            let driver = async {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                backend.kill_task(&victim.task_id).await
+            };
+            let (s, outcome) = tokio::join!(backend.run(sibling), driver);
+            let s = s.unwrap();
+            assert_eq!(outcome, KillOutcome::Killed, "persistent={persistent}");
+            assert!(
+                s.exit_code == Some(0) && s.combined_output.contains("kt-sibling-done"),
+                "persistent={persistent}: the parallel foreground command must finish normally, got {}",
+                describe_run(&s)
+            );
+        }
     }
 
     #[tokio::test]

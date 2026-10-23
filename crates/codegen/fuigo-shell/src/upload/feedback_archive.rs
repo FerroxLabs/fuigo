@@ -105,8 +105,8 @@ fn held_first_party_keys() -> Vec<String> {
         .filter_map(Result::ok)
         .collect();
     keys.extend(
-        [auth::FUIGO_API_KEY_ENV_VAR, auth::LEGACY_FUIGO_API_KEY_ENV_VAR]
-            .into_iter()
+        auth::FLUX_KEY_ENV_VARS
+            .iter()
             .filter_map(|name| std::env::var(name).ok()),
     );
     keys

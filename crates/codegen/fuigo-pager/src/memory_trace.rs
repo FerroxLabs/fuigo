@@ -763,7 +763,10 @@ mod tests {
         test_support::record_sample_for_tests();
 
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(!body.contains("other-thread"), "foreign purge leaked: {body}");
+        assert!(
+            !body.contains("other-thread"),
+            "foreign purge leaked: {body}"
+        );
         assert_eq!(body.lines().count(), 1, "only this thread's sample: {body}");
     }
 

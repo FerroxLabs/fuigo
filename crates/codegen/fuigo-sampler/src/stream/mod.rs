@@ -13,4 +13,4 @@ pub mod responses_ptc;
 pub use chat_completions::stream_chat_completions;
 pub use collect::collect_response;
 pub use messages::stream_messages;
-pub use responses::stream_responses;
+pub use responses::{ClientTools, stream_responses};

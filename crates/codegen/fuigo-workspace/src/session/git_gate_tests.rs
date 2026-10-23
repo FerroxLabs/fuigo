@@ -902,3 +902,123 @@ async fn patch_and_content_ops_skip_snapshot() {
         assert_eq!(walks.load(Ordering::SeqCst), 2);
     }
 }
+
+/// A walk waiting in line for the single ODB permit is not a hung walk: the walk timeout counts from the moment it
+/// starts, the queue has its own (longer) limit. Before this, a healthy walk queued behind another repository's slow
+/// walk was failed with "git walk timed out" once the line outlasted the walk timeout.
+#[tokio::test]
+async fn a_walk_queued_behind_another_repository_is_not_timed_out_by_the_line() {
+    let (repo_a, repo_b) = (init_temp_repo(), init_temp_repo());
+    let gate = GitGate::with_queue_limit(
+        Duration::from_millis(1),
+        Duration::from_millis(200),
+        Duration::from_secs(60),
+        1,
+        Duration::from_secs(60),
+    );
+    let started = Arc::new(AtomicUsize::new(0));
+    let release = tokio::sync::watch::channel(false).0;
+    let holder = {
+        let (gate, root, started, mut rx) = (gate.clone(), repo_a.path().to_path_buf(), Arc::clone(&started), release.subscribe());
+        tokio::spawn(async move {
+            gate.run(&root, status_op(), move || {
+                let (started, mut rx) = (Arc::clone(&started), rx.clone());
+                async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    while !*rx.borrow() {
+                        if rx.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(1_u32)
+                }
+            })
+            .await
+        })
+    };
+    wait_for_count(&started, 1).await;
+    let queued = {
+        let (gate, root) = (gate.clone(), repo_b.path().to_path_buf());
+        tokio::spawn(async move { gate.run(&root, status_op(), || async { Ok(2_u32) }).await })
+    };
+    // Three walk timeouts in the line, then the holder lets go.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    release.send(true).unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(30), queued).await.expect("queued walk hung").unwrap();
+    assert_eq!(got.expect("a walk that only waited in line must not time out"), 2);
+    let _ = holder.await;
+}
+
+/// The line has a limit too: a permit that never comes back does not hold its waiters for ever.
+#[tokio::test]
+async fn the_line_for_the_permit_is_still_bounded() {
+    let (repo_a, repo_b) = (init_temp_repo(), init_temp_repo());
+    let gate = GitGate::with_queue_limit(
+        Duration::from_millis(1),
+        Duration::from_millis(100),
+        Duration::from_millis(500),
+        1,
+        Duration::from_secs(60),
+    );
+    let started = Arc::new(AtomicUsize::new(0));
+    let release = tokio::sync::watch::channel(false).0;
+    let holder = {
+        let (gate, root, started, rx) = (gate.clone(), repo_a.path().to_path_buf(), Arc::clone(&started), release.subscribe());
+        tokio::spawn(async move {
+            gate.run(&root, status_op(), move || {
+                let (started, mut rx) = (Arc::clone(&started), rx.clone());
+                async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    while !*rx.borrow() {
+                        if rx.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(1_u32)
+                }
+            })
+            .await
+        })
+    };
+    wait_for_count(&started, 1).await;
+    let err = gate
+        .run(repo_b.path(), status_op(), || async { Ok(2_u32) })
+        .await
+        .expect_err("a waiter behind a stuck permit must give up");
+    assert!(err.to_string().contains("timed out"), "{err}");
+    release.send(true).unwrap();
+    let _ = holder.await;
+}
+
+/// A walk that has started and does not finish still times out after the walk timeout, queue limit notwithstanding.
+#[tokio::test]
+async fn a_running_walk_still_times_out_after_the_walk_timeout() {
+    let repo = init_temp_repo();
+    let gate = GitGate::with_queue_limit(
+        Duration::from_millis(1),
+        Duration::from_millis(150),
+        Duration::from_secs(60),
+        1,
+        Duration::from_secs(60),
+    );
+    let release = tokio::sync::watch::channel(false).0;
+    let rx = release.subscribe();
+    let began = std::time::Instant::now();
+    let err = gate
+        .run(repo.path(), status_op(), move || {
+            let mut rx = rx.clone();
+            async move {
+                while !*rx.borrow() {
+                    if rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+                Ok(1_u32)
+            }
+        })
+        .await
+        .expect_err("a running walk past its timeout must fail");
+    assert!(err.to_string().contains("timed out"), "{err}");
+    assert!(began.elapsed() < Duration::from_secs(30), "gave up in {:?}", began.elapsed());
+    release.send(true).unwrap();
+}

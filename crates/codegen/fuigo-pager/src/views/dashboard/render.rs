@@ -115,7 +115,8 @@ pub fn render_dashboard(
 
     let home = cached_home();
     let rows = if workspace_dashboard_enabled {
-        let provisional = crate::app::workspace_sync::provisional_agent_ids(agents, workspace_snapshot);
+        let provisional =
+            crate::app::workspace_sync::provisional_agent_ids(agents, workspace_snapshot);
         build_rows_with_workspace(agents, workspace_snapshot, &provisional, home)
     } else {
         build_rows_with_roster(
@@ -345,6 +346,20 @@ pub fn render_dashboard(
             Default::default()
         };
         state.peek_reply_rect = render.reply_rect;
+        // Record the live tail's geometry and painted cells for drag selection, and paint the current selection over it
+        state.peek_tail_rect = render.tail_rect;
+        match render.tail_rect {
+            Some(rect) => {
+                state.peek_tail_cells = super::peek_select::capture_cells(buf, rect);
+                if let Some(sel) = state.peek_tail_selection {
+                    super::peek_select::paint_selection(buf, rect, &sel);
+                }
+            }
+            None => {
+                state.peek_tail_cells.clear();
+                state.peek_tail_selection = None;
+            }
+        }
         let cursor = render.caret;
         // The reply is a full PromptWidget, so its `@` file-context picker paints ABOVE the peek box (same chrome as the dispatch box's)
         // Slash completion stays inert for the reply

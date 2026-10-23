@@ -412,6 +412,57 @@ async fn incremental_dispatch_surfaces_fast_tool_before_slow_sibling() {
 /// All of those calls fell through to fully concurrent dispatch and could lose edits via TOCTOU on the same workspace file.
 ///
 /// These tests pin the JSON-key contract so the bucket key keeps tracking every toolset's actual schema.
+/// A tool that declares its path argument (`ToolMetadata::lock_path_param`) is keyed on exactly that argument, even
+/// when the harness spells it outside the fixed fallback keys: opencode `edit` and `read` use `filePath`. Before the
+/// declaration was consulted, parallel `edit` calls on one file had no key and ran concurrently (lost update).
+#[test]
+fn lock_path_for_call_keys_a_declared_argument_outside_the_fixed_keys() {
+    let cwd = Path::new("/cwd");
+    let edit_a = serde_json::json!({"filePath": "src/lib.rs", "oldString": "a", "newString": "b"});
+    let edit_b = serde_json::json!({"filePath": "./src/../src/lib.rs", "oldString": "c", "newString": "d"});
+    let key = lock_path_for_call(&edit_a, Some("filePath"), cwd);
+    assert!(key.is_some(), "a declared filePath must produce a lock key");
+    assert_eq!(key, lock_path_for_call(&edit_b, Some("filePath"), cwd));
+    // The same file reached through a harness that spells it `file_path` shares the key.
+    assert_eq!(
+        key,
+        lock_path_for_call(
+            &serde_json::json!({"file_path": "/cwd/src/lib.rs"}),
+            Some("file_path"),
+            cwd
+        )
+    );
+    // Different files never share one.
+    assert_ne!(
+        key,
+        lock_path_for_call(
+            &serde_json::json!({"filePath": "src/other.rs"}),
+            Some("filePath"),
+            cwd
+        )
+    );
+}
+
+#[test]
+fn lock_path_for_call_ignores_other_path_shaped_arguments_of_a_declaring_tool() {
+    let cwd = Path::new("/cwd");
+    // A declaring tool is keyed on its own argument only: an unrelated `path` must not alias it.
+    let args = serde_json::json!({"target_notebook": "nb.ipynb", "path": "other.py"});
+    assert_eq!(
+        lock_path_for_call(&args, Some("target_notebook"), cwd),
+        lock_path_for_args(&serde_json::json!({"path": "nb.ipynb"}), cwd)
+    );
+    assert_eq!(lock_path_for_call(&args, Some("file_path"), cwd), None);
+}
+
+#[test]
+fn lock_path_for_call_falls_back_to_the_fixed_keys_without_a_declaration() {
+    let cwd = Path::new("/cwd");
+    let args = serde_json::json!({"file_path": "src/main.rs"});
+    assert_eq!(lock_path_for_call(&args, None, cwd), lock_path_for_args(&args, cwd));
+    assert!(lock_path_for_call(&args, None, cwd).is_some());
+}
+
 #[test]
 fn lock_path_for_args_matches_fuigo_build_file_path() {
     // fuigo_build search_replace / opencode EditTool / WriteTool / etc.

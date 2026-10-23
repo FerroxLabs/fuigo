@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use fuigo_pager_pty_harness::{
-    ContentController, EnvOp, PtyExitPoll, PtyHarness, keys, pager_binary,
+    ContentController, EnvOp, PtyExitPoll, PtyHarness, keys, oauth_provider_ops, pager_binary,
     seed_fake_oauth_coding_data_opted_out,
 };
 
@@ -42,11 +42,14 @@ async fn privacy_banner_persists_into_agent_view_and_opt_in_shares() {
 
 /// The banner's two preconditions: force the rollout flag on (the env override beats remote settings) and remove the sandbox's fake `FUIGO_API_KEY`.
 /// Removing the key makes the seeded opted-out OAuth entry the active auth.
-fn banner_env_ops() -> [EnvOp<'static>; 2] {
-    [
+/// Fuigo ships with no OAuth issuer, so the one the seeded entry belongs to is named too (otherwise the pager stops on the key prompt).
+fn banner_env_ops() -> Vec<EnvOp<'static>> {
+    let mut ops = vec![
         EnvOp::set("FUIGO_PRIVACY_NOTICE_ROLLOUT", "1"),
         EnvOp::remove("FUIGO_API_KEY"),
-    ]
+    ];
+    ops.extend(oauth_provider_ops());
+    ops
 }
 
 async fn run_opt_out() -> Result<()> {
@@ -152,13 +155,17 @@ async fn run_opt_in() -> Result<()> {
 }
 
 fn spawn_pager(binary: &Path, content: &ContentController, project: &Path) -> Result<PtyHarness> {
+    // Session auth only reaches the settings, models and inference endpoints over a trusted HTTPS origin.
+    let front_env = content.session_front_env();
+    let mut ops = banner_env_ops();
+    ops.extend(front_env.iter().map(|(key, value)| EnvOp::set(key, value)));
     PtyHarness::spawn_with_content_env_ops_in_dir(
         binary,
         ROWS,
         COLS,
         content,
         &[],
-        &banner_env_ops(),
+        &ops,
         Some(project),
     )
 }

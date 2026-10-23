@@ -59,6 +59,7 @@ pub(crate) struct GroveEnvGuard {
 impl GroveEnvGuard {
     pub(crate) fn set(data: &Path, sock: &Path) -> Self {
         let lock = GROVE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::test_support::grove_env_held_adjust(1);
         let prev_data_dir = std::env::var_os("GROVE_DATA_DIR");
         let prev_control_sock = std::env::var_os("GROVE_CONTROL_SOCK");
         // SAFETY: the guard holds GROVE_ENV_LOCK for its whole lifetime, and every
@@ -89,6 +90,7 @@ impl Drop for GroveEnvGuard {
                 None => std::env::remove_var("GROVE_CONTROL_SOCK"),
             }
         }
+        crate::test_support::grove_env_held_adjust(-1);
     }
 }
 use crate::copy::CopyStats;

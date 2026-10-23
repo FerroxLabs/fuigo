@@ -531,6 +531,7 @@ impl<C> ChildRecord<C> {
 
 pub(super) trait ForegroundChild {
     fn id(&self) -> &str;
+    fn request(&self) -> &SubagentRequest;
     fn child_session_id(&self) -> &str;
     fn deadline(&self) -> Option<tokio::time::Instant>;
     /// True when the spawn caller dropped its result receiver while this
@@ -546,6 +547,10 @@ pub(super) trait ForegroundChild {
 impl ForegroundChild for PendingChild {
     fn id(&self) -> &str {
         &self.request.id
+    }
+
+    fn request(&self) -> &SubagentRequest {
+        &self.request
     }
 
     fn child_session_id(&self) -> &str {
@@ -581,6 +586,10 @@ impl ForegroundChild for PendingChild {
 impl<C: ChildControl> ForegroundChild for ActiveChild<C> {
     fn id(&self) -> &str {
         &self.request.id
+    }
+
+    fn request(&self) -> &SubagentRequest {
+        &self.request
     }
 
     fn child_session_id(&self) -> &str {
@@ -665,6 +674,14 @@ pub(super) fn background_if_caller_gone(child: &mut impl ForegroundChild) {
         "foreground subagent caller gone; auto-backgrounding (child keeps running)",
     );
     child.mark_backgrounded();
+}
+
+/// [`background_if_caller_gone`] without its gate: deterministic, before the aborted caller has dropped its receiver.
+/// Only a child whose caller is still waiting is handed off.
+pub(super) fn hand_off_to_background(child: &mut impl ForegroundChild) {
+    if child.take_reply().is_some() {
+        child.mark_backgrounded();
+    }
 }
 
 pub(super) async fn sleep_until(deadline: Option<tokio::time::Instant>) {

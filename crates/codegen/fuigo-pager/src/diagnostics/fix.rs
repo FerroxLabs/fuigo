@@ -1015,10 +1015,10 @@ fn commonmark_code_span(value: &str) -> String {
 
 fn shell_quote_path(path: &Path) -> Option<String> {
     let value = path.to_str()?;
-    if value
-        .chars()
-        .any(|character| matches!(character, '\n' | '\r' | '\0') || fuigo_tty_utils::is_unsafe_display_char(character))
-    {
+    if value.chars().any(|character| {
+        matches!(character, '\n' | '\r' | '\0')
+            || fuigo_tty_utils::is_unsafe_display_char(character)
+    }) {
         return None;
     }
     Some(format!("'{}'", value.replace('\'', "'\\''")))

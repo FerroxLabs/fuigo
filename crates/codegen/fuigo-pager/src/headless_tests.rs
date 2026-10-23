@@ -331,8 +331,8 @@ fn spawn_fake_agent(
     fuigo_acp_lib::AcpAgentTx,
     std::sync::Arc<std::sync::Mutex<FakeAgentLog>>,
 ) {
-    use std::sync::{Arc, Mutex};
     use fuigo_acp_lib::AcpAgentMessage;
+    use std::sync::{Arc, Mutex};
     let log = Arc::new(Mutex::new(FakeAgentLog::default()));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AcpAgentMessage>();
     let log_for_task = log.clone();
@@ -406,9 +406,10 @@ async fn worktree_create_opens_session_at_worktree_subdirectory() {
     );
     let spec = WorktreeSpec::from_cli(Some("fix"), Some("origin/main")).unwrap();
 
-    let opened = open_session_in_new_worktree(&tx, &launch_cwd, &spec, None, RunDeadline::start(None))
-        .await
-        .unwrap();
+    let opened =
+        open_session_in_new_worktree(&tx, &launch_cwd, &spec, None, RunDeadline::start(None))
+            .await
+            .unwrap();
 
     assert_eq!(opened.session_id.0.as_ref(), "sess-new");
     assert_eq!(opened.cwd, wt_root.path().join("crates").join("pager"));
@@ -451,10 +452,15 @@ async fn worktree_create_with_session_id_names_worktree_and_session() {
     );
     let sid = "2d3c6b3e-3d43-4f0a-9d2e-2b6d1b6a9c11";
 
-    let opened =
-        open_session_in_new_worktree(&tx, source.path(), &WorktreeSpec::default(), Some(sid), RunDeadline::start(None))
-            .await
-            .unwrap();
+    let opened = open_session_in_new_worktree(
+        &tx,
+        source.path(),
+        &WorktreeSpec::default(),
+        Some(sid),
+        RunDeadline::start(None),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(opened.session_id.0.as_ref(), sid);
     assert_eq!(opened.cwd, wt_root.path());
@@ -492,10 +498,16 @@ async fn worktree_create_failure_is_reported_before_any_session_opens() {
         ),
     ] {
         let (tx, log) = spawn_fake_agent(reply, Ok("never"));
-        let err = open_session_in_new_worktree(&tx, source.path(), &WorktreeSpec::default(), None, RunDeadline::start(None))
-            .await
-            .unwrap_err()
-            .to_string();
+        let err = open_session_in_new_worktree(
+            &tx,
+            source.path(),
+            &WorktreeSpec::default(),
+            None,
+            RunDeadline::start(None),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("couldn't create worktree"), "{err}");
         assert!(err.contains(expect), "{err}");
         assert!(log.lock().unwrap().new_sessions.is_empty());
@@ -511,10 +523,16 @@ async fn worktree_create_then_session_failure_names_the_orphaned_worktree() {
         Err("agent refused"),
     );
 
-    let err = open_session_in_new_worktree(&tx, source.path(), &WorktreeSpec::default(), None, RunDeadline::start(None))
-        .await
-        .unwrap_err()
-        .to_string();
+    let err = open_session_in_new_worktree(
+        &tx,
+        source.path(),
+        &WorktreeSpec::default(),
+        None,
+        RunDeadline::start(None),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
 
     assert!(err.contains("agent refused"), "{err}");
     assert!(err.contains(&wt_root.path().display().to_string()), "{err}");
@@ -537,10 +555,17 @@ async fn worktree_resume_loads_reported_session_without_re_restoring_code() {
     );
     let spec = WorktreeSpec::from_cli(Some(""), Some("v1.2")).unwrap();
 
-    let opened =
-        resume_session_in_new_worktree(&tx, source.path(), &spec, "orig", Some(true), false, RunDeadline::start(None))
-            .await
-            .unwrap();
+    let opened = resume_session_in_new_worktree(
+        &tx,
+        source.path(),
+        &spec,
+        "orig",
+        Some(true),
+        false,
+        RunDeadline::start(None),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(opened.session_id.0.as_ref(), "forked-in-worktree");
     assert_eq!(opened.cwd, eff_cwd);
@@ -587,14 +612,30 @@ async fn worktree_resume_failure_carries_local_miss_hint_like_the_tui() {
     let (tx, _log) = spawn_fake_agent(serde_json::json!({"error": "archive unavailable"}), Ok("x"));
     let spec = WorktreeSpec::default();
 
-    let hinted = resume_session_in_new_worktree(&tx, source.path(), &spec, "my title", None, true, RunDeadline::start(None))
-        .await
-        .unwrap_err()
-        .to_string();
-    let plain = resume_session_in_new_worktree(&tx, source.path(), &spec, "my title", None, false, RunDeadline::start(None))
-        .await
-        .unwrap_err()
-        .to_string();
+    let hinted = resume_session_in_new_worktree(
+        &tx,
+        source.path(),
+        &spec,
+        "my title",
+        None,
+        true,
+        RunDeadline::start(None),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    let plain = resume_session_in_new_worktree(
+        &tx,
+        source.path(),
+        &spec,
+        "my title",
+        None,
+        false,
+        RunDeadline::start(None),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
 
     assert_eq!(
         plain,
@@ -1282,9 +1323,15 @@ fn a_prompt_error_echoing_a_sent_credential_is_redacted_in_every_format() {
         )
         .expect_err("a failed turn exits non-zero");
         let out = captured.text();
-        assert!(!out.contains(SENT), "{format:?}: stdout carried the sent key: {out}");
+        assert!(
+            !out.contains(SENT),
+            "{format:?}: stdout carried the sent key: {out}"
+        );
         if format != super::OutputFormat::Plain {
-            assert!(out.contains("Credit limit reached for key <redacted>"), "{format:?}: control: {out}");
+            assert!(
+                out.contains("Credit limit reached for key <redacted>"),
+                "{format:?}: control: {out}"
+            );
         }
     }
 }
@@ -1297,8 +1344,11 @@ fn a_structured_output_error_quoting_a_sent_credential_is_redacted() {
     let _registry = crate::test_util::sent_credentials_lock();
     fuigo_telemetry::sent_credentials::record(SENT);
     let captured = CapturedOut::default();
-    let mut emitter =
-        super::HeadlessEmitter::with_writer(super::OutputFormat::Json, true, Box::new(captured.clone()));
+    let mut emitter = super::HeadlessEmitter::with_writer(
+        super::OutputFormat::Json,
+        true,
+        Box::new(captured.clone()),
+    );
     let mut meta = serde_json::Map::new();
     meta.insert(
         "structuredOutputError".into(),
@@ -1308,7 +1358,10 @@ fn a_structured_output_error_quoting_a_sent_credential_is_redacted() {
     emitter.on_end("end_turn", "sess-p149", "req-p149", None);
     let out = captured.text();
     assert!(!out.contains(SENT), "{out}");
-    assert!(out.contains("<redacted>"), "control: the error is reported: {out}");
+    assert!(
+        out.contains("<redacted>"),
+        "control: the error is reported: {out}"
+    );
 }
 
 /// P149 (S8, Astra r2 #6): the run-level error `on_end` folds into the terminal document is scrubbed too.
@@ -1317,11 +1370,19 @@ fn a_run_level_error_on_the_terminal_document_is_redacted() {
     const SENT: &str = "fuigo-p149-SYNTH-on-end-key-000001";
     let _registry = crate::test_util::sent_credentials_lock();
     fuigo_telemetry::sent_credentials::record(SENT);
-    for format in [super::OutputFormat::Json, super::OutputFormat::StreamingJson] {
+    for format in [
+        super::OutputFormat::Json,
+        super::OutputFormat::StreamingJson,
+    ] {
         let captured = CapturedOut::default();
         let mut emitter =
             super::HeadlessEmitter::with_writer(format, false, Box::new(captured.clone()));
-        emitter.on_end("end_turn", "sess-p149", "req-p149", Some(&format!("run failed near {SENT}")));
+        emitter.on_end(
+            "end_turn",
+            "sess-p149",
+            "req-p149",
+            Some(&format!("run failed near {SENT}")),
+        );
         let out = captured.text();
         assert!(!out.contains(SENT), "{format:?}: {out}");
         if format == super::OutputFormat::Json {
@@ -1773,8 +1834,8 @@ mod permission_denial {
 
     use crate::headless::{
         HeadlessDenial, HeadlessDenialRule, HeadlessEmitter, HeadlessOutcome, OutputFormat,
-        PERMISSION_DENIED_EXIT_CODE, TurnStop, emit_completed_response,
-        connection_closed_error, handle_headless_acp_message, headless_run_outcome,
+        PERMISSION_DENIED_EXIT_CODE, TurnStop, connection_closed_error, emit_completed_response,
+        handle_headless_acp_message, headless_run_outcome,
     };
 
     /// A prompt response carrying the shell's own terminal `_meta`, with `cancellationCategory`
@@ -1854,11 +1915,8 @@ mod permission_denial {
 
     fn captured_emitter() -> (super::CapturedOut, HeadlessEmitter) {
         let captured = super::CapturedOut::default();
-        let emitter = HeadlessEmitter::with_writer(
-            OutputFormat::Json,
-            false,
-            Box::new(captured.clone()),
-        );
+        let emitter =
+            HeadlessEmitter::with_writer(OutputFormat::Json, false, Box::new(captured.clone()));
         (captured, emitter)
     }
 
@@ -1888,6 +1946,40 @@ mod permission_denial {
         assert_eq!(denial.tool_call_id, "tc-1");
     }
 
+    /// 53.7(a): every refused approval prints its own stderr line, tool and reason, at the moment it is refused.
+    /// The denial latch keeps only the first, so a run that carries on past several refusals must still name each one.
+    #[test]
+    fn every_refused_approval_prints_one_stderr_line_with_tool_and_reason() {
+        let stderr = super::CapturedOut::default();
+        let mut emitter = emitter().with_refusal_writer(Box::new(stderr.clone()));
+        for title in ["Write src/main.rs", "Edit src/lib.rs"] {
+            let _ = ask(
+                &mut emitter,
+                /*yolo=*/ false,
+                Some(title),
+                &[acp::PermissionOptionKind::RejectOnce],
+            );
+        }
+        let text = stderr.text();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "one line per refusal: {text:?}");
+        assert!(
+            lines[0].contains("Write src/main.rs") && lines[0].contains("no one to ask"),
+            "{:?}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("Edit src/lib.rs") && lines[1].contains("no one to ask"),
+            "{:?}",
+            lines[1]
+        );
+        assert_eq!(
+            emitter.take_permission_denial().and_then(|d| d.tool_title).as_deref(),
+            Some("Write src/main.rs"),
+            "the latch still keeps the first denial"
+        );
+    }
+
     /// P149 (S8, Astra r1 #1): a denied tool call whose title holds a credential this process sent prints that title
     /// on stderr (`human_line` on exit 3, `notice_line` when the run continued) and puts it in the denial record of
     /// the terminal document. Every one of them carries `<redacted>` in its place.
@@ -1901,9 +1993,15 @@ mod permission_denial {
             &mut emitter,
             /*yolo=*/ false,
             Some(&format!("echo {SENT}")),
-            &[acp::PermissionOptionKind::AllowOnce, acp::PermissionOptionKind::RejectOnce],
+            &[
+                acp::PermissionOptionKind::AllowOnce,
+                acp::PermissionOptionKind::RejectOnce,
+            ],
         );
-        let denial = emitter.permission_denial.clone().expect("a headless denial is latched");
+        let denial = emitter
+            .permission_denial
+            .clone()
+            .expect("a headless denial is latched");
         for (what, text) in [
             ("human_line", denial.human_line()),
             ("notice_line", denial.notice_line()),
@@ -1914,7 +2012,10 @@ mod permission_denial {
         }
         emitter.on_error("turn failed", None);
         let out = captured.text();
-        assert!(!out.contains(SENT), "the terminal document carries the sent key: {out}");
+        assert!(
+            !out.contains(SENT),
+            "the terminal document carries the sent key: {out}"
+        );
     }
 
     /// `--yolo` auto-approves, so a request it cannot approve is a denial too — the branch the
@@ -1997,8 +2098,58 @@ mod permission_denial {
             tool_title: Some("Write src/main.rs".to_owned()),
             tool_call_id: "tc-1".to_owned(),
             offered_option_kinds: vec!["reject_once".to_owned()],
+            tool_kind: None,
             agent_message: None,
+            reported: false,
         }
+    }
+
+    /// A read-only shell command that only silences or merges a stream is not a write by redirect: its remedy is the
+    /// ordinary `--allow` one. A real `> file` keeps the redirect remedy.
+    #[test]
+    fn a_dev_null_or_fd_dup_redirect_is_not_a_file_write_remedy() {
+        for title in [
+            "ls x 2>/dev/null",
+            "ls x >/dev/null",
+            "ls x > /dev/null 2>&1",
+            "ls x &>/dev/null",
+            "ls x 2>&1",
+            "ls x >&2",
+            "ls x 2>/dev/null | head",
+            "ls .venv/bin 2>/dev/null; which python3",
+            "Execute `rm -rf x 2>/dev/null`",
+        ] {
+            let d = HeadlessDenial {
+                tool_kind: Some("execute".to_owned()),
+                tool_title: Some(title.to_owned()),
+                ..denial()
+            };
+            assert!(
+                d.remedy().contains("--allow") && !d.remedy().contains("redirect"),
+                "{title}: {}",
+                d.remedy()
+            );
+        }
+        for title in ["echo hi > out.txt", "echo hi >> out.txt", "ls 2>/dev/null > out.txt", "cat a >/dev/nullx"] {
+            let d = HeadlessDenial {
+                tool_kind: Some("execute".to_owned()),
+                tool_title: Some(title.to_owned()),
+                ..denial()
+            };
+            assert!(d.remedy().contains("redirect"), "{title}: {}", d.remedy());
+        }
+    }
+
+    /// One line per refusal: it carries the rule and the per-tool remedy, so nothing repeats it at exit.
+    #[test]
+    fn the_refusal_line_carries_the_rule_and_the_remedy() {
+        let d = HeadlessDenial {
+            tool_kind: Some("edit".to_owned()),
+            ..denial()
+        };
+        let line = d.refusal_line();
+        assert!(line.contains("headless_never_approves") && line.contains(d.remedy()), "{line}");
+        assert_eq!(line.lines().count(), 1);
     }
 
     /// D.2.1. The code is a compatibility commitment: `0` is success, `1` is a generic error, `2` is
@@ -2249,11 +2400,20 @@ mod permission_denial {
         let body = text.strip_suffix('\n').expect("ends with one newline");
         assert!(body.starts_with(prefix), "trusted prefix intact: {text:?}");
         assert!(
-            !body.chars().any(|c| c.is_control() || fuigo_tty_utils::is_unsafe_display_char(c)),
+            !body
+                .chars()
+                .any(|c| c.is_control() || fuigo_tty_utils::is_unsafe_display_char(c)),
             "no ESC, CR, LF, tab or other control remains in the line: {text:?}"
         );
-        assert_eq!(text.matches("fuigo:").count(), fuigo_count, "the forged prefix is inert text inside the one line: {text:?}");
-        assert!(body.contains("Denied by rule"), "the trusted tail survives: {text:?}");
+        assert_eq!(
+            text.matches("fuigo:").count(),
+            fuigo_count,
+            "the forged prefix is inert text inside the one line: {text:?}"
+        );
+        assert!(
+            body.contains("Denied by rule"),
+            "the trusted tail survives: {text:?}"
+        );
     }
 
     /// P181 (sweep, S3): the connection-closed path writes the denial line to a caller-supplied stderr writer. The tool
@@ -2269,12 +2429,22 @@ mod permission_denial {
             let mut stderr = Vec::new();
             let _ = connection_closed_error(&mut emitter, &mut stderr);
             let text = String::from_utf8(stderr).expect("utf8");
-            assert_one_intact_line(&text, "fuigo: a permission was denied in headless mode and the run continued: ", 3);
+            assert_one_intact_line(
+                &text,
+                "fuigo: a permission was denied in headless mode and the run continued: ",
+                3,
+            );
             // S5: the 150-column hostile field is shortened to the field cap (middle replaced by an ellipsis)
             // ESC and the space before it are two spaces; inside the bracketed call id the `]` is escaped
-            assert!(text.contains("Write  ]0;owned") || text.contains("Write  \\]0;owned"), "inert visible bytes: {text:?}");
+            assert!(
+                text.contains("Write  ]0;owned") || text.contains("Write  \\]0;owned"),
+                "inert visible bytes: {text:?}"
+            );
             assert!(text.contains('\u{2026}'), "the field is capped: {text:?}");
-            assert!(text.contains("Denied by rule `") && text.contains("Remedy: "), "Fuigo's own tail is intact: {text:?}");
+            assert!(
+                text.contains("Denied by rule `") && text.contains("Remedy: "),
+                "Fuigo's own tail is intact: {text:?}"
+            );
         }
     }
 
@@ -2292,9 +2462,14 @@ mod permission_denial {
             d.agent_message = agent_message.map(str::to_owned);
             // The agent message is only on the budget line, so in the third case these two lines hold no hostile text.
             let carried = if agent_message.is_some() { 1 } else { 3 };
-            assert_one_intact_line(&format!("{}\n", d.notice_line()), "fuigo: a permission was denied", carried);
+            assert_one_intact_line(
+                &format!("{}\n", d.notice_line()),
+                "fuigo: a permission was denied",
+                carried,
+            );
             assert_one_intact_line(&format!("{}\n", d.human_line()), "fuigo: blocked", carried);
-            let mut budget = HeadlessDenial::from_budget_rule(HeadlessDenialRule::ExecutionBudgetUnrecognized);
+            let mut budget =
+                HeadlessDenial::from_budget_rule(HeadlessDenialRule::ExecutionBudgetUnrecognized);
             budget.agent_message = Some(HOSTILE_FIELD.to_owned());
             assert_one_intact_line(&format!("{}\n", budget.human_line()), "fuigo: blocked", 3);
         }
@@ -2382,7 +2557,10 @@ mod permission_denial {
             fuigo_shell::session::commands::PERMISSION_CANCELLED_CATEGORY,
             "PermissionCancelled"
         );
-        assert_eq!(crate::app::CANCELLATION_CATEGORY_KEY, "cancellationCategory");
+        assert_eq!(
+            crate::app::CANCELLATION_CATEGORY_KEY,
+            "cancellationCategory"
+        );
     }
 
     /// D.2.2 on the document a machine consumer actually reads: the reason is a field, not prose.
@@ -2414,7 +2592,10 @@ mod permission_denial {
             record["remedy"].as_str().is_some_and(|r| !r.is_empty()),
             "the remedy is data too: {doc}"
         );
-        assert_eq!(record["offeredOptionKinds"], serde_json::json!(["reject_once"]));
+        assert_eq!(
+            record["offeredOptionKinds"],
+            serde_json::json!(["reject_once"])
+        );
     }
 
     /// The invariant that makes the narrow gate safe: a latched denial is never silent, whatever the
@@ -2427,7 +2608,12 @@ mod permission_denial {
         let cases: Vec<(&str, anyhow::Result<HeadlessOutcome>)> = vec![
             (
                 "ended at the denial",
-                headless_run_outcome(Ok(TurnStop::PermissionCancelled), None, None, Some(denial())),
+                headless_run_outcome(
+                    Ok(TurnStop::PermissionCancelled),
+                    None,
+                    None,
+                    Some(denial()),
+                ),
             ),
             (
                 "recovered and finished",
@@ -2650,7 +2836,10 @@ mod permission_denial {
             .expect("the denial is latched")
             .human_line();
         assert_eq!(line.lines().count(), 1, "one line: {line}");
-        assert!(line.contains(&expected), "the agent's message rides on the line: {line}");
+        assert!(
+            line.contains(&expected),
+            "the agent's message rides on the line: {line}"
+        );
     }
 
     /// An interrupt while the turn is driven, after the turn already answered, is ONE document: the
@@ -2658,14 +2847,18 @@ mod permission_denial {
     #[test]
     fn an_interrupt_after_a_completed_response_is_one_document_with_the_error() {
         let captured = super::CapturedOut::default();
-        let mut emitter = HeadlessEmitter::with_writer(OutputFormat::Json, false, Box::new(captured.clone()));
+        let mut emitter =
+            HeadlessEmitter::with_writer(OutputFormat::Json, false, Box::new(captured.clone()));
         let err = crate::headless::finish_interrupt(
             &mut emitter,
             Some(Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))),
             130,
             &acp::SessionId::new("sess-1"),
         );
-        assert!(err.downcast_ref::<crate::headless::HeadlessInterrupted>().is_some());
+        assert!(
+            err.downcast_ref::<crate::headless::HeadlessInterrupted>()
+                .is_some()
+        );
         let doc: serde_json::Value =
             serde_json::from_str(captured.text().trim()).expect("stdout is exactly one JSON value");
         assert_eq!(doc["error"], "Interrupted by SIGINT; exiting 130", "{doc}");
@@ -2772,9 +2965,14 @@ mod permission_denial {
             output_tokens: 20,
             ..Default::default()
         };
-        for format in [OutputFormat::Json, OutputFormat::StreamingJson, OutputFormat::StreamingMessagesJson] {
+        for format in [
+            OutputFormat::Json,
+            OutputFormat::StreamingJson,
+            OutputFormat::StreamingMessagesJson,
+        ] {
             let captured = super::CapturedOut::default();
-            let mut emitter = HeadlessEmitter::with_writer(format, false, Box::new(captured.clone()));
+            let mut emitter =
+                HeadlessEmitter::with_writer(format, false, Box::new(captured.clone()));
             for _ in 0..2 {
                 emitter.reduce_and_emit(StreamEvent::ResponseCompleted {
                     message_id: Some("m".into()),
@@ -2788,48 +2986,82 @@ mod permission_denial {
             emitter.on_error("Interrupted by SIGINT; exiting 130", Some("cancelled"));
             let text = captured.text();
             let terminal: serde_json::Value = serde_json::from_str(
-                text[before..].lines().rev().find(|l| !l.trim().is_empty()).expect("a terminal line"),
+                text[before..]
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .expect("a terminal line"),
             )
             .or_else(|_| serde_json::from_str(text[before..].trim()))
             .expect("terminal json");
             // Two responses of 10 in / 20 out.
-            assert_eq!(terminal["usage"]["output_tokens"], 40, "{format:?}: {terminal}");
-            assert_eq!(terminal["usage"]["input_tokens"], 20, "{format:?}: {terminal}");
+            assert_eq!(
+                terminal["usage"]["output_tokens"], 40,
+                "{format:?}: {terminal}"
+            );
+            assert_eq!(
+                terminal["usage"]["input_tokens"], 20,
+                "{format:?}: {terminal}"
+            );
         }
     }
 
     /// The one-line rule survives an agent message with embedded newlines (a multi-line remedy).
     #[test]
     fn a_multiline_agent_message_stays_on_one_line() {
-        let mut denial = HeadlessDenial::from_budget_rule(HeadlessDenialRule::ExecutionBudgetUnrecognized);
+        let mut denial =
+            HeadlessDenial::from_budget_rule(HeadlessDenialRule::ExecutionBudgetUnrecognized);
         denial.agent_message = Some("rule x refused\n  raise limit y\n\nthen retry".to_string());
         let line = denial.human_line();
         assert_eq!(line.lines().count(), 1, "{line}");
-        assert!(line.contains("rule x refused raise limit y then retry"), "{line}");
+        assert!(
+            line.contains("rule x refused raise limit y then retry"),
+            "{line}"
+        );
     }
 
     /// An interrupt after the terminal document is out (the post-turn memory flush) writes no second
     /// document: a machine consumer reads exactly one. Before it, the error line IS the document.
     #[test]
     fn an_interrupt_writes_one_terminal_document_at_most() {
-        for format in [OutputFormat::Json, OutputFormat::StreamingJson, OutputFormat::StreamingMessagesJson] {
+        for format in [
+            OutputFormat::Json,
+            OutputFormat::StreamingJson,
+            OutputFormat::StreamingMessagesJson,
+        ] {
             let captured = super::CapturedOut::default();
-            let mut emitter = HeadlessEmitter::with_writer(format, false, Box::new(captured.clone()));
+            let mut emitter =
+                HeadlessEmitter::with_writer(format, false, Box::new(captured.clone()));
             let before = captured.text();
             let err = crate::headless::interrupted(&mut emitter, 130);
-            assert!(err.downcast_ref::<crate::headless::HeadlessInterrupted>().is_some());
+            assert!(
+                err.downcast_ref::<crate::headless::HeadlessInterrupted>()
+                    .is_some()
+            );
             let docs = captured.text().len() - before.len();
-            assert!(docs > 0, "{format:?}: an interrupt before any terminal writes the error document");
+            assert!(
+                docs > 0,
+                "{format:?}: an interrupt before any terminal writes the error document"
+            );
             let after_first = captured.text();
             let _ = crate::headless::interrupted(&mut emitter, 130);
-            assert_eq!(captured.text(), after_first, "{format:?}: a second terminal document was written");
+            assert_eq!(
+                captured.text(),
+                after_first,
+                "{format:?}: a second terminal document was written"
+            );
         }
         let captured = super::CapturedOut::default();
-        let mut emitter = HeadlessEmitter::with_writer(OutputFormat::Json, false, Box::new(captured.clone()));
+        let mut emitter =
+            HeadlessEmitter::with_writer(OutputFormat::Json, false, Box::new(captured.clone()));
         emitter.on_end("end_turn", "s", "r", None);
         let done = captured.text();
         let _ = crate::headless::interrupted(&mut emitter, 143);
-        assert_eq!(captured.text(), done, "an interrupt after the terminal document writes nothing");
+        assert_eq!(
+            captured.text(),
+            done,
+            "an interrupt after the terminal document writes nothing"
+        );
     }
 
     /// `--output-format plain`: stdout stays empty and the budget denial writes nothing itself —
@@ -2887,7 +3119,9 @@ mod denial_record_per_format {
             tool_title: Some("Edit src/main.rs".to_owned()),
             tool_call_id: "tc-1".to_owned(),
             offered_option_kinds: vec!["allow_once".to_owned(), "reject_once".to_owned()],
+            tool_kind: None,
             agent_message: None,
+            reported: false,
         }
     }
 
@@ -3277,7 +3511,10 @@ mod denial_record_per_format {
     fn answer_then_budget_error() -> acp::Error {
         let mut err = plain_budget_error();
         if let Some(serde_json::Value::Object(data)) = err.data.as_mut() {
-            data.insert("answer_completed".to_string(), serde_json::Value::Bool(true));
+            data.insert(
+                "answer_completed".to_string(),
+                serde_json::Value::Bool(true),
+            );
         }
         err
     }
@@ -3315,7 +3552,10 @@ mod denial_record_per_format {
         assert_eq!(doc["stopReason"], "end_turn", "{out}");
         assert_eq!(doc["sessionId"], "sess-1", "{out}");
         assert_ne!(doc["type"], "error", "not the error document: {out}");
-        assert_eq!(doc["permissionDenied"]["rule"], "execution_token_budget_exhausted", "{out}");
+        assert_eq!(
+            doc["permissionDenied"]["rule"], "execution_token_budget_exhausted",
+            "{out}"
+        );
         assert_eq!(doc["permissionDenied"]["exitCode"], 3, "{out}");
     }
 
@@ -3328,8 +3568,18 @@ mod denial_record_per_format {
         let lines = ndjson(&out);
         let last = lines.last().expect("a terminal line");
         assert_eq!(last["type"], "end", "{out}");
-        assert_eq!(last["permissionDenied"]["rule"], "execution_token_budget_exhausted", "{out}");
-        assert_eq!(lines.iter().filter(|l| l["type"] == "end" || l["type"] == "error").count(), 1, "{out}");
+        assert_eq!(
+            last["permissionDenied"]["rule"], "execution_token_budget_exhausted",
+            "{out}"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l["type"] == "end" || l["type"] == "error")
+                .count(),
+            1,
+            "{out}"
+        );
     }
 
     #[test]
@@ -3342,7 +3592,10 @@ mod denial_record_per_format {
         let lines = ndjson(&out);
         let results: Vec<_> = lines.iter().filter(|l| l["type"] == "result").collect();
         assert_eq!(results.len(), 1, "one terminal line: {out}");
-        assert_eq!(results[0]["result"], "ANSWER-TEXT-42", "result carries the last text: {out}");
+        assert_eq!(
+            results[0]["result"], "ANSWER-TEXT-42",
+            "result carries the last text: {out}"
+        );
         // Grok r2: the stream must say why the exit code is 3, so the line is the denial's, not a success.
         assert_eq!(results[0]["is_error"], true, "{out}");
         assert_eq!(results[0]["subtype"], "error_during_execution", "{out}");
@@ -3357,13 +3610,21 @@ mod denial_record_per_format {
                 .is_some_and(|e| e.contains("execution_token_budget_exhausted")),
             "errors[0] names the rule: {out}"
         );
-        assert_eq!(lines.last().unwrap()["type"], "result", "the result is the last line: {out}");
+        assert_eq!(
+            lines.last().unwrap()["type"],
+            "result",
+            "the result is the last line: {out}"
+        );
         assert_eq!(
             lines.iter().filter(|l| l["type"] == "assistant").count(),
             1,
             "the assistant frame holds the text once: {out}"
         );
-        assert_eq!(out.matches("ANSWER-TEXT-42").count(), 2, "frame + result: {out}");
+        assert_eq!(
+            out.matches("ANSWER-TEXT-42").count(),
+            2,
+            "frame + result: {out}"
+        );
     }
 
     /// Guard, not a regression test for the round-2 fix: plain never took the new branch, so this passes with or
@@ -3413,8 +3674,14 @@ mod denial_record_per_format {
         let budget = TurnStop::BudgetDenied(HeadlessDenialRule::ExecutionBudgetUnrecognized);
         assert!(!should_run_memory_flush(true, &Ok(budget)));
         assert!(should_run_memory_flush(true, &Ok(TurnStop::Ended)));
-        assert!(should_run_memory_flush(true, &Ok(TurnStop::PermissionCancelled)));
-        assert!(!should_run_memory_flush(true, &Err(anyhow::anyhow!("boom"))));
+        assert!(should_run_memory_flush(
+            true,
+            &Ok(TurnStop::PermissionCancelled)
+        ));
+        assert!(!should_run_memory_flush(
+            true,
+            &Err(anyhow::anyhow!("boom"))
+        ));
         assert!(!should_run_memory_flush(false, &Ok(TurnStop::Ended)));
     }
 
@@ -3491,7 +3758,9 @@ mod denial_docs_pin {
             tool_title: Some("Write src/main.rs".into()),
             tool_call_id: "tc-17".into(),
             offered_option_kinds: vec!["allow_once".into(), "reject_once".into()],
+            tool_kind: None,
             agent_message: None,
+            reported: false,
         };
         let keys = |v: &serde_json::Value| {
             let mut k: Vec<String> = v.as_object().expect("an object").keys().cloned().collect();
@@ -3545,9 +3814,11 @@ mod denial_docs_pin {
             tool_title: Some("Write src/main.rs".into()),
             tool_call_id: "tc-17".into(),
             offered_option_kinds: vec![],
+            tool_kind: Some("edit".into()),
             agent_message: None,
+            reported: false,
         }
-        .human_line();
+        .refusal_line();
         let documented: String = guide
             .split("#### The stderr line")
             .nth(1)
@@ -3653,9 +3924,9 @@ fn p188_a_discarded_attempt_never_reaches_the_reply_in_any_format() {
             emitter.on_text_chunk(dead, Some(stream));
             if stream == 3 {
                 // Astra r1: a hosted tool (x_search) reports mid-attempt; it is not a response boundary
-                emitter.reduce_and_emit(StreamEvent::ToolCall(super::reducer::ToolCallEvent::hosted_for_test(
-                    "xs-1", "x_search",
-                )));
+                emitter.reduce_and_emit(StreamEvent::ToolCall(
+                    super::reducer::ToolCallEvent::hosted_for_test("xs-1", "x_search"),
+                ));
             }
             emitter.reduce_and_emit(StreamEvent::ResponseDiscarded {
                 message_id: None,
@@ -3677,7 +3948,10 @@ fn p188_a_discarded_attempt_never_reaches_the_reply_in_any_format() {
             super::OutputFormat::Json => {
                 let doc: serde_json::Value = serde_json::from_str(&out).expect("one JSON document");
                 assert_eq!(doc["text"], "Looking. A3", "{out}");
-                assert!(doc.get("thought").is_none(), "the dead attempts' thinking is void too: {out}");
+                assert!(
+                    doc.get("thought").is_none(),
+                    "the dead attempts' thinking is void too: {out}"
+                );
             }
             super::OutputFormat::StreamingJson => {
                 // Text lines went out live; a consumer applying `response_discarded` gets the accepted reply
@@ -3698,12 +3972,18 @@ fn p188_a_discarded_attempt_never_reaches_the_reply_in_any_format() {
                 assert_eq!(visible, "Looking. A3", "{out}");
             }
             super::OutputFormat::StreamingMessagesJson => {
-                assert!(!out.contains("A1") && !out.contains("A2"), "no frame or result carries dead text: {out}");
+                assert!(
+                    !out.contains("A1") && !out.contains("A2"),
+                    "no frame or result carries dead text: {out}"
+                );
                 let lines: Vec<serde_json::Value> = out
                     .lines()
                     .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("NDJSON"))
                     .collect();
-                let result = lines.iter().find(|l| l["type"] == "result").expect("result line");
+                let result = lines
+                    .iter()
+                    .find(|l| l["type"] == "result")
+                    .expect("result line");
                 // `result` is the last assistant frame's text, as for any multi-response turn
                 assert_eq!(result["result"], "A3", "{out}");
                 // Astra r1 HIGH: the hosted call reported by a dead attempt keeps its tool_use, so its error
@@ -3711,12 +3991,21 @@ fn p188_a_discarded_attempt_never_reaches_the_reply_in_any_format() {
                 let ids = |kind: &str, key: &str| -> Vec<String> {
                     lines
                         .iter()
-                        .flat_map(|l| l["message"]["content"].as_array().cloned().unwrap_or_default())
+                        .flat_map(|l| {
+                            l["message"]["content"]
+                                .as_array()
+                                .cloned()
+                                .unwrap_or_default()
+                        })
                         .filter(|b| b["type"] == kind)
                         .map(|b| b[key].as_str().unwrap_or_default().to_string())
                         .collect()
                 };
-                assert_eq!(ids("tool_use", "id"), ids("tool_result", "tool_use_id"), "{out}");
+                assert_eq!(
+                    ids("tool_use", "id"),
+                    ids("tool_result", "tool_use_id"),
+                    "{out}"
+                );
             }
         }
     }
@@ -3747,7 +4036,10 @@ fn plain_output_to_a_terminal_is_scrubbed_and_piped_output_is_exact() {
             Box::new(Sink(bytes.clone())),
         );
         emitter.scrub_terminal = terminal;
-        emitter.on_text_chunk("answer \x1b]0;owned\x07 with\u{2028}break \u{e0041}and \x1b[1mbold\x1b[0m\n", None);
+        emitter.on_text_chunk(
+            "answer \x1b]0;owned\x07 with\u{2028}break \u{e0041}and \x1b[1mbold\x1b[0m\n",
+            None,
+        );
         // P188 holds plain text until its response is accepted; this is the acceptance
         emitter.flush_plain_pending();
         String::from_utf8(bytes.lock().unwrap().clone()).unwrap()
@@ -3798,14 +4090,18 @@ fn p181_plain_terminal_output_scrubs_the_first_and_the_resent_attempt() {
     assert!(!out.contains("void"), "{out:?}");
 }
 
-
 /// P181 (Grok r3 HIGH): plain model text on a terminal cannot restyle the terminal, so the denial that follows is intact.
 /// The audit's attack bytes (reset, a fake Fuigo line, black on black, faint, strikethrough) arrive as inert text with
 /// no ESC; split across chunks the sequence is joined before the scrub; the only escape on the stream is Fuigo's own
 /// leading reset on the denial line.
 #[test]
 fn p181_r3_model_text_on_a_terminal_cannot_restyle_the_denial_that_follows() {
-    for tail in ["\x1b[38;2;0;0;0;48;2;0;0;0m", "\x1b[30;40m", "\x1b[2m", "\x1b[9m"] {
+    for tail in [
+        "\x1b[38;2;0;0;0;48;2;0;0;0m",
+        "\x1b[30;40m",
+        "\x1b[2m",
+        "\x1b[9m",
+    ] {
         let captured = CapturedOut::default();
         let mut emitter = super::HeadlessEmitter::with_writer(
             super::OutputFormat::Plain,
@@ -3818,23 +4114,45 @@ fn p181_r3_model_text_on_a_terminal_cannot_restyle_the_denial_that_follows() {
         emitter.flush_plain_pending();
         let out = captured.text();
         assert!(!out.contains('\x1b'), "{out:?}");
-        assert!(out.contains("fuigo: permission granted") && out.contains(&tail[1..]), "inert text stays visible: {out:?}");
+        assert!(
+            out.contains("fuigo: permission granted") && out.contains(&tail[1..]),
+            "inert text stays visible: {out:?}"
+        );
 
         let denial = super::HeadlessDenial {
             rule: super::HeadlessDenialRule::HeadlessNeverApproves,
             tool_title: Some("Write\x1b[0m fuigo: permission granted".to_owned()),
             tool_call_id: "tc-1".to_owned(),
             offered_option_kinds: vec!["reject_once".to_owned()],
+            tool_kind: None,
             agent_message: None,
+            reported: false,
         };
         let mut err = Vec::new();
-        assert!(fuigo_tty_utils::best_effort_stderr::write_fuigo_line_with(&mut err, &denial.notice_line(), true));
+        assert!(fuigo_tty_utils::best_effort_stderr::write_fuigo_line_with(
+            &mut err,
+            &denial.notice_line(),
+            true
+        ));
         let err = String::from_utf8(err).unwrap();
-        assert!(err.starts_with("\x1b[0mfuigo: a permission was denied"), "{err:?}");
-        assert_eq!(err.matches('\x1b').count(), 1, "only Fuigo's own reset: {err:?}");
-        assert!(err.contains(denial.rule.remedy()) && err.ends_with(".\n"), "{err:?}");
+        assert!(
+            err.starts_with("\x1b[0mfuigo: a permission was denied"),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.matches('\x1b').count(),
+            1,
+            "only Fuigo's own reset: {err:?}"
+        );
+        assert!(
+            err.contains(denial.rule.remedy()) && err.ends_with(".\n"),
+            "{err:?}"
+        );
         // L1: the agent's title and the call id are quoted, so its words read as quoted text, not as Fuigo's sentence
-        assert!(err.contains("\u{201c}Write [0m fuigo: permission granted\u{201d} (tool call [tc-1])"), "{err:?}");
+        assert!(
+            err.contains("\u{201c}Write [0m fuigo: permission granted\u{201d} (tool call [tc-1])"),
+            "{err:?}"
+        );
     }
 }
 
@@ -3848,7 +4166,14 @@ fn p181_r3_a_sequence_split_across_chunks_is_judged_whole() {
         Box::new(captured.clone()),
     );
     emitter.scrub_terminal = true;
-    for chunk in ["a\x1b", "[3", "0;4", "0mb \x1b]0;ti", "tle\x07c \u{9b}", "2Jd\n"] {
+    for chunk in [
+        "a\x1b",
+        "[3",
+        "0;4",
+        "0mb \x1b]0;ti",
+        "tle\x07c \u{9b}",
+        "2Jd\n",
+    ] {
         emitter.on_text_chunk(chunk, Some(1));
     }
     emitter.flush_plain_pending();
@@ -3867,7 +4192,10 @@ fn p181_r3_the_resend_path_is_strictly_scrubbed_on_both_attempts() {
     );
     emitter.scrub_terminal = true;
     emitter.on_text_chunk("void \x1b[2m", Some(1));
-    emitter.reduce_and_emit(StreamEvent::ResponseDiscarded { message_id: None, stream_start_ms: Some(1) });
+    emitter.reduce_and_emit(StreamEvent::ResponseDiscarded {
+        message_id: None,
+        stream_start_ms: Some(1),
+    });
     emitter.on_text_chunk("two \x1b[30;40m ", Some(2));
     emitter.on_text_chunk("three \x1b[9m", Some(3));
     emitter.flush_plain_pending();
@@ -3896,7 +4224,10 @@ fn mcp_start_failure_is_one_streaming_json_notice_per_server() {
         .collect();
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert_eq!(lines[0]["type"], "config_notice");
-    assert_eq!(lines[0]["message"], "MCP server \"dead\" failed to start: the server exited before it answered. Run `fuigo mcp doctor`.");
+    assert_eq!(
+        lines[0]["message"],
+        "MCP server \"dead\" failed to start: the server exited before it answered. Run `fuigo mcp doctor`."
+    );
     eprintln!("streaming-json event: {}", lines[0]);
 }
 
@@ -3923,9 +4254,15 @@ fn mcp_start_failure_json_is_valid_for_odd_names_and_dedups_on_printed_name() {
         .map(|l| serde_json::from_str(l).expect("valid json line"))
         .collect();
     assert_eq!(lines.len(), 2, "{lines:?}");
-    assert_eq!(lines[0]["message"], "MCP server \"a'b\\c\" failed to start: the start-up handshake failed. Run `fuigo mcp doctor`.");
+    assert_eq!(
+        lines[0]["message"],
+        "MCP server \"a'b\\c\" failed to start: the start-up handshake failed. Run `fuigo mcp doctor`."
+    );
     let mut seen = std::collections::HashSet::new();
-    assert!(lines.iter().all(|l| seen.insert(l["message"].to_string())), "identical lines printed");
+    assert!(
+        lines.iter().all(|l| seen.insert(l["message"].to_string())),
+        "identical lines printed"
+    );
 }
 
 /// `json` keeps stdout untouched by the warning (it goes to stderr).
@@ -3947,7 +4284,356 @@ fn plain_mode_prints_the_sandbox_warning_once() {
     // The startup stderr line already said it: the session notice is dropped in `plain`.
     assert_eq!(plain_lifecycle_line(&notice, Some(&w)), None);
     // Any other config notice, and the same text when there was no startup line, still print.
+    let other = Lifecycle::ConfigNotice {
+        message: "something else".to_string(),
+    };
+    assert_eq!(
+        plain_lifecycle_line(&other, Some(&w)),
+        Some(other.plain_message())
+    );
+    assert_eq!(
+        plain_lifecycle_line(&notice, None),
+        Some(notice.plain_message())
+    );
+}
+
+/// The Windows run that used `--output-format json` printed the sandbox warning twice: once from `apply_sandbox` and once
+/// for the session's config notice. `json` and `streaming-messages-json` must drop the notice that repeats the startup line.
+#[test]
+fn json_formats_print_the_sandbox_warning_once() {
+    let w = fuigo_sandbox::unavailable_warning_for("workspace", true).unwrap();
+    let notice = Lifecycle::ConfigNotice { message: w.clone() };
+    assert_eq!(config_notice_stderr_line(&notice, Some(&w)), None);
+    // Without a startup line (nothing printed it) the notice still reaches stderr, and other notices always do.
+    assert_eq!(config_notice_stderr_line(&notice, None), Some(notice.plain_message()));
     let other = Lifecycle::ConfigNotice { message: "something else".to_string() };
-    assert_eq!(plain_lifecycle_line(&other, Some(&w)), Some(other.plain_message()));
-    assert_eq!(plain_lifecycle_line(&notice, None), Some(notice.plain_message()));
+    assert_eq!(config_notice_stderr_line(&other, Some(&w)), Some(other.plain_message()));
+    // A lifecycle event that is not a config notice has no stderr line in these formats.
+    assert_eq!(config_notice_stderr_line(&Lifecycle::CompactCancelled, Some(&w)), None);
+}
+
+impl crate::headless::InterruptSource for tokio::sync::mpsc::UnboundedReceiver<i32> {
+    async fn next_code(&mut self) -> i32 {
+        self.recv().await.expect("the test holds the sender")
+    }
+}
+
+/// P5 / upstream 1.0.42: the first interrupt is latched for the run to report, and a second one is the hard stop.
+/// The OS handler outlives its stream, so without the second wait a wedged cleanup could not be interrupted.
+#[tokio::test]
+async fn a_second_interrupt_is_the_hard_stop_after_the_first_is_latched() {
+    let (code_tx, mut codes) = tokio::sync::mpsc::unbounded_channel::<i32>();
+    let (latched_tx, mut latched) = tokio::sync::watch::channel(None::<i32>);
+    let forced = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i32>::new()));
+    let watcher = tokio::spawn({
+        let forced = std::sync::Arc::clone(&forced);
+        async move {
+            crate::headless::latch_then_force_exit(&mut codes, latched_tx, |code| {
+                forced.lock().unwrap().push(code);
+            })
+            .await;
+        }
+    });
+
+    code_tx.send(143).unwrap();
+    latched.changed().await.expect("the first interrupt is latched");
+    assert_eq!(Some(143), *latched.borrow());
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        forced.lock().unwrap().is_empty(),
+        "the first interrupt reports through the run; it does not exit the process"
+    );
+
+    code_tx.send(130).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), watcher)
+        .await
+        .expect("a second interrupt must reach the hard stop")
+        .unwrap();
+    assert_eq!(vec![130], *forced.lock().unwrap());
+}
+
+// ── `--effort` validation and the ignored-flag notice (52.16) ─────────────────────────────
+
+mod effort_flag {
+    use super::super::{EffortChoice, resolve_headless_effort};
+    use crate::acp::model_state::ModelState;
+    use agent_client_protocol as acp;
+
+    fn state_with_plain_model() -> (ModelState, acp::ModelId) {
+        let id = acp::ModelId::new("plain-model");
+        let mut state = ModelState::default();
+        state
+            .available
+            .insert(id.clone(), acp::ModelInfo::new(id.clone(), "Plain Model"));
+        state.current = Some(id.clone());
+        (state, id)
+    }
+
+    #[test]
+    fn a_model_without_effort_support_gets_a_visible_notice_not_an_error() {
+        let (state, id) = state_with_plain_model();
+        match resolve_headless_effort(&state, &id, "high").expect("not an error") {
+            EffortChoice::Ignored { notice } => {
+                assert!(notice.contains("plain-model"), "{notice}");
+                assert!(notice.contains("high"), "{notice}");
+                assert!(notice.contains("--effort"), "{notice}");
+            }
+            other => panic!("expected the ignored notice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_level_is_rejected_when_no_catalog_is_loaded() {
+        let state = ModelState::default();
+        let id = acp::ModelId::new("anything");
+        let err = resolve_headless_effort(&state, &id, "ludicrous").expect_err("unknown level");
+        assert!(err.to_string().contains("ludicrous"), "{err}");
+        assert!(err.to_string().contains("--effort"), "{err}");
+    }
+
+    #[test]
+    fn a_canonical_level_with_no_catalog_is_deferred() {
+        let state = ModelState::default();
+        let id = acp::ModelId::new("anything");
+        assert!(matches!(
+            resolve_headless_effort(&state, &id, "high"),
+            Ok(EffortChoice::Deferred)
+        ));
+    }
+}
+
+// ── A prompt that starts a goal stays alive until the goal stops (51.4 / 62.1) ────────────
+
+mod goal_wait {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn ext_update(update: serde_json::Value) -> fuigo_acp_lib::AcpClientMessage {
+        let raw = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": "sess-1",
+            "update": update,
+        }))
+        .unwrap();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        fuigo_acp_lib::AcpClientMessage::ExtNotification(fuigo_acp_lib::AcpArgs {
+            request: acp::ExtNotification::new("fuigo/session/update", raw.into()),
+            response_tx: tx,
+        })
+    }
+
+    fn goal_updated(status: &str) -> fuigo_acp_lib::AcpClientMessage {
+        ext_update(serde_json::json!({
+            "sessionUpdate": "goal_updated",
+            "goal_id": "g1",
+            "objective": "ship it",
+            "status": status,
+            "phase": "executing",
+            "elapsed_ms": 5,
+            "total_deliverables": 0,
+            "completed_deliverables": 0,
+            "total_worker_rounds": 1,
+            "total_verify_rounds": 0,
+        }))
+    }
+
+    async fn quick_prompt_response() -> Result<acp::PromptResponse, acp::Error> {
+        Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))
+    }
+
+    async fn drive(
+        client_tx: &tokio::sync::mpsc::UnboundedSender<fuigo_acp_lib::AcpClientMessage>,
+        mut acp_rx: fuigo_acp_lib::AcpClientRx,
+        bg_timeout: Duration,
+    ) -> (super::super::TurnDriveOutcome, Duration) {
+        let _ = client_tx;
+        let (acp_tx, _agent_rx) =
+            tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpAgentMessage>();
+        let session_id = acp::SessionId::new("sess-1");
+        let mut emitter = super::super::HeadlessEmitter::new(super::super::OutputFormat::Json, false);
+        let mut options = timeout_test_options(None);
+        options.background_wait_timeout = bg_timeout;
+        let mut ttf_logged = false;
+        let started = Instant::now();
+        let outcome = super::super::drive_prompt_turn(
+            quick_prompt_response(),
+            &mut acp_rx,
+            &acp_tx,
+            &session_id,
+            &mut emitter,
+            &options,
+            super::super::RunDeadline::start(None),
+            Instant::now(),
+            &mut ttf_logged,
+            None,
+            &crate::app::prompt_ack::PromptAckDeadlines::from_env(None),
+            &super::super::InterruptWatch::inert(),
+        )
+        .await;
+        (outcome, started.elapsed())
+    }
+
+    #[tokio::test]
+    async fn the_run_waits_for_an_active_goal_to_finish() {
+        let (client_tx, acp_rx) =
+            tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+        client_tx.send(goal_updated("active")).unwrap();
+        let finisher = client_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            finisher.send(goal_updated("complete")).unwrap();
+        });
+        let (outcome, took) = tokio::time::timeout(
+            Duration::from_secs(20),
+            drive(&client_tx, acp_rx, Duration::from_secs(30)),
+        )
+        .await
+        .expect("the run must end once the goal completes");
+        assert!(took >= Duration::from_millis(500), "returned before the goal finished: {took:?}");
+        assert!(!outcome.goal_unfinished, "the goal finished in time");
+        assert!(matches!(outcome.prompt_result, Some(Ok(_))));
+    }
+
+    #[tokio::test]
+    async fn a_goal_still_running_at_the_wait_timeout_is_reported_unfinished() {
+        let (client_tx, acp_rx) =
+            tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+        client_tx.send(goal_updated("active")).unwrap();
+        let (outcome, took) = tokio::time::timeout(
+            Duration::from_secs(20),
+            drive(&client_tx, acp_rx, Duration::from_millis(400)),
+        )
+        .await
+        .expect("the wait timeout must end the run");
+        assert!(took >= Duration::from_millis(350), "{took:?}");
+        assert!(outcome.goal_unfinished, "an unfinished goal makes the run fail");
+    }
+
+    #[tokio::test]
+    async fn a_paused_goal_does_not_hold_the_run() {
+        let (client_tx, acp_rx) =
+            tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+        client_tx.send(goal_updated("active")).unwrap();
+        client_tx.send(goal_updated("user_paused")).unwrap();
+        let (outcome, took) = tokio::time::timeout(
+            Duration::from_secs(20),
+            drive(&client_tx, acp_rx, Duration::from_secs(30)),
+        )
+        .await
+        .expect("a paused goal must not hold the run");
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        assert!(!outcome.goal_unfinished);
+    }
+
+    #[tokio::test]
+    async fn a_run_without_a_goal_still_exits_at_once() {
+        let (client_tx, acp_rx) =
+            tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+        let (outcome, took) = tokio::time::timeout(
+            Duration::from_secs(20),
+            drive(&client_tx, acp_rx, Duration::from_secs(30)),
+        )
+        .await
+        .expect("no background work: exit at once");
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        assert!(!outcome.goal_unfinished);
+    }
+
+    /// A background task that finishes after the prompt returned makes the shell start a follow-up turn.
+    /// The run waits for that turn instead of exiting between the task ending and the turn starting.
+    #[tokio::test]
+    async fn the_run_waits_for_the_follow_up_turn_a_finished_task_starts() {
+        let (client_tx, acp_rx) =
+            tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+        // A background task started before the prompt returned (its own method, as the shell sends it)
+        let raw = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": "sess-1",
+            "update": {"sessionUpdate": "task_backgrounded", "task_id": "t1"},
+        }))
+        .unwrap();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        client_tx
+            .send(fuigo_acp_lib::AcpClientMessage::ExtNotification(fuigo_acp_lib::AcpArgs {
+                request: acp::ExtNotification::new("fuigo/task_backgrounded", raw.into()),
+                response_tx: tx,
+            }))
+            .unwrap();
+        let sender = client_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let raw = serde_json::value::to_raw_value(&serde_json::json!({
+                "sessionId": "sess-1",
+                "update": {"sessionUpdate": "task_completed", "task_snapshot": {"task_id": "t1"}},
+            }))
+            .unwrap();
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            sender
+                .send(fuigo_acp_lib::AcpClientMessage::ExtNotification(fuigo_acp_lib::AcpArgs {
+                    request: acp::ExtNotification::new("fuigo/task_completed", raw.into()),
+                    response_tx: tx,
+                }))
+                .unwrap();
+            // The follow-up turn starts a moment later, outside the original prompt, and ends
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            sender
+                .send(ext_update(serde_json::json!({"sessionUpdate": "response_started"})))
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            sender
+                .send(ext_update(serde_json::json!({
+                    "sessionUpdate": "turn_completed",
+                    "prompt_id": "wake-1",
+                    "stop_reason": "end_turn",
+                })))
+                .unwrap();
+        });
+        let (outcome, took) = tokio::time::timeout(
+            Duration::from_secs(30),
+            drive(&client_tx, acp_rx, Duration::from_secs(30)),
+        )
+        .await
+        .expect("the run must end after the follow-up turn");
+        assert!(
+            took >= Duration::from_millis(1400),
+            "exited before the follow-up turn finished: {took:?}"
+        );
+        assert!(!outcome.goal_unfinished);
+    }
+}
+
+/// DEFECT 3: the remedy fits the refused tool, and none of them talks about shell redirects.
+#[test]
+fn the_remedy_fits_the_refused_tool() {
+    use super::{HeadlessDenial, HeadlessDenialRule};
+    let with_kind = |kind: Option<&str>| HeadlessDenial {
+        rule: HeadlessDenialRule::HeadlessNeverApproves,
+        tool_title: Some("t".to_owned()),
+        tool_call_id: "tc-1".to_owned(),
+        offered_option_kinds: vec!["reject_once".to_owned()],
+        tool_kind: kind.map(str::to_owned),
+        agent_message: None,
+        reported: false,
+    };
+    for kind in ["edit", "delete", "move"] {
+        let d = with_kind(Some(kind));
+        assert!(d.remedy().contains("--permission-mode acceptEdits"), "{kind}: {}", d.remedy());
+        assert!(d.human_line().contains(d.remedy()));
+        assert_eq!(d.wire_record(true)["remedy"], d.remedy());
+    }
+    let shell = with_kind(Some("execute"));
+    assert!(shell.remedy().contains("--allow"), "{}", shell.remedy());
+    assert!(shell.remedy().contains("not shell commands"), "{}", shell.remedy());
+    for kind in [None, Some("fetch"), Some("other")] {
+        assert_eq!(with_kind(kind).remedy(), HeadlessDenialRule::HeadlessNeverApproves.remedy());
+    }
+    for kind in [None, Some("edit"), Some("execute")] {
+        let r = with_kind(kind).remedy();
+        assert!(!r.contains("redirect") && !r.contains("> file"), "{r}");
+    }
+    // Only a shell command that redirects into a file gets the redirect remedy: no --allow rule can cover it.
+    let mut redirect = with_kind(Some("execute"));
+    redirect.tool_title = Some("Execute `echo x > notes.txt`".to_owned());
+    assert!(redirect.remedy().contains("--always-approve") && redirect.remedy().contains("redirect"));
+    assert!(!redirect.remedy().contains("--allow rule that covers"), "{}", redirect.remedy());
 }

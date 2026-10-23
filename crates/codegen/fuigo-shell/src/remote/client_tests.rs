@@ -1703,3 +1703,32 @@ async fn checkpoint_only_batch_too_large_is_dropped_but_not_latched() {
     assert_eq!(*posts.lock().unwrap(), 2, "the next checkpoint is tried again");
     server.abort();
 }
+
+#[test]
+fn a_published_price_is_read_and_a_bad_one_is_ignored() {
+    let ok = serde_json::json!({
+        "id": "m1", "baseUrl": "https://default.url",
+        "pricing": { "inputPerMillion": 2.5, "outputPerMillion": 10 }
+    });
+    let price = parse_remote_model_value(&ok, "https://default.url").unwrap().price.expect("price");
+    assert_eq!((price.input_per_million, price.output_per_million), (2.5, 10.0));
+    assert_eq!(price.summary(), "$2.5 in / $10 out per 1M tokens");
+    // Snake-case spelling, under `_meta`.
+    let meta = serde_json::json!({
+        "id": "m2", "baseUrl": "https://default.url",
+        "_meta": { "pricing": { "input_per_million": 0.25, "output_per_million": 1.0 } }
+    });
+    assert!(parse_remote_model_value(&meta, "https://default.url").unwrap().price.is_some());
+    // Missing half, negative, or not a number: no price rather than a wrong one.
+    for bad in [
+        serde_json::json!({ "inputPerMillion": 2.5 }),
+        serde_json::json!({ "inputPerMillion": -1, "outputPerMillion": 1 }),
+        serde_json::json!({ "inputPerMillion": "2", "outputPerMillion": 1 }),
+    ] {
+        let v = serde_json::json!({ "id": "m3", "baseUrl": "https://default.url", "pricing": bad });
+        assert!(parse_remote_model_value(&v, "https://default.url").unwrap().price.is_none());
+    }
+    // No pricing object: none.
+    let none = serde_json::json!({ "id": "m4", "baseUrl": "https://default.url" });
+    assert!(parse_remote_model_value(&none, "https://default.url").unwrap().price.is_none());
+}

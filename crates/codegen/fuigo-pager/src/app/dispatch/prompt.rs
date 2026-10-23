@@ -7,7 +7,7 @@ use super::auth::{
 use super::billing::is_credit_limit_error;
 use super::ctx::with_active_agent;
 use super::interject;
-use super::permissions::drain_permission_queue;
+use super::permissions::drain_permission_queue_at_turn_end;
 use super::queue::{
     apply_turn_start_shim, drain_prompt_state_to_last_queued, immediate_server_send_eligible,
     maybe_drain_queue, note_peek_page_flip, push_and_page_flip, push_server_queue_echo,
@@ -506,7 +506,8 @@ pub(super) fn dispatch_send_prompt_inner(
     };
     // A slash command is refused below only if it would queue, so `/new`, `/resume`, and `exit` still run
     let runs_locally = !literal
-        && (text.trim().starts_with('/') || crate::slash::commands::exit::is_exit_alias(text.trim()));
+        && (text.trim().starts_with('/')
+            || crate::slash::commands::exit::is_exit_alias(text.trim()));
     if !runs_locally && refuse_if_load_failed(app, id) {
         return vec![];
     }
@@ -518,6 +519,7 @@ pub(super) fn dispatch_send_prompt_inner(
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
+    let subagent_model_inheritance_from_app = app.subagent_model_inheritance;
     // Set when a plain prompt is queued while a turn is running (local path); shown after the agent borrow ends so we can re-enter via the tip helper
     let mut tip_send_now_after_queue = false;
     let voice_stt_language_from_app = app.voice_config.language.clone();
@@ -633,6 +635,7 @@ pub(super) fn dispatch_send_prompt_inner(
                     respect_manual_folds: respect_manual_folds_from_app,
                     auto_mode_gate: auto_mode_gate_from_app,
                     ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
+                    subagent_model_inheritance: subagent_model_inheritance_from_app,
                     voice_stt_language: voice_stt_language_from_app,
                     // This session's own value (what its fires will actually do), seed only until the session response lands
                     scheduler_background_loops: agent
@@ -852,8 +855,10 @@ pub(super) fn dispatch_send_prompt_inner(
         agent.credit_limit_stashed_prompt = None;
         agent.release_hook_block_hold();
         if consume_input {
+            app.pending_image_notices
+                .extend(agent.unbound_image_placeholder_notice());
             // Drain prompt images before clearing prompt state.
-            drain_prompt_state_to_last_queued(agent);
+            drain_prompt_state_to_last_queued(agent, &mut app.pending_image_notices);
             agent.prompt.set_text("");
             agent.note_draft_consumed();
         }
@@ -927,6 +932,11 @@ pub(super) fn dispatch_send_prompt_inner(
             && parked_sendable_wait
             && !hold_behind_existing_queue
         {
+            let image_notice = if consume_input {
+                agent.unbound_image_placeholder_notice()
+            } else {
+                None
+            };
             let images = agent.prompt.drain_images();
             if consume_input {
                 agent.prompt.set_text("");
@@ -934,7 +944,7 @@ pub(super) fn dispatch_send_prompt_inner(
             }
             // A new prompt is taking over (same contract as the immediate-send branch below)
             agent.clear_follow_ups();
-            return interject::dispatch_send_prompt_now(app, text, images);
+            return interject::dispatch_send_prompt_now(app, text, images, image_notice);
         }
 
         if immediate_server_send {
@@ -951,6 +961,8 @@ pub(super) fn dispatch_send_prompt_inner(
             // Plain image-free sends set no send-now cancel expectation: shell queue state and cancelTrigger decide the outcome
 
             if consume_input {
+                app.pending_image_notices
+                    .extend(agent.unbound_image_placeholder_notice());
                 // Plain prompt: no images to drain
                 // Clear the textarea and record up-arrow history (same as the local path's history insert)
                 agent.prompt.set_text("");
@@ -994,8 +1006,10 @@ pub(super) fn dispatch_send_prompt_inner(
             .enqueue_prompt_with_skill_tokens(text.clone(), skill_token_ranges);
         agent.credit_limit_stashed_prompt = None;
         if consume_input {
+            app.pending_image_notices
+                .extend(agent.unbound_image_placeholder_notice());
             // Drain prompt images before clearing prompt state.
-            drain_prompt_state_to_last_queued(agent);
+            drain_prompt_state_to_last_queued(agent, &mut app.pending_image_notices);
             agent.prompt.set_text("");
             agent.note_draft_consumed();
         }
@@ -1024,7 +1038,7 @@ pub(super) fn dispatch_send_prompt_inner(
         if consume_input && !recorded_as_command {
             agent.record_prompt_in_history(&text);
         }
-        maybe_drain_queue(agent)
+        maybe_drain_queue(agent, &mut app.pending_image_notices)
     };
     effects.extend(drain.effects);
     note_peek_page_flip(app, id, drain.page_flip_entry);
@@ -1118,7 +1132,7 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
     agent.prompt.set_text("");
     agent.note_draft_consumed();
 
-    let drain = maybe_drain_queue(agent);
+    let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
     note_peek_page_flip(app, id, drain.page_flip_entry);
     drain.effects
 }
@@ -1258,7 +1272,9 @@ pub(super) fn handle_prompt_response(
                     // W3B item 3: any other error also meant the prompt never ran, and it vanished without a word
                     // (for example an unknown session id after a failed re-init). Say so, and keep the text in the
                     // line like the branch above: the queued text is not in the composer, so it cannot go back there.
-                    let detail = crate::app::error_display::format_request_failure(None, None, message).message();
+                    let detail =
+                        crate::app::error_display::format_request_failure(None, None, message)
+                            .message();
                     let detail = detail.trim_end().trim_end_matches('.');
                     let text = agent
                         .shared_queue
@@ -1272,7 +1288,10 @@ pub(super) fn handle_prompt_response(
                             fuigo_tty_utils::untrusted(detail),
                             queued_text_rows(&text)
                         ),
-                        None => format!("Your message was not sent: {}.", fuigo_tty_utils::untrusted(detail)),
+                        None => format!(
+                            "Your message was not sent: {}.",
+                            fuigo_tty_utils::untrusted(detail)
+                        ),
                     };
                     agent.scrollback.push_block(RenderBlock::system(line));
                 }
@@ -1345,30 +1364,24 @@ pub(super) fn handle_prompt_response(
         // If the retry notification lost the race with (or never reached) this PromptResponse, detect the free-usage code from the prompt error itself
         // The flattened 429 body embeds it
         let free_usage_blocked = agent.session.free_usage_blocked
-            || result
-                .as_ref()
-                .err()
-                .is_some_and(|e| {
-                    // P119: the shell's verdict decides; the words of `e` only for a reply without one (older shell)
-                    verdicts.as_ref().map_or_else(
-                        || fuigo_shell::sampling::error::is_free_usage_exhausted_error(e),
-                        |v| v.free_usage,
-                    )
-                });
+            || result.as_ref().err().is_some_and(|e| {
+                // P119: the shell's verdict decides; the words of `e` only for a reply without one (older shell)
+                verdicts.as_ref().map_or_else(
+                    || fuigo_shell::sampling::error::is_free_usage_exhausted_error(e),
+                    |v| v.free_usage,
+                )
+            });
         let model_incompatible = agent.session.model_incompatible;
         // Context overflow: the RetryState handler already pushed the actionable block, so the generic TurnFailed and error toast are redundant
         // Derived from the scrollback (mirrors reauth), not a session flag
         let context_overflow = scrollback_has_recent_context_too_large(&agent.scrollback);
-        let disk_full_from_error = result
-            .as_ref()
-            .err()
-            .is_some_and(|e| {
-                // P119: the shell's verdict decides; the words of `e` only for a reply without one (older shell)
-                verdicts.as_ref().map_or_else(
-                    || crate::app::effects::is_disk_full_error(e),
-                    |v| v.disk_full,
-                )
-            });
+        let disk_full_from_error = result.as_ref().err().is_some_and(|e| {
+            // P119: the shell's verdict decides; the words of `e` only for a reply without one (older shell)
+            verdicts.as_ref().map_or_else(
+                || crate::app::effects::is_disk_full_error(e),
+                |v| v.disk_full,
+            )
+        });
         if disk_full_from_error && !scrollback_has_recent_disk_full(&agent.scrollback) {
             agent
                 .scrollback
@@ -1380,15 +1393,18 @@ pub(super) fn handle_prompt_response(
         // Covers races where the retry notification arrives after the PromptResponse
         // The error text is already banner-formatted ("Request failed (402): …"), so recover the status from it when the field is absent
         let credit_limit_blocked = agent.session.credit_limit_blocked
-            || result.as_ref().err().is_some_and(|e| match verdicts.as_ref() {
-                // P119: decided by the shell from the unscrubbed text
-                Some(v) => v.credit_limit,
-                None => {
-                    let status =
-                        http_status.or_else(|| crate::app::error_display::parse_http_status(e));
-                    is_credit_limit_error(status, e)
-                }
-            });
+            || result
+                .as_ref()
+                .err()
+                .is_some_and(|e| match verdicts.as_ref() {
+                    // P119: decided by the shell from the unscrubbed text
+                    Some(v) => v.credit_limit,
+                    None => {
+                        let status =
+                            http_status.or_else(|| crate::app::error_display::parse_http_status(e));
+                        is_credit_limit_error(status, e)
+                    }
+                });
         // A 401/auth failure already showed an actionable `ReAuthRequired` prompt via the RetryState handler (which runs before this PromptResponse)
         // Suppress the redundant "Turn failed" block and error toast so only the prompt shows
         // The needle matches both the raw "Unauthorized (401)" dump and the banner-formatted "Request failed (401): …" text
@@ -1521,9 +1537,9 @@ pub(super) fn handle_prompt_response(
         agent.activity_started_at = None;
         agent.last_activity = None;
 
-        // Drain all queued permission requests: the turn is over, so any pending permissions are stale
-        // Send Cancelled to each
-        drain_permission_queue(agent);
+        // Drain the parent's queued permission requests: the turn is over, so they are stale
+        // Send Cancelled to each, except cards a running background subagent is still waiting on
+        drain_permission_queue_at_turn_end(agent);
 
         // Dismiss any active plan approval or review: the turn that produced it has completed, so the state is stale
         if let Some(mut pav) = agent.plan_approval_view.take() {
@@ -1674,7 +1690,7 @@ pub(super) fn handle_prompt_response(
             None
         };
 
-        let drain = maybe_drain_queue(agent);
+        let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         let page_flip_entry = adopted_page_flip.or(drain.page_flip_entry);
         let mut effects = drain.effects;
 
@@ -1774,7 +1790,7 @@ pub(super) fn handle_compact_complete(
         if app.reconnect_pending {
             return vec![];
         }
-        let drain = maybe_drain_queue(agent);
+        let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         note_peek_page_flip(app, agent_id, drain.page_flip_entry);
         return drain.effects;
     }

@@ -94,7 +94,10 @@ fn info_notice_uses_the_info_prefix() {
 
     let buf = paint(&notice, 60);
 
-    assert_eq!(vec!["i notice: preview · Preview model".to_owned()], rows(&buf));
+    assert_eq!(
+        vec!["i notice: preview · Preview model".to_owned()],
+        rows(&buf)
+    );
     assert_eq!(
         Some(Theme::current().text_secondary),
         buf.cell((2, 0)).map(|cell| cell.fg)
@@ -140,9 +143,21 @@ fn hostile_notice_text_paints_as_one_filtered_capped_line() {
     let painted = rows(&buf);
     assert_eq!(1, painted.len(), "{painted:?}");
     let row = &painted[0];
-    assert!(row.starts_with("i notice: la bel · [31m ]0;title Allow this tool? [y/n] system: evil x"), "{row:?}");
-    assert!(row.chars().all(|c| !c.is_control() && !('\u{202A}'..='\u{202E}').contains(&c) && !('\u{2066}'..='\u{2069}').contains(&c)), "{row:?}");
-    assert!(row.chars().count() <= 2 + NOTICE_TAG.len() + 24 + 3 + 160, "{}", row.chars().count());
+    assert!(
+        row.starts_with("i notice: la bel · [31m ]0;title Allow this tool? [y/n] system: evil x"),
+        "{row:?}"
+    );
+    assert!(
+        row.chars().all(|c| !c.is_control()
+            && !('\u{202A}'..='\u{202E}').contains(&c)
+            && !('\u{2066}'..='\u{2069}').contains(&c)),
+        "{row:?}"
+    );
+    assert!(
+        row.chars().count() <= 2 + NOTICE_TAG.len() + 24 + 3 + 160,
+        "{}",
+        row.chars().count()
+    );
     assert!(row.ends_with('…'));
     // A narrow terminal wraps, never past MAX_ROWS.
     assert!(height(&notice, 30) <= MAX_ROWS);

@@ -592,6 +592,18 @@ mod tests {
     }
 
     #[test]
+    fn tool_search_activity_groups_as_ran_n_tool_searches() {
+        let search = |q: &str| {
+            entry(ToolCallBlock::IntegrationSearch(
+                crate::scrollback::blocks::tool::IntegrationSearchToolCallBlock::new(q),
+            ))
+        };
+        let entries = vec![search("slack"), search("github"), search("linear")];
+        assert_eq!(label(&entries).text, "Ran 3 tool searches");
+        assert_eq!(label(&entries[..1]).text, "Ran 1 tool search");
+    }
+
+    #[test]
     fn web_search_counts_distinct_sources_with_call_fallback() {
         let searched = |query: &str, citations: &[&str]| {
             let mut b = WebSearchToolCallBlock::new(query);

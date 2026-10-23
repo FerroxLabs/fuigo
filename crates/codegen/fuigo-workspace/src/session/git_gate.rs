@@ -11,6 +11,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
@@ -23,7 +24,7 @@ use super::git::{GitDiscoveryResult, discover_git_root};
 use crate::git_odb::{self, OdbLimiter, OdbPermit};
 
 pub const SNAPSHOT_TTL: Duration = Duration::from_secs(1);
-pub use crate::git_odb::WALK_TIMEOUT;
+pub use crate::git_odb::{ODB_QUEUE_WAIT, WALK_TIMEOUT};
 
 pub(crate) const MAX_SLOTS: usize = 64;
 const MAX_KEY_STR: usize = 256;
@@ -87,6 +88,8 @@ struct Snapshot {
 struct Inflight {
     rx: watch::Receiver<Option<WalkOutcome>>,
     epoch: u64,
+    /// Set once the walk holds the ODB permit and is actually running. `walk_timeout` only starts counting then.
+    started: Arc<AtomicBool>,
 }
 
 struct Slot {
@@ -115,6 +118,8 @@ struct GitGateInner {
     odb: OdbLimiter,
     snapshot_ttl: Duration,
     walk_timeout: Duration,
+    /// Longest a waiter stays behind other walks before the walk has even started.
+    queue_limit: Duration,
     state: Mutex<GateState>,
 }
 
@@ -137,11 +142,13 @@ enum Decision {
     Join {
         rx: watch::Receiver<Option<WalkOutcome>>,
         epoch: u64,
+        started: Arc<AtomicBool>,
     },
     Lead {
         tx: watch::Sender<Option<WalkOutcome>>,
         rx: watch::Receiver<Option<WalkOutcome>>,
         epoch: u64,
+        started: Arc<AtomicBool>,
     },
 }
 
@@ -195,6 +202,7 @@ impl GitGate {
                 odb: git_odb::shared().clone(),
                 snapshot_ttl: SNAPSHOT_TTL,
                 walk_timeout: WALK_TIMEOUT,
+                queue_limit: ODB_QUEUE_WAIT,
                 state: Mutex::new(GateState::default()),
             }),
         }
@@ -212,9 +220,30 @@ impl GitGate {
                 odb: OdbLimiter::new(odb_permits, odb_acquire_wait),
                 snapshot_ttl,
                 walk_timeout,
+                queue_limit: walk_timeout,
                 state: Mutex::new(GateState::default()),
             }),
         }
+    }
+
+    /// [`Self::with_config`] with a queue limit longer than the walk timeout.
+    #[cfg(test)]
+    pub(crate) fn with_queue_limit(
+        snapshot_ttl: Duration,
+        walk_timeout: Duration,
+        queue_limit: Duration,
+        odb_permits: usize,
+        odb_acquire_wait: Duration,
+    ) -> Self {
+        let gate = Self::with_config(snapshot_ttl, walk_timeout, odb_permits, odb_acquire_wait);
+        let inner = GitGateInner {
+            odb: gate.inner.odb.clone(),
+            snapshot_ttl,
+            walk_timeout,
+            queue_limit,
+            state: Mutex::new(GateState::default()),
+        };
+        Self { inner: Arc::new(inner) }
     }
 
     pub async fn acquire_odb(&self) -> Result<OdbPermit> {
@@ -289,21 +318,21 @@ impl GitGate {
         let mut epoch_retries = 0;
 
         loop {
-            let (rx, epoch) = match self.decide(&key) {
+            let (rx, epoch, started) = match self.decide(&key) {
                 Decision::Snapshot(value) => {
                     tracing::debug!(root = %key.root.display(), "git_gate snapshot hit");
                     return take_typed(&value);
                 }
-                Decision::Join { rx, epoch } => {
+                Decision::Join { rx, epoch, started } => {
                     tracing::debug!(root = %key.root.display(), "git_gate join inflight");
-                    (rx, epoch)
+                    (rx, epoch, started)
                 }
-                Decision::Lead { tx, rx, epoch } => {
-                    self.spawn_walk(key.clone(), Arc::clone(&walk), tx, epoch);
-                    (rx, epoch)
+                Decision::Lead { tx, rx, epoch, started } => {
+                    self.spawn_walk(key.clone(), Arc::clone(&walk), tx, epoch, Arc::clone(&started));
+                    (rx, epoch, started)
                 }
             };
-            match self.finish_wait(&key, rx, epoch).await {
+            match self.finish_wait(&key, rx, epoch, &started).await {
                 WaitEnd::Done(result) => return result,
                 WaitEnd::Retry(result) => {
                     if epoch_retries >= MAX_EPOCH_RETRIES {
@@ -342,15 +371,18 @@ impl GitGate {
             return Decision::Join {
                 rx: inflight.rx.clone(),
                 epoch: inflight.epoch,
+                started: Arc::clone(&inflight.started),
             };
         }
 
         let (tx, rx) = watch::channel(None);
+        let started = Arc::new(AtomicBool::new(false));
         slot.inflight = Some(Inflight {
             rx: rx.clone(),
             epoch,
+            started: Arc::clone(&started),
         });
-        Decision::Lead { tx, rx, epoch }
+        Decision::Lead { tx, rx, epoch, started }
     }
 
     fn current_epoch(&self, root: &Path) -> u64 {
@@ -380,8 +412,9 @@ impl GitGate {
         key: &FlightKey,
         rx: watch::Receiver<Option<WalkOutcome>>,
         epoch: u64,
+        started: &AtomicBool,
     ) -> WaitEnd<T> {
-        match tokio::time::timeout(self.inner.walk_timeout, join_inflight::<T>(rx)).await {
+        match self.wait_for_walk::<T>(rx, started).await {
             Ok(result) => {
                 if epoch == self.current_epoch(&key.root) {
                     WaitEnd::Done(result)
@@ -400,6 +433,41 @@ impl GitGate {
                     WaitEnd::Done(take_typed(&value))
                 } else {
                     WaitEnd::Done(timed_out)
+                }
+            }
+        }
+    }
+
+    /// Wait for the walk's outcome. A walk that has not started (it is queued behind other walks for the ODB permit) is
+    /// given `queue_limit` in total; once it runs it gets a fresh `walk_timeout`. `Err(Elapsed)` when either is spent.
+    async fn wait_for_walk<T: Clone + 'static>(
+        &self,
+        rx: watch::Receiver<Option<WalkOutcome>>,
+        started: &AtomicBool,
+    ) -> Result<Result<T>, tokio::time::error::Elapsed> {
+        let queued_since = Instant::now();
+        let mut running_since: Option<Instant> = None;
+        let mut join = Box::pin(join_inflight::<T>(rx));
+        loop {
+            if running_since.is_none() && started.load(Ordering::Acquire) {
+                running_since = Some(Instant::now());
+            }
+            let budget = match running_since {
+                Some(since) => self.inner.walk_timeout.saturating_sub(since.elapsed()),
+                None => self
+                    .inner
+                    .queue_limit
+                    .max(self.inner.walk_timeout)
+                    .saturating_sub(queued_since.elapsed()),
+            };
+            // Wake at least this often to notice the walk starting, so a queued walk's clock is not the running one's.
+            let slice = budget.min(Duration::from_millis(50).max(self.inner.walk_timeout / 20));
+            match tokio::time::timeout(slice, &mut join).await {
+                Ok(result) => return Ok(result),
+                Err(elapsed) => {
+                    if budget.is_zero() || slice >= budget {
+                        return Err(elapsed);
+                    }
                 }
             }
         }
@@ -444,6 +512,7 @@ impl GitGate {
         walk: Arc<F>,
         tx: watch::Sender<Option<WalkOutcome>>,
         epoch: u64,
+        started: Arc<AtomicBool>,
     ) where
         T: Clone + Send + Sync + 'static,
         F: Fn() -> Fut + Send + Sync + 'static,
@@ -459,12 +528,12 @@ impl GitGate {
                 tx: Some(tx),
                 epoch,
             };
-            let outcome = this.execute_walk(walk.as_ref()).await;
+            let outcome = this.execute_walk(walk.as_ref(), &started).await;
             publisher.complete(outcome);
         });
     }
 
-    async fn execute_walk<T, F, Fut>(&self, walk: &F) -> WalkOutcome
+    async fn execute_walk<T, F, Fut>(&self, walk: &F, started: &AtomicBool) -> WalkOutcome
     where
         F: Fn() -> Fut,
         Fut: Future<Output = Result<T>> + Send + 'static,
@@ -474,6 +543,7 @@ impl GitGate {
             Ok(permit) => permit,
             Err(error) => return Err(Arc::from(error.to_string())),
         };
+        started.store(true, Ordering::Release);
         let result = walk().await;
         drop(permit);
         match result {

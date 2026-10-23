@@ -11,7 +11,8 @@ use std::time::Duration;
 /// Fixed label of every preview row: it says where the text came from.
 pub const PEER_ROW_LABEL: &str = "Message from another session";
 /// Fixed sentence of the hold dialog.
-pub const ACCEPT_SENTENCE: &str = "Accepting delivers the message to this session. It does not approve any tool call.";
+pub const ACCEPT_SENTENCE: &str =
+    "Accepting delivers the message to this session. It does not approve any tool call.";
 /// The two fixed rows of the sentence (the dialog never wraps, so the sentence is split by Fuigo, not by a wrapper).
 const ACCEPT_ROW_1: &str = "Accepting delivers the message to this session.";
 const ACCEPT_ROW_2: &str = "It does not approve any tool call.";
@@ -90,7 +91,9 @@ pub fn ref_field(r: &str) -> String {
 
 /// The first line of a message body, quoted and capped. A line break of any kind (LF, CR, NEL, U+2028, U+2029) ends it.
 pub fn first_line_field(body: &str) -> String {
-    let end = body.find(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}']).unwrap_or(body.len());
+    let end = body
+        .find(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'])
+        .unwrap_or(body.len());
     fuigo_tty_utils::quoted(&body[..end], LINE_COLS)
 }
 
@@ -129,7 +132,10 @@ fn unescape_entities(s: &str) -> String {
             "gt" => Some('>'),
             "quot" => Some('"'),
             "#39" => Some('\''),
-            _ => ent.strip_prefix("#x").and_then(|h| u32::from_str_radix(h, 16).ok()).and_then(char::from_u32),
+            _ => ent
+                .strip_prefix("#x")
+                .and_then(|h| u32::from_str_radix(h, 16).ok())
+                .and_then(char::from_u32),
         };
         match ch {
             Some(c) => {
@@ -238,7 +244,11 @@ fn reason_label(name: &str) -> &'static str {
 fn cluster_width(g: &str) -> usize {
     use unicode_width::UnicodeWidthStr;
     let w = fuigo_tty_utils::display_width(g).max(UnicodeWidthStr::width(g));
-    if g.chars().nth(1).is_some() && !g.is_ascii() { w.max(2) } else { w }
+    if g.chars().nth(1).is_some() && !g.is_ascii() {
+        w.max(2)
+    } else {
+        w
+    }
 }
 
 /// Display width of `s` measured by grapheme cluster (see [`cluster_width`]).
@@ -272,7 +282,12 @@ pub(crate) fn fit_line(s: &str, cols: usize) -> String {
 
 impl PeerHold {
     fn reasons_text(&self) -> String {
-        let mut parts: Vec<&str> = self.reasons.iter().take(MAX_SHOWN_REASONS).map(|r| reason_label(r)).collect();
+        let mut parts: Vec<&str> = self
+            .reasons
+            .iter()
+            .take(MAX_SHOWN_REASONS)
+            .map(|r| reason_label(r))
+            .collect();
         if parts.is_empty() {
             parts.push("other");
         }
@@ -287,15 +302,24 @@ impl PeerHold {
     fn denial_text(&self, cols: usize) -> Option<String> {
         if self.denial_counts.is_empty() {
             // 12b: the wire carries the shell's note instead of counts; show it for a `sender_denied` hold only.
-            let d = self.detail.as_deref().filter(|d| !d.is_empty() && self.reasons.iter().any(|r| r == "sender_denied"))?;
-            return Some(format!("the sender was recently denied: {}", fuigo_tty_utils::quoted(d, cols.min(LINE_COLS))));
+            let d = self
+                .detail
+                .as_deref()
+                .filter(|d| !d.is_empty() && self.reasons.iter().any(|r| r == "sender_denied"))?;
+            return Some(format!(
+                "the sender was recently denied: {}",
+                fuigo_tty_utils::quoted(d, cols.min(LINE_COLS))
+            ));
         }
         let parts: Vec<String> = self
             .denial_counts
             .iter()
             .map(|(k, n)| format!("{} x{n}", fuigo_tty_utils::quoted(k, REASON_COLS)))
             .collect();
-        Some(format!("the sender was recently denied: {}", parts.join(", ")))
+        Some(format!(
+            "the sender was recently denied: {}",
+            parts.join(", ")
+        ))
     }
 }
 
@@ -326,18 +350,36 @@ pub fn held_row_text(h: &PeerHold, now_secs: u64) -> String {
 /// What a notice row is about. The row is fixed text plus escaped names; a peer string is never a whole row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerNotice {
-    Delivered { name: String },
-    Released { name: String },
-    Refused { name: String, told: bool },
-    Expired { name: String },
+    Delivered {
+        name: String,
+    },
+    Released {
+        name: String,
+    },
+    Refused {
+        name: String,
+        told: bool,
+    },
+    Expired {
+        name: String,
+    },
     /// A protected file changed while peer-influenced (packet 6).
-    IntegrityWarning { path: String },
+    IntegrityWarning {
+        path: String,
+    },
     /// A request matching a denial the sender carried was refused (packet 7).
-    LaunderingRefused { name: String },
+    LaunderingRefused {
+        name: String,
+    },
     /// A released message could not be delivered yet and is held again (12b).
-    Reheld { name: String },
+    Reheld {
+        name: String,
+    },
     /// A `peer_warning` event: the shell's fixed text and an escaped subject, both capped again here (12b).
-    Warning { text: String, subject: String },
+    Warning {
+        text: String,
+        subject: String,
+    },
 }
 
 /// The system notice row for one notice. `None` when the flag is off.
@@ -346,14 +388,27 @@ pub fn notice_row_text(n: &PeerNotice) -> Option<String> {
         return None;
     }
     Some(match n {
-        PeerNotice::Delivered { name } => format!("Peer message from {} was delivered to this session.", name_field(name)),
+        PeerNotice::Delivered { name } => format!(
+            "Peer message from {} was delivered to this session.",
+            name_field(name)
+        ),
         PeerNotice::Released { name } => {
-            format!("Held peer message from {} was released. No tool call was approved.", name_field(name))
+            format!(
+                "Held peer message from {} was released. No tool call was approved.",
+                name_field(name)
+            )
         }
         PeerNotice::Refused { name, told } => {
-            format!("Peer message from {} was refused{}", name_field(name), if *told { "; the sender is told." } else { "." })
+            format!(
+                "Peer message from {} was refused{}",
+                name_field(name),
+                if *told { "; the sender is told." } else { "." }
+            )
         }
-        PeerNotice::Expired { name } => format!("Held peer message from {} expired and was dropped.", name_field(name)),
+        PeerNotice::Expired { name } => format!(
+            "Held peer message from {} expired and was dropped.",
+            name_field(name)
+        ),
         PeerNotice::IntegrityWarning { path } => format!(
             "Warning: a protected file changed while this session was peer-influenced: {}. Peer messages are held until you review it.",
             fuigo_tty_utils::quoted(path, PATH_COLS)
@@ -363,12 +418,22 @@ pub fn notice_row_text(n: &PeerNotice) -> Option<String> {
             name_field(name)
         ),
         PeerNotice::Reheld { name } => {
-            format!("Held peer message from {} could not be delivered yet and is held again.", name_field(name))
+            format!(
+                "Held peer message from {} could not be delivered yet and is held again.",
+                name_field(name)
+            )
         }
         PeerNotice::Warning { text, subject } => {
             let subject = fuigo_tty_utils::quoted(subject, PATH_COLS);
             let text = fuigo_tty_utils::quoted(text, LINE_COLS);
-            format!("Warning from a peer notice: {text}{}", if subject == "\"\"" { String::new() } else { format!(" about {subject}") })
+            format!(
+                "Warning from a peer notice: {text}{}",
+                if subject == "\"\"" {
+                    String::new()
+                } else {
+                    format!(" about {subject}")
+                }
+            )
         }
     })
 }
@@ -410,13 +475,21 @@ pub struct PeerHoldDialog {
 }
 
 fn id_is_plain(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 impl PeerHoldDialog {
     /// Open the dialog. `None` with the flag off, or when the message id is not a plain token (it is put in a command).
     pub fn open(hold: PeerHold) -> Option<Self> {
-        (peer_ui_enabled() && id_is_plain(&hold.message_id)).then_some(Self { hold, expired: false, fits: std::cell::Cell::new(false) })
+        (peer_ui_enabled() && id_is_plain(&hold.message_id)).then_some(Self {
+            hold,
+            expired: false,
+            fits: std::cell::Cell::new(false),
+        })
     }
 
     pub fn message_id(&self) -> &str {
@@ -447,7 +520,10 @@ impl PeerHoldDialog {
     /// `a` accepts (release), `r` refuses, `Esc` / `d` / `q` dismiss. Enter does nothing, so a stray Enter never releases.
     pub fn handle_key(&mut self, key: &crossterm::event::KeyEvent) -> PeerDialogOutcome {
         use crossterm::event::{KeyCode, KeyModifiers};
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return PeerDialogOutcome::Ignored;
         }
         match key.code {
@@ -465,15 +541,27 @@ impl PeerHoldDialog {
     pub fn body_lines(&self, now_secs: u64, width: usize) -> Vec<String> {
         let h = &self.hold;
         let q = |label: &str, v: &str, cap: usize| {
-            let cols = width.saturating_sub(label.chars().count() + 2).clamp(1, cap);
-            fit_line(&format!("{label}{}", fuigo_tty_utils::quoted(v, cols)), width)
+            let cols = width
+                .saturating_sub(label.chars().count() + 2)
+                .clamp(1, cap);
+            fit_line(
+                &format!("{label}{}", fuigo_tty_utils::quoted(v, cols)),
+                width,
+            )
         };
-        let name = if h.from_name.is_empty() { "(unnamed)".to_owned() } else { h.from_name.clone() };
+        let name = if h.from_name.is_empty() {
+            "(unnamed)".to_owned()
+        } else {
+            h.from_name.clone()
+        };
         let mut v = vec![fit_line(
             &format!(
                 "From: {} {}",
                 fuigo_tty_utils::quoted(&name, NAME_COLS.min(width.saturating_sub(24).max(1))),
-                fuigo_tty_utils::bracketed(&h.from_ref, REF_COLS.min(width.saturating_sub(24).max(1)))
+                fuigo_tty_utils::bracketed(
+                    &h.from_ref,
+                    REF_COLS.min(width.saturating_sub(24).max(1))
+                )
             ),
             width,
         )];
@@ -482,20 +570,42 @@ impl PeerHoldDialog {
         if !h.own_mode.is_empty() {
             v.push(q("This session's mode: ", &h.own_mode, REASON_COLS));
         }
-        v.push(fit_line(&format!("Held because: {}", h.reasons_text()), width));
+        v.push(fit_line(
+            &format!("Held because: {}", h.reasons_text()),
+            width,
+        ));
         if let Some(d) = h.denial_text(width.saturating_sub(40).max(1)) {
             v.push(fit_line(&format!("Note: {d}"), width));
         }
         if !h.first_line.is_empty() {
-            v.push(q("Starts: ", &h.first_line[..h.first_line.find(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}']).unwrap_or(h.first_line.len())], LINE_COLS));
+            v.push(q(
+                "Starts: ",
+                &h.first_line[..h
+                    .first_line
+                    .find(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'])
+                    .unwrap_or(h.first_line.len())],
+                LINE_COLS,
+            ));
         }
-        v.push(if self.expired { "This hold has expired.".to_owned() } else { expiry_text(h.expires_at_secs, now_secs) });
+        v.push(if self.expired {
+            "This hold has expired.".to_owned()
+        } else {
+            expiry_text(h.expires_at_secs, now_secs)
+        });
         v
     }
 
     /// The Fuigo-owned rows pinned to the bottom of the box: sentence (two rows) and the legend. No peer text.
     pub fn fixed_lines(&self) -> [&'static str; 3] {
-        [ACCEPT_ROW_1, ACCEPT_ROW_2, if self.expired { LEGEND_EXPIRED } else { LEGEND_LIVE }]
+        [
+            ACCEPT_ROW_1,
+            ACCEPT_ROW_2,
+            if self.expired {
+                LEGEND_EXPIRED
+            } else {
+                LEGEND_LIVE
+            },
+        ]
     }
 
     /// All rows top to bottom (body, then the fixed rows).
@@ -524,7 +634,12 @@ impl PeerHoldDialog {
 /// Paint the dialog centered in `area`. FIXED layout: border, body rows (single lines, clipped by count never wrapped), then the
 /// sentence (2 rows) and the legend pinned to the last three inner rows. Too small for those: one "terminal too small" line and
 /// `a` is not accepted.
-pub fn render_peer_hold_dialog(area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer, d: &PeerHoldDialog, now_secs: u64) {
+pub fn render_peer_hold_dialog(
+    area: ratatui::layout::Rect,
+    buf: &mut ratatui::buffer::Buffer,
+    d: &PeerHoldDialog,
+    now_secs: u64,
+) {
     use ratatui::layout::Rect;
     use ratatui::style::Style;
     use ratatui::widgets::{Block, Borders, Clear, Widget};
@@ -536,7 +651,10 @@ pub fn render_peer_hold_dialog(area: ratatui::layout::Rect, buf: &mut ratatui::b
         if area.width == 0 || area.height == 0 {
             return;
         }
-        let msg = fit_line("Terminal too small to accept. Enlarge it. (r refuses, Esc dismisses)", area.width as usize);
+        let msg = fit_line(
+            "Terminal too small to accept. Enlarge it. (r refuses, Esc dismisses)",
+            area.width as usize,
+        );
         let y = area.y + area.height / 2;
         Clear.render(Rect::new(area.x, y, area.width, 1), buf);
         buf.set_stringn(area.x, y, &msg, area.width as usize, style);
@@ -545,14 +663,22 @@ pub fn render_peer_hold_dialog(area: ratatui::layout::Rect, buf: &mut ratatui::b
     let iw = (w - 2) as usize;
     let body = d.body_lines(now_secs, iw);
     let h = (body.len() as u16 + 5).clamp(DIALOG_MIN_HEIGHT, area.height);
-    let rect = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
+    let rect = Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    );
     // The fixed rows must lie entirely inside the buffer that is actually flushed.
     if buf.area.intersection(rect) != rect || rect.height < DIALOG_MIN_HEIGHT {
         d.fits.set(false);
         return;
     }
     Clear.render(rect, buf);
-    let block = Block::default().borders(Borders::ALL).title(" Peer message held ").style(style);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Peer message held ")
+        .style(style);
     let inner = block.inner(rect);
     block.render(rect, buf);
     let body_rows = (inner.height - 3) as usize;
@@ -560,7 +686,13 @@ pub fn render_peer_hold_dialog(area: ratatui::layout::Rect, buf: &mut ratatui::b
         buf.set_stringn(inner.x, inner.y + i as u16, line, iw, style);
     }
     for (i, line) in d.fixed_lines().iter().enumerate() {
-        buf.set_stringn(inner.x, inner.y + inner.height - 3 + i as u16, line, iw, style);
+        buf.set_stringn(
+            inner.x,
+            inner.y + inner.height - 3 + i as u16,
+            line,
+            iw,
+            style,
+        );
     }
     // Last: only now were the sentence and legend painted inside the rect used.
     d.fits.set(true);
@@ -568,7 +700,10 @@ pub fn render_peer_hold_dialog(area: ratatui::layout::Rect, buf: &mut ratatui::b
 
 /// Seconds since the epoch, for the dialog clock.
 pub fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs()
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs()
 }
 
 #[cfg(test)]

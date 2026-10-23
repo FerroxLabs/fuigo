@@ -226,6 +226,7 @@ async fn spawn_session(
         false,
         false,
         false,
+        false,
         fuigo_tools::implementations::fuigo_build::task::MAX_SUBAGENT_DEPTH,
         crate::session::workflow::host_service::DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS,
         fuigo_tools::media_gen_limits::MediaGenBatchLimits::default(),

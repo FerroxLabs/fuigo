@@ -320,6 +320,7 @@ impl ChannelSpawner {
             fork_context: true,
             owner: SubagentOwner::Task,
             cancel_token: self.cancel_token.clone(),
+            tool_call_id: None,
         };
         let backend = ChannelBackend::new(self.event_tx.clone());
         let cancel = self.cancel_token.clone();

@@ -51,10 +51,10 @@ async fn bash_mode_strips_redundant_session_cd_from_chrome() {
     harness
         .wait_for_text("STRIP_CD_OK", Duration::from_secs(30))
         .expect("command output");
-    // Completed bash-mode shows "Run (user)" in execute chrome (not history `#N ! …`).
+    // Completed bash-mode shows "Ran (user)" in execute chrome (not history `#N ! …`).
     harness
-        .wait_for_text("Run (user)", Duration::from_secs(15))
-        .expect("Run (user) chrome on screen");
+        .wait_for_text("Ran (user)", Duration::from_secs(15))
+        .expect("Ran (user) chrome on screen");
 
     let screen = harness.screen_contents();
     assert!(
@@ -66,18 +66,18 @@ async fn bash_mode_strips_redundant_session_cd_from_chrome() {
         "expected command output on screen:\n{screen}"
     );
     // Asserting per line avoids slicing bytes through box-drawing characters, which panics on a char boundary
-    // The history line `#N ! cd …` keeps the typed command; only the Run (user) chrome loses the cd prefix
+    // The history line `#N ! cd …` keeps the typed command; only the Ran (user) chrome loses the cd prefix
     let run_lines: Vec<&str> = screen
         .lines()
-        .filter(|line| line.contains("Run (user)"))
+        .filter(|line| line.contains("Ran (user)"))
         .collect();
     assert!(
         !run_lines.is_empty(),
-        "Run (user) chrome missing on screen:\n{screen}"
+        "Ran (user) chrome missing on screen:\n{screen}"
     );
     assert!(
         run_lines.iter().any(|line| line.contains("printf")),
-        "expected short command (printf) on Run (user) line(s) {run_lines:?}\nfull:\n{screen}"
+        "expected short command (printf) on Ran (user) line(s) {run_lines:?}\nfull:\n{screen}"
     );
     let noisy_prefix = format!("cd {cwd_str} &&");
     assert!(

@@ -229,7 +229,7 @@ fn activity_label_rendered_for_each_turn_activity() {
         ),
         (
             TurnActivity::Waiting(WaitingReason::subagent()),
-            "Waiting on subagent…".into(),
+            "Waiting for subagent…".into(),
         ),
         (
             TurnActivity::Waiting(WaitingReason::task_output()),

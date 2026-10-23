@@ -120,6 +120,24 @@ context_windows = [100000, 400000]       # sizes /context-window can select
 
 `context_windows` may also be set under `[model_providers.<id>]`; a model that sets neither `context_window` nor `context_windows` inherits both from its provider. The list is read from your configuration only. Values must be positive whole numbers of tokens; sizes above 16,000,000, repeated sizes and entries beyond the first 16 are dropped with a configuration warning, and a zero or non-number skips the whole `context_windows` field with a warning. The selected size must be one of the listed ones. A managed model allowlist still decides whether the model can be used at all; `/context-window` only picks among the sizes you or your administrator configured.
 
+### Request size limit
+
+`max_request_bytes` is the largest request body your endpoint accepts. Fuigo evicts older inline images from the conversation to stay under it, so a session with many screenshots keeps working instead of being rejected. When you omit it, Fuigo picks the default for the `api_backend`: 30 MB for `messages`, and 50 MiB for `chat_completions` and `responses`. Set it only when your host enforces a different cap.
+
+The cap is a property of the endpoint, so it also works on a shared `[model_providers.<id>]` block, where every model pointing at that provider inherits it; a `max_request_bytes` on the model itself overrides the provider's value. It must be a positive whole number of bytes. A value below 12 MiB is treated as 12 MiB, so the eviction trigger always sits above the amount it reclaims down to.
+
+```toml
+[model_providers.my-gateway]
+base_url = "https://gateway.example/v1"
+api_backend = "messages"
+max_request_bytes = 25000000   # every model on this provider inherits it
+
+[model.my-model]
+model = "my-model"
+model_provider = "my-gateway"
+max_request_bytes = 20000000   # per-model override
+```
+
 **Model notice.** `notice = "preview: may change"` under `[model.<id>]` shows a short message in a banner just above the prompt while that model is selected, and sends it to ACP clients as `_meta.notice` on the model. A table form, `notice = { severity = "warning", text = "...", label = "deprecated" }`, picks the colour (`info`, `warning` or `critical`) and a short badge. The text is plain, single-line and capped at 160 characters: control and escape characters, bidirectional controls and line separators are removed, runs of whitespace collapse, and it is never shown as markdown or as a link. Every banner starts with a fixed `notice:` tag, so it cannot pass for a Fuigo message or a permission prompt. A notice is read only from your own and your administrator's configuration (a project `.fuigo/config.toml` does not define models), and a blank `notice = ""` clears one set by a lower layer. Terminals 16 rows high or less do not show the banner. A campaign cannot set a notice.
 
 ### Global Default Headers

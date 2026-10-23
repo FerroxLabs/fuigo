@@ -109,6 +109,9 @@ fn parse_plugin_name(source_label: &str) -> Option<String> {
 #[serde(rename_all = "camelCase")]
 pub struct McpsListResponse {
     pub servers: Vec<McpsServerEntry>,
+    /// Session-scoped. True when session MCP init reports `is_initialized`.
+    #[serde(default)]
+    pub session_mcp_resolved: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -464,6 +467,7 @@ mod tests {
                     unavailable_reason: None,
                 }),
             }],
+            session_mcp_resolved: None,
         })
         .into_iter()
         .next()
@@ -507,7 +511,9 @@ mod tests {
         let blocked = servers.iter().find(|s| s.name == "corp-denied").unwrap();
         assert_eq!(
             blocked.blocked_reason.as_deref(),
-            Some("The server corp-denied is blocked by an organization policy (managed_config.toml).")
+            Some(
+                "The server corp-denied is blocked by an organization policy (managed_config.toml)."
+            )
         );
         assert!(!blocked.enabled);
         let off = servers.iter().find(|s| s.name == "off").unwrap();
@@ -624,6 +630,7 @@ mod tests {
                 gateway_entry("managed_gateway:zeta", "Alpha"),
                 gateway_entry("managed_gateway:alpha", "Zeta"),
             ],
+            session_mcp_resolved: None,
         });
         assert_eq!(servers[0].display_name.as_deref(), Some("Alpha"));
         assert_eq!(servers[0].name, "managed_gateway:zeta");
@@ -663,6 +670,7 @@ mod tests {
                     unavailable_reason: None,
                 }),
             }],
+            session_mcp_resolved: None,
         });
         assert_eq!(servers.len(), 1);
         assert!(servers[0].setup_required);
@@ -694,12 +702,19 @@ mod tests {
         };
         let servers = convert_list_response(McpsListResponse {
             servers: vec![
-                entry(Some("refusing to send OAuth credentials to https://idp.example/token: refused")),
+                entry(Some(
+                    "refusing to send OAuth credentials to https://idp.example/token: refused",
+                )),
                 entry(Some("   ")),
                 entry(None),
             ],
+            session_mcp_resolved: None,
         });
-        assert!(servers.iter().all(|s| s.status == McpServerDisplayStatus::NeedsAuth));
+        assert!(
+            servers
+                .iter()
+                .all(|s| s.status == McpServerDisplayStatus::NeedsAuth)
+        );
         assert_eq!(
             servers[0].status_reason.as_deref(),
             Some("refusing to send OAuth credentials to https://idp.example/token: refused")
@@ -730,6 +745,7 @@ mod tests {
         };
         let servers = convert_list_response(McpsListResponse {
             servers: vec![entry("refused\x1b]0;pwned\x07\x1b[2J\u{9b}31m\u{202e}tail")],
+            session_mcp_resolved: None,
         });
         let reason = servers[0].status_reason.as_deref().expect("reason kept");
         assert!(reason.starts_with("refused"), "{reason:?}");

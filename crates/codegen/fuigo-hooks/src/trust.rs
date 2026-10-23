@@ -74,6 +74,9 @@ pub const MANAGED_HOOKS_ONLY_NOTE: &str = "Only managed hooks run: your organiza
 pub struct DisabledHooks {
     names: std::collections::HashSet<String>,
     managed_only: bool,
+    /// The disabled-hooks file exists but could not be read. Which hooks the user disabled is then unknown, so every
+    /// non-managed hook is skipped rather than running one the user turned off.
+    unreadable: bool,
 }
 
 impl DisabledHooks {
@@ -87,27 +90,27 @@ impl DisabledHooks {
         Self {
             names: names.into_iter().collect(),
             managed_only,
+            unreadable: false,
         }
+    }
+
+    /// Build from the disabled-hooks file at `file` (no managed-only pin). A missing file disables nothing; a file
+    /// that exists but cannot be read marks the set unreadable, which skips every non-managed hook.
+    pub fn from_file(file: &Path, managed_only: bool) -> Self {
+        let (names, unreadable) = read_disabled_names(file);
+        let mut loaded = Self::new(names, managed_only);
+        loaded.unreadable = unreadable;
+        loaded
     }
 
     /// Read the disabled-hooks file and the `allow_managed_hooks_only` pin (every managed-config and requirements
     /// layer plus the Claude managed-settings file; an unreadable policy layer engages it).
     pub fn load() -> Self {
-        let names: Vec<String> = disabled_hooks_file_path()
-            .and_then(|file| std::fs::read_to_string(file).ok())
-            .map(|content| {
-                content
-                    .lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-        Self::new(
-            names,
-            fuigo_config::policy_sources::managed_hooks_only_pin().is_disabled(),
-        )
+        let managed_only = fuigo_config::policy_sources::managed_hooks_only_pin().is_disabled();
+        match disabled_hooks_file_path() {
+            Some(file) => Self::from_file(&file, managed_only),
+            None => Self::new(Vec::new(), managed_only),
+        }
     }
 
     pub fn contains(&self, hook_name: &str) -> bool {
@@ -127,7 +130,8 @@ impl DisabledHooks {
         if self.managed_only {
             return Some(HookSkipReason::ManagedOnly);
         }
-        (!spec.enabled || self.names.contains(&spec.name)).then_some(HookSkipReason::UserDisabled)
+        (!spec.enabled || self.unreadable || self.names.contains(&spec.name))
+            .then_some(HookSkipReason::UserDisabled)
     }
 
     /// Whether dispatch skips `spec`; also what the modal shows as disabled.
@@ -136,14 +140,29 @@ impl DisabledHooks {
     }
 }
 
-fn is_hook_disabled_with_file(hook_name: &str, file: &Path) -> bool {
-    let content = match std::fs::read_to_string(file) {
-        Ok(c) => c,
-        Err(_) => return false,
+/// Names listed in the disabled-hooks file, and whether the file exists but could not be read.
+/// Bytes that are not UTF-8 are replaced, so the lines around them still count; a missing file is simply empty.
+fn read_disabled_names(file: &Path) -> (Vec<String>, bool) {
+    let bytes = match std::fs::read(file) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), false),
+        Err(e) => {
+            tracing::warn!(path = %file.display(), error = %e, "disabled-hooks file is unreadable; skipping every hook");
+            return (Vec::new(), true);
+        }
     };
-    content
+    let names = String::from_utf8_lossy(&bytes)
         .lines()
-        .any(|l| !l.trim().is_empty() && !l.trim().starts_with('#') && l.trim() == hook_name)
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    (names, false)
+}
+
+fn is_hook_disabled_with_file(hook_name: &str, file: &Path) -> bool {
+    let (names, unreadable) = read_disabled_names(file);
+    unreadable || names.iter().any(|n| n == hook_name)
 }
 
 /// Disable a hook by name (append to `$FUIGO_HOME/disabled-hooks`).
@@ -299,6 +318,34 @@ mod tests {
             list_trusted_projects_with_file(Path::new("/nonexistent/trusted-hook-projects"))
                 .expect("missing file resolves to Ok(empty)");
         assert!(projects.is_empty());
+    }
+
+    #[test]
+    fn disabled_names_survive_invalid_utf8_elsewhere_in_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("disabled-hooks");
+        let mut bytes = b"evil-hook\n".to_vec();
+        bytes.extend_from_slice(&[0xff, 0xfe, b'\n']);
+        bytes.extend_from_slice(b"other-hook\n");
+        std::fs::write(&file, bytes).unwrap();
+        assert!(is_hook_disabled_with_file("evil-hook", &file));
+        assert!(is_hook_disabled_with_file("other-hook", &file));
+        assert!(!is_hook_disabled_with_file("fine-hook", &file));
+    }
+
+    #[test]
+    fn unreadable_disabled_file_keeps_every_hook_disabled() {
+        // A directory where the file belongs: the read fails even for root.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("disabled-hooks");
+        std::fs::create_dir(&file).unwrap();
+        assert!(is_hook_disabled_with_file("any-hook", &file));
+    }
+
+    #[test]
+    fn missing_disabled_file_disables_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_hook_disabled_with_file("any-hook", &dir.path().join("disabled-hooks")));
     }
 }
 

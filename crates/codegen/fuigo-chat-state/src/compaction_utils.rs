@@ -742,6 +742,8 @@ pub struct CompactionInputs {
     pub scheduled_loops: Vec<ScheduledLoopSummary>,
     pub workflows: Vec<WorkflowRunSummary>,
     pub workflow_tool_name: Option<String>,
+    /// When set, used as `last_user_query` so compact cannot revive a stale pre-goal prompt.
+    pub goal_objective: Option<String>,
 }
 impl CompactionStateContext {
     /// Build the state context from current session state.
@@ -749,8 +751,21 @@ impl CompactionStateContext {
     /// Uses a typed compaction boundary for the retained tail while keeping
     /// the last-query field human-only.
     pub async fn build(conversation: &[ConversationItem], inputs: CompactionInputs) -> Self {
-        let last = find_last_real_user_item(conversation);
-        let mut images = last.map(image_context_from_item).unwrap_or_default();
+        // An active goal's objective, when given, is the last query: a pre-goal prompt must not be revived by compact
+        // Its images belong to the stale prompt, so they are not carried
+        let (last_user_query, mut images) = match inputs
+            .goal_objective
+            .filter(|objective| !objective.trim().is_empty())
+        {
+            Some(objective) => (Some(objective), CompactionImageContext::default()),
+            None => {
+                let last = find_last_real_user_item(conversation);
+                (
+                    last.map(|item| extract_user_query(&item.text_content())),
+                    last.map(image_context_from_item).unwrap_or_default(),
+                )
+            }
+        };
         let last_turn_paths =
             parse_image_files_paths(images.last_turn_image_files.as_deref().unwrap_or_default());
         images.attached_paths = collect_attached_image_paths(conversation, &last_turn_paths);
@@ -775,7 +790,7 @@ impl CompactionStateContext {
             destination_project_instructions: inputs.destination_project_instructions,
             agent_message_anchor: extract_latest_agent_message(conversation),
             recent_messages,
-            last_user_query: last.map(|item| extract_user_query(&item.text_content())),
+            last_user_query,
             images,
             agent_edited_paths: inputs.agent_edited_paths.into_iter().collect(),
             running_tasks: inputs.running_tasks,

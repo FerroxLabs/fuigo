@@ -2,6 +2,7 @@
 
 use super::setters::{
     pr13_effective_default, set_ask_user_question_timeout_enabled_inner, set_auto_dark_theme_inner,
+    set_subagent_model_inheritance_inner,
     set_auto_light_theme_inner, set_auto_update_inner, set_collapsed_edit_blocks_inner,
     set_combine_queued_prompts_inner, set_compact_mode, set_compact_mode_inner,
     set_confirm_before_rewind_inner, set_contextual_hint_inner, set_default_model_inner,
@@ -10,7 +11,7 @@ use super::setters::{
     set_hunk_tracker_mode_inner, set_invert_scroll_inner, set_keep_text_selection_inner,
     set_max_thoughts_width_inner, set_multiline_mode, set_page_flip_on_send_inner,
     set_prompt_suggestions_inner, set_remember_tool_approvals_inner, set_render_mermaid_inner,
-    set_respect_manual_folds_inner, set_screen_mode_inner, set_scroll_lines_inner,
+    set_respect_manual_folds_inner, set_screen_mode_inner, set_tool_density_inner, set_scroll_lines_inner,
     set_scroll_mode_inner, set_scroll_speed_inner, set_show_thinking_blocks_inner,
     set_show_tips_inner, set_simple_mode_inner, set_theme_inner, set_timeline_inner,
     set_timestamps, set_timestamps_inner, set_vim_mode_inner, set_voice_capture_mode_inner,
@@ -53,6 +54,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
+    let subagent_model_inheritance_from_app = app.subagent_model_inheritance;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
     for agent in app.agents.values_mut() {
@@ -91,6 +93,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 respect_manual_folds: respect_manual_folds_from_app,
                 auto_mode_gate: auto_mode_gate_from_app,
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
+                subagent_model_inheritance: subagent_model_inheritance_from_app,
                 voice_stt_language: voice_stt_language_from_app.clone(),
                 scheduler_background_loops: agent
                     .scheduler_background_loops
@@ -191,6 +194,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
+    let subagent_model_inheritance_from_app = app.subagent_model_inheritance;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
 
@@ -237,6 +241,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         respect_manual_folds: respect_manual_folds_from_app,
         auto_mode_gate: auto_mode_gate_from_app,
         ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
+        subagent_model_inheritance: subagent_model_inheritance_from_app,
         voice_stt_language: voice_stt_language_from_app,
         scheduler_background_loops: agent
             .scheduler_background_loops
@@ -656,6 +661,7 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         respect_manual_folds: app.appearance.scrollback.scroll.respect_manual_folds,
         auto_mode_gate: app.auto_mode_gate,
         ask_user_question_timeout_enabled: app.ask_user_question_timeout_enabled,
+        subagent_model_inheritance: app.subagent_model_inheritance,
         voice_stt_language: app.voice_config.language.clone(),
         scheduler_background_loops: agent_scheduler_background_loops(app),
     }
@@ -716,6 +722,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
         }
         ("toolset.ask_user_question.timeout_enabled", SettingValue::Bool(b)) => {
             Some(Action::SetAskUserQuestionTimeoutEnabled(*b))
+        }
+        ("features.subagent_model_inheritance", SettingValue::Bool(b)) => {
+            Some(Action::SetSubagentModelInheritance(*b))
         }
         ("keep_text_selection", SettingValue::Enum(s)) => {
             crate::appearance::TextSelection::from_canonical(s).map(Action::SetKeepTextSelection)
@@ -807,6 +816,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
             Some(Action::SetHunkTrackerMode((*s).to_string()))
         }
         ("screen_mode", SettingValue::Enum(s)) => Some(Action::SetScreenMode((*s).to_string())),
+        ("tool_density", SettingValue::Enum(s)) => {
+            Some(Action::SetToolDensityDefault((*s).to_string()))
+        }
         ("voice_keybind_enabled", SettingValue::Bool(b)) => {
             Some(Action::SetVoiceKeybindEnabled(*b))
         }
@@ -1052,6 +1064,14 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 set_ask_user_question_timeout_enabled_inner(app, *b);
             }
         }
+        // subagent_model_inheritance: a rollback to the feature default clears the mirror (the key was unset on disk)
+        ("features.subagent_model_inheritance", SettingValue::Bool(b)) => {
+            if !*b {
+                app.subagent_model_inheritance.config = None;
+            } else {
+                set_subagent_model_inheritance_inner(app, *b);
+            }
+        }
         ("show_thinking_blocks", SettingValue::Bool(b)) => set_show_thinking_blocks_inner(app, *b),
         ("group_tool_verbs", SettingValue::Bool(b)) => set_group_tool_verbs_inner(app, *b),
         ("collapsed_edit_blocks", SettingValue::Bool(b)) => {
@@ -1076,6 +1096,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("screen_mode", SettingValue::Enum(s)) => {
             set_screen_mode_inner(app, crate::settings::canonical_screen_mode(Some(s)));
+        }
+        ("tool_density", SettingValue::Enum(s)) => {
+            set_tool_density_inner(app, crate::settings::canonical_tool_density(Some(s)));
         }
         ("voice_keybind_enabled", SettingValue::Bool(b)) => {
             set_voice_keybind_enabled_inner(app, *b)

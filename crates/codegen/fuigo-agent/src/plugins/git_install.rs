@@ -269,6 +269,13 @@ pub fn install_from_source_with_label(
     })?;
 
     let repo_path = install_dir.join(&repo_key);
+    // The registry has no entry for this key (checked above), so whatever sits at the path is what an interrupted
+    // install left behind. Clearing it lets the retry start clean instead of cloning or copying into a half-written
+    // directory and failing again.
+    if std::fs::symlink_metadata(&repo_path).is_ok() {
+        tracing::warn!(path = %repo_path.display(), "removing leftovers of an interrupted plugin install");
+        remove_repo_path(&repo_path)?;
+    }
 
     let (kind, commit) = match source {
         InstallSource::Git {
@@ -1464,6 +1471,32 @@ mod tests {
                 Ok(UpdateStatus::Pinned { ref_name }) if ref_name == expected_pin
             ));
         }
+    }
+
+    #[test]
+    fn install_retries_over_the_leftovers_of_an_interrupted_install() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("plugin.json"), r#"{"name":"retry-plugin"}"#).unwrap();
+        let install = tempfile::tempdir().unwrap();
+        let registry = InstallRegistry::empty(install.path().join("installed-plugins"));
+        let source = InstallSource::Local {
+            path: src.path().to_path_buf(),
+            subdir: None,
+        };
+        let repo_key = InstallRegistry::repo_key(&repo_source_id(&normalize_install_source(&source).unwrap()));
+        // What an install killed half-way leaves behind: the repo directory, never registered.
+        let stale = registry.install_dir().join(&repo_key);
+        std::fs::create_dir_all(stale.join("half-copied")).unwrap();
+        std::fs::write(stale.join("half-copied/partial.bin"), b"partial").unwrap();
+
+        let result = install_from_source(&source, &registry, false)
+            .expect("an unregistered leftover directory must not block the retry");
+        assert_eq!(result.repo_key, repo_key);
+        assert!(result.repo_path.join("plugin.json").is_file());
+        assert!(
+            !result.repo_path.join("half-copied").exists(),
+            "the interrupted install's files must not survive into the new one"
+        );
     }
 
     #[test]

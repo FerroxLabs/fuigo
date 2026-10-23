@@ -68,23 +68,6 @@ fn show_picker_refused_while_rewind_open() {
 }
 
 #[test]
-fn show_picker_refused_while_inline_edit_open() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    push_turns(&mut app, id, 3);
-    assert!(
-        app.agents.get_mut(&id).unwrap().enter_inline_edit(0),
-        "entered inline edit on the first prompt"
-    );
-
-    dispatch(Action::JumpShowPicker, &mut app);
-    assert!(
-        app.agents[&id].jump_state.is_none(),
-        "picker must not stack on an open inline edit (wheel scroll would leak)"
-    );
-}
-
-#[test]
 fn show_picker_refused_while_input_overlay_pending() {
     // A pending permission / question / cancel-turn / plan-approval overlay suppresses the picker's rendering
     // Opening one would be invisible but still eat wheel/keys, so `/jump` must refuse
@@ -352,30 +335,6 @@ fn rewind_dismisses_open_jump_picker() {
 }
 
 #[test]
-fn inline_edit_dismisses_open_jump_picker() {
-    // The mirror of `show_picker_refused_while_inline_edit_open`
-    // Entering inline edit while the picker is open dismisses it so it can't reappear stale
-    // (Inline edit re-centers on the edited entry, so only the picker teardown is asserted, not the viewport.)
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    push_turns(&mut app, id, 3);
-    app.agents.get_mut(&id).unwrap().scrollback.goto_bottom();
-
-    dispatch(Action::JumpShowPicker, &mut app);
-    assert!(app.agents[&id].jump_state.is_some());
-
-    let entered = app.agents.get_mut(&id).unwrap().enter_inline_edit(0);
-    assert!(entered, "entered inline edit on the first prompt");
-
-    let agent = &app.agents[&id];
-    assert!(
-        agent.jump_state.is_none(),
-        "entering inline edit dismissed the jump picker"
-    );
-    assert!(agent.inline_edit.is_some(), "inline edit opened");
-}
-
-#[test]
 fn dismiss_restores_viewport() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -421,11 +380,17 @@ fn next_response_jumps_to_the_turn_below_the_viewport_top() {
         sb.goto_bottom();
     }
 
-    let target = app.agents.get(&id).expect("agent")
+    let target = app
+        .agents
+        .get(&id)
+        .expect("agent")
         .scrollback
         .turn_below_viewport_top()
         .expect("trailing turns sit below the viewport top");
-    let prompt = app.agents.get(&id).expect("agent")
+    let prompt = app
+        .agents
+        .get(&id)
+        .expect("agent")
         .scrollback
         .turn(target)
         .expect("target turn")
@@ -451,16 +416,27 @@ fn prev_response_aligns_the_current_prompt_from_mid_turn() {
         sb.scroll_down(3);
     }
 
-    let target = app.agents.get(&id).expect("agent")
+    let target = app
+        .agents
+        .get(&id)
+        .expect("agent")
         .scrollback
         .turn_above_viewport_top()
         .expect("prompt is strictly above the viewport top");
-    let prompt = app.agents.get(&id).expect("agent")
+    let prompt = app
+        .agents
+        .get(&id)
+        .expect("agent")
         .scrollback
         .turn(target)
         .expect("target turn")
         .prompt_index;
-    let before_scroll = app.agents.get(&id).expect("agent").scrollback.scroll_offset();
+    let before_scroll = app
+        .agents
+        .get(&id)
+        .expect("agent")
+        .scrollback
+        .scroll_offset();
     assert_eq!(0, target);
     assert!(before_scroll > 0, "scrolled into the answer");
 

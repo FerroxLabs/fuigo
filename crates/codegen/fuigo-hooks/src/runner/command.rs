@@ -121,15 +121,6 @@ pub async fn run_command_hook(
         );
     }
 
-    let is_shell_command = command_str.contains(' ')
-        || command_str.contains('|')
-        || command_str.contains('&')
-        || command_str.contains(';')
-        || command_str.contains('>')
-        || command_str.contains('<')
-        || command_str.contains('$')
-        || command_str.starts_with('~');
-
     // P70a: this hook's own child env, with the first-party key added only when its config names it explicitly.
     // Detection reads the command as parsed: aliases from its `env` map are substituted there (`$TOKEN` with
     // `TOKEN = "${FUIGO_API_KEY}"`), and an escaped `$${FUIGO_API_KEY}` is kept as written (Astra f5).
@@ -144,59 +135,37 @@ pub async fn run_command_hook(
 
     // The base command as (program, args, fixed env), so it can be rebuilt for the
     // unplaced retry after a failed session-cgroup placement (P189).
-    let (program, base_args, base_env): (std::ffi::OsString, Vec<std::ffi::OsString>, Vec<(&'static str, &'static str)>) =
-        if is_shell_command {
-            let unresolved = find_unresolved_env_vars(&command_str, &child_env);
-            if !unresolved.is_empty() {
-                let elapsed = start.elapsed();
-                let list = unresolved
-                    .iter()
-                    .map(|v| format!("${{{v}}}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return (
-                    HookRunnerResult::Failed(format!(
-                        "hook not executed: required env var(s) not set: {list}"
-                    )),
-                    elapsed,
-                    None,
-                );
-            }
-            #[cfg(unix)]
-            {
-                ("sh".into(), vec!["-c".into(), command_str.as_ref().into()], Vec::new())
-            }
-            #[cfg(not(unix))]
-            {
-                let command_str = rewrite_hook_command_for_windows_shell(&command_str, &child_env);
-                let inv = fuigo_config::shell::shell_command_argv(command_str.as_ref());
-                (
-                    inv.program.into(),
-                    inv.args.into_iter().map(Into::into).collect(),
-                    inv.env,
-                )
-            }
-        } else {
-            let command_path = if command.is_absolute() {
-                command.clone()
-            } else {
-                spec.source_dir.join(command)
-            };
-            if !command_path.exists() {
-                let elapsed = start.elapsed();
-                return (
-                    HookRunnerResult::Failed(format!("command not found: {}", command_path.display())),
-                    elapsed,
-                    None,
-                );
-            }
-            (command_path.into(), Vec::new(), Vec::new())
-        };
+    // A command that cannot be run at all is a CONFIG failure (see `crate::health`): it is reported once per session.
+    let event_name = envelope.hook_event_name.to_string();
+    let inputs = PlanInputs {
+        workspace_root: ctx.workspace_root,
+        session_id: ctx.session_id,
+        event: &event_name,
+    };
+    let plan = match plan_command(spec, &command_str, &child_env, &inputs) {
+        Ok(plan) => plan,
+        Err(detail) => {
+            return (
+                HookRunnerResult::Failed(crate::health::config_failure(&detail)),
+                start.elapsed(),
+                None,
+            );
+        }
+    };
+    let CommandPlan {
+        program,
+        args: base_args,
+        env: base_env,
+        shell: is_shell_command,
+        named_posix_shell,
+    } = plan;
+    #[cfg(unix)]
+    let _ = (is_shell_command, named_posix_shell);
 
     #[cfg(not(unix))]
     let env_root = {
         use fuigo_config::shell::{WindowsShell, detect_windows_shell};
-        if is_shell_command && matches!(detect_windows_shell(), WindowsShell::GitBash(_)) {
+        if named_posix_shell || (is_shell_command && matches!(detect_windows_shell(), WindowsShell::GitBash(_))) {
             Cow::Owned(ctx.workspace_root.replace('\\', "/"))
         } else {
             Cow::Borrowed(ctx.workspace_root)
@@ -236,11 +205,17 @@ pub async fn run_command_hook(
         Ok(c) => c,
         Err(e) => {
             let elapsed = start.elapsed();
-            return (
-                HookRunnerResult::Failed(format!("failed to spawn command: {e}")),
-                elapsed,
-                None,
-            );
+            let message = format!("failed to spawn command: {}: {e}", program.to_string_lossy());
+            // A program that is missing or not executable can never run: a CONFIG failure, like a missing placeholder.
+            let message = if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) {
+                crate::health::config_failure(&message)
+            } else {
+                message
+            };
+            return (HookRunnerResult::Failed(message), elapsed, None);
         }
     };
 
@@ -364,7 +339,6 @@ pub async fn run_command_hook(
     }
 }
 
-#[cfg(any(test, not(unix)))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PsQuote {
     Bare,
@@ -465,7 +439,6 @@ fn push_ps_env_ref(buf: &mut String, braced: bool, name: &str) {
     }
 }
 
-#[cfg(any(test, not(unix)))]
 fn powershell_ctx_at(command: &str, at: usize) -> (PsQuote, bool) {
     let bytes = command.as_bytes();
     let mut i = 0;
@@ -530,6 +503,448 @@ fn rewrite_hook_command_for_windows_shell<'a>(
     }
 }
 
+/// How one command hook is started: the program, its arguments and any fixed environment.
+pub(crate) struct CommandPlan {
+    pub program: std::ffi::OsString,
+    pub args: Vec<std::ffi::OsString>,
+    pub env: Vec<(&'static str, &'static str)>,
+    /// Whether the command goes through a shell (`sh -c`) rather than being executed directly.
+    pub shell: bool,
+    /// Whether the hook named its own POSIX shell (`"shell": "bash"`), so its paths are POSIX paths even on Windows.
+    pub named_posix_shell: bool,
+}
+
+/// The runner-provided values a placeholder can resolve to.
+pub(crate) struct PlanInputs<'a> {
+    pub workspace_root: &'a str,
+    pub session_id: &'a str,
+    pub event: &'a str,
+}
+
+/// Shell-looking commands go through `sh -c`; the `command` + `args` form never does.
+fn is_shell_form(spec: &HookSpec, command_str: &str) -> bool {
+    spec.args.is_none()
+        && (command_str.contains(' ')
+            || command_str.contains('|')
+            || command_str.contains('&')
+            || command_str.contains(';')
+            || command_str.contains('>')
+            || command_str.contains('<')
+            || command_str.contains('$')
+            || command_str.starts_with('~'))
+}
+
+/// Decide how to start a command hook, or why it can never start (the `Err` text is the reason, without the CONFIG prefix).
+///
+/// * Shell form: only the known plugin placeholders ([`crate::config::KNOWN_HOOK_PLACEHOLDERS`]) are checked; every other
+///   `${...}` is the script's own and is left to the shell.
+/// * `command` + `args` form: executed directly. A bare command name is looked up on `PATH`; only a relative path that
+///   contains a `/` is resolved against the plugin root (the hook's own directory for a non-plugin hook).
+pub(crate) fn plan_command(
+    spec: &HookSpec,
+    command_str: &str,
+    child_env: &std::collections::HashMap<String, String>,
+    inputs: &PlanInputs<'_>,
+) -> Result<CommandPlan, String> {
+    if !is_shell_form(spec, command_str) {
+        let program = resolve_program(spec, command_str, child_env)?;
+        let args = expand_args(spec, child_env, inputs)?;
+        return Ok(CommandPlan {
+            program: program.into(),
+            args,
+            env: Vec::new(),
+            shell: false,
+            named_posix_shell: false,
+        });
+    }
+    let unresolved = find_unresolved_env_vars(command_str, child_env);
+    if !unresolved.is_empty() {
+        return Err(format!(
+            "required env var(s) not set: {}",
+            unresolved.iter().map(|v| format!("${{{v}}}")).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if let Some(name) = &spec.shell {
+        if matches!(name.to_ascii_lowercase().as_str(), "powershell" | "pwsh") {
+            warn_if_reads_powershell_input(spec, command_str);
+        }
+        let invocation = named_shell_invocation(name, command_str, child_env)?;
+        return Ok(CommandPlan {
+            program: invocation.0,
+            args: invocation.1,
+            env: invocation.2,
+            shell: true,
+            named_posix_shell: is_posix_shell_name(name),
+        });
+    }
+    #[cfg(unix)]
+    {
+        Ok(CommandPlan {
+            program: "sh".into(),
+            args: vec!["-c".into(), command_str.into()],
+            env: Vec::new(),
+            shell: true,
+            named_posix_shell: false,
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let command_str = rewrite_hook_command_for_windows_shell(command_str, child_env);
+        if matches!(
+            fuigo_config::shell::detect_windows_shell(),
+            fuigo_config::shell::WindowsShell::Pwsh | fuigo_config::shell::WindowsShell::PowerShell
+        ) {
+            warn_if_reads_powershell_input(spec, command_str.as_ref());
+        }
+        let inv = fuigo_config::shell::shell_command_argv(command_str.as_ref());
+        Ok(CommandPlan {
+            program: inv.program.into(),
+            args: inv.args.into_iter().map(Into::into).collect(),
+            env: inv.env,
+            shell: true,
+            named_posix_shell: false,
+        })
+    }
+}
+
+/// A shell the hook names must be a plain name looked up on `PATH`: no directory, no space, nothing a shell could parse.
+fn validate_shell_name(name: &str) -> Result<(), String> {
+    let mut chars = name.chars();
+    let starts_ok = chars.next().is_some_and(|c| c.is_ascii_alphanumeric());
+    if starts_ok && name.len() <= 32 && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+')) {
+        Ok(())
+    } else {
+        Err(format!(
+            "unsupported \"shell\" value {name:?}: name a shell on PATH such as \"bash\" (no path, no spaces)"
+        ))
+    }
+}
+
+/// Whether an inline PowerShell command reads `$input` (the automatic variable that enumerates the pipeline, which for a
+/// hook is the event JSON on stdin) outside single quotes. Platform-neutral so it is tested everywhere; the Windows build
+/// calls it when it hands a command to PowerShell, and a hook that names `pwsh` or `powershell` does so on any platform.
+pub(crate) fn reads_powershell_input(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    let mut from = 0;
+    while let Some(found) = command[from..].to_ascii_lowercase().find("$input") {
+        let at = from + found;
+        let end = at + "$input".len();
+        let continues = bytes.get(end).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
+        let escaped = at > 0 && bytes[at - 1] == b'`';
+        if !continues && !escaped && powershell_ctx_at(command, at).0 != PsQuote::Single {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
+/// Say, once per run, that an inline PowerShell hook reads `$input`: it runs, but it depends on PowerShell's own
+/// stdin handling, which differs between `powershell` and `pwsh` and from a `-File` script.
+fn warn_if_reads_powershell_input(spec: &HookSpec, command: &str) {
+    if reads_powershell_input(command) {
+        tracing::warn!(
+            hook_name = %spec.name,
+            "inline PowerShell hook reads $input; it runs, but $input behaves differently across PowerShell hosts. \
+             Put the script in a .ps1 file and read the event with [Console]::In.ReadToEnd() for a stable result"
+        );
+    }
+}
+
+/// Whether `name` is a POSIX-style shell (`sh -c` syntax), as opposed to PowerShell or cmd.
+fn is_posix_shell_name(name: &str) -> bool {
+    !matches!(name.to_ascii_lowercase().as_str(), "powershell" | "pwsh" | "cmd")
+}
+
+/// `(program, args, env)` for a hook that names its shell: the shell is resolved on the hook's `PATH`, and when it is not
+/// there the hook is a CONFIG failure ("bash not found"), never a quiet fallback to `sh`.
+#[allow(clippy::type_complexity)]
+fn named_shell_invocation(
+    name: &str,
+    command_str: &str,
+    child_env: &std::collections::HashMap<String, String>,
+) -> Result<(std::ffi::OsString, Vec<std::ffi::OsString>, Vec<(&'static str, &'static str)>), String> {
+    validate_shell_name(name)?;
+    let not_found = || format!("{name} not found on PATH (this hook sets \"shell\": \"{name}\")");
+    let path_override = child_env.get("PATH").map(String::as_str);
+    let program = resolve_named_shell(name, path_override).ok_or_else(not_found)?;
+    let args: Vec<std::ffi::OsString> = match name.to_ascii_lowercase().as_str() {
+        "powershell" | "pwsh" => ["-NoProfile", "-NonInteractive", "-Command"].iter().map(Into::into).chain([command_str.into()]).collect(),
+        "cmd" => vec!["/C".into(), command_str.into()],
+        _ => vec!["-c".into(), command_str.into()],
+    };
+    // Git Bash must not rewrite `/flag` arguments into Windows paths.
+    let env = if cfg!(windows) && is_posix_shell_name(name) {
+        vec![("MSYS_NO_PATHCONV", "1"), ("MSYS2_ARG_CONV_EXCL", "*")]
+    } else {
+        Vec::new()
+    };
+    Ok((program.into_os_string(), args, env))
+}
+
+#[cfg(unix)]
+fn resolve_named_shell(name: &str, path_override: Option<&str>) -> Option<std::path::PathBuf> {
+    find_on_path(name, path_override)
+}
+
+/// Windows: resolve a named shell on the hook's `PATH`. `bash` prefers Git Bash and never resolves to the WSL launcher.
+#[cfg(not(unix))]
+fn resolve_named_shell(name: &str, path_override: Option<&str>) -> Option<std::path::PathBuf> {
+    use fuigo_config::shell::{WindowsShell, detect_windows_shell};
+    if name.eq_ignore_ascii_case("bash") {
+        if let WindowsShell::GitBash(path) = detect_windows_shell() {
+            return Some(std::path::PathBuf::from(path));
+        }
+    }
+    let path_var = match path_override {
+        Some(p) => std::ffi::OsString::from(p),
+        None => std::env::var_os("PATH")?,
+    };
+    resolve_named_shell_in(name, &path_var, &is_executable_file)
+}
+
+/// Whether `path` is under a directory whose `bash.exe` is not a usable POSIX shell: `System32` (the WSL launcher, which
+/// runs a different filesystem) or `WindowsApps` (the Store alias stubs). Separators are normalised so the check is the
+/// same for `C:\Windows\System32` and a POSIX test layout.
+fn is_wsl_launcher_dir(path: &std::path::Path) -> bool {
+    let lower = path.to_string_lossy().to_ascii_lowercase().replace('\\', "/");
+    lower.contains("/windows/system32") || lower.contains("/windowsapps")
+}
+
+/// `name` (as `<name>.exe`) looked up in the directories of `path_var`; `exists` says whether a candidate is a runnable file.
+///
+/// The `System32` / `WindowsApps` exclusion applies to `bash` ONLY: its `bash.exe` there is the WSL launcher. `powershell.exe`
+/// and `cmd.exe` live in `System32` (under `System32\WindowsPowerShell\v1.0` for the former), and `pwsh` may be anywhere
+/// (including the Store's `WindowsApps`), so those resolve wherever `PATH` finds them.
+// Windows-only caller, but platform-neutral so the layout rules are unit-tested on every host.
+#[cfg_attr(unix, allow(dead_code))]
+fn resolve_named_shell_in(
+    name: &str,
+    path_var: &std::ffi::OsStr,
+    exists: &dyn Fn(&std::path::Path) -> bool,
+) -> Option<std::path::PathBuf> {
+    let lower = name.to_ascii_lowercase();
+    let is_bash = lower.strip_suffix(".exe").unwrap_or(&lower) == "bash";
+    let exts = [".exe".to_string()];
+    find_in_dirs(name, path_var, &exts, &|candidate| {
+        !(is_bash && is_wsl_launcher_dir(candidate)) && exists(candidate)
+    })
+}
+
+/// The directory a relative `./x.sh` hook path resolves against: the plugin root for a plugin hook, else the hook's own directory.
+fn relative_root(spec: &HookSpec) -> std::path::PathBuf {
+    if matches!(crate::config::hook_origin(spec), crate::config::HookOrigin::Plugin) {
+        for key in ["CLAUDE_PLUGIN_ROOT", "FUIGO_PLUGIN_ROOT"] {
+            if let Some(root) = spec.extra_env.get(key).filter(|v| !v.is_empty()) {
+                return std::path::PathBuf::from(root);
+            }
+        }
+    }
+    spec.source_dir.clone()
+}
+
+fn resolve_program(
+    spec: &HookSpec,
+    command: &str,
+    child_env: &std::collections::HashMap<String, String>,
+) -> Result<std::path::PathBuf, String> {
+    let path = std::path::Path::new(command);
+    let exists = |p: std::path::PathBuf| {
+        if p.exists() {
+            Ok(p)
+        } else {
+            Err(format!("command not found: {}", p.display()))
+        }
+    };
+    if path.is_absolute() {
+        return exists(path.to_path_buf());
+    }
+    if command.contains('/') || command.contains(std::path::MAIN_SEPARATOR) {
+        return exists(relative_root(spec).join(path));
+    }
+    let is_plugin = matches!(crate::config::hook_origin(spec), crate::config::HookOrigin::Plugin);
+    // A non-plugin hook written as a bare script name has always meant "the script beside my hook file", so that stays first.
+    // A plugin hook, or any hook in the `command` + `args` form, means a program on PATH (`node`).
+    let beside_first = spec.args.is_none() && !is_plugin;
+    let beside = spec.source_dir.join(command);
+    if beside_first && beside.exists() {
+        return Ok(beside);
+    }
+    if let Some(found) = find_on_path(command, child_env.get("PATH").map(String::as_str)) {
+        return Ok(found);
+    }
+    if !is_plugin && beside.exists() {
+        return Ok(beside);
+    }
+    Err(format!("command not found: {command} (not on PATH)"))
+}
+
+/// The extensions Windows may add to a bare program name, in `PATHEXT` order (`.COM;.EXE;.BAT;.CMD` when it is unset).
+/// Only the four a process can be started from directly are kept (a `.JS` or `.VBS` entry cannot be spawned). A `.cmd` or
+/// `.bat` is spawned directly: the standard library runs it through `cmd.exe` with its own argument quoting and refuses an
+/// argument it cannot quote safely, so no hook text is ever re-parsed by a shell.
+fn spawnable_pathext(pathext: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for ext in pathext.unwrap_or("").split(';') {
+        let ext = ext.trim().to_ascii_lowercase();
+        if matches!(ext.as_str(), ".com" | ".exe" | ".bat" | ".cmd") && !out.contains(&ext) {
+            out.push(ext);
+        }
+    }
+    if out.is_empty() {
+        out = [".com", ".exe", ".bat", ".cmd"].iter().map(|e| (*e).to_string()).collect();
+    }
+    out
+}
+
+/// The file names to try for `name`: with no extensions (POSIX) just `name`; with them, `name` itself when it already ends
+/// in one (`node.exe`), else `name` plus each extension in order.
+fn candidate_file_names(name: &str, exts: &[String]) -> Vec<String> {
+    let lower = name.to_ascii_lowercase();
+    if exts.is_empty() || exts.iter().any(|e| lower.ends_with(e.as_str())) {
+        return vec![name.to_string()];
+    }
+    exts.iter().map(|e| format!("{name}{e}")).collect()
+}
+
+/// First hit of `name` in the directories of `path_var`, directory by directory and extension by extension (the order
+/// Windows itself uses). `accept` says whether a candidate is a runnable file (and may veto it).
+fn find_in_dirs(
+    name: &str,
+    path_var: &std::ffi::OsStr,
+    exts: &[String],
+    accept: &dyn Fn(&std::path::Path) -> bool,
+) -> Option<std::path::PathBuf> {
+    let names = candidate_file_names(name, exts);
+    std::env::split_paths(path_var)
+        // An empty `PATH` entry would mean the current directory, and a hook must not pick a program out of the workspace that way.
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
+        .find(|candidate| accept(candidate))
+}
+
+/// `name` looked up on `path_override` (the hook's own `PATH`) or, without one, the process `PATH`. On Windows a bare
+/// name also tries the `PATHEXT` extensions, so `node` finds `node.exe` (or `node.cmd`).
+fn find_on_path(name: &str, path_override: Option<&str>) -> Option<std::path::PathBuf> {
+    let path_var = match path_override {
+        Some(p) => std::ffi::OsString::from(p),
+        None => std::env::var_os("PATH")?,
+    };
+    let exts = if cfg!(windows) { spawnable_pathext(std::env::var("PATHEXT").ok().as_deref()) } else { Vec::new() };
+    find_in_dirs(name, &path_var, &exts, &is_executable_file)
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn expand_args(
+    spec: &HookSpec,
+    child_env: &std::collections::HashMap<String, String>,
+    inputs: &PlanInputs<'_>,
+) -> Result<Vec<std::ffi::OsString>, String> {
+    let mut missing = std::collections::BTreeSet::new();
+    let args: Vec<std::ffi::OsString> = spec
+        .args
+        .iter()
+        .flatten()
+        .map(|arg| expand_known_placeholders(arg, spec, child_env, inputs, &mut missing).into())
+        .collect();
+    if missing.is_empty() {
+        Ok(args)
+    } else {
+        Err(format!(
+            "required env var(s) not set: {}",
+            missing.iter().map(|v| format!("${{{v}}}")).collect::<Vec<_>>().join(", ")
+        ))
+    }
+}
+
+/// Expand the known placeholders in one argument; anything else (including `${NOT_OURS}`) stays literal, since no shell sees it.
+fn expand_known_placeholders(
+    arg: &str,
+    spec: &HookSpec,
+    child_env: &std::collections::HashMap<String, String>,
+    inputs: &PlanInputs<'_>,
+    missing: &mut std::collections::BTreeSet<String>,
+) -> String {
+    let mut out = String::with_capacity(arg.len());
+    let mut cursor = 0;
+    for r in crate::env_expand::iter_env_var_references(arg) {
+        out.push_str(&arg[cursor..r.start]);
+        cursor = r.end;
+        let literal = &arg[r.start..r.end];
+        if r.name.is_empty() || r.has_modifier || !crate::config::is_known_hook_placeholder(r.name) {
+            out.push_str(literal);
+            continue;
+        }
+        match placeholder_value(r.name, spec, child_env, inputs) {
+            Some(value) => out.push_str(&value),
+            None => {
+                missing.insert(r.name.to_string());
+                out.push_str(literal);
+            }
+        }
+    }
+    out.push_str(&arg[cursor..]);
+    out
+}
+
+fn placeholder_value(
+    name: &str,
+    spec: &HookSpec,
+    child_env: &std::collections::HashMap<String, String>,
+    inputs: &PlanInputs<'_>,
+) -> Option<String> {
+    match name {
+        "FUIGO_HOOK_EVENT" => return Some(inputs.event.to_string()),
+        "FUIGO_HOOK_NAME" => return Some(spec.name.clone()),
+        "FUIGO_SESSION_ID" => return Some(inputs.session_id.to_string()),
+        "FUIGO_WORKSPACE_ROOT" | "CLAUDE_PROJECT_DIR" => return Some(inputs.workspace_root.to_string()),
+        _ => {}
+    }
+    let from_env = |key: &str| child_env.get(key).cloned().or_else(|| std::env::var(key).ok());
+    from_env(name).or_else(|| {
+        // The bare `PLUGIN_ROOT` some plugins write is the plugin root under either spelling.
+        (name == "PLUGIN_ROOT")
+            .then(|| from_env("CLAUDE_PLUGIN_ROOT").or_else(|| from_env("FUIGO_PLUGIN_ROOT")))
+            .flatten()
+    })
+}
+
+/// Check, without running anything, that a command hook can start: its placeholders resolve and its program exists.
+/// The `Err` text is the CONFIG failure reason (see `crate::health`).
+pub(crate) fn validate_command_spec(
+    spec: &HookSpec,
+    workspace_root: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    let Some(command) = spec.command.as_ref() else {
+        return Err("command hook has no 'command' field".to_string());
+    };
+    let event = spec.event.to_string();
+    let inputs = PlanInputs {
+        workspace_root,
+        session_id,
+        event: &event,
+    };
+    plan_command(spec, &command.to_string_lossy(), &spec.extra_env, &inputs).map(|_| ())
+}
+
 fn find_unresolved_env_vars(
     command_str: &str,
     extra_env: &std::collections::HashMap<String, String>,
@@ -538,6 +953,11 @@ fn find_unresolved_env_vars(
     let mut out: Vec<String> = Vec::new();
     for r in crate::env_expand::iter_env_var_references(command_str) {
         if r.name.is_empty() || r.has_modifier {
+            continue;
+        }
+        // Only Fuigo's own placeholders are ours to demand: any other `${NAME}` is the script's (a loop variable, an
+        // assignment inside a `case`), and refusing to run over it is what made valid scripts unrunnable.
+        if !crate::config::is_known_hook_placeholder(r.name) {
             continue;
         }
         if RUNNER_ALWAYS_SET_ENV.contains(&r.name) {
@@ -678,6 +1098,15 @@ fn parse_blocking_result(
                 }
                 return (
                     HookRunnerResult::Deny {
+                        reason,
+                        hook_name: hook_name.to_string(),
+                    },
+                    elapsed,
+                );
+            }
+            GateOutcome::Stop(reason) => {
+                return (
+                    HookRunnerResult::GateStop {
                         reason,
                         hook_name: hook_name.to_string(),
                     },
@@ -965,7 +1394,7 @@ pub fn resolve_command_path(spec: &HookSpec) -> Option<std::path::PathBuf> {
     if command.is_absolute() {
         Some(command.clone())
     } else {
-        Some(spec.source_dir.join(command))
+        Some(relative_root(spec).join(command))
     }
 }
 
@@ -1077,6 +1506,7 @@ mod tests {
                 }
                 HookRunnerResult::Defer => "defer".to_string(),
                 HookRunnerResult::Deny { reason, .. } => format!("deny: {reason}"),
+                HookRunnerResult::GateStop { reason, .. } => format!("stop: {reason}"),
                 HookRunnerResult::Failed(error) => format!("failed: {error}"),
                 other => panic!("expected a gate result, got {other:?}"),
             }
@@ -1090,11 +1520,14 @@ mod tests {
                 r#"{"decision":"maybe"}"#,
                 "failed: unknown decision value 'maybe' in 'decision' from hook 'test'",
             ),
+            // `continue: false` at a tool gate refuses the call AND ends the turn
             (
                 r#"{"decision":"allow","continue":false,"systemMessage":"hi"}"#,
-                "allow",
+                "stop: stopped by hook 'test' (continue: false)",
             ),
-            (r#"{"continue":false,"stopReason":"enough"}"#, "allow"),
+            (r#"{"continue":false,"stopReason":"enough"}"#, "stop: enough"),
+            (r#"{"decision":"deny","reason":"why","continue":false}"#, "stop: why"),
+            (r#"{"continue":true,"stopReason":"enough"}"#, "allow"),
             (
                 r#"{"decision":"allow","hookSpecificOutput":{"updateInput":{"command":"x"}}}"#,
                 "allow",
@@ -1923,6 +2356,8 @@ mod tests {
                 enabled: true,
                 command: command.map(std::path::PathBuf::from),
                 command_raw: command.map(str::to_string),
+                args: None,
+                shell: None,
                 url: None,
                 url_raw: None,
                 timeout_ms: 5000,
@@ -1965,6 +2400,8 @@ mod tests {
             enabled: true,
             command: Some(command.into()),
             command_raw: Some(command.to_string()),
+            args: None,
+            shell: None,
             url: None,
             url_raw: None,
             timeout_ms: 5000,
@@ -2431,19 +2868,39 @@ mod tests {
         let mut env = std::collections::HashMap::new();
         env.insert("KNOWN".to_string(), "x".to_string());
         assert_eq!(
-            find_unresolved_env_vars("${KNOWN}/${SOME_GB1183_UNSET_VAR}/foo", &env),
-            vec!["SOME_GB1183_UNSET_VAR".to_string()]
+            find_unresolved_env_vars("${KNOWN}/${CLAUDE_PLUGIN_DATA}/foo", &env),
+            vec!["CLAUDE_PLUGIN_DATA".to_string()]
         );
         assert_eq!(
-            find_unresolved_env_vars("$SOME_GB1183_BARE_UNSET/foo", &env),
-            vec!["SOME_GB1183_BARE_UNSET".to_string()]
+            find_unresolved_env_vars("$FUIGO_PLUGIN_DATA/foo", &env),
+            vec!["FUIGO_PLUGIN_DATA".to_string()]
         );
         assert_eq!(
             find_unresolved_env_vars(
-                "${MISSING_GB1183_DUP} && ${MISSING_GB1183_DUP}/foo $MISSING_GB1183_DUP",
+                "${CLAUDE_CONFIG_DIR} && ${CLAUDE_CONFIG_DIR}/foo $CLAUDE_CONFIG_DIR",
                 &env,
             ),
-            vec!["MISSING_GB1183_DUP".to_string()]
+            vec!["CLAUDE_CONFIG_DIR".to_string()]
+        );
+    }
+
+    /// 1.0.32 HOOKS-COMPAT: a `${NAME}` that is not one of Fuigo's placeholders is the script's own (a loop variable,
+    /// an assignment inside a `case`), and must never stop the hook from running.
+    #[test]
+    fn find_unresolved_leaves_the_scripts_own_variables_to_the_shell() {
+        let env = std::collections::HashMap::new();
+        for cmd in [
+            r#"for _V in a b; do [ -e "${_V}.orphaned_at" ] && continue; done"#,
+            r#"case "$x" in (*-*) _G=0;; (*) _G=1;; esac; echo "${_G}""#,
+            "echo ${SOME_GB1183_UNSET_VAR} $SOME_GB1183_BARE_UNSET",
+        ] {
+            let v = find_unresolved_env_vars(cmd, &env);
+            assert!(v.is_empty(), "`{cmd}` is the script's own, got {v:?}");
+        }
+        assert_eq!(
+            find_unresolved_env_vars("${_V} ${CLAUDE_PLUGIN_ROOT}", &env),
+            vec!["CLAUDE_PLUGIN_ROOT".to_string()],
+            "a placeholder Fuigo is meant to provide is still checked"
         );
     }
 
@@ -2488,15 +2945,15 @@ mod tests {
     fn find_unresolved_skips_parameter_expansion_modifiers() {
         let env = std::collections::HashMap::new();
         let cases = [
-            "${MISSING_GB1183_MOD:-/default/path.sh}",
-            "${MISSING_GB1183_MOD-/default/path.sh}",
-            "${MISSING_GB1183_MOD:=/assigned/path.sh}",
-            "${MISSING_GB1183_MOD:?msg here}",
-            "${MISSING_GB1183_MOD:+/used/if/set.sh}",
-            "${MISSING_GB1183_MOD%.sh}",
-            "${MISSING_GB1183_MOD#prefix/}",
-            "${MISSING_GB1183_MOD/foo/bar}",
-            "${MISSING_GB1183_MOD:0:5}",
+            "${CLAUDE_PLUGIN_DATA:-/default/path.sh}",
+            "${CLAUDE_PLUGIN_DATA-/default/path.sh}",
+            "${CLAUDE_PLUGIN_DATA:=/assigned/path.sh}",
+            "${CLAUDE_PLUGIN_DATA:?msg here}",
+            "${CLAUDE_PLUGIN_DATA:+/used/if/set.sh}",
+            "${CLAUDE_PLUGIN_DATA%.sh}",
+            "${CLAUDE_PLUGIN_DATA#prefix/}",
+            "${CLAUDE_PLUGIN_DATA/foo/bar}",
+            "${CLAUDE_PLUGIN_DATA:0:5}",
         ];
         for case in cases {
             let v = find_unresolved_env_vars(case, &env);
@@ -2520,9 +2977,11 @@ mod tests {
             matcher: None,
             enabled: true,
             command: Some(std::path::PathBuf::from(
-                "${NEVER_SET_GB1183}/does/not/exist.sh",
+                "${CLAUDE_PLUGIN_ROOT}/does/not/exist.sh",
             )),
-            command_raw: Some("${NEVER_SET_GB1183}/does/not/exist.sh".to_string()),
+            command_raw: Some("${CLAUDE_PLUGIN_ROOT}/does/not/exist.sh".to_string()),
+            args: None,
+            shell: None,
             url: None,
             url_raw: None,
             timeout_ms: 5000,
@@ -2538,7 +2997,7 @@ mod tests {
         match result {
             HookRunnerResult::Failed(reason) => {
                 assert!(
-                    reason.contains("NEVER_SET_GB1183"),
+                    reason.contains("CLAUDE_PLUGIN_ROOT"),
                     "failure reason should name the undefined env var, got: {reason}"
                 );
                 assert!(
@@ -2738,5 +3197,166 @@ mod tests {
             matches!(result, HookRunnerResult::Failed(_)),
             "got {result:?}"
         );
+    }
+
+    // ---- Windows program resolution, driven by injected PATH / PATHEXT layouts so it runs on every host ----
+
+    fn fake_fs(files: &[&str]) -> impl Fn(&std::path::Path) -> bool {
+        let set: std::collections::HashSet<std::path::PathBuf> = files.iter().map(std::path::PathBuf::from).collect();
+        move |p| set.contains(p)
+    }
+
+    fn path_of(dirs: &[&str]) -> std::ffi::OsString {
+        std::env::join_paths(dirs).expect("test PATH")
+    }
+
+    fn exts(pathext: Option<&str>) -> Vec<String> {
+        spawnable_pathext(pathext)
+    }
+
+    const SYS32: &str = "/c/Windows/System32";
+    const PS_DIR: &str = "/c/Windows/System32/WindowsPowerShell/v1.0";
+
+    #[test]
+    fn named_shell_powershell_and_cmd_resolve_from_system32() {
+        let fs = fake_fs(&["/c/Windows/System32/cmd.exe", "/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"]);
+        let path = path_of(&[SYS32, PS_DIR]);
+        assert_eq!(
+            resolve_named_shell_in("cmd", &path, &fs),
+            Some(std::path::PathBuf::from("/c/Windows/System32/cmd.exe"))
+        );
+        assert_eq!(
+            resolve_named_shell_in("powershell", &path, &fs),
+            Some(std::path::PathBuf::from("/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"))
+        );
+    }
+
+    #[test]
+    fn named_shell_bash_in_system32_or_windowsapps_is_rejected() {
+        let fs = fake_fs(&[
+            "/c/Windows/System32/bash.exe",
+            "/c/Users/u/AppData/Local/Microsoft/WindowsApps/bash.exe",
+            "/c/Git/bin/bash.exe",
+        ]);
+        // Only the WSL launcher / Store stub on PATH: no bash.
+        let launcher_only = path_of(&[SYS32, "/c/Users/u/AppData/Local/Microsoft/WindowsApps"]);
+        assert_eq!(resolve_named_shell_in("bash", &launcher_only, &fs), None);
+        assert_eq!(resolve_named_shell_in("BASH", &launcher_only, &fs), None);
+        assert_eq!(resolve_named_shell_in("bash.exe", &launcher_only, &fs), None);
+        // A real bash later on PATH still wins.
+        let with_git = path_of(&[SYS32, "/c/Git/bin"]);
+        assert_eq!(
+            resolve_named_shell_in("bash", &with_git, &fs),
+            Some(std::path::PathBuf::from("/c/Git/bin/bash.exe"))
+        );
+    }
+
+    #[test]
+    fn named_shell_pwsh_resolves_wherever_it_is() {
+        let fs = fake_fs(&[
+            "/c/Program Files/PowerShell/7/pwsh.exe",
+            "/c/Users/u/AppData/Local/Microsoft/WindowsApps/pwsh.exe",
+        ]);
+        assert_eq!(
+            resolve_named_shell_in("pwsh", &path_of(&["/c/Program Files/PowerShell/7"]), &fs),
+            Some(std::path::PathBuf::from("/c/Program Files/PowerShell/7/pwsh.exe"))
+        );
+        assert_eq!(
+            resolve_named_shell_in("pwsh", &path_of(&["/c/Users/u/AppData/Local/Microsoft/WindowsApps"]), &fs),
+            Some(std::path::PathBuf::from("/c/Users/u/AppData/Local/Microsoft/WindowsApps/pwsh.exe"))
+        );
+    }
+
+    #[test]
+    fn pathext_keeps_spawnable_extensions_in_order() {
+        let all = |v: Vec<String>| v.join(",");
+        assert_eq!(all(exts(Some(".COM;.EXE;.BAT;.CMD;.VBS;.JS;.MSC"))), ".com,.exe,.bat,.cmd");
+        assert_eq!(all(exts(Some(".CMD;.EXE"))), ".cmd,.exe");
+        assert_eq!(all(exts(Some(".exe;;.EXE; .bat "))), ".exe,.bat");
+        // Unset, empty or nothing spawnable: the Windows default.
+        assert_eq!(all(exts(None)), ".com,.exe,.bat,.cmd");
+        assert_eq!(all(exts(Some(""))), ".com,.exe,.bat,.cmd");
+        assert_eq!(all(exts(Some(".VBS;.JS"))), ".com,.exe,.bat,.cmd");
+    }
+
+    #[test]
+    fn bare_name_resolves_through_pathext() {
+        let fs = fake_fs(&["/n/node.exe"]);
+        let path = path_of(&["/x", "/n"]);
+        let e = exts(None);
+        assert_eq!(find_in_dirs("node", &path, &e, &fs), Some(std::path::PathBuf::from("/n/node.exe")));
+        // Already carries an extension: tried as written.
+        assert_eq!(find_in_dirs("node.exe", &path, &e, &fs), Some(std::path::PathBuf::from("/n/node.exe")));
+        assert_eq!(find_in_dirs("node.EXE", &path, &e, &fake_fs(&["/n/node.EXE"])), Some(std::path::PathBuf::from("/n/node.EXE")));
+        // POSIX (no extensions): the name is taken literally.
+        assert_eq!(find_in_dirs("node", &path, &[], &fs), None);
+        // An empty PATH entry is never the current directory.
+        assert_eq!(find_in_dirs("node", &path_of(&[""]), &e, &fake_fs(&["node.exe"])), None);
+    }
+
+    #[test]
+    fn pathext_order_and_directory_order_decide_the_winner() {
+        let both = fake_fs(&["/n/node.cmd", "/n/node.exe"]);
+        let path = path_of(&["/n"]);
+        assert_eq!(
+            find_in_dirs("node", &path, &exts(Some(".CMD;.EXE")), &both),
+            Some(std::path::PathBuf::from("/n/node.cmd"))
+        );
+        assert_eq!(find_in_dirs("node", &path, &exts(None), &both), Some(std::path::PathBuf::from("/n/node.exe")));
+        // Directory by directory: an earlier directory's .cmd beats a later directory's .exe.
+        let split = fake_fs(&["/a/node.cmd", "/b/node.exe"]);
+        assert_eq!(
+            find_in_dirs("node", &path_of(&["/a", "/b"]), &exts(None), &split),
+            Some(std::path::PathBuf::from("/a/node.cmd"))
+        );
+    }
+
+    #[test]
+    fn cmd_shim_resolves_and_is_spawned_directly_with_literal_args() {
+        // npm-style shim: only `npm.cmd` exists, and a bare `npm` finds it.
+        let fs = fake_fs(&["/nodejs/npm.cmd", "/nodejs/npm"]);
+        assert_eq!(
+            find_in_dirs("npm", &path_of(&["/nodejs"]), &exts(None), &fs),
+            Some(std::path::PathBuf::from("/nodejs/npm.cmd"))
+        );
+        // The plan runs the shim as the program with each argument kept as one literal argument: nothing is spliced into a
+        // shell string by Fuigo (on Windows the standard library starts a .cmd through cmd.exe with its own quoting, and
+        // refuses an argument it cannot quote safely).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shim = dir.path().join("npm.cmd");
+        std::fs::write(&shim, "@echo off\r\n").expect("write shim");
+        let mut spec = make_shell_spec(&shim.to_string_lossy());
+        spec.args = Some(vec!["install".into(), "a b&c".into(), "%PATH%".into()]);
+        let inputs = PlanInputs { workspace_root: "/w", session_id: "s", event: "Stop" };
+        let plan = plan_command(&spec, &shim.to_string_lossy(), &std::collections::HashMap::new(), &inputs)
+            .expect("plan");
+        assert!(!plan.shell);
+        assert_eq!(std::path::PathBuf::from(&plan.program), shim);
+        let args: Vec<String> = plan.args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["install", "a b&c", "%PATH%"]);
+    }
+
+    #[test]
+    fn relative_plugin_path_resolves_against_the_plugin_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(root.path().join("bin")).expect("mkdir");
+        let tool = root.path().join("bin").join("run.cmd");
+        std::fs::write(&tool, "@echo off\r\n").expect("write");
+        let mut spec = make_shell_spec("bin/run.cmd");
+        spec.layer = crate::config::HookProvenance::Plugin;
+        spec.args = Some(vec!["--x".into()]);
+        spec.extra_env.insert("CLAUDE_PLUGIN_ROOT".into(), root.path().to_string_lossy().into_owned());
+        let inputs = PlanInputs { workspace_root: "/w", session_id: "s", event: "Stop" };
+        let plan = plan_command(&spec, "bin/run.cmd", &std::collections::HashMap::new(), &inputs).expect("plan");
+        assert_eq!(std::path::PathBuf::from(&plan.program), tool);
+        // The native separator form resolves the same way.
+        let native = format!("bin{}run.cmd", std::path::MAIN_SEPARATOR);
+        let plan = plan_command(&spec, &native, &std::collections::HashMap::new(), &inputs).expect("plan");
+        assert_eq!(std::path::PathBuf::from(&plan.program), tool);
+        // A path that is not there is a config failure naming it.
+        let err = plan_command(&spec, "bin/missing.cmd", &std::collections::HashMap::new(), &inputs)
+            .err()
+            .expect("missing");
+        assert!(err.contains("command not found"), "{err}");
     }
 }

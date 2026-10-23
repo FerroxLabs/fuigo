@@ -218,7 +218,7 @@ fn wedged_child_handle() -> (
             std::sync::atomic::AtomicBool::new(false),
         ),
         client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
-        mcp_servers: vec![],
+        mcp_servers: Default::default(),
         initial_client_mcp_servers: Default::default(),
         display_cwd: None,
         feedback_manager: std::sync::Arc::new(
@@ -759,6 +759,7 @@ fn auto_wake_test_request(id: &str) -> SubagentRequest {
         fork_context: false,
         owner: SubagentOwner::Task,
         cancel_token: CancellationToken::new(),
+        tool_call_id: None,
     }
 }
 #[test]
@@ -1616,6 +1617,7 @@ fn bootstrap_test_request(fork_context: bool) -> SubagentRequest {
         fork_context,
         owner: SubagentOwner::Task,
         cancel_token: CancellationToken::new(),
+        tool_call_id: None,
     }
 }
 #[tokio::test]
@@ -2447,6 +2449,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             query_params: Default::default(),
             env_http_headers: Default::default(),
             context_window: std::num::NonZeroU64::new(256_000).unwrap(),
+            max_request_bytes: None,
             context_windows: Vec::new(),
             notice: None,
             auto_compact_threshold_percent: None,
@@ -2467,6 +2470,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
+            price: None,
             stream_tool_calls: None,
             laziness_detector: crate::agent::config::LazinessDetectorPerModelConfig::default(),
             variants: Vec::new(),
@@ -2696,6 +2700,7 @@ fn test_sampling_config(model_slug: &str) -> fuigo_sampling_types::SamplingConfi
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: NonZeroU64::new(256_000).expect("non-zero context window"),
+        max_request_bytes: None,
         reasoning_effort: None,
         stream_tool_calls: None,
         mtls_cert_dir: None,

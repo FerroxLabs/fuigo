@@ -11,7 +11,7 @@ pub mod responses_ptc;
 pub use chat_completions::{conversation_item_to_chat_message, conversation_to_chat_messages};
 pub use messages::{build_messages_request, messages_response_to_items};
 pub use responses::{
-    custom_tool_call, extra_tool_entries, patch_reasoning_text_types, response_to_conversation_items,
+    custom_tool_call, extra_tool_entries, patch_reasoning_text_types, response_to_conversation_items, response_to_conversation_items_with_custom,
 };
 pub use responses_ptc::{ProgramItem, ProgramOutputItem, patch_request_body};
 
@@ -333,6 +333,9 @@ pub enum OutputSlot {
         #[serde(default)]
         id: String,
     },
+    /// A `function_call` a provider returned in place of a declared `custom` tool call (`{"input": text}` arguments), by
+    /// `call_id`; it replays as it arrived, so its result goes back as `function_call_output`.
+    DowngradedCustomCall { call_id: String },
     /// A backend-executed tool call sibling (`web_search_call`, hosted `custom_tool_call`, `code_interpreter_call`), by item id.
     BackendToolCall { id: String },
 }
@@ -2571,6 +2574,18 @@ pub fn repair_dangling_tool_calls(
     conversation: &mut Vec<ConversationItem>,
     reason: DanglingToolCallReason,
 ) -> usize {
+    repair_dangling_tool_calls_with(conversation, |_, name| {
+        synthetic_dangling_result_text(name, reason)
+    })
+}
+
+/// [`repair_dangling_tool_calls`] with the result text of each unanswered call chosen by `text_for(tool_call_id, tool_name)`.
+/// A caller that knows what became of a call (a foreground subagent moved to the background when its turn ended)
+/// can say so instead of the generic "was not executed".
+pub fn repair_dangling_tool_calls_with(
+    conversation: &mut Vec<ConversationItem>,
+    mut text_for: impl FnMut(&str, &str) -> String,
+) -> usize {
     // Phase 1: forward scan to find every assistant with unanswered tool calls.
     // We record (insert_position, synthetic_items) for each repair site.
     let mut repairs: Vec<(usize, Vec<ConversationItem>)> = Vec::new();
@@ -2604,10 +2619,7 @@ pub fn repair_dangling_tool_calls(
                 .iter()
                 .filter(|(id, _)| !answered.contains(id.as_ref()))
                 .map(|(id, name)| {
-                    ConversationItem::tool_result(
-                        id.as_ref(),
-                        synthetic_dangling_result_text(name, reason),
-                    )
+                    ConversationItem::tool_result(id.as_ref(), text_for(id.as_ref(), name))
                 })
                 .collect();
 
@@ -2666,7 +2678,8 @@ pub fn has_dangling_tool_calls(conversation: &[ConversationItem]) -> bool {
     false
 }
 
-fn synthetic_dangling_result_text(name: &str, reason: DanglingToolCallReason) -> String {
+/// The generic result text of a tool call that has no real result, worded for `reason`.
+pub fn synthetic_dangling_result_text(name: &str, reason: DanglingToolCallReason) -> String {
     // Exhaustive match (no `_ =>` guard) so adding a new variant is a compile-time error at every call site that renders these messages
     match reason {
         DanglingToolCallReason::UserCancelled => {
@@ -4054,6 +4067,44 @@ mod tests {
             0
         );
         assert_eq!(conv.len(), 3);
+    }
+
+    #[test]
+    fn repair_with_writes_the_callers_text_for_the_calls_it_knows() {
+        let mut conv = vec![
+            assistant_with_calls(&[("c1", "spawn_subagent"), ("c2", "read_file")]),
+        ];
+        let inserted = repair_dangling_tool_calls_with(&mut conv, |id, name| {
+            if id == "c1" {
+                "Subagent was moved to the background".to_owned()
+            } else {
+                synthetic_dangling_result_text(
+                    name,
+                    DanglingToolCallReason::HarnessHalted { class: "user_cancel" },
+                )
+            }
+        });
+        assert_eq!(2, inserted);
+        let texts: Vec<(String, String)> = conv
+            .iter()
+            .filter_map(|item| match item {
+                ConversationItem::ToolResult(tr) => {
+                    Some((tr.tool_call_id.to_string(), item.text_content()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            vec![
+                ("c1".to_owned(), "Subagent was moved to the background".to_owned()),
+                (
+                    "c2".to_owned(),
+                    "Tool execution was halted by the harness (user_cancel); the tool `read_file` was not executed."
+                        .to_owned()
+                ),
+            ],
+            texts
+        );
     }
 
     #[test]

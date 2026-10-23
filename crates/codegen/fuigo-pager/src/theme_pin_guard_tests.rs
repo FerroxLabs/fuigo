@@ -527,6 +527,10 @@ const PINNED_READERS: &[(&str, &str)] = &[
         "scrollback/entry.rs",
         "test_truncated_height_cache_hits_when_key_unchanged",
     ),
+    (
+        "views/welcome/mod.rs",
+        "no_cell_has_a_fill_background_different_from_the_theme",
+    ),
 ];
 
 /// If `stmt` (whitespace-stripped code) is `let _name = [path::]pin_theme();`, the name of the guard it binds.

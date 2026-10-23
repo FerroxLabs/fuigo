@@ -113,12 +113,13 @@ fn seed_fake_oauth_raw(
     team_fields: &str,
 ) {
     let fuigo_home = content.home().join(".fuigo");
+    let issuer = FAKE_OAUTH_ISSUER;
     std::fs::create_dir_all(&fuigo_home).expect("create temp .fuigo");
     std::fs::write(
         fuigo_home.join("auth.json"),
         format!(
             r#"{{
-  "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {{
+  "{issuer}::b1a00492-073a-47ea-816f-4c329264a828": {{
     "key": "pty-test-oauth-token",
     "auth_mode": "oidc",
     "create_time": "2026-01-01T00:00:00Z",
@@ -126,7 +127,7 @@ fn seed_fake_oauth_raw(
     "email": "{user}@test.invalid",
     "expires_at": "2030-01-01T00:00:00Z",
     "refresh_token": "pty-test-refresh-token",
-    "oidc_issuer": "https://auth.x.ai",
+    "oidc_issuer": "{issuer}",
     "oidc_client_id": "b1a00492-073a-47ea-816f-4c329264a828",
     "coding_data_retention_opt_out": {opted_out}{team_fields}
   }}
@@ -135,6 +136,11 @@ fn seed_fake_oauth_raw(
     )
     .expect("seed fake oauth auth.json");
 }
+
+/// The OAuth2 issuer [`seed_fake_oauth`] stores its entry under.
+/// It names a FluxRouter host: Fuigo refuses to contact an upstream vendor host, so a refresh against a vendor issuer
+/// fails permanently ("fuigo refuses to contact upstream vendor host") instead of the way an unreachable issuer does.
+pub const FAKE_OAUTH_ISSUER: &str = "https://auth.fluxrouter.ai";
 
 /// The OAuth2 client id [`seed_fake_oauth`] stores its entry under (the second half of the `<issuer>::<client_id>` scope key).
 pub const FAKE_OAUTH_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
@@ -148,7 +154,7 @@ pub const FAKE_OAUTH_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 /// [`crate::ContentController::session_front_env`].
 pub fn oauth_provider_ops() -> [crate::EnvOp<'static>; 2] {
     [
-        crate::EnvOp::set("FUIGO_OAUTH2_ISSUER", "https://auth.x.ai"),
+        crate::EnvOp::set("FUIGO_OAUTH2_ISSUER", FAKE_OAUTH_ISSUER),
         crate::EnvOp::set("FUIGO_OAUTH2_CLIENT_ID", FAKE_OAUTH_CLIENT_ID),
     ]
 }

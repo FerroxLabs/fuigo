@@ -28,11 +28,11 @@ use fuigo_shell::util::config as cli_config;
 use fuigo_telemetry::startup::PendingStartup;
 
 use crate::acp::model_state::{EffortTokenError, ModelState};
-use crate::app::worktree_session::{
-    CREATE_METHOD, RESUME_METHOD, WorktreeRpcError, WorktreeSpec, create_worktree,
-    new_worktree_id, note_orphaned_worktree, resume_session_into_worktree,
-};
 use crate::acp::spawn::{AgentShutdownGuard, spawn_fuigo_shell};
+use crate::app::worktree_session::{
+    CREATE_METHOD, RESUME_METHOD, WorktreeRpcError, WorktreeSpec, create_worktree, new_worktree_id,
+    note_orphaned_worktree, resume_session_into_worktree,
+};
 use crate::client_identity::{HEADLESS_CLIENT_TYPE, PAGER_CLIENT_VERSION};
 use crate::headless::reducer::{
     Lifecycle, McpServer, Reducer, SessionContext, StreamEvent, TurnEnd, map_session_update,
@@ -40,16 +40,18 @@ use crate::headless::reducer::{
 };
 
 mod ext_protocol;
+mod mcp_init;
 mod prompt_ack;
 mod reducer;
+mod residual;
 use crate::app::prompt_ack::{PromptAckDeadlines, PromptAckWatch};
 use ext_protocol::{ExtEvent, handle_ext_notification, reply_headless_ext_method};
 use prompt_ack::{abort_unacknowledged_prompt, headless_ack_signal};
 
 mod cli;
 pub use cli::{HeadlessPrompt, OutputFormat, parse_json_schema, parse_permission_rules_lenient};
-pub(crate) use cli::{ResolvedAgent, resolve_agent_arg};
-use cli::{apply_agent_flag, parse_cli_agents, parse_comma_list, parse_permission_rules_strict};
+pub(crate) use cli::{ResolvedAgent, parse_comma_list, resolve_agent_arg};
+use cli::{apply_agent_flag, parse_cli_agents, parse_permission_rules_strict};
 
 #[derive(Debug, Clone)]
 pub struct HeadlessOptions {
@@ -145,15 +147,25 @@ impl HeadlessDenialRule {
         }
     }
 
+    /// Why the request was refused, in a few words, for the per-refusal stderr line.
+    pub fn short_reason(self) -> &'static str {
+        match self {
+            Self::HeadlessNeverApproves => "headless mode has no one to ask for approval",
+            Self::YoloHadNoAllowOption => "a deny rule or protected path left no allow option",
+            Self::ExecutionBudget(_) | Self::ExecutionBudgetUnrecognized => {
+                "an execution budget refused it"
+            }
+        }
+    }
+
     /// What the operator would have to change (D.2.2): a permission mode, a config key, a grant.
     pub fn remedy(self) -> &'static str {
         match self {
             Self::HeadlessNeverApproves => {
-                "pre-approve it before the run — pass --allow, raise --permission-mode, or trust a \
-                 folder whose project config allows it; headless mode has nobody to ask. No --allow \
-                 rule covers a shell command that writes a file by redirect (`> file`); \
-                 --always-approve runs one (--permission-mode auto runs it only if its classifier \
-                 approves), and deny rules still apply"
+                "pre-approve it before the run — pass --allow, raise --permission-mode (acceptEdits \
+                 allows file edits in the workspace), or trust a folder whose project config allows \
+                 it; headless mode has nobody to ask. --always-approve runs anything a deny rule \
+                 does not forbid (--permission-mode auto runs it only if its classifier approves)"
             }
             Self::YoloHadNoAllowOption => {
                 "a deny rule or protected path left the request with no allow option — remove the \
@@ -184,10 +196,55 @@ pub struct HeadlessDenial {
     pub tool_call_id: String,
     /// The option kinds offered, in the order offered: the evidence that no allow option existed.
     pub offered_option_kinds: Vec<String>,
+    /// The ACP wire spelling of the refused tool call's kind (`edit`, `execute`, ...), when the request carried
+    /// one. It picks the remedy that fits the tool; absent, the rule's generic remedy is used.
+    pub tool_kind: Option<String>,
     /// The agent's own message for a budget rule this build does not know. It names the rule and its
     /// remedy, which [`HeadlessDenialRule::ExecutionBudgetUnrecognized`] cannot, so [`Self::human_line`]
     /// carries it: the denial is then reported by that one line and nowhere else (P51).
     pub agent_message: Option<String>,
+    /// Whether the per-refusal stderr line (which carries the rule and the remedy) already went to the process
+    /// stderr, so the exit path and the notice must not print the same refusal a second time.
+    pub reported: bool,
+}
+
+/// Whether a shell command wording writes a file by redirect. A redirect to `/dev/null` or a file-descriptor dup
+/// (`2>&1`, `>&2`, `2>&-`) writes no file, so a read-only command that only silences or merges a stream is not one.
+fn writes_file_by_redirect(title: &str) -> bool {
+    let b = title.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'>' {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        if j < b.len() && b[j] == b'>' {
+            j += 1;
+        }
+        if j < b.len() && b[j] == b'&' {
+            j += 1;
+            if j < b.len() && (b[j].is_ascii_digit() || b[j] == b'-') {
+                i = j + 1;
+                continue;
+            }
+        }
+        while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
+            j += 1;
+        }
+        let rest = &title[j..];
+        let is_null = rest.strip_prefix("/dev/null").is_some_and(|after| {
+            after
+                .chars()
+                .next()
+                .is_none_or(|c| c.is_whitespace() || matches!(c, ';' | '|' | '&' | ')' | '"' | '\'' | '`' | '”'))
+        });
+        if !is_null {
+            return true;
+        }
+        i = j;
+    }
+    false
 }
 
 impl HeadlessDenial {
@@ -209,7 +266,9 @@ impl HeadlessDenial {
                 .iter()
                 .map(|option| permission_option_kind_wire(option.kind))
                 .collect(),
+            tool_kind: request.tool_call.fields.kind.map(tool_kind_wire),
             agent_message: None,
+            reported: false,
         }
     }
 
@@ -226,7 +285,9 @@ impl HeadlessDenial {
             tool_title: None,
             tool_call_id: String::new(),
             offered_option_kinds: Vec::new(),
+            tool_kind: None,
             agent_message: None,
+            reported: false,
         }
     }
 
@@ -237,6 +298,38 @@ impl HeadlessDenial {
             HeadlessDenialRule::ExecutionBudget(_)
                 | HeadlessDenialRule::ExecutionBudgetUnrecognized
         )
+    }
+
+    /// What the operator would have to change, fitted to the refused tool (D.2.2).
+    ///
+    /// A file edit is fixed by `--permission-mode acceptEdits`; a shell command is not (that mode approves edits only), so
+    /// its remedy names an `--allow` rule instead. Any other tool, or a request that carried no kind, gets the rule's
+    /// generic remedy. Budget denials and `yolo_had_no_allow_option` have one remedy whatever the tool.
+    pub fn remedy(&self) -> &'static str {
+        if self.rule != HeadlessDenialRule::HeadlessNeverApproves {
+            return self.rule.remedy();
+        }
+        match self.tool_kind.as_deref() {
+            Some("edit" | "delete" | "move") => {
+                "re-run with --permission-mode acceptEdits (it approves file edits inside the \
+                 workspace), an --allow rule that covers the edit, or --always-approve; headless \
+                 mode has nobody to ask, and deny rules still apply"
+            }
+            // A command that redirects into a file is the one shell command no --allow rule can pre-approve (the
+            // permission layer keeps a write by redirect behind a prompt), so naming an --allow rule there would send
+            // the operator to a fix that cannot work. The title is the agent's wording of the command.
+            Some("execute") if self.tool_title.as_deref().is_some_and(writes_file_by_redirect) => {
+                "re-run with --always-approve: no --allow rule covers a shell command that writes a \
+                 file by redirect (`> file`), and --permission-mode acceptEdits approves file edits, \
+                 not shell commands; deny rules still apply"
+            }
+            Some("execute") => {
+                "re-run with an --allow rule that covers the command (for example \
+                 --allow 'Bash(npm test:*)') or --always-approve; --permission-mode acceptEdits \
+                 approves file edits, not shell commands, and deny rules still apply"
+            }
+            _ => self.rule.remedy(),
+        }
     }
 
     /// The exit code a run blocked by this denial must produce (D.2.1).
@@ -255,10 +348,27 @@ impl HeadlessDenial {
         let call_id = fuigo_tty_utils::bracketed(&self.tool_call_id, DENIAL_ID_MAX_COLUMNS);
         match self.tool_title.as_deref() {
             Some(title) if !title.is_empty() => {
-                format!("{} (tool call {call_id})", fuigo_tty_utils::curly_quoted(title, DENIAL_TITLE_MAX_COLUMNS))
+                format!(
+                    "{} (tool call {call_id})",
+                    fuigo_tty_utils::curly_quoted(title, DENIAL_TITLE_MAX_COLUMNS)
+                )
             }
             _ => format!("tool call {call_id}"),
         }
+    }
+
+    /// One stderr line per refused approval: the tool and why it was refused.
+    ///
+    /// Written the moment the request is refused, for every refusal of the run (the latch keeps only the
+    /// first), so a run that carries on past several refusals still names each one. Never gated on a TTY.
+    pub fn refusal_line(&self) -> String {
+        format!(
+            "fuigo: refused {}: {}. Denied by rule `{}`. Remedy: {}.",
+            self.requested(),
+            self.rule.short_reason(),
+            fuigo_tty_utils::Untrusted(self.rule.id()),
+            self.remedy(),
+        )
     }
 
     /// The single English line required by D.2.3, remedy included.
@@ -270,14 +380,21 @@ impl HeadlessDenial {
             let detail = self
                 .agent_message
                 .as_deref()
-                .map(|m| format!(" Agent message: {}", fuigo_tty_utils::Untrusted(m.split_whitespace().collect::<Vec<_>>().join(" "))))
+                .map(|m| {
+                    format!(
+                        " Agent message: {}",
+                        fuigo_tty_utils::Untrusted(
+                            m.split_whitespace().collect::<Vec<_>>().join(" ")
+                        )
+                    )
+                })
                 .unwrap_or_default();
             return format!(
                 "fuigo: blocked — an execution budget refused {}. \
                  Denied by rule `{}`. Remedy: {}. Exiting {}.{detail}",
                 self.requested(),
                 fuigo_tty_utils::Untrusted(self.rule.id()),
-                self.rule.remedy(),
+                self.remedy(),
                 self.exit_code(),
             );
         }
@@ -286,7 +403,7 @@ impl HeadlessDenial {
              Denied by rule `{}`. Remedy: {}. Exiting {}.",
             self.requested(),
             fuigo_tty_utils::Untrusted(self.rule.id()),
-            self.rule.remedy(),
+            self.remedy(),
             self.exit_code(),
         )
     }
@@ -304,7 +421,7 @@ impl HeadlessDenial {
              Denied by rule `{}`. Remedy: {}.",
             self.requested(),
             fuigo_tty_utils::Untrusted(self.rule.id()),
-            self.rule.remedy(),
+            self.remedy(),
         )
     }
 
@@ -328,13 +445,21 @@ impl HeadlessDenial {
             "toolCallId": (!self.is_budget()).then_some(self.tool_call_id.as_str()),
             "toolTitle": self.tool_title,
             "offeredOptionKinds": self.offered_option_kinds,
-            "remedy": self.rule.remedy(),
+            "remedy": self.remedy(),
             "endedRun": ended_run,
         });
         if ended_run {
             record["exitCode"] = serde_json::json!(self.exit_code());
         }
         record
+    }
+}
+
+/// The ACP wire spelling of a tool-call kind (`edit`, `execute`, ...).
+fn tool_kind_wire(kind: acp::ToolKind) -> String {
+    match serde_json::to_value(kind) {
+        Ok(serde_json::Value::String(s)) => s,
+        _ => format!("{kind:?}").to_lowercase(),
     }
 }
 
@@ -346,7 +471,10 @@ fn permission_option_kind_wire(kind: acp::PermissionOptionKind) -> String {
     match serde_json::to_value(kind) {
         Ok(serde_json::Value::String(s)) => s,
         other => {
-            tracing::debug!(?other, "headless: unexpected permission option kind encoding");
+            tracing::debug!(
+                ?other,
+                "headless: unexpected permission option kind encoding"
+            );
             format!("{kind:?}")
         }
     }
@@ -461,6 +589,10 @@ struct HeadlessEmitter {
     mcp_start_failed_reported: HashSet<String>,
     /// Usage of the responses that completed so far (see [`Self::terminal_usage`]).
     observed_usage: fuigo_shell::extensions::notification::PromptUsageModel,
+    /// Goals and follow-up turns the run still waits for once its prompt returned.
+    residual: residual::ResidualWork,
+    /// Where the per-refusal line goes: `None` is the process stderr; tests capture it.
+    refusal_out: Option<Box<dyn std::io::Write + Send>>,
 }
 
 impl HeadlessEmitter {
@@ -470,6 +602,7 @@ impl HeadlessEmitter {
             Self::with_writer(format, parse_structured_output, Box::new(std::io::stdout()));
         emitter.scrub_terminal =
             matches!(format, OutputFormat::Plain) && std::io::stdout().is_terminal();
+        emitter.refusal_out = None;
         emitter
     }
 
@@ -502,6 +635,27 @@ impl HeadlessEmitter {
             terminal_emitted: false,
             mcp_start_failed_reported: HashSet::new(),
             observed_usage: Default::default(),
+            residual: Default::default(),
+            refusal_out: Some(Box::new(std::io::sink())),
+        }
+    }
+
+    /// Capture the per-refusal stderr lines (tests).
+    #[cfg(test)]
+    fn with_refusal_writer(mut self, w: Box<dyn std::io::Write + Send>) -> Self {
+        self.refusal_out = Some(w);
+        self
+    }
+
+    /// Say one refused approval on stderr, at once: tool plus reason, one line.
+    fn report_refusal(&mut self, denial: &HeadlessDenial) {
+        // The line carries the rule and the remedy, so the exit path / notice must not repeat this refusal.
+        let line = denial.refusal_line();
+        match self.refusal_out.as_mut() {
+            Some(w) => {
+                crate::best_effort_stderr::write_fuigo_line(w, &line);
+            }
+            None => crate::best_effort_stderr::eprint_line(&line),
         }
     }
 
@@ -513,7 +667,8 @@ impl HeadlessEmitter {
         use std::io::Write as _;
         let scrubbed;
         let bytes = if self.scrub_terminal {
-            scrubbed = fuigo_tty_utils::scrub_terminal_text(&String::from_utf8_lossy(bytes)).into_owned();
+            scrubbed =
+                fuigo_tty_utils::scrub_terminal_text(&String::from_utf8_lossy(bytes)).into_owned();
             scrubbed.as_bytes()
         } else {
             bytes
@@ -606,23 +761,25 @@ impl HeadlessEmitter {
     fn on_lifecycle(&mut self, event: Lifecycle) {
         match self.format {
             OutputFormat::Plain => {
-                if let Some(line) = plain_lifecycle_line(&event, fuigo_sandbox::unavailable_warning().as_deref()) {
+                if let Some(line) =
+                    plain_lifecycle_line(&event, fuigo_sandbox::unavailable_warning().as_deref())
+                {
                     crate::best_effort_stderr::eprint_line(&line);
                 }
             }
             // stdout stays one JSON document; a refused reference to the saved key is a warning for the person at the
             // terminal, so it goes to stderr (the other lifecycle events have no stderr line in these formats).
             OutputFormat::Json => {
-                if matches!(event, Lifecycle::ConfigNotice { .. }) {
-                    crate::best_effort_stderr::eprint_line(&event.plain_message());
+                if let Some(line) = config_notice_stderr_line(&event, fuigo_sandbox::unavailable_warning().as_deref()) {
+                    crate::best_effort_stderr::eprint_line(&line);
                 }
             }
             OutputFormat::StreamingJson => {
                 self.reduce_and_emit(StreamEvent::Lifecycle(event));
             }
             OutputFormat::StreamingMessagesJson => {
-                if matches!(event, Lifecycle::ConfigNotice { .. }) {
-                    crate::best_effort_stderr::eprint_line(&event.plain_message());
+                if let Some(line) = config_notice_stderr_line(&event, fuigo_sandbox::unavailable_warning().as_deref()) {
+                    crate::best_effort_stderr::eprint_line(&line);
                 }
                 self.reduce_and_emit(StreamEvent::Lifecycle(event));
             }
@@ -631,7 +788,11 @@ impl HeadlessEmitter {
 
     /// A configured MCP server failed to start: one warning per server per run, however many times the shell reports it
     /// (the shell pushes the failure from two places, and a restart can fail again).
-    fn on_mcp_start_failed(&mut self, name: &str, kind: fuigo_shell::extensions::mcp::McpFailureKind) {
+    fn on_mcp_start_failed(
+        &mut self,
+        name: &str,
+        kind: fuigo_shell::extensions::mcp::McpFailureKind,
+    ) {
         let (printed_name, lifecycle) = Lifecycle::mcp_start_failed(name, kind);
         // Keyed on the name as printed, so two raw names that print alike never give two identical lines
         if !self.mcp_start_failed_reported.insert(printed_name) {
@@ -710,7 +871,8 @@ impl HeadlessEmitter {
         };
         let t = &mut self.observed_usage;
         // ACP identity: `input_tokens` is the whole prompt, cache reads and creation included.
-        t.input_tokens += u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens;
+        t.input_tokens +=
+            u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens;
         t.output_tokens += u.output_tokens;
         t.cached_read_tokens += u.cache_read_input_tokens;
         t.cache_creation_tokens += u.cache_creation_input_tokens;
@@ -759,8 +921,9 @@ impl HeadlessEmitter {
         if let Some(err) = meta.get("structuredOutputError").and_then(|v| v.as_str()) {
             // P149 (S8, Astra r3 #1): a schema-validation error quotes the rejected value, and it rides an `Ok`
             // reply the ACP reply-rail scrub never sees; it is printed on the terminal document, so scrub it here.
-            self.structured_output =
-                Some(Err(fuigo_telemetry::sent_credentials::scrub_owned(err.to_string())));
+            self.structured_output = Some(Err(fuigo_telemetry::sent_credentials::scrub_owned(
+                err.to_string(),
+            )));
         } else if let Some(value) = meta.get("structuredOutput") {
             self.structured_output = Some(Ok(value.clone()));
         }
@@ -1033,27 +1196,6 @@ fn stop_reason_wire(reason: acp::StopReason) -> String {
     .to_string()
 }
 
-/// Configured MCP servers for the `init` line; all report `"connected"` (status is not resolved here).
-fn mcp_server_names(cwd: &Path) -> Vec<McpServer> {
-    let servers =
-        cli_config::load_mcp_servers(cwd, &fuigo_tools::types::compat::CompatConfig::default());
-    servers
-        .iter()
-        .filter_map(|s| {
-            let name = match s {
-                acp::McpServer::Http(h) => h.name.clone(),
-                acp::McpServer::Sse(h) => h.name.clone(),
-                acp::McpServer::Stdio(h) => h.name.clone(),
-                _ => return None,
-            };
-            Some(McpServer {
-                name,
-                status: "connected".to_string(),
-            })
-        })
-        .collect()
-}
-
 fn auto_respond_to_permissions(
     args: &acp::RequestPermissionRequest,
     option_kinds: &[acp::PermissionOptionKind],
@@ -1183,10 +1325,8 @@ async fn open_session(
                     }
                     Some(m)
                 });
-        let try_load: Result<acp::LoadSessionResponse, _> = with_send_deadline(
-            "session/load",
-            deadline.budget(None),
-            async {
+        let try_load: Result<acp::LoadSessionResponse, _> =
+            with_send_deadline("session/load", deadline.budget(None), async {
                 let result = acp_send(request, acp_tx).await;
                 if let Err(error) = &result
                     && is_session_unavailable(error)
@@ -1194,9 +1334,8 @@ async fn open_session(
                     unavailable = Some(acp_error_text(error));
                 }
                 result
-            },
-        )
-        .await;
+            })
+            .await;
         match try_load {
             Ok(resp) => {
                 return Ok(OpenedSession {
@@ -1405,6 +1544,46 @@ async fn resume_session_in_new_worktree(
 
 /// Apply `-m` / effort after session open.
 /// Effort is soft-ignored on a non-supporting model (still applying `-m`) but hard-fails on a genuinely unknown token.
+/// What `--effort` means for the model the run uses.
+#[derive(Debug)]
+enum EffortChoice {
+    /// Send this level with the model switch.
+    Apply(fuigo_shell::sampling::types::ReasoningEffort),
+    /// Nothing to send (no catalog yet; the canonical token was already stamped on the config).
+    Deferred,
+    /// The model ignores the flag; say so to the operator.
+    Ignored { notice: String },
+}
+
+/// Decide what to do with `--effort <token>` for `model_id`. An unknown level is an error; a model without effort
+/// support is a notice, not an error.
+fn resolve_headless_effort(
+    models: &ModelState,
+    model_id: &acp::ModelId,
+    token: &str,
+) -> anyhow::Result<EffortChoice> {
+    // Pre-catalog: canonical tokens are already stamped; remapped menu ids can't resolve yet.
+    if models.available.is_empty() {
+        if parse_canonical_effort_token(token).is_none() {
+            anyhow::bail!(
+                "--effort/--reasoning-effort: unknown effort level '{token}' \
+                 (model catalog unavailable; remapped menu ids require a loaded catalog)"
+            );
+        }
+        return Ok(EffortChoice::Deferred);
+    }
+    match models.resolve_effort_for_model(model_id, token) {
+        Ok(effort) => Ok(EffortChoice::Apply(effort)),
+        Err(EffortTokenError::Unsupported) => Ok(EffortChoice::Ignored {
+            notice: format!(
+                "--effort {token}: model {} does not support reasoning effort, so the flag is ignored",
+                model_id.0
+            ),
+        }),
+        Err(err) => anyhow::bail!("--effort/--reasoning-effort: {}", err.message()),
+    }
+}
+
 async fn apply_headless_model_and_effort(
     acp_tx: &AcpAgentTx,
     session_id: &acp::SessionId,
@@ -1429,27 +1608,17 @@ async fn apply_headless_model_and_effort(
 
     let effort = match effort_token {
         None => None,
-        // Pre-catalog: canonical tokens are already stamped; remapped menu ids can't resolve yet.
-        Some(token) if models.available.is_empty() => {
-            if parse_canonical_effort_token(token).is_none() {
-                anyhow::bail!(
-                    "--effort/--reasoning-effort: unknown effort level '{token}' \
-                     (model catalog unavailable; remapped menu ids require a loaded catalog)"
-                );
-            }
-            None
-        }
-        Some(token) => match models.resolve_effort_for_model(&model_id, token) {
-            Ok(effort) => Some(effort),
-            Err(EffortTokenError::Unsupported) => {
-                tracing::warn!(
-                    model = %model_id.0,
-                    token,
-                    "--effort/--reasoning-effort: model does not support reasoning effort; ignoring"
+        Some(token) => match resolve_headless_effort(models, &model_id, token)? {
+            EffortChoice::Apply(effort) => Some(effort),
+            EffortChoice::Deferred => None,
+            EffortChoice::Ignored { notice } => {
+                tracing::warn!(model = %model_id.0, token, "{notice}");
+                fuigo_tty_utils::cli_eprintln!(
+                    "fuigo: warning: {}",
+                    fuigo_tty_utils::untrusted(notice)
                 );
                 None
             }
-            Err(err) => anyhow::bail!("--effort/--reasoning-effort: {}", err.message()),
         },
     };
 
@@ -1732,11 +1901,7 @@ impl InterruptWatch {
 
     fn install() -> Self {
         let (tx, rx) = tokio::sync::watch::channel(None);
-        let listener = interrupt_listener();
-        tokio::spawn(async move {
-            let code = listener.await;
-            let _ = tx.send(Some(code));
-        });
+        spawn_interrupt_watcher(tx);
         Self {
             rx,
             phase: std::sync::Arc::default(),
@@ -1847,32 +2012,118 @@ fn finish_interrupt(
     anyhow::Error::new(error)
 }
 
-/// Registers the process-signal listeners now (not on first poll) and returns the future that
-/// resolves with the `128 + signal` exit code.
+/// Where the process-signal exit codes come from; a channel stands in for the OS in tests.
+pub(crate) trait InterruptSource {
+    /// Resolves with the `128 + signal` exit code of the next SIGINT/SIGTERM/SIGHUP (130/143/129).
+    fn next_code(&mut self) -> impl std::future::Future<Output = i32>;
+}
+
 #[cfg(unix)]
-fn interrupt_listener() -> impl std::future::Future<Output = i32> + Send + 'static {
-    use crate::app::signal_handler::recv_optional_unix_signal;
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut int = signal(SignalKind::interrupt()).ok();
-    let mut term = signal(SignalKind::terminate()).ok();
-    let mut hup = signal(SignalKind::hangup()).ok();
-    async move {
+struct UnixSignals {
+    int: Option<tokio::signal::unix::Signal>,
+    term: Option<tokio::signal::unix::Signal>,
+    hup: Option<tokio::signal::unix::Signal>,
+}
+
+#[cfg(unix)]
+impl UnixSignals {
+    /// Registers the listeners now (not on first poll), in the runtime that is current.
+    fn install() -> Self {
+        use tokio::signal::unix::{SignalKind, signal};
+        Self {
+            int: signal(SignalKind::interrupt()).ok(),
+            term: signal(SignalKind::terminate()).ok(),
+            hup: signal(SignalKind::hangup()).ok(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl InterruptSource for UnixSignals {
+    async fn next_code(&mut self) -> i32 {
+        use crate::app::signal_handler::recv_optional_unix_signal;
         tokio::select! {
-            _ = recv_optional_unix_signal(&mut int) => 130,
-            _ = recv_optional_unix_signal(&mut term) => 143,
-            _ = recv_optional_unix_signal(&mut hup) => 129,
+            _ = recv_optional_unix_signal(&mut self.int) => 130,
+            _ = recv_optional_unix_signal(&mut self.term) => 143,
+            _ = recv_optional_unix_signal(&mut self.hup) => 129,
         }
     }
 }
 
 #[cfg(not(unix))]
-fn interrupt_listener() -> impl std::future::Future<Output = i32> + Send + 'static {
-    async {
+struct CtrlC;
+
+#[cfg(not(unix))]
+impl InterruptSource for CtrlC {
+    async fn next_code(&mut self) -> i32 {
         match tokio::signal::ctrl_c().await {
             Ok(()) => 130,
             Err(_) => std::future::pending().await,
         }
     }
+}
+
+/// Latch the first interrupt on `tx`; a second one is the hard stop and goes to `force_exit`.
+/// The run is exiting once the first lands, and its cleanup (a session teardown, a stuck flush) can wedge. The OS
+/// handler stays installed after its stream is gone, so without this a second Ctrl-C would be swallowed and only
+/// SIGKILL would end the process.
+pub(crate) async fn latch_then_force_exit(
+    signals: &mut impl InterruptSource,
+    tx: tokio::sync::watch::Sender<Option<i32>>,
+    force_exit: impl FnOnce(i32),
+) {
+    let first = signals.next_code().await;
+    let _ = tx.send(Some(first));
+    force_exit(signals.next_code().await);
+}
+
+/// Registers the process-signal listeners now, before this returns (so a signal in the start-up window is latched
+/// and not lost), on a thread and runtime of their own: a run that blocks its workers while shutting down must not
+/// be able to starve the second signal. Falls back to a task on the current runtime when the thread cannot start.
+fn spawn_interrupt_watcher(tx: tokio::sync::watch::Sender<Option<i32>>) {
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+    let tx_for_thread = tx.clone();
+    let thread = std::thread::Builder::new()
+        .name("headless-signals".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::warn!(%error, "headless signal runtime did not start");
+                    return;
+                }
+            };
+            #[cfg(unix)]
+            let mut signals = {
+                let _context = runtime.enter();
+                UnixSignals::install()
+            };
+            #[cfg(not(unix))]
+            let mut signals = CtrlC;
+            let _ = ready_tx.send(());
+            runtime.block_on(latch_then_force_exit(
+                &mut signals,
+                tx_for_thread,
+                |code| crate::app::signal_handler::force_exit(code),
+            ));
+        });
+    if thread.is_ok() && ready_rx.recv().is_ok() {
+        return;
+    }
+    tracing::warn!("headless signal thread did not start; watching on the main runtime");
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        let mut signals = UnixSignals::install();
+        #[cfg(not(unix))]
+        let mut signals = CtrlC;
+        latch_then_force_exit(&mut signals, tx, |code| {
+            crate::app::signal_handler::force_exit(code)
+        })
+        .await;
+    });
 }
 
 async fn run_single_turn_inner(
@@ -2201,9 +2452,7 @@ async fn run_single_turn_inner(
         "headless: open_session complete"
     );
     // `--peer` (packet 13): opt the session in with no operator. Without the flag nothing below runs and the run is unchanged.
-    if peer_opt_in
-        && let Err(e) = opt_in_to_peer_messaging(&acp_tx, &session_id, deadline).await
-    {
+    if peer_opt_in && let Err(e) = opt_in_to_peer_messaging(&acp_tx, &session_id, deadline).await {
         let msg = format!("--peer: {e}");
         emitter.on_error(&msg, None);
         anyhow::bail!("{msg}");
@@ -2221,6 +2470,13 @@ async fn run_single_turn_inner(
 
     // Seed the reducer's session context BEFORE applying model/effort so a later failure carries it.
     {
+        // Only the Messages `init` line carries `mcp_servers`: one bounded `fuigo/mcp/list` read says which
+        // servers are connected, still starting, need auth or failed, instead of calling every configured one connected.
+        let mcp_servers = if options.output_format == OutputFormat::StreamingMessagesJson {
+            mcp_init::resolve_mcp_servers_for_init(&acp_tx, &session_id, &session_cwd).await
+        } else {
+            Vec::new()
+        };
         let model = options
             .model
             .clone()
@@ -2234,7 +2490,7 @@ async fn run_single_turn_inner(
             model,
             cwd: session_cwd.to_string_lossy().to_string(),
             permission_mode,
-            mcp_servers: mcp_server_names(&session_cwd),
+            mcp_servers,
             include_partial_messages: options.include_partial_messages,
             api_key_auth: is_api_key_auth,
             context_window: session_models.get_context_window(),
@@ -2341,6 +2597,7 @@ async fn run_single_turn_inner(
         timed_out,
         interrupted: interrupted_by,
         prompt_unacknowledged,
+        goal_unfinished,
     } = match prompt_fut {
         Some(prompt_fut) => {
             drive_prompt_turn(
@@ -2401,11 +2658,18 @@ async fn run_single_turn_inner(
         let mut err = std::io::stderr().lock();
         return Err(connection_closed_error(emitter, &mut err));
     }
+    // A goal still running when `--background-wait-timeout` ran out is a run that did not finish its work:
+    // it is reported through the same one terminal document as a timeout, with the wait limit as the number
+    let wait_expired_on_goal = goal_unfinished && !timed_out;
     let outcome = finish_turn(
         emitter,
         prompt_result,
-        timed_out,
-        options.total_timeout,
+        timed_out || wait_expired_on_goal,
+        if wait_expired_on_goal {
+            Some(options.background_wait_timeout)
+        } else {
+            options.total_timeout
+        },
         &session_id,
         is_api_key_auth,
     );
@@ -2533,7 +2797,7 @@ fn headless_run_outcome(
         // An error is the run's outcome and keeps `exit(1)`. A denial latched on the way is still
         // said out loud, or an unrelated failure would bury it (D.3).
         (Some(e), _) | (None, Err(e)) => {
-            if let Some(denial) = &denial {
+            if let Some(denial) = denial.as_ref().filter(|d| !d.reported) {
                 crate::best_effort_stderr::eprint_line(&denial.notice_line());
             }
             return Err(e);
@@ -2552,7 +2816,9 @@ fn headless_run_outcome(
             HeadlessDenial::from_budget_rule(rule),
         )),
         (Some(denial), TurnStop::Ended | TurnStop::MaxTurns) => {
-            crate::best_effort_stderr::eprint_line(&denial.notice_line());
+            if !denial.reported {
+                crate::best_effort_stderr::eprint_line(&denial.notice_line());
+            }
             Ok(HeadlessOutcome::Finished)
         }
         (None, _) => Ok(HeadlessOutcome::Finished),
@@ -2621,6 +2887,7 @@ fn finish_turn(
                     ));
                 }
                 if let Some(earlier) = emitter.permission_denial.replace(denial)
+                    && !earlier.reported
                 {
                     crate::best_effort_stderr::eprint_line(&earlier.notice_line());
                 }
@@ -2646,13 +2913,18 @@ fn finish_turn(
                     // still ends with exit 3, but its one terminal document is the normal result carrying the answer
                     // and the typed denial, as on the timeout path: never the `type:error` document without the text.
                     if emitter.parse_structured_output
-                        && let Some(so) = err.data.as_ref().and_then(|d| d.get("answer_structured_output"))
+                        && let Some(so) = err
+                            .data
+                            .as_ref()
+                            .and_then(|d| d.get("answer_structured_output"))
                     {
                         emitter.structured_output = if let Some(v) = so.get("value") {
                             Some(Ok(v.clone()))
                         } else {
                             so.get("error").and_then(|e| e.as_str()).map(|e| {
-                                Err(fuigo_telemetry::sent_credentials::scrub_owned(e.to_string()))
+                                Err(fuigo_telemetry::sent_credentials::scrub_owned(
+                                    e.to_string(),
+                                ))
                             })
                         };
                     }
@@ -2678,8 +2950,7 @@ fn finish_turn(
                 crate::app::sanitize_user_error(&format_rate_limited_user_message_with(
                     detail.as_deref(),
                     is_api_key_auth,
-                    fuigo_shell::sampling::error_verdicts::error_verdicts_from_error(&err)
-                        .as_ref(),
+                    fuigo_shell::sampling::error_verdicts::error_verdicts_from_error(&err).as_ref(),
                 ))
             } else {
                 // `Display` would print an object `data` as raw JSON; people read its `message`
@@ -2784,6 +3055,8 @@ struct TurnDriveOutcome {
     interrupted: Option<i32>,
     /// The shell never acknowledged the prompt; exit-path awaits must stay bounded.
     prompt_unacknowledged: bool,
+    /// `--background-wait-timeout` elapsed while a goal the prompt started was still running.
+    goal_unfinished: bool,
 }
 
 /// Drive the prompt future and the ACP stream until the turn ends.
@@ -2821,6 +3094,8 @@ where
     let mut prompt_done_at: Option<Instant> = None;
     // On mid-turn channel close, break (not bail) so the exit path still drains and reaps.
     let mut connection_closed = false;
+    // The wait for background work ran out while a goal was still running.
+    let mut goal_unfinished = false;
 
     let stream = async {
         loop {
@@ -2839,8 +3114,9 @@ where
                     &mut pending_bg,
                     &mut completed_bg,
                 );
-                if pending_bg.is_empty() {
-                    tracing::debug!("headless: no pending background tasks, exiting");
+                // A running goal, or the follow-up turn a just-finished task starts, is work this run waits for too
+                if pending_bg.is_empty() && !emitter.residual.is_waiting(Instant::now()) {
+                    tracing::debug!("headless: no pending background work, exiting");
                     break;
                 }
             }
@@ -2854,19 +3130,27 @@ where
                     timeout_secs = options.background_wait_timeout.as_secs(),
                     "headless: background wait timed out, exiting"
                 );
+                // Plain background work (a persistent monitor never ends) is cut off quietly; a goal that was
+                // expected to finish and did not makes the run fail
+                goal_unfinished = emitter.residual.goal_active();
                 break;
             }
 
-            let timeout_deadline = if options.wait_for_background
+            let waiting = options.wait_for_background
                 && prompt_result.is_some()
-                && !pending_bg.is_empty()
-                && let Some(done_at) = prompt_done_at
-            {
+                && (!pending_bg.is_empty() || emitter.residual.is_waiting(Instant::now()));
+            let timeout_deadline = if waiting && let Some(done_at) = prompt_done_at {
                 let remaining = options
                     .background_wait_timeout
                     .saturating_sub(done_at.elapsed());
-                if remaining.is_zero() {
+                let remaining = if remaining.is_zero() {
                     Duration::from_millis(50)
+                } else {
+                    remaining
+                };
+                if pending_bg.is_empty() {
+                    // Only a goal or a follow-up turn is awaited: look again soon, the grace period runs out on its own
+                    remaining.min(Duration::from_millis(250))
                 } else {
                     remaining
                 }
@@ -2908,6 +3192,7 @@ where
                     prompt_ack = None;
                     prompt_result = Some(res);
                     prompt_done_at = Some(Instant::now());
+                    emitter.residual.prompt_returned();
                     if !options.wait_for_background {
                         drain_acp_with_grace(
                             &mut *acp_rx,
@@ -2933,9 +3218,7 @@ where
                         &mut completed_bg,
                     );
                 }
-                _ = tokio::time::sleep(timeout_deadline), if options.wait_for_background
-                    && prompt_result.is_some()
-                    && !pending_bg.is_empty() =>
+                _ = tokio::time::sleep(timeout_deadline), if waiting =>
                 {
                     // Wake to re-check the timeout at the top of the loop.
                 }
@@ -2992,6 +3275,14 @@ where
         &mut completed_bg,
     );
 
+    // A goal that stopped without finishing (paused, blocked, out of budget) is an outcome the caller should see
+    if let Some(stop) = emitter.residual.take_goal_stop() {
+        crate::best_effort_stderr::eprint_line(&format!(
+            "fuigo: the goal stopped before finishing ({}); resume it with /goal resume in an interactive session",
+            stop.replace('_', " ")
+        ));
+    }
+
     if !pending_bg.is_empty() {
         tracing::warn!(
             pending_bg = pending_bg.len(),
@@ -3006,13 +3297,16 @@ where
         timed_out,
         interrupted,
         prompt_unacknowledged,
+        goal_unfinished,
     }
 }
 
 /// Invoke `fuigo/memory/flush` and wait for the flush LLM to finish.
 /// The one `fuigo/peer/configure` a `--peer` run sends: opted in, operator `unattended` (nobody can release a hold, so a
 /// would-be hold is rejected `no_operator`; a delivered message follows the unattended equal-mode rule), policy `accept`.
-pub(crate) fn peer_opt_in_request(session_id: &acp::SessionId) -> serde_json::Result<acp::ExtRequest> {
+pub(crate) fn peer_opt_in_request(
+    session_id: &acp::SessionId,
+) -> serde_json::Result<acp::ExtRequest> {
     let params = serde_json::json!({
         "sessionId": session_id.0.to_string(),
         "optIn": true,
@@ -3230,6 +3524,8 @@ fn track_background_lifecycle(
         }
         // Routed to the emitter by the caller, never tracked.
         ExtEvent::MonitorEvent
+        | ExtEvent::GoalStatus { .. }
+        | ExtEvent::TurnCompleted
         | ExtEvent::None
         | ExtEvent::Lifecycle(_)
         | ExtEvent::Stream(_)
@@ -3338,6 +3634,7 @@ fn handle_headless_acp_message(
                                 "headless: time-to-first-chunk"
                             );
                         }
+                        emitter.residual.turn_activity();
                         emitter.on_text_chunk(
                             &text.text,
                             update_stream_start_ms(boxed.request.meta.as_ref()),
@@ -3355,6 +3652,7 @@ fn handle_headless_acp_message(
                                 "headless: time-to-first-thought"
                             );
                         }
+                        emitter.residual.turn_activity();
                         emitter.on_thought_chunk(
                             &text.text,
                             update_stream_start_ms(boxed.request.meta.as_ref()),
@@ -3365,6 +3663,12 @@ fn handle_headless_acp_message(
                 | acp::SessionUpdate::ToolCallUpdate(_)
                 | acp::SessionUpdate::Plan(_)
                 | acp::SessionUpdate::AvailableCommandsUpdate(_) => {
+                    if matches!(
+                        boxed.request.update,
+                        acp::SessionUpdate::ToolCall(_) | acp::SessionUpdate::ToolCallUpdate(_)
+                    ) {
+                        emitter.residual.turn_activity();
+                    }
                     if let Some(event) = map_session_update(&boxed.request.update) {
                         emitter.reduce_and_emit(event);
                     }
@@ -3398,8 +3702,10 @@ fn handle_headless_acp_message(
                     } else {
                         HeadlessDenialRule::HeadlessNeverApproves
                     };
-                    emitter
-                        .record_permission_denial(HeadlessDenial::from_request(&req.request, rule));
+                    let mut denial = HeadlessDenial::from_request(&req.request, rule);
+                    denial.reported = emitter.refusal_out.is_none();
+                    emitter.report_refusal(&denial);
+                    emitter.record_permission_denial(denial);
                     acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled)
                 }
             };
@@ -3416,11 +3722,33 @@ fn handle_headless_acp_message(
             let _ = notif.response_tx.send(Ok(()));
             match event {
                 ExtEvent::Lifecycle(l) => emitter.on_lifecycle(l),
-                ExtEvent::Stream(event) => emitter.reduce_and_emit(*event),
+                ExtEvent::Stream(event) => {
+                    if matches!(*event, StreamEvent::ResponseStarted { .. }) {
+                        emitter.residual.turn_activity();
+                    }
+                    emitter.reduce_and_emit(*event);
+                }
+                ExtEvent::GoalStatus {
+                    goal_id,
+                    active,
+                    status,
+                } => {
+                    emitter.residual.goal_status(&goal_id, active);
+                    emitter.residual.note_goal_stop(&status);
+                }
+                ExtEvent::TurnCompleted => emitter.residual.turn_completed(),
                 ExtEvent::McpStartFailed { name, kind } => {
                     emitter.on_mcp_start_failed(&name, kind);
                 }
-                other => track_background_lifecycle(other, pending_bg, completed_bg),
+                other => {
+                    if matches!(
+                        other,
+                        ExtEvent::TaskCompleted { .. } | ExtEvent::SubagentFinished { .. }
+                    ) {
+                        emitter.residual.background_finished(Instant::now());
+                    }
+                    track_background_lifecycle(other, pending_bg, completed_bg);
+                }
             }
         }
         AcpClientMessageBox::WaitForTerminalExit(args) => {
@@ -3437,14 +3765,27 @@ fn handle_headless_acp_message(
 
 /// The `plain` stderr line for a lifecycle event, or `None` when it would repeat the startup sandbox warning
 /// that `apply_sandbox` already printed on stderr (so the warning appears once in this mode).
-fn plain_lifecycle_line(event: &Lifecycle, startup_sandbox_warning: Option<&str>) -> Option<String> {
+fn plain_lifecycle_line(
+    event: &Lifecycle,
+    startup_sandbox_warning: Option<&str>,
+) -> Option<String> {
     match (event, startup_sandbox_warning) {
         (Lifecycle::ConfigNotice { message }, Some(w)) if message == w => None,
         _ => Some(event.plain_message()),
     }
 }
 
+/// The stderr line the `json` and `streaming-messages-json` formats print for a lifecycle event: only a config notice
+/// has one, and the startup sandbox warning is not repeated (`apply_sandbox` already printed it on stderr, so the
+/// warning appears exactly once per process in every format).
+fn config_notice_stderr_line(event: &Lifecycle, startup_sandbox_warning: Option<&str>) -> Option<String> {
+    if matches!(event, Lifecycle::ConfigNotice { .. }) {
+        plain_lifecycle_line(event, startup_sandbox_warning)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 #[path = "headless_tests.rs"]
 mod tests;
-

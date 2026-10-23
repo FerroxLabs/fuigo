@@ -94,24 +94,27 @@ impl SubscriptionResolver for Resolver {
                 ));
             }
             let access = default_store()
-                .map_err(|_| auth_error())?
+                .map_err(|_| auth_error(self.provider))?
                 .access(self.provider, self.account.as_deref())
                 .await
-                .map_err(sampling_error)?;
+                .map_err(|e| sampling_error(self.provider, e))?;
             Ok(SubscriptionBearer::new(
-                access.bearer().map_err(|_| auth_error())?.to_owned(),
+                access.bearer().map_err(|_| auth_error(self.provider))?.to_owned(),
                 access.account,
                 access.expires_at,
             ))
         })
     }
 }
-pub(super) fn sampling_error(error: SubscriptionError) -> fuigo_sampling_types::SamplingError {
+pub(super) fn sampling_error(
+    provider: SubscriptionProvider,
+    error: SubscriptionError,
+) -> fuigo_sampling_types::SamplingError {
     match error {
         // A local TLS fault is not a credential problem; "run fuigo login" would send the
         // user the wrong way. The file path is logged by `flow`.
         SubscriptionError::LocalTls(_) => local_tls_error(),
-        _ => auth_error(),
+        _ => auth_error(provider),
     }
 }
 fn local_tls_error() -> fuigo_sampling_types::SamplingError {
@@ -119,10 +122,17 @@ fn local_tls_error() -> fuigo_sampling_types::SamplingError {
         "subscription local TLS/CA configuration error (the HTTPS client could not be built, or the provider certificate did not verify against the configured CA bundle); check the file named by FUIGO_EXTRA_CA_BUNDLE or SSL_CERT_FILE (the log names it); not a credential or network problem",
     )
 }
-fn auth_error() -> fuigo_sampling_types::SamplingError {
-    fuigo_sampling_types::SamplingError::InvalidConfiguration(
-        "subscription credentials unavailable; run fuigo login --provider for the selected provider; no API-key fallback",
-    )
+/// The error names the route that failed and offers `/model`. There is no fallback: a denied
+/// subscription never moves the turn to an API key or to Flux Router, and the text says so.
+pub(crate) fn auth_error(provider: SubscriptionProvider) -> fuigo_sampling_types::SamplingError {
+    fuigo_sampling_types::SamplingError::InvalidConfiguration(match provider {
+        SubscriptionProvider::Chatgpt => {
+            "ChatGPT subscription credentials unavailable: sign in again with /login (or `fuigo login --provider chatgpt`), or pick another model with /model. Fuigo does not fall back to an API key or Flux Router."
+        }
+        SubscriptionProvider::Xai => {
+            "Grok subscription credentials unavailable: sign in again with /login (or `fuigo login --provider xai`), or pick another model with /model. Fuigo does not fall back to an API key or Flux Router."
+        }
+    })
 }
 
 pub(crate) fn configure(
@@ -159,9 +169,9 @@ pub(crate) fn configure(
 // Catalogs include per-model instructions/capabilities and are larger than token responses.
 const MODEL_CATALOG_MAX_BYTES: usize = 2 * 1024 * 1024;
 
-/// List only model IDs returned for the explicitly authenticated provider.
-/// A denial is surfaced; no hard-coded entitlement or fallback catalog.
-pub async fn cli_models(provider: SubscriptionProvider) -> Result<()> {
+/// The model IDs returned for the explicitly authenticated provider, in the provider's own
+/// order. A denial is surfaced; no hard-coded entitlement or fallback catalog.
+pub(crate) async fn model_ids(provider: SubscriptionProvider) -> Result<Vec<String>> {
     use fuigo_extra_ca::subscription::Recipient;
     let access = default_store()?.access(provider, None).await?;
     if access.is_unpersisted() {
@@ -186,7 +196,15 @@ pub async fn cli_models(provider: SubscriptionProvider) -> Result<()> {
     })
     .await
     .map_err(|_| SubscriptionError::Timeout)??;
-    let models = parse_model_ids(provider, &body)?;
+    parse_model_ids(provider, &body)
+}
+
+/// `fuigo models --provider X`: print the IDs, and refresh the cache `/model` reads.
+pub async fn cli_models(provider: SubscriptionProvider) -> Result<()> {
+    let models = model_ids(provider).await?;
+    if let Some(home) = fuigo_dirs::resolve_fuigo_home() {
+        let _ = super::catalog::write_cached_model_ids(Path::new(&home), provider, &models);
+    }
     for model in models {
         fuigo_tty_utils::cli_println!(
             "{}",
@@ -441,5 +459,51 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod denial_tests {
+    use super::*;
+
+    /// A denial names the route and offers `/model`, and says nothing else will be tried.
+    #[test]
+    fn a_denial_names_the_route_offers_model_and_promises_no_fallback() {
+        for (provider, name) in [
+            (SubscriptionProvider::Chatgpt, "ChatGPT subscription"),
+            (SubscriptionProvider::Xai, "Grok subscription"),
+        ] {
+            let fuigo_sampling_types::SamplingError::InvalidConfiguration(text) =
+                sampling_error(provider, SubscriptionError::LoginRequired)
+            else {
+                panic!("a denial is a configuration error, never a retry");
+            };
+            assert!(text.contains(name), "{text}");
+            assert!(text.contains("/model"), "{text}");
+            assert!(text.contains("does not fall back to an API key or Flux Router"), "{text}");
+            assert!(!text.to_lowercase().contains("grok build"), "{text}");
+        }
+    }
+
+    /// Whatever failed (storage, lock, expiry, a rejected refresh), the result is the same
+    /// route-naming refusal: no error kind is allowed to turn into another credential.
+    #[test]
+    fn every_credential_failure_is_the_same_refusal() {
+        for error in [
+            SubscriptionError::Storage,
+            SubscriptionError::LockTimeout,
+            SubscriptionError::LoginRequired,
+            SubscriptionError::InvalidCredentials,
+            SubscriptionError::Http(401),
+            SubscriptionError::Http(403),
+            SubscriptionError::Network,
+            SubscriptionError::AmbiguousExchange,
+        ] {
+            let got = format!("{:?}", sampling_error(SubscriptionProvider::Xai, error));
+            let want = format!("{:?}", auth_error(SubscriptionProvider::Xai));
+            assert_eq!(got, want);
+            assert!(got.contains("Grok subscription") && got.contains("/model"), "{got}");
+            assert!(!got.contains("TLS"), "a credential failure must not be reported as a TLS fault: {got}");
+        }
     }
 }

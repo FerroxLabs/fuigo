@@ -770,6 +770,7 @@ mod tests {
                     ),
                 }),
             }],
+            session_mcp_resolved: None,
         };
         let converted = convert_list_response(wire);
         let reason = converted[0].status_reason.clone().expect("reason kept");

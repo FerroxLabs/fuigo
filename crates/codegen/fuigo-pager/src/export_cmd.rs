@@ -50,19 +50,27 @@ pub fn run(args: ExportArgs) -> Result<()> {
 
     if let Some(path) = args.output {
         let expanded = PathBuf::from(shellexpand::tilde(&path.to_string_lossy()).as_ref());
-        if let Some(parent) = expanded.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create {}", parent.display()))?;
-        }
-        std::fs::write(&expanded, &md)
-            .with_context(|| format!("Failed to write {}", expanded.display()))?;
+        // An existing file is never replaced
+        crate::clipboard::write_text_to_new_file(&md, &expanded, false).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow::anyhow!(
+                    "{} already exists; not overwriting it. Choose another name or remove it first",
+                    expanded.display()
+                )
+            } else {
+                anyhow::Error::new(error).context(format!("Failed to write {}", expanded.display()))
+            }
+        })?;
         tracing::info!(
             session_id = %args.session_id,
             path = %expanded.display(),
             bytes = md.len(),
             "export_cmd: wrote transcript to file"
         );
-        fuigo_tty_utils::cli_eprintln!("Conversation exported to {}", fuigo_tty_utils::untrusted(expanded.display()));
+        fuigo_tty_utils::cli_eprintln!(
+            "Conversation exported to {}",
+            fuigo_tty_utils::untrusted(expanded.display())
+        );
     } else if args.clipboard {
         let _ = crate::clipboard::copy_text(&md);
         let lines = md.lines().count();

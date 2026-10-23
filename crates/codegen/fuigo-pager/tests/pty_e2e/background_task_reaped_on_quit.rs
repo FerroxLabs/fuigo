@@ -22,13 +22,16 @@ async fn background_task_reaped_on_quit() {
     let pidfile = content.home().join("orphan_bg.pid");
     let donefile = content.home().join("orphan_bg.done");
     let errfile = content.home().join("orphan_bg.err");
+    let childfile = content.home().join("orphan_bg.child.pid");
 
     // Turn 1: the model runs a background command via run_terminal_command
-    // It writes its PID, then sleeps; the done/err files capture an unexpected early exit for diagnostics
+    // It writes its shell PID, starts the sleep as a child and writes the CHILD's PID too, then waits; the done/err files capture an unexpected early exit for diagnostics
+    // Both PIDs are tracked: the shell dying proves nothing if its child outlives it
     // Absolute /bin/sleep avoids PATH surprises in the spawn env
     let command = format!(
-        "echo $$ > {pid}; /bin/sleep {SLEEP_SECS} 2> {err}; echo rc=$? > {done}",
+        "echo $$ > {pid}; /bin/sleep {SLEEP_SECS} 2> {err} & echo $! > {child}; wait $!; echo rc=$? > {done}",
         pid = pidfile.display(),
+        child = childfile.display(),
         err = errfile.display(),
         done = donefile.display(),
     );
@@ -80,11 +83,17 @@ async fn background_task_reaped_on_quit() {
             harness.screen_contents()
         );
     }
+    assert!(
+        wait_until(Duration::from_secs(5), || childfile.exists()),
+        "background command never started its sleep (no child pidfile)"
+    );
     let pid = read_pid(&pidfile);
     assert!(pid > 1, "pidfile did not contain a valid pid: {pid}");
+    let child = read_pid(&childfile);
+    assert!(child > 1, "child pidfile did not contain a valid pid: {child}");
 
-    // Sanity: the detached sleep is alive before we quit.
-    if !wait_until(Duration::from_secs(5), || pid_alive(pid)) {
+    // Sanity: the detached shell and its sleep are alive before we quit.
+    if !wait_until(Duration::from_secs(5), || pid_alive(pid) && pid_alive(child)) {
         panic!(
             "background sleep (pid {pid}) exited immediately; nothing to test\n\
              done={:?} err={:?}\n--- files under home ---\n{}\n--- screen ---\n{}",
@@ -111,7 +120,11 @@ async fn background_task_reaped_on_quit() {
     // Without the fix the setsid-detached sleep reparents to init and keeps running, so this times out
     assert!(
         wait_until(Duration::from_secs(15), || !pid_alive(pid)),
-        "background sleep (pid {pid}) survived pager exit (orphaned)"
+        "background shell (pid {pid}) survived pager exit (orphaned)"
+    );
+    assert!(
+        wait_until(Duration::from_secs(15), || !pid_alive(child)),
+        "background sleep (pid {child}), a child of the shell, survived pager exit (orphaned)"
     );
 }
 

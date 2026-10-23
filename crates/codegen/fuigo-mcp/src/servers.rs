@@ -396,8 +396,39 @@ enum UnreachableRetry {
     },
 }
 
+/// Admitted server list shared with the session handle.
+///
+/// `update_configs` and `update_configs_diff` publish into this cell, so a handle that cloned it at spawn sees the
+/// current seat, including headers. A fork snapshots that list instead of the spawn-time overlay.
+#[derive(Clone)]
+pub struct AdmittedMcpServers(Arc<parking_lot::Mutex<Vec<acp::McpServer>>>);
+
+impl AdmittedMcpServers {
+    pub fn new(servers: Vec<acp::McpServer>) -> Self {
+        Self(Arc::new(parking_lot::Mutex::new(servers)))
+    }
+
+    /// Copy the list. Forks keep this copy; later seat switches do not rewrite it.
+    pub fn snapshot(&self) -> Vec<acp::McpServer> {
+        self.0.lock().clone()
+    }
+
+    pub fn replace(&self, servers: Vec<acp::McpServer>) {
+        *self.0.lock() = servers;
+    }
+}
+
+impl Default for AdmittedMcpServers {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
 pub struct McpState {
     pub configs: Vec<acp::McpServer>,
+    /// Shared with the session handle. Private so commits go through [`Self::update_configs`] /
+    /// [`Self::update_configs_diff`].
+    admitted: AdmittedMcpServers,
     pub meta_config_map: McpMetaConfigMap,
     /// Clients owned by this session; cleared on config changes.
     pub owned_clients: crate::owned_clients::OwnedClients,
@@ -458,8 +489,10 @@ impl McpState {
     }
 
     pub fn new_with_meta(configs: Vec<acp::McpServer>, meta_config_map: McpMetaConfigMap) -> Self {
+        let admitted = AdmittedMcpServers::new(configs.clone());
         Self {
             configs,
+            admitted,
             meta_config_map,
             owned_clients: crate::owned_clients::OwnedClients::new(),
             shared_clients: HashMap::new(),
@@ -620,6 +653,15 @@ impl McpState {
             .is_some_and(|set| set.contains(tool_name))
     }
 
+    /// Handle clones share this cell. Forks call [`AdmittedMcpServers::snapshot`].
+    pub fn admitted_servers(&self) -> AdmittedMcpServers {
+        self.admitted.clone()
+    }
+
+    fn publish_admitted(&self) {
+        self.admitted.replace(self.configs.clone());
+    }
+
     /// Update configs and reset initialization state.
     /// Returns true if the configs actually changed, false if they were identical.
     pub fn update_configs(&mut self, new_configs: Vec<acp::McpServer>) -> bool {
@@ -634,6 +676,7 @@ impl McpState {
         self.mcp_tool_icons.clear();
         self.disabled_tool_registrations.clear();
         self.configs = new_configs;
+        self.publish_admitted();
         self.init_progress.cancel();
         self.auth_required.clear();
         self.init_failed.clear();
@@ -731,6 +774,7 @@ impl McpState {
         );
 
         self.configs = new_configs;
+        self.publish_admitted();
         self.init_progress.cancel();
         self.generation = self.generation.wrapping_add(1);
 
@@ -1708,6 +1752,8 @@ impl fuigo_tool_runtime::Tool for McpErasedTool {
                         success: reauth_ok,
                     });
                     if reauth_ok {
+                        // `try_call_tool` only sets the flag; telemetry must describe the retry.
+                        is_timeout = false;
                         self.try_call_tool(
                             &client,
                             &raw,
@@ -1932,6 +1978,7 @@ impl McpErasedTool {
         let mut params = CallToolRequestParams::new(self.tool.name.clone());
         params.arguments = raw.as_object().cloned();
 
+        let call = client.request_tracker.begin_request();
         let mut input_rounds = 0usize;
         let mut pending_polls = 0u32;
         let mut pending_since: Option<std::time::Instant> = None;
@@ -1939,6 +1986,7 @@ impl McpErasedTool {
             let response = self
                 .call_tool_round(
                     client,
+                    &call,
                     params.clone(),
                     timeout_duration,
                     tool_timeout,
@@ -1948,8 +1996,15 @@ impl McpErasedTool {
                 )
                 .await?;
             let input_required = match response {
-                rmcp::model::CallToolResponse::Complete(call_result) => return Ok(call_result),
-                rmcp::model::CallToolResponse::InputRequired(input_required) => input_required,
+                rmcp::model::CallToolResponse::Complete(mut call_result) => {
+                    call.annotate(&self.tool.server_name, &mut call_result)
+                        .await;
+                    return Ok(call_result);
+                }
+                rmcp::model::CallToolResponse::InputRequired(input_required) => {
+                    call.note_input_required();
+                    input_required
+                }
                 // SEP-2663 tasks are never advertised by this client, so a conforming server
                 // cannot return one; `CallToolResponse` is also non_exhaustive.
                 _ => {
@@ -1997,8 +2052,9 @@ impl McpErasedTool {
                 pending_polls = pending_polls.saturating_add(1);
             }
 
-            let (input_responses, request_state) =
-                self.gather_input_responses(client, input_required).await?;
+            let (input_responses, request_state) = self
+                .gather_input_responses(client, &call, input_required)
+                .await?;
             params.input_responses = input_responses;
             params.request_state = request_state;
         }
@@ -2012,6 +2068,7 @@ impl McpErasedTool {
     async fn call_tool_round(
         &self,
         client: &Arc<McpClient>,
+        call: &crate::elicitation::RunningRequest,
         params: CallToolRequestParams,
         timeout_duration: std::time::Duration,
         tool_timeout: u64,
@@ -2025,8 +2082,15 @@ impl McpErasedTool {
             .map_err(|e| fuigo_tool_runtime::ToolError::custom("process_manager", e.to_string()))?;
         // P194 (U16): `call_tool_cancel_aware` races the deadline itself and sends `notifications/cancelled`
         // from a bounded task; `CancelOnDrop` does the same when the turn drops this future first.
-        let result =
-            call_tool_cancel_aware(&mcp_service, params.clone(), Some(timeout_duration)).await;
+        let service_id = mcp_service.service().service_id();
+        call.begin_send();
+        let result = send_tool_call(
+            &mcp_service,
+            params.clone(),
+            Some(timeout_duration),
+            |request_id| call.bind_send(service_id, request_id),
+        )
+        .await;
 
         match result {
             Ok(response) => Ok(response),
@@ -2039,6 +2103,7 @@ impl McpErasedTool {
             {
                 self.recover_and_retry(
                     client,
+                    call,
                     params,
                     timeout_duration,
                     tool_timeout,
@@ -2076,6 +2141,7 @@ impl McpErasedTool {
     async fn gather_input_responses(
         &self,
         client: &Arc<McpClient>,
+        call: &crate::elicitation::RunningRequest,
         result: rmcp::model::InputRequiredResult,
     ) -> Result<(Option<rmcp::model::InputResponses>, Option<String>), fuigo_tool_runtime::ToolError>
     {
@@ -2099,7 +2165,9 @@ impl McpErasedTool {
                         tool = %self.tool.name,
                         "MCP elicitation received in input_required round"
                     );
-                    let elicit_result = client.bridge_elicit(elicit.params).await;
+                    let elicit_result = client
+                        .bridge_elicit(elicit.params, call.begin_answer_ask())
+                        .await;
                     let value = serde_json::to_value(elicit_result).map_err(|e| {
                         fuigo_tool_runtime::ToolError::custom(
                             "process_manager",
@@ -2134,6 +2202,7 @@ impl McpErasedTool {
     async fn recover_and_retry(
         &self,
         client: &Arc<McpClient>,
+        call: &crate::elicitation::RunningRequest,
         params: CallToolRequestParams,
         timeout_duration: std::time::Duration,
         tool_timeout: u64,
@@ -2175,7 +2244,13 @@ impl McpErasedTool {
                 ));
             }
         };
-        match call_tool_cancel_aware(&mcp_service, params, Some(timeout_duration)).await {
+        let service_id = mcp_service.service().service_id();
+        call.begin_send();
+        match send_tool_call(&mcp_service, params, Some(timeout_duration), |request_id| {
+            call.bind_send(service_id, request_id)
+        })
+        .await
+        {
             Ok(response) => Ok(response),
             Err(ServiceError::Timeout { .. }) => {
                 *is_timeout = true;
@@ -2209,6 +2284,16 @@ pub async fn call_tool_cancel_aware(
     params: CallToolRequestParams,
     timeout: Option<std::time::Duration>,
 ) -> Result<rmcp::model::CallToolResponse, ServiceError> {
+    send_tool_call(service, params, timeout, |_| {}).await
+}
+
+/// [`call_tool_cancel_aware`], passing the request's rmcp id to `on_sent` once it is sent.
+async fn send_tool_call(
+    service: &McpService,
+    params: CallToolRequestParams,
+    timeout: Option<std::time::Duration>,
+    on_sent: impl FnOnce(&rmcp::model::RequestId),
+) -> Result<rmcp::model::CallToolResponse, ServiceError> {
     use rmcp::model::{CallToolRequest, CallToolResponse, ClientRequest, ServerResult};
     use rmcp::service::PeerRequestOptions;
 
@@ -2230,6 +2315,7 @@ pub async fn call_tool_cancel_aware(
         .await?;
     // Map this request's progress token to the owning tool call until the call settles, however it ends.
     let progress = claim.map(|claim| claim.bind(handle.progress_token.clone()));
+    on_sent(&handle.id);
     let mut guard = CancelOnDrop {
         service: service.clone(),
         request_id: Some(handle.id.clone()),
@@ -2714,6 +2800,42 @@ fn is_ignorable_notification(line: &[u8]) -> bool {
     }
 }
 
+/// The line with the damage servers commonly cause undone: a leading UTF-8 byte order mark, bytes that are not
+/// valid UTF-8 (replaced by U+FFFD) and raw control characters inside strings (escaped as `\u00XX`).
+/// `None` when the line needed no repair, so a retry could not change the outcome.
+fn repair_json_line(line: &[u8]) -> Option<Vec<u8>> {
+    use std::fmt::Write as _;
+    let stripped = line.strip_prefix(&[0xEF, 0xBB, 0xBF][..]).unwrap_or(line);
+    let text = String::from_utf8_lossy(stripped);
+    let mut out = String::with_capacity(text.len() + 8);
+    let (mut in_string, mut escaped) = (false, false);
+    for c in text.chars() {
+        if !in_string {
+            in_string = c == '"';
+            out.push(c);
+        } else if escaped {
+            escaped = false;
+            out.push(c);
+        } else if c == '\\' {
+            escaped = true;
+            out.push(c);
+        } else if c == '"' {
+            in_string = false;
+            out.push(c);
+        } else if (c as u32) < 0x20 {
+            let _ = write!(out, "\\u{:04x}", c as u32);
+        } else {
+            out.push(c);
+        }
+    }
+    (out.as_bytes() != line).then(|| out.into_bytes())
+}
+
+/// Decode a line the strict parse refused, after [`repair_json_line`].
+fn decode_repaired_line(line: &[u8]) -> Option<RxJsonRpcMessage<RoleClient>> {
+    serde_json::from_slice(&repair_json_line(line)?).ok()
+}
+
 impl<R, W> ResilientRwTransport<R, W>
 where
     R: AsyncRead + Send + Unpin,
@@ -2856,6 +2978,15 @@ where
                 Ok(msg) => return Some(msg),
                 // The whole point: a single undecodable line must not collapse the transport; skip it and keep reading
                 Err(err) => {
+                    // A reply the strict parse refuses only because of stray bytes would otherwise be dropped,
+                    // and the request waiting on it would sit until its timeout
+                    if let Some(msg) = decode_repaired_line(&line) {
+                        tracing::debug!(
+                            server = %self.server_name,
+                            "Decoded an MCP stdout line after repairing invalid characters",
+                        );
+                        return Some(msg);
+                    }
                     if is_ignorable_notification(&line) {
                         tracing::trace!(
                             server = %self.server_name,
@@ -3516,6 +3647,8 @@ pub struct McpClient {
     /// `parking_lot::Mutex` is sufficient: the lock is never held across an `.await`, and the handler's `emit` path is short and allocation-free.
     notify_tx: SharedEventTx,
     elicitation_tx: crate::elicitation::SharedElicitationTx,
+    /// Shared with the [`FuigoClientHandler`], which records `elicitation/create` requests on the running call.
+    request_tracker: Arc<crate::elicitation::RequestTracker>,
     /// In-flight progress tokens of this client's tool calls; shared with its [`FuigoClientHandler`].
     progress: Arc<crate::progress::ProgressRegistry>,
     /// Source of [`crate::progress::Generation`]s: one per handler built, i.e. one per connection.
@@ -3664,6 +3797,7 @@ impl McpClient {
             reconnect,
             notify_tx: Arc::new(parking_lot::Mutex::new(None)),
             elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
+            request_tracker: Arc::default(),
             progress: Arc::default(),
             progress_generations: std::sync::atomic::AtomicU64::new(0),
             liveness_handle: Arc::new(parking_lot::Mutex::new(None)),
@@ -4996,6 +5130,8 @@ impl McpClient {
             server_name: self.server_name.clone(),
             notify_tx: Arc::clone(&self.notify_tx),
             elicitation_tx: Arc::clone(&self.elicitation_tx),
+            request_tracker: Arc::clone(&self.request_tracker),
+            service_id: self.request_tracker.next_service_id(),
             progress: Arc::clone(&self.progress),
             // rmcp numbers progress tokens per connection; a new generation keeps them unique across reconnects.
             progress_generation: self
@@ -5022,14 +5158,21 @@ impl McpClient {
         *self.elicitation_tx.lock() = tx;
     }
 
+    /// Hold the returned guard while sending this server a request that is not an agent tool call.
+    pub fn begin_outbound_request(&self) -> crate::elicitation::OutboundRequest {
+        crate::elicitation::OutboundRequest::new(&self.request_tracker)
+    }
+
     /// Bridge one elicitation request from an MRTR `input_required` round to the HITL UI.
     /// Same inbox path as the server-initiated `elicitation/create` handler, so both protocol
     /// generations share the coordinator, wire format, and card rendering.
     pub(crate) async fn bridge_elicit(
         &self,
         params: rmcp::model::ElicitRequestParams,
+        ask: crate::elicitation::AskGuard,
     ) -> rmcp::model::ElicitResult {
-        crate::elicitation::bridge_elicit(&self.elicitation_tx, &self.server_name, params).await
+        crate::elicitation::bridge_elicit(&self.elicitation_tx, &self.server_name, params, ask)
+            .await
     }
 
     /// Snapshot the current event sender, if any.
@@ -5462,6 +5605,7 @@ impl McpClient {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<rmcp::model::CallToolResult, McpError> {
+        let _request = self.begin_outbound_request();
         let mcp_service = self.ensure_initialized().await?;
         let result = mcp_service
             .call_tool({
@@ -6333,6 +6477,8 @@ pub struct FuigoClientHandler {
     /// So wiring the sender post-handshake works without restarting the rmcp service loop.
     notify_tx: SharedEventTx,
     elicitation_tx: crate::elicitation::SharedElicitationTx,
+    request_tracker: Arc<crate::elicitation::RequestTracker>,
+    service_id: crate::elicitation::ServiceId,
     /// Token -> owning tool call, for `notifications/progress`.
     progress: Arc<crate::progress::ProgressRegistry>,
     /// Which connection this handler serves; keys its progress tokens in the shared registry.
@@ -6340,6 +6486,11 @@ pub struct FuigoClientHandler {
 }
 
 impl FuigoClientHandler {
+    /// Which rmcp service of its client this handler serves; request ids restart with each one.
+    pub(crate) fn service_id(&self) -> crate::elicitation::ServiceId {
+        self.service_id
+    }
+
     /// The connection generation this handler's progress tokens belong to.
     pub(crate) fn progress_generation(&self) -> crate::progress::Generation {
         self.progress_generation
@@ -6395,8 +6546,17 @@ impl ClientHandler for FuigoClientHandler {
         // `context.ct` fires when the server cancels this request (`notifications/cancelled`)
         // Dropping the bridge future closes the job's response channel, which the shell coordinator observes to tear down the HITL card
         // Otherwise the popup would outlive the abandoned request and answer into the void
-        let bridged =
-            crate::elicitation::bridge_elicit(&self.elicitation_tx, &self.server_name, request);
+        let bridged = crate::elicitation::bridge_elicit(
+            &self.elicitation_tx,
+            &self.server_name,
+            request,
+            self.request_tracker.begin_server_ask(
+                self.service_id,
+                context
+                    .extensions
+                    .get::<rmcp::service::InboundStreamOrigin>(),
+            ),
+        );
         tokio::select! {
             result = bridged => Ok(result),
             _ = context.ct.cancelled() => {

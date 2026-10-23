@@ -46,7 +46,29 @@ const STOP_LABEL: &str = "[stop]";
 /// Fuigo keeps the dock behind an env gate rather than upstream's remote
 /// `dock_enabled` feature flag: it is an off-by-default experiment here.
 pub fn enabled() -> bool {
+    #[cfg(test)]
+    if FORCE_ENABLED.with(std::cell::Cell::get) {
+        return true;
+    }
     std::env::var_os("FUIGO_DOCK_V2").is_some()
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Turn the dock on for the current test thread only, without touching the process environment that sibling tests read.
+#[cfg(test)]
+pub(crate) fn force_enabled_for_test() -> impl Drop {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FORCE_ENABLED.with(|f| f.set(false));
+        }
+    }
+    FORCE_ENABLED.with(|f| f.set(true));
+    Reset
 }
 
 /// Terminal row-hover tint, matching the scrollback pane's blend.

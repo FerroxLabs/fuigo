@@ -317,6 +317,19 @@ const SCREEN_MODE_CHOICES: &[EnumChoice] = &[
     },
 ];
 
+const TOOL_DENSITY_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "compact",
+        display: "Compact",
+        description: "Fold every tool call to its header line.",
+    },
+    EnumChoice {
+        canonical: "detailed",
+        display: "Detailed",
+        description: "Show each tool call with its full body.",
+    },
+];
+
 // Voice-capture-mode catalog. SHELL-owned, persisted to `[ui].voice_capture_mode`.
 // `hold` is gated on `kitty_releases_reported`; `effective_enum_choices` hides it elsewhere, and it falls back to `toggle` at runtime
 // "Kitty-protocol terminal" in the copy below is a deliberate user-facing simplification
@@ -572,6 +585,24 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 supports_preview: false,
             },
             restart_required: true,
+            hidden_in_minimal: false,
+        },
+        // SHELL-owned, persisted to `[ui].tool_density`. Unset keeps each tool call's own fold and reads as Detailed.
+        SettingMeta {
+            key: "tool_density",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shell,
+            label: "Tool call density",
+            description: "How much of each tool call the transcript shows when a session \
+                          starts: fold each to its header line, or show the body. /density \
+                          changes it for the current session only.",
+            keywords: &["tool", "call", "detailed", "fold", "collapse", "expand"],
+            kind: SettingKind::Enum {
+                default: "detailed",
+                choices: TOOL_DENSITY_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
             hidden_in_minimal: false,
         },
         SettingMeta {
@@ -1291,6 +1322,31 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 supports_preview: false,
             },
             restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHELL-owned `[features].subagent_model_inheritance`
+        // The row shows the value in force across a requirements pin, `FUIGO_SUBAGENT_MODEL_INHERITANCE` and the config file
+        // Toggling writes the user-config layer; a tier that outranks it is named instead of being silently overridden
+        // `restart_required` because the flag is resolved when an agent is built, like `remember_tool_approvals`
+        SettingMeta {
+            key: "features.subagent_model_inheritance",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Subagent model inheritance",
+            description: "When on, subagents run on the same model as the agent that started them, and the \
+                          task tool no longer accepts a model argument. Can be pinned by requirements.toml \
+                          or FUIGO_SUBAGENT_MODEL_INHERITANCE.",
+            keywords: &[
+                "subagent",
+                "model",
+                "inherit",
+                "inheritance",
+                "task",
+                "parent",
+                "features",
+            ],
+            kind: SettingKind::Bool { default: false },
+            restart_required: true,
             hidden_in_minimal: false,
         },
         // SHELL-owned startup-time settings (restart_required: true).

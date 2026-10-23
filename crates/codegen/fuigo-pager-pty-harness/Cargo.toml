@@ -51,6 +51,7 @@ serde_yaml = { workspace = true }
 image = { workspace = true, features = ["png"] }
 tempfile = { workspace = true }
 fuigo-tty-utils = { workspace = true }
+fuigo-version = { workspace = true }
 
 clap = { workspace = true, features = ["derive"] }
 

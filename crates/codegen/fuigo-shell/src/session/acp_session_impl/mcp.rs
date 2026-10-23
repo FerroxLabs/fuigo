@@ -940,6 +940,25 @@ impl SessionActor {
         {
             return;
         }
+        // While servers are still connecting, or a restored set has not resolved yet, the live list is incomplete: a
+        // reminder now would call a reconnecting server disconnected. Stay armed and decide once init has settled.
+        let has_restored_fingerprints = !self.mcp_announcements.lock().fingerprints.is_empty();
+        let has_live_servers = !self.connected_server_summaries().is_empty();
+        {
+            let mcp_state = self.mcp_state.lock().await;
+            let has_pending_servers =
+                !mcp_state.configs.is_empty() || !mcp_state.pending_acp_server_names().is_empty();
+            let has_settled_failure =
+                !mcp_state.init_failed.is_empty() || !mcp_state.auth_required.is_empty();
+            let is_unresolved_restore =
+                !has_settled_failure && !has_live_servers && has_restored_fingerprints;
+            if has_pending_servers
+                && !mcp_state.is_initialized()
+                && (mcp_state.is_initializing() || is_unresolved_restore)
+            {
+                return;
+            }
+        }
         use fuigo_tools::implementations::search_tool::fingerprint_servers;
         self.mcp_reminder_dirty
             .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1457,6 +1476,85 @@ impl SessionActor {
         drop(mcp_state);
         true
     }
+    /// Fan a config diff out to the status dispatcher and drop the removed servers' tools from the live bridge.
+    pub(super) fn apply_mcp_config_diff(
+        &self,
+        diff: &crate::session::mcp_servers::McpConfigDiff,
+        dispatch_event_tx: Option<
+            tokio::sync::mpsc::UnboundedSender<fuigo_mcp::servers::McpClientEvent>,
+        >,
+    ) {
+        if (!diff.added.is_empty() || !diff.removed.is_empty())
+            && let Some(tx) = dispatch_event_tx
+        {
+            let _ = tx.send(fuigo_mcp::servers::McpClientEvent::ConfigDiff {
+                added: diff.added.clone(),
+                removed: diff.removed.clone(),
+            });
+        }
+        for name in &diff.removed {
+            let prefix = format!(
+                "{}{}",
+                name,
+                crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
+            );
+            let removed_count = self
+                .agent
+                .borrow()
+                .tool_bridge()
+                .unregister_tools_by_prefix(&prefix);
+            tracing::info!(
+                server = name.as_str(),
+                tools_removed = removed_count,
+                "Unregistered tools for removed MCP server"
+            );
+        }
+    }
+
+    /// After an agent rebuild: swap the previous seat's `mcpServers` for the new seat's.
+    /// The disk/client layer comes from the actor's admitted seed and names outside the previous overlay stay live,
+    /// so a server added since spawn survives and a header the old seat set does not outlive it.
+    /// A rebuild between two seats that declare none leaves the live set alone.
+    pub(super) async fn switch_agent_seat_mcp_servers(
+        &self,
+        previous_mcp_servers: &[fuigo_agent::config::McpServerRef],
+    ) {
+        let definition = self.agent.borrow().definition().clone();
+        if previous_mcp_servers.is_empty() && definition.mcp_servers.is_empty() {
+            return;
+        }
+        let plugin_registry = self.plugin_registry.borrow().clone();
+        let client_seed = self.initial_client_mcp_servers.borrow().clone();
+        let live = self.mcp_state.lock().await.configs.clone();
+        let (desired, notices) = crate::session::agent_mcp::rematerialize_live_for_agent_seat(
+            &live,
+            previous_mcp_servers,
+            crate::session::agent_mcp::RematerializeParams {
+                initial_client_mcp_servers: client_seed,
+                cwd: std::path::Path::new(&self.session_info.cwd),
+                parent_cwd: self.startup_hints.parent_cwd.as_deref(),
+                plugin_registry: plugin_registry.as_deref(),
+                compat: &self.rebuild_spec.compat,
+                definition: &definition,
+            },
+        );
+        for notice in notices {
+            self.send_fuigo_notification_transient(FuigoSessionUpdate::ConfigNotice {
+                message: notice,
+            });
+        }
+        let (diff, dispatch_event_tx) = {
+            let mut mcp_state = self.mcp_state.lock().await;
+            let diff = mcp_state.update_configs_diff(desired);
+            let tx = mcp_state.client_event_tx();
+            (diff, tx)
+        };
+        if let Some(diff) = diff {
+            self.apply_mcp_config_diff(&diff, dispatch_event_tx);
+            self.ensure_mcp_tools_initialized().await;
+        }
+    }
+
     /// Ensure MCP tools are initialized (spawns processes and performs handshakes on first call)
     pub(super) async fn ensure_mcp_tools_initialized(&self) {
         let (mcp_server_configs, meta_config_map, generation, existing_client_names, has_acp) = {

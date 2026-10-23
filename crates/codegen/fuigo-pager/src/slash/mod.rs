@@ -1476,6 +1476,17 @@ pub(crate) fn is_typed_slash_selected(
     let Some(typed) = registry.get_for_dispatch(invocation.token) else {
         return false;
     };
+    let is_typed_row = |row: &SuggestionRow| {
+        row.command_name().eq_ignore_ascii_case(invocation.token)
+            || registry
+                .get_for_dispatch(row.command_name())
+                .is_some_and(|selected| selected.name() == typed.name())
+    };
+    // A command the menu does not offer here (the dashboard-only `/cd` elsewhere) is in no row, so whatever is highlighted
+    // is a near match; the typed command is what runs.
+    if !snap.matches.iter().any(is_typed_row) {
+        return true;
+    }
     match snap.selection() {
         None => true,
         Some(row) => {
@@ -2254,6 +2265,24 @@ mod tests {
         assert!(names.iter().any(|d| d == "/compact"));
         assert!(names.iter().any(|d| d == "/fork"));
         assert!(names.iter().any(|d| d == "/doctor"));
+    }
+
+    /// A command the menu does not offer here (`/cd` away from the dashboard) still runs when typed in full and sent. The
+    /// dropdown shows near matches instead, and Enter must not swap the typed command for the highlighted one.
+    #[test]
+    fn a_typed_menu_hidden_command_runs_instead_of_the_highlighted_near_match() {
+        let models = ModelState::default();
+        let mut agent = SlashController::with_builtins(std::path::PathBuf::from("."));
+        let state = SlashState::default();
+        agent.refresh(&state, "/cd", 3, &models);
+        let snap = state.snapshot();
+        assert!(!snap.matches.is_empty(), "the menu offers near matches for /cd");
+        assert!(snap.matches.iter().all(|r| r.display != "/cd"), "/cd is not in the menu off the dashboard");
+        assert!(
+            is_typed_slash_selected(&snap, "/cd", agent.registry()),
+            "Enter must send /cd as typed, not accept {:?}",
+            snap.selection().map(|r| r.display.clone())
+        );
     }
 
     /// `/cd` is dashboard-only: it appears in the dropdown on the session-less dashboard surface but is hidden on the default (agent view) surface.

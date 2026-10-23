@@ -6,11 +6,11 @@ pub struct LoginCommand;
 impl SlashCommand for LoginCommand {
     slash_meta! {
         name: "login",
-        description: "Log in or re-authenticate with your account",
+        description: "Choose how Fuigo reaches a model: Flux Router, a subscription, or a key",
         usage: "/login",
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
-        CommandResult::Action(Action::Login)
+        CommandResult::Action(Action::OpenSignInPicker)
     }
 }

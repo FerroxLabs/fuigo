@@ -80,21 +80,45 @@ fn is_blocked_ip(ip: &IpAddr) -> bool {
     }
 }
 
-async fn validate_hook_url(url: &str) -> Result<(), String> {
-    let parsed = Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
-
-    if parsed.scheme() != "https" {
-        return Err(format!(
-            "only https:// URLs are allowed for HTTP hooks, got {}://",
-            parsed.scheme()
-        ));
+/// Whether `host` names this machine: `localhost`, any `*.localhost` name, or a loopback address.
+fn is_loopback_host(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(name) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            name == "localhost" || name.ends_with(".localhost")
+        }
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
     }
+}
+
+/// The checks on a hook URL that need no network: it parses, it has a host, and its scheme is allowed.
+/// `https://` is allowed anywhere; plain `http://` only to this machine (a local receiver has no certificate).
+/// Shared by the run-time validation and by hook loading, so a URL that can never work is reported when the hooks load.
+pub(crate) fn check_hook_url_shape(url: &str) -> Result<(), String> {
+    let parsed = Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
+    let host = parsed.host().ok_or_else(|| "URL has no host".to_string())?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_host(&host) => Ok(()),
+        "http" => Err(
+            "only https:// URLs are allowed for HTTP hooks (plain http:// is accepted for localhost only), got http://"
+                .to_string(),
+        ),
+        other => Err(format!("only https:// URLs are allowed for HTTP hooks, got {other}://")),
+    }
+}
+
+async fn validate_hook_url(url: &str) -> Result<(), String> {
+    check_hook_url_shape(url)?;
+    let parsed = Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
+    let plain_http = parsed.scheme() == "http";
 
     let host = parsed
         .host_str()
         .ok_or_else(|| "URL has no host".to_string())?;
 
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    if let Ok(ip) = host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
         if is_blocked_ip(&ip) {
             return Err(format!("URL resolves to blocked private/internal IP: {ip}"));
         }
@@ -114,6 +138,13 @@ async fn validate_hook_url(url: &str) -> Result<(), String> {
 
     // SECURITY: resolution-time check only; DNS rebinding can still swap in a blocked IP at send time.
     for addr in &addrs {
+        // A plain-http hook is allowed because its name is local: a name that resolves anywhere else is not.
+        if plain_http && !addr.ip().is_loopback() {
+            return Err(format!(
+                "http:// is only allowed for loopback addresses, but {host} resolves to {}",
+                addr.ip()
+            ));
+        }
         if is_blocked_ip(&addr.ip()) {
             return Err(format!(
                 "URL host {host} resolves to blocked private/internal IP: {}",
@@ -404,6 +435,10 @@ fn parse_http_blocking_result(
             let health = HookHealth::from_success(status.is_success());
             match super::gate_outcome(json, hook_name, /* fallback_reason */ None, health) {
                 GateOutcome::Deny(reason) => HookRunnerResult::Deny {
+                    reason,
+                    hook_name: hook_name.to_string(),
+                },
+                GateOutcome::Stop(reason) => HookRunnerResult::GateStop {
                     reason,
                     hook_name: hook_name.to_string(),
                 },
@@ -975,6 +1010,8 @@ mod tests {
             enabled: true,
             command: None,
             command_raw: None,
+            args: None,
+            shell: None,
             url: Some(raw_url.to_string()),
             url_raw: Some(raw_url.to_string()),
             timeout_ms,

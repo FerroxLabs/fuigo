@@ -224,6 +224,10 @@ harness = false
 name = "resize"
 harness = false
 
+[[bench]]
+name = "thinking_toggle"
+harness = false
+
 # PTY integration tests are split into coherent scheduling families. The test
 # modules remain under tests/pty_e2e/; these roots only define which cases share
 # one Cargo/Bazel process. All cases stay #[ignore]d for ordinary Cargo runs.
@@ -231,6 +235,14 @@ harness = false
 [[test]]
 name = "doctor_early_dispatch"
 path = "tests/doctor_early_dispatch.rs"
+
+[[test]]
+name = "login_cli"
+path = "tests/login_cli.rs"
+
+[[test]]
+name = "pty_stoke"
+path = "tests/pty_stoke.rs"
 
 [[test]]
 name = "pty_e2e_smoke"

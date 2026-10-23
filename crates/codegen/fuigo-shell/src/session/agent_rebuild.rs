@@ -90,6 +90,8 @@ pub(crate) struct AgentRebuildSpec {
     pub media_gen_batch_limits: fuigo_tools::media_gen_limits::MediaGenBatchLimits,
     pub write_file_enabled: bool,
     pub active_agent_messages_enabled: bool,
+    /// Every subagent runs on the parent model (latched when the session starts).
+    pub subagent_model_inheritance: bool,
     pub subagents_enabled: bool,
     pub subagent_toggle: HashMap<String, bool>,
     pub background_workflows_enabled: bool,
@@ -199,6 +201,7 @@ impl AgentRebuildSpec {
             media_gen_batch_limits: _,
             write_file_enabled,
             active_agent_messages_enabled,
+            subagent_model_inheritance,
             subagents_enabled,
             subagent_toggle,
             background_workflows_enabled,
@@ -275,6 +278,11 @@ impl AgentRebuildSpec {
         .with_web_fetch_config(web_fetch_config.clone())
         .with_write_file_enabled(*write_file_enabled)
         .with_active_agent_messages_enabled(*active_agent_messages_enabled)
+        .with_task_model_selection(if *subagent_model_inheritance {
+            fuigo_tools::implementations::fuigo_build::task::model_policy::TaskModelSelection::Inherited
+        } else {
+            fuigo_tools::implementations::fuigo_build::task::model_policy::TaskModelSelection::Selectable
+        })
         .with_peer_messaging_tools(crate::session::peer_message::peer_messaging_enabled())
         .with_fs(fs_backend.clone())
         .with_subagents_enabled(*subagents_enabled)
@@ -454,6 +462,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         media_gen_batch_limits: fuigo_tools::media_gen_limits::MediaGenBatchLimits::default(),
         write_file_enabled: true,
         active_agent_messages_enabled: false,
+        subagent_model_inheritance: false,
         subagents_enabled: false,
         subagent_toggle: HashMap::new(),
         background_workflows_enabled: false,
@@ -728,6 +737,44 @@ mod tests {
                          - zeta-public"
                     )
                 );
+            })
+            .await;
+    }
+    /// `[features] subagent_model_inheritance`, latched into the rebuild spec at session start, locks the `task` tool
+    /// to the parent model on every build from that spec.
+    #[tokio::test(flavor = "current_thread")]
+    async fn rebuild_with_subagent_model_inheritance_locks_the_task_tool_to_the_parent_model() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for (inherit, expect_model_argument) in [(false, true), (true, false)] {
+                    let mut spec = test_rebuild_spec_default();
+                    {
+                        let spec = Arc::get_mut(&mut spec)
+                            .expect("test rebuild spec should be uniquely owned");
+                        spec.subagents_enabled = true;
+                        spec.subagent_model_inheritance = inherit;
+                    }
+                    spec.models_manager
+                        .insert_test_entry("alpha-public", model_entry("internal-alpha"));
+                    let agent = spec
+                        .build_agent(AgentDefinition::default_fuigo_build())
+                        .await
+                        .expect("agent build should succeed");
+                    let toolset = agent.tool_bridge().toolset();
+                    let task_name = toolset
+                        .tool_name_for_kind(fuigo_tools::types::tool::ToolKind::Task)
+                        .expect("FuigoBuild Task tool should be present");
+                    let definition = toolset
+                        .tool_definitions()
+                        .into_iter()
+                        .find(|definition| definition.function.name == task_name)
+                        .expect("Task definition");
+                    let has_model_argument =
+                        definition.function.parameters["properties"].get("model").is_some();
+                    let description = definition.function.description.unwrap_or_default();
+                    assert_eq!(has_model_argument, expect_model_argument, "inherit={inherit}");
+                    assert_eq!(description.contains("alpha-public"), expect_model_argument, "inherit={inherit}: {description}");
+                }
             })
             .await;
     }

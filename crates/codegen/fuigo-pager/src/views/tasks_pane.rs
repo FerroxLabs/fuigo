@@ -2182,8 +2182,15 @@ mod tests {
                 &[],
             );
             assert_eq!(pane.last_theme, crate::theme::cache::render_key());
-            assert_ne!(pane.list_style.selection_bg, ratatui::style::Color::Rgb(1, 2, 3), "lock={locked}: list style not refreshed");
-            assert!(pane.highlight_cache.is_empty(), "lock={locked}: highlight cache not cleared");
+            assert_ne!(
+                pane.list_style.selection_bg,
+                ratatui::style::Color::Rgb(1, 2, 3),
+                "lock={locked}: list style not refreshed"
+            );
+            assert!(
+                pane.highlight_cache.is_empty(),
+                "lock={locked}: highlight cache not cleared"
+            );
         }
     }
 

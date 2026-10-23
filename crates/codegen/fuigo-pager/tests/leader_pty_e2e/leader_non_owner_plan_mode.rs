@@ -5,7 +5,9 @@ use super::common::*;
 /// Every `plan_mode.json` under the cluster home, as (path, contents).
 fn plan_mode_files(home: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
     fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, String)>) {
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -31,8 +33,12 @@ enum Launch {
 }
 
 async fn non_owner_cannot_change_plan_mode(launch: Launch) {
-    let cluster = LeaderCluster::start(DEFAULT_ROWS, DEFAULT_COLS).await.expect("start cluster");
-    cluster.content().set_response(format!("{} first turn payload.", turn_sentinel(1)));
+    let cluster = LeaderCluster::start(DEFAULT_ROWS, DEFAULT_COLS)
+        .await
+        .expect("start cluster");
+    cluster
+        .content()
+        .set_response(format!("{} first turn payload.", turn_sentinel(1)));
     let home = cluster.content().home().to_path_buf();
     let binary = pager_binary().expect("binary");
     if matches!(launch, Launch::DefaultLeaderById) {
@@ -42,27 +48,52 @@ async fn non_owner_cannot_change_plan_mode(launch: Launch) {
         std::fs::write(&cfg, text).expect("write config");
     }
     let spawn = |args: &[&str]| -> PtyHarness {
-        PtyHarness::spawn_with_content(&binary, DEFAULT_ROWS, DEFAULT_COLS, cluster.content(), args).expect("spawn")
+        PtyHarness::spawn_with_content(&binary, DEFAULT_ROWS, DEFAULT_COLS, cluster.content(), args)
+            .expect("spawn")
     };
 
     let mut a = match launch {
         Launch::DefaultLeaderById => spawn(&[]),
         _ => cluster.spawn_leader(&[]).expect("spawn pager A"),
     };
-    a.wait_for_text(WELCOME_SCREEN_SENTINEL, LEADER_TIMEOUT).expect("A welcome");
-    a.inject_keys(format!("{PROMPT}\r").as_bytes()).expect("A submit turn 1");
-    a.wait_for_text(&turn_sentinel(1), STREAM_TIMEOUT).expect("A turn 1");
+    a.wait_for_text(WELCOME_SCREEN_SENTINEL, LEADER_TIMEOUT)
+        .expect("A welcome");
+    a.inject_keys(format!("{PROMPT}\r").as_bytes())
+        .expect("A submit turn 1");
+    a.wait_for_text(&turn_sentinel(1), STREAM_TIMEOUT)
+        .expect("A turn 1");
+    // Wait for A's turn to FINISH before toggling: the sentinel is on screen while the turn is still ending, and a
+    // Shift+Tab during a running turn activates plan mode at once (Pending -> Active, reminder buffered), so under load
+    // plan_mode.json never showed `Pending`.
+    a.wait_for_turn_idle(Duration::from_secs(60))
+        .expect("A turn 1 finished");
     // The owner enters plan mode.
     a.inject_keys(b"\x1b[Z").expect("A BackTab");
-    a.wait_for_text("Switched to mode: Plan", Duration::from_secs(20)).expect("A -> plan");
+    a.wait_for_text("Switched to mode: Plan", Duration::from_secs(20))
+        .expect("A -> plan");
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !plan_mode_files(&home).iter().any(|(_, s)| s.contains("Pending")) && Instant::now() < deadline {
+    while !plan_mode_files(&home)
+        .iter()
+        .any(|(_, s)| s.contains("Pending"))
+        && Instant::now() < deadline
+    {
         a.update(Duration::from_millis(200));
     }
     let before = plan_mode_files(&home);
     assert_eq!(before.len(), 1, "one session: {before:?}");
-    assert!(before[0].1.contains("\"Pending\""), "owner plan mode persisted: {before:?}");
-    let sid = before[0].0.parent().unwrap().file_name().unwrap().to_str().unwrap().to_string();
+    assert!(
+        before[0].1.contains("\"Pending\""),
+        "owner plan mode persisted: {before:?}"
+    );
+    let sid = before[0]
+        .0
+        .parent()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
 
     // C opens the same session (non-owner) and cycles Shift+Tab: Plan, Auto (leaves plan on C's side), Always-Approve.
     let mut c = match launch {
@@ -70,16 +101,30 @@ async fn non_owner_cannot_change_plan_mode(launch: Launch) {
         Launch::ClusterById => cluster.attach(&[sid.as_str()]).expect("spawn pager C"),
         Launch::DefaultLeaderById => spawn(&["--resume", sid.as_str()]),
     };
-    c.wait_for_text(&turn_sentinel(1), LEADER_TIMEOUT).expect("C replayed A's transcript");
+    c.wait_for_text(&turn_sentinel(1), LEADER_TIMEOUT)
+        .expect("C replayed A's transcript");
     c.update(Duration::from_secs(2));
-    assert_eq!(plan_mode_files(&home), before, "opening the session as a non-owner changed plan_mode.json");
+    assert_eq!(
+        plan_mode_files(&home),
+        before,
+        "opening the session as a non-owner changed plan_mode.json"
+    );
     for press in 1..=3 {
         c.inject_keys(b"\x1b[Z").expect("C BackTab");
         c.update(Duration::from_secs(3));
         let now = plan_mode_files(&home);
-        assert_eq!(now, before, "a non-owner Shift+Tab #{press} changed plan_mode.json\nC screen:\n{}", c.screen_contents());
+        assert_eq!(
+            now,
+            before,
+            "a non-owner Shift+Tab #{press} changed plan_mode.json\nC screen:\n{}",
+            c.screen_contents()
+        );
     }
-    assert!(a.is_running().expect("A alive"), "A exited\n{}", a.screen_contents());
+    assert!(
+        a.is_running().expect("A alive"),
+        "A exited\n{}",
+        a.screen_contents()
+    );
     c.quit().expect("quit C");
     a.quit().expect("quit A");
 }

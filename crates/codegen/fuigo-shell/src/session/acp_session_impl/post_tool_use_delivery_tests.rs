@@ -86,6 +86,21 @@ fn mcp(value: serde_json::Value) -> PostToolUseResult {
 }
 
 #[test]
+fn a_stop_request_reaches_the_delivery() {
+    let original = bash("ls", "listing");
+    let stop = fuigo_hooks::dispatcher::PostToolUseStop {
+        hook_name: "stopper".to_string(),
+        reason: Some("enough".to_string()),
+    };
+    let result = PostToolUseResult {
+        force_stop: Some(stop.clone()),
+        ..Default::default()
+    };
+    assert_eq!(plan(result, &original).stop, Some(stop));
+    assert_eq!(plan(PostToolUseResult::default(), &original).stop, None);
+}
+
+#[test]
 fn large_builtin_replacement_is_clipped_not_dropped() {
     let original = bash("ls", "original listing");
     let big = "x".repeat(MAX_HOOK_OUTPUT_REPLACEMENT_CHARS + 10);

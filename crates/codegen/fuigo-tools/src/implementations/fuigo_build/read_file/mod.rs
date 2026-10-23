@@ -190,6 +190,9 @@ pub(crate) const DESCRIPTION_FULL: &str = r#"Read a file, or several files in on
 
 Usage:
 - Reads whole files by default; pass several paths in one call (files: [{path}, {path, offset, limit}, ...]) to read them together; use offset/limit only for very large files.
+${%- if whole_read.skill_markdown or whole_read.instruction_files %}
+- ${% if whole_read.skill_markdown %}SKILL.md${% endif %}${% if whole_read.skill_markdown and whole_read.instruction_files %} and ${% endif %}${% if whole_read.instruction_files %}AGENTS.md/CLAUDE.md${% endif %} files are returned whole when they fit the per-call limit; ${{ params.read.offset }} and ${{ params.read.limit }} are ignored for them
+${%- endif %}
 - The ${{ params.read.target_file }} parameter (or each files[].path) can be a relative path in the workspace or an absolute path
 - A call returns up to {max_lines_read} lines and about 40 KB across all of its files; past that the read is truncated at a line boundary and the result names the next offset to continue from
 - Line numbers (1-based) appear as anchors in the format LINE_NUMBER→LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line
@@ -295,7 +298,7 @@ fn resolve_read_start_line(file_content: &str, offset: Option<i64>) -> usize {
 fn stored_read_offset(offset: Option<i64>) -> Option<usize> {
     offset.filter(|&o| o >= 0).map(|o| o as usize)
 }
-/// Files read in full (no line/token cap): any file named exactly `SKILL.md`,
+/// Files read whole while they fit the per-call cap: any file named exactly `SKILL.md`,
 /// plus any Markdown file with a `skills` path component so docs a `SKILL.md`
 /// references are never silently truncated. `.`/`..` are folded lexically
 /// (symlinks are not resolved). Intentionally broader than
@@ -325,6 +328,15 @@ fn is_skill_markdown(path: &std::path::Path) -> bool {
         }
     }
     stack.into_iter().any(|c| c == "skills")
+}
+/// Instruction files (`AGENTS.md`, `CLAUDE.md`, ...) match by exact file name. A windowed read hides the rules after the
+/// window with no signal to the model, so these are read whole while they fit the cap.
+fn is_instruction_markdown(path: &std::path::Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        crate::types::compat::INSTRUCTION_FILENAMES
+            .iter()
+            .any(|candidate| name == *candidate)
+    })
 }
 /// Result of extracting file content lines with both default and concise formats
 pub struct ExtractedContent {
@@ -714,7 +726,14 @@ async fn run_read_one(
         hints_enabled = res.get::<PathNotFoundHints>().is_some_and(|h| h.0);
     }
     let joined_path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.path);
-    let is_skill_markdown = is_skill_markdown(&joined_path);
+    let whole_read_policy = {
+        let res = resources.lock().await;
+        res.get::<TruncationCfg>()
+            .map(|t| t.0.whole_read)
+            .unwrap_or_default()
+    };
+    let is_whole_read_class = (whole_read_policy.skill_markdown && is_skill_markdown(&joined_path))
+        || (whole_read_policy.instruction_files && is_instruction_markdown(&joined_path));
     let (path, _unicode_note) = resolve_joined_read_path(joined_path.clone()).await;
     let version = ReadFileVersion::from_contract(contract_version);
     let is_legacy = version.is_legacy();
@@ -879,7 +898,13 @@ async fn run_read_one(
             .map(|t| t.0.max_lines_read())
             .unwrap_or_else(|| TruncationConfig::default().max_lines_read())
     };
-    let (effective_offset, effective_limit) = if is_skill_markdown {
+    // A skill or instruction file is returned whole only while it fits the per-call cap; a larger one is read in a
+    // window like any other file, so it cannot flood the context.
+    let whole_read = is_whole_read_class
+        .then(|| extract_file_content_lines(&file_content, None, None, total_lines))
+        .filter(|full| full.content.len() <= byte_budget);
+    let is_whole_read = whole_read.is_some();
+    let (effective_offset, effective_limit) = if is_whole_read {
         (None, None)
     } else {
         (
@@ -887,14 +912,16 @@ async fn run_read_one(
             Some(input.limit.unwrap_or(usize::MAX).min(max_lines)),
         )
     };
-    let mut extracted = extract_file_content_lines(
-        &file_content,
-        effective_offset,
-        effective_limit,
-        total_lines,
-    );
+    let mut extracted = whole_read.unwrap_or_else(|| {
+        extract_file_content_lines(
+            &file_content,
+            effective_offset,
+            effective_limit,
+            total_lines,
+        )
+    });
     let mut truncated_to: Option<usize> = None;
-    if !is_skill_markdown && extracted.content.len() > byte_budget {
+    if !is_whole_read && extracted.content.len() > byte_budget {
         // Keep whole lines while they fit the budget.
         let mut kept = 0usize;
         let mut used = 0usize;
@@ -945,7 +972,7 @@ async fn run_read_one(
         );
         truncated_to = Some(kept);
     }
-    let (stored_offset, stored_limit) = if is_skill_markdown {
+    let (stored_offset, stored_limit) = if is_whole_read {
         (None, None)
     } else {
         (
@@ -1001,6 +1028,10 @@ async fn run_read_one(
 #[derive(Default, Debug)]
 pub struct ReadFileTool;
 impl crate::types::tool_metadata::ToolMetadata for ReadFileTool {
+    fn lock_path_param(&self) -> Option<&'static str> {
+        Some("target_file")
+    }
+
     fn kind(&self) -> ToolKind {
         ToolKind::Read
     }
@@ -1143,6 +1174,7 @@ mod tests {
     use crate::implementations::read_file::compress_image_for_conversation;
     use crate::implementations::skills::types::SkillInfo;
     use crate::notification::types::ToolNotificationHandle;
+    use crate::types::context::{TruncationConfig, WholeReadPolicy};
     use crate::types::resources::{NotificationHandle, Resources};
     use crate::types::tool_metadata::test_ctx;
     use std::sync::Arc;
@@ -1705,6 +1737,7 @@ mod tests {
         ctx.extensions
             .insert(crate::types::resources::InvokingToolParamNames(
                 [
+                    ("target_file".to_string(), "target_file".to_string()),
                     ("offset".to_string(), "start_line".to_string()),
                     ("limit".to_string(), "max_lines".to_string()),
                 ]
@@ -2808,7 +2841,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
         }
     }
     #[tokio::test]
-    async fn skill_file_skips_token_limit() {
+    async fn oversized_skill_file_is_windowed_with_a_continuation_offset() {
         let tmp = TempDir::new().unwrap();
         let line = "x".repeat(200);
         let big_content = std::iter::repeat_n(line.as_str(), 1100)
@@ -2834,11 +2867,12 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
             .unwrap();
-        assert!(
-            matches!(result, ReadFileOutput::FileContent(_)),
-            "SKILL.md should not be truncated, got {:?}",
-            std::mem::discriminant(&result),
-        );
+        let ReadFileOutput::FileContent(fc) = result else {
+            panic!("expected FileContent, got {:?}", std::mem::discriminant(&result));
+        };
+        // 220 KB is far over the per-call cap: the skill is read in a window that names where to continue.
+        assert!(fc.content.len() < MAX_READ_BYTES + 400, "{} bytes", fc.content.len());
+        assert!(fc.content.contains("continue with offset="), "{}", &fc.content[fc.content.len() - 200..]);
     }
     #[tokio::test]
     async fn md_in_skills_dir_ignores_model_offset_and_limit() {
@@ -2880,6 +2914,147 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             }
             other => panic!("Expected FileContent, got {:?}", other),
         }
+    }
+    #[tokio::test]
+    async fn nested_instruction_file_ignores_model_offset_and_limit() {
+        let tmp = TempDir::new().unwrap();
+        let sub_dir = tmp.path().join("sub");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        let content = (1..=1200)
+            .map(|n| format!("line{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(sub_dir.join("AGENTS.md"), &content).unwrap();
+        let input = ReadFileInput {
+            path: "sub/AGENTS.md".to_string(),
+            offset: Some(3),
+            limit: Some(1),
+            pages: None,
+            format: None,
+            files: None,
+        };
+        let result = fuigo_tool_runtime::Tool::run(
+            &ReadFileTool,
+            test_ctx(test_resources(tmp.path()).into_shared()),
+            input,
+        )
+        .await
+        .unwrap();
+        let ReadFileOutput::FileContent(fc) = result else {
+            panic!("expected FileContent, got {:?}", std::mem::discriminant(&result));
+        };
+        assert!(fc.content.starts_with("1\u{2192}line1\nline2"), "not whole from line 1: {}", fc.content);
+        assert!(fc.content.ends_with("line1200"), "cut before line 1200: {}", fc.content);
+        assert_eq!((None, None), (fc.offset, fc.limit));
+    }
+
+    #[tokio::test]
+    async fn whole_read_policy_gates_each_exemption() {
+        let tmp = TempDir::new().unwrap();
+        let five_lines = "line1\nline2\nline3\nline4\nline5";
+        for rel_path in [".fuigo/skills/s/SKILL.md", "sub/AGENTS.md"] {
+            let file = tmp.path().join(rel_path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, five_lines).unwrap();
+        }
+        let skill_only = WholeReadPolicy { skill_markdown: true, instruction_files: false };
+        let instruction_only = WholeReadPolicy { skill_markdown: false, instruction_files: true };
+        let whole = (None, None, "1\u{2192}line1\nline2\nline3\nline4\nline5");
+        let windowed = (Some(3), Some(1), "3\u{2192}line3");
+        for (policy, rel_path, expected) in [
+            (skill_only, ".fuigo/skills/s/SKILL.md", whole),
+            (skill_only, "sub/AGENTS.md", windowed),
+            (instruction_only, ".fuigo/skills/s/SKILL.md", windowed),
+            (instruction_only, "sub/AGENTS.md", whole),
+        ] {
+            let mut resources = test_resources(tmp.path());
+            resources.insert(TruncationCfg(TruncationConfig {
+                whole_read: policy,
+                ..TruncationConfig::default()
+            }));
+            let input = ReadFileInput {
+                path: rel_path.to_string(),
+                offset: Some(3),
+                limit: Some(1),
+                pages: None,
+                format: None,
+                files: None,
+            };
+            let result = fuigo_tool_runtime::Tool::run(
+                &ReadFileTool,
+                test_ctx(resources.into_shared()),
+                input,
+            )
+            .await
+            .unwrap();
+            let ReadFileOutput::FileContent(fc) = result else {
+                panic!("expected FileContent for {rel_path} under {policy:?}");
+            };
+            assert_eq!(
+                expected,
+                (fc.offset, fc.limit, fc.content.as_str()),
+                "{rel_path} under {policy:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_instruction_markdown_matches_exact_names_only() {
+        for (path, expected) in [
+            ("AGENTS.md", true),
+            ("sub/CLAUDE.md", true),
+            ("sub/CLAUDE.local.md", true),
+            ("sub/AGENT.md", true),
+            ("sub/agents.md", false),
+            ("sub/AGENTS.md.bak", false),
+            ("sub/NOTAGENTS.md", false),
+            ("sub/README.md", false),
+        ] {
+            assert_eq!(
+                is_instruction_markdown(std::path::Path::new(path)),
+                expected,
+                "{path}"
+            );
+        }
+    }
+
+    /// The whole-read promise in the description follows the policy and the client-facing parameter names.
+    #[test]
+    fn description_whole_read_note_follows_policy_and_param_names() {
+        let base = TemplateRenderer::new(
+            [(ToolKind::Read, "read_file".to_string())].into(),
+            [(
+                ToolKind::Read,
+                [
+                    ("offset".to_string(), "start_line".to_string()),
+                    ("limit".to_string(), "num_lines".to_string()),
+                ]
+                .into(),
+            )]
+            .into(),
+        );
+        let on = base.clone().render(DESCRIPTION_FULL).unwrap();
+        assert!(
+            on.contains("SKILL.md and AGENTS.md/CLAUDE.md files are returned whole")
+                && on.contains("start_line and num_lines are ignored for them"),
+            "note must use the client-facing param names: {on}"
+        );
+        let skill_only = base
+            .clone()
+            .with_whole_read(WholeReadPolicy { skill_markdown: true, instruction_files: false })
+            .render(DESCRIPTION_FULL)
+            .unwrap();
+        assert!(skill_only.contains("- SKILL.md files are returned whole"), "{skill_only}");
+        assert!(!skill_only.contains("AGENTS.md"), "{skill_only}");
+        let off = base
+            .with_whole_read(WholeReadPolicy { skill_markdown: false, instruction_files: false })
+            .render(DESCRIPTION_FULL)
+            .unwrap();
+        assert!(!off.contains("returned whole"), "note must vanish with both classes off: {off}");
+        assert!(
+            off.contains("only for very large files.\n- The "),
+            "the bullet list must stay intact: {off}"
+        );
     }
     #[test]
     fn parse_single_page() {

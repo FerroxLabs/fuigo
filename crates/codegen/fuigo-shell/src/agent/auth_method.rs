@@ -24,6 +24,14 @@ pub(crate) fn new_shared_auth_method_id(initial: Option<acp::AuthMethodId>) -> S
 /// Kept as a constant so test code and the production check stay in sync.
 pub const FUIGO_API_KEY_ENV_VAR: &str = "FUIGO_API_KEY";
 
+/// Every environment variable the Flux key is read from, in precedence order: `FUIGO_API_KEY`, then the legacy
+/// `FUIGO_CODE_API_KEY`, then `FLUX_API_KEY` (FluxRouter's own name for its key).
+///
+/// This is the ONE list (`fuigo_secrets::provider_key_env_vars::FLUXROUTER`): discovery, `login --status`, the picker,
+/// the runtime resolver and the child-environment denylist all take it from there, so the names cannot drift apart
+/// again (`FLUX_API_KEY` was once reported "ready" by `login --status` while the runtime ignored it).
+pub const FLUX_KEY_ENV_VARS: &[&str] = fuigo_tools::util::shell_env_policy::provider_key_env_vars::FLUXROUTER;
+
 /// Legacy env var name.
 /// Checked as a fallback when `FUIGO_API_KEY` is not set, so existing deployments that use the old name keep working.
 pub const LEGACY_FUIGO_API_KEY_ENV_VAR: &str = "FUIGO_CODE_API_KEY";
@@ -202,11 +210,28 @@ pub(crate) fn read_fuigo_api_key_env() -> Result<String, std::env::VarError> {
     first_party_key(true, read_environment_key).ok_or(std::env::VarError::NotPresent)
 }
 
-/// `FUIGO_API_KEY`, then legacy, from the process environment.
+/// The Flux key from the process environment: the first of `FUIGO_API_KEY`, `FUIGO_CODE_API_KEY`, `FLUX_API_KEY`
+/// (in that order) that holds a non-blank value.
+///
+/// The list is [`FLUX_KEY_ENV_VARS`], the same one `login --status` and the first-run picker discover from
+/// (`key_discovery::PROVIDERS`) and the child-environment scrub denies, so a key the UI reports as ready is a key the
+/// runtime uses. A blank value is skipped rather than ending the search, as discovery skips it.
 fn read_environment_key() -> Option<String> {
-    std::env::var(FUIGO_API_KEY_ENV_VAR)
-        .or_else(|_| std::env::var(LEGACY_FUIGO_API_KEY_ENV_VAR))
-        .ok()
+    flux_key_env_var_with(|name| std::env::var(name).ok()).and_then(|name| std::env::var(name).ok())
+}
+
+/// The name of the Flux key variable that [`read_environment_key`] reads, per `lookup`.
+fn flux_key_env_var_with(lookup: impl Fn(&str) -> Option<String>) -> Option<&'static str> {
+    FLUX_KEY_ENV_VARS
+        .iter()
+        .copied()
+        .find(|name| lookup(name).is_some_and(|value| !value.trim().is_empty()))
+}
+
+/// The name of the environment variable the Flux key is being read from right now, for messages ("You are using
+/// FLUX_API_KEY."). `None` when no such variable is set (the key then comes from a client or the saved login).
+pub fn flux_key_env_var_in_use() -> Option<&'static str> {
+    flux_key_env_var_with(|name| std::env::var(name).ok())
 }
 
 /// The environment key or the stored key, never the runtime key. For the one reader that hands the key back to a
@@ -263,7 +288,8 @@ pub(crate) fn runtime_api_key_capability() -> serde_json::Value {
     serde_json::json!({ "metaKey": RUNTIME_API_KEY_META, "persistOptIn": true })
 }
 
-/// Returns `true` if either `FUIGO_API_KEY` or `FUIGO_CODE_API_KEY` is set.
+/// Returns `true` if any of `FUIGO_API_KEY`, `FUIGO_CODE_API_KEY` or `FLUX_API_KEY` is set (or a client or saved key
+/// stands in for one).
 pub fn has_fuigo_api_key_env() -> bool {
     read_fuigo_api_key_env().is_ok()
 }
@@ -1565,6 +1591,107 @@ mod tests {
         let _new = EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "new-key");
         let _legacy = EnvGuard::set(LEGACY_FUIGO_API_KEY_ENV_VAR, "old-key");
         assert_eq!(read_fuigo_api_key_env().unwrap(), "new-key");
+    }
+
+    const FLUX_NAME: &str = "FLUX_API_KEY";
+    const FLUX_VALUE: &str = "sk-flux-unit-AAAAAAAAAAAAAAAA";
+
+    /// The three Flux key variables, all unset.
+    fn flux_env_cleared() -> [EnvGuard; 3] {
+        [
+            EnvGuard::unset(FUIGO_API_KEY_ENV_VAR),
+            EnvGuard::unset(LEGACY_FUIGO_API_KEY_ENV_VAR),
+            EnvGuard::unset(FLUX_NAME),
+        ]
+    }
+
+    /// `FLUX_API_KEY` alone is a Flux credential for the runtime, as `login --status` already reports it.
+    #[test]
+    #[serial]
+    fn flux_api_key_alone_is_read_as_the_flux_credential() {
+        let _cleared = flux_env_cleared();
+        let _flux = EnvGuard::set(FLUX_NAME, FLUX_VALUE);
+        assert!(has_fuigo_api_key_env());
+        assert_eq!(read_fuigo_api_key_env().as_deref(), Ok(FLUX_VALUE));
+        assert_eq!(read_fuigo_api_key_echoable().as_deref(), Ok(FLUX_VALUE));
+        assert_eq!(flux_key_env_var_in_use(), Some(FLUX_NAME));
+    }
+
+    /// Precedence is `FUIGO_API_KEY`, then `FUIGO_CODE_API_KEY`, then `FLUX_API_KEY`, and the order is the shared list's.
+    #[test]
+    #[serial]
+    fn flux_key_precedence_is_fuigo_then_legacy_then_flux() {
+        assert_eq!(
+            FLUX_KEY_ENV_VARS,
+            [FUIGO_API_KEY_ENV_VAR, LEGACY_FUIGO_API_KEY_ENV_VAR, FLUX_NAME],
+            "the one list names the three variables in precedence order"
+        );
+        let _cleared = flux_env_cleared();
+        let _flux = EnvGuard::set(FLUX_NAME, "flux-key");
+        assert_eq!(read_fuigo_api_key_env().as_deref(), Ok("flux-key"));
+        let _legacy = EnvGuard::set(LEGACY_FUIGO_API_KEY_ENV_VAR, "legacy-key");
+        assert_eq!(read_fuigo_api_key_env().as_deref(), Ok("legacy-key"));
+        assert_eq!(flux_key_env_var_in_use(), Some(LEGACY_FUIGO_API_KEY_ENV_VAR));
+        let _first = EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "fuigo-key");
+        assert_eq!(read_fuigo_api_key_env().as_deref(), Ok("fuigo-key"));
+        assert_eq!(flux_key_env_var_in_use(), Some(FUIGO_API_KEY_ENV_VAR));
+    }
+
+    /// A blank higher-precedence variable does not hide a real key below it (discovery skips blanks the same way).
+    #[test]
+    #[serial]
+    fn a_blank_flux_key_variable_is_skipped() {
+        let _cleared = flux_env_cleared();
+        let _blank = EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "   ");
+        let _flux = EnvGuard::set(FLUX_NAME, FLUX_VALUE);
+        assert_eq!(read_fuigo_api_key_env().as_deref(), Ok(FLUX_VALUE));
+        assert_eq!(flux_key_env_var_in_use(), Some(FLUX_NAME));
+        let _no_flux = EnvGuard::unset(FLUX_NAME);
+        assert!(read_fuigo_api_key_env().is_err(), "a blank key alone is no key");
+        assert_eq!(flux_key_env_var_in_use(), None);
+    }
+
+    /// `login --status` (discovery) and the runtime resolver name the same variable and the same key, for every
+    /// combination of the three variables.
+    #[test]
+    #[serial]
+    fn login_status_and_the_runtime_agree_on_which_variable_wins() {
+        let home = tempfile::tempdir().unwrap();
+        let values = [("FUIGO_API_KEY", "sk-fuigo-unit-AAAAAAAAAAAAAAA"), ("FUIGO_CODE_API_KEY", "sk-legacy-unit-AAAAAAAAAAAAA"), (FLUX_NAME, FLUX_VALUE)];
+        for mask in 1u8..8 {
+            let _cleared = flux_env_cleared();
+            let _set: Vec<EnvGuard> = values
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask & (1 << i) != 0)
+                .map(|(_, (name, value))| EnvGuard::set(name, value))
+                .collect();
+            let status = crate::auth::provider_status::ProviderStatus::collect(
+                home.path(),
+                |name| std::env::var(name).ok(),
+                false,
+            );
+            assert_eq!(
+                status.flux_env_var(),
+                flux_key_env_var_in_use(),
+                "mask {mask:#05b}: login --status and the runtime picked different variables"
+            );
+            let runtime = read_fuigo_api_key_env().expect("a key is set");
+            let winner = status.flux_env_var().expect("status reports a key");
+            assert_eq!(std::env::var(winner).as_deref(), Ok(runtime.as_str()), "mask {mask:#05b}");
+            assert!(has_fuigo_api_key_env());
+        }
+    }
+
+    /// A Flux key in `FLUX_API_KEY` stays out of every tool child process, like the other two names.
+    #[test]
+    fn flux_api_key_is_denied_to_child_processes() {
+        for name in FLUX_KEY_ENV_VARS {
+            assert!(
+                fuigo_tools::util::shell_env_policy::is_provider_credential(name),
+                "{name} would be inherited by tool child processes"
+            );
+        }
     }
 
     // -- fuigo login --legacy regression coverage ------------------------

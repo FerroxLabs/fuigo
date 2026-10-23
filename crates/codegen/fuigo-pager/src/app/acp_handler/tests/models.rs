@@ -304,33 +304,40 @@
         );
     }
 
-    /// A `ModelChanged` broadcast carrying a model id the local catalog doesn't know about must be dropped.
-    /// Applying it would render an unresolvable id in the status bar and desync the `/model` dropdown.
-    /// This can happen when the leader and a follower briefly disagree on the model catalog (etag drift, or a skewed custom-model config).
+    /// The engine IS on the model a `ModelChanged` names, whether or not this client's catalog lists it.
+    /// The catalog fetch can fail (no Flux credential) and a model from the user's own config or a signed-in
+    /// subscription may never be in it. Dropping the change left the status line on the default model ("Flux
+    /// Auto") while the engine ran Grok. The model is named as the engine named it, with the route it chose.
     #[test]
-    fn model_changed_dropped_when_model_unknown_to_catalog() {
+    fn model_changed_for_a_model_outside_the_catalog_names_the_engines_model_and_route() {
         let mut app = make_app_with_agent("sess-1");
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        seed_models(agent, "grok-3", &["grok-3", "grok-4"]);
+        seed_models(agent, "flux-auto", &["flux-auto"]);
 
-        let notif = model_changed_ext("sess-1", "grok-99-unknown", None);
+        let notif = model_changed_ext_with_route("sess-1", "grok", Some("Grok subscription"));
         let changed = handle_ext_notification(&notif, &mut app);
-        assert!(
-            !changed,
-            "unknown model must NOT trigger a redraw — no state changed"
-        );
+        assert!(changed, "the engine's model differs from the shown one: redraw");
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(agent.session.models.current_model_name().as_deref(), Some("grok"));
         assert_eq!(
-            agent
-                .session
-                .models
-                .current
-                .as_ref()
-                .map(|id| id.0.as_ref()),
-            Some("grok-3"),
-            "models.current must stay on the previously-known model"
+            agent.session.models.current_route_label().as_deref(),
+            Some("Grok subscription"),
+            "the status line must name the route the engine uses"
         );
+    }
+
+    /// With no route attached (an older agent) the model is still named, and no route is invented.
+    #[test]
+    fn model_changed_outside_the_catalog_without_a_route_invents_none() {
+        let mut app = make_app_with_agent("sess-1");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        seed_models(agent, "grok-3", &["grok-3"]);
+        let changed = handle_ext_notification(&model_changed_ext("sess-1", "grok-99", None), &mut app);
+        assert!(changed);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(agent.session.models.current_model_name().as_deref(), Some("grok-99"));
+        assert_eq!(agent.session.models.current_route_label(), None);
     }
 
     /// `reasoning_effort` round-trips through the broadcast: the follower applies it alongside the model id.

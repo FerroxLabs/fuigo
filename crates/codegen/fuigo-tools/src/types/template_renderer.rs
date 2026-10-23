@@ -70,6 +70,8 @@ struct TemplateContext {
     /// on this so the promise is only made when it can be kept. Defaults
     /// to `true` (prod CLI behavior).
     system_reminders_enabled: bool,
+    /// Which file classes `read_file` returns whole; read descriptions only promise it for classes that are on.
+    whole_read: crate::types::context::WholeReadPolicy,
 }
 
 /// Shared render implementation: fast-path check + MiniJinja render.
@@ -218,8 +220,16 @@ impl TemplateRenderer {
                 shell_uses_semicolon: fuigo_config::shell::chain_separator() == ";",
                 has_unix_utilities: fuigo_config::shell::has_unix_utilities(),
                 system_reminders_enabled: true,
+                whole_read: crate::types::context::WholeReadPolicy::default(),
             },
         }
+    }
+
+    /// Set from the finalized `TruncationConfig`; every other construction site keeps the default (both on).
+    #[must_use]
+    pub fn with_whole_read(mut self, policy: crate::types::context::WholeReadPolicy) -> Self {
+        self.ctx.whole_read = policy;
+        self
     }
 
     /// Override whether templates see `system_reminders_enabled` as true.

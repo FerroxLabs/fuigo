@@ -6,8 +6,14 @@ and prints `<exe-basename> <N>` and one `doc:<crate> -` line per doc-tested libr
 ignored included, so N here must equal it). A binary that cannot be listed is omitted; gate-verify then treats its
 header as UNFINISHED when any expectation file is in force (fail closed). Binaries are only listed, never run.
 """
-import sys, json, os, subprocess
+import sys, json, os, re, subprocess
 seen = set()
+list_ignored = os.environ.get("LIST_IGNORED") == "1"
+nodoc = os.environ.get("NODOC") == "1"
+filters = {}
+for item in filter(None, os.environ.get("LIST_FILTERS", "").split(";")):
+    k, _, v = item.partition("=")
+    filters[k] = v
 want = os.environ.get("P", "*")
 wanted = None if want == "*" else set(want.split(","))
 docs = set()
@@ -21,7 +27,7 @@ for line in open(sys.argv[1]):
     except ValueError: continue
     if m.get("reason") != "compiler-artifact": continue
     t = m.get("target", {}); nm = pkg_name(m.get("package_id", ""))
-    if (wanted is None or nm in wanted) and set(t.get("kind", [])) & {"lib", "rlib", "proc-macro"} and t.get("doctest"):
+    if not nodoc and (wanted is None or nm in wanted) and set(t.get("kind", [])) & {"lib", "rlib", "proc-macro"} and t.get("doctest"):
         docs.add("doc:" + t.get("name", "").replace("-", "_"))
     if not m.get("profile", {}).get("test") or not m.get("executable"): continue
     exe = m["executable"]
@@ -29,7 +35,11 @@ for line in open(sys.argv[1]):
     seen.add(exe)
     cwd = os.path.dirname(m.get("manifest_path", exe)) or "."
     try:
-        r = subprocess.run([exe, "--list", "--format", "terse"], cwd=cwd, capture_output=True, text=True, timeout=300,
+        argv = [exe, "--list", "--format", "terse"]
+        if list_ignored: argv.append("--ignored")
+        flt = filters.get(re.sub(r"-[0-9a-f]{16}$", "", os.path.basename(exe)))
+        if flt: argv.append(flt)
+        r = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=300,
                            stdin=subprocess.DEVNULL)
     except Exception as e:
         print("list-counts: %s: %s" % (os.path.basename(exe), e), file=sys.stderr); continue

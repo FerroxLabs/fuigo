@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use fuigo_pager_pty_harness::{
-    ContentController, EnvOp, PtyHarness, keys, pager_binary, seed_fake_oauth_team_member,
-    seed_fake_oauth_zdr_team,
+    ContentController, EnvOp, PtyHarness, keys, oauth_provider_ops, pager_binary,
+    seed_fake_oauth_team_member, seed_fake_oauth_zdr_team,
 };
 
 const ROWS: u16 = 50;
@@ -55,12 +55,15 @@ async fn team_member_sees_admin_managed_row_and_no_banner() {
 /// The sandbox's fake `FUIGO_API_KEY` is removed so the seeded team OAuth entry is the active auth.
 /// ZDR product access is enabled; without it a ZDR account gets the blocked welcome screen ("not yet available") and can never reach settings.
 /// The row lock and banner suppression key off `is_zdr` regardless.
-fn locked_row_env_ops() -> [EnvOp<'static>; 3] {
-    [
+/// Fuigo ships with no OAuth issuer, so the one the seeded entry belongs to is named too (otherwise the pager stops on the key prompt).
+fn locked_row_env_ops() -> Vec<EnvOp<'static>> {
+    let mut ops = vec![
         EnvOp::set("FUIGO_PRIVACY_NOTICE_ROLLOUT", "1"),
         EnvOp::set("FUIGO_ZDR_ACCESS_ENABLED", "1"),
         EnvOp::remove("FUIGO_API_KEY"),
-    ]
+    ];
+    ops.extend(oauth_provider_ops());
+    ops
 }
 
 async fn run_zdr() -> Result<()> {
@@ -163,13 +166,17 @@ fn launch(content: &ContentController) -> Result<PtyHarness> {
 }
 
 fn spawn_pager(binary: &Path, content: &ContentController, project: &Path) -> Result<PtyHarness> {
+    // Session auth only reaches the settings, models and inference endpoints over a trusted HTTPS origin.
+    let front_env = content.session_front_env();
+    let mut ops = locked_row_env_ops();
+    ops.extend(front_env.iter().map(|(key, value)| EnvOp::set(key, value)));
     PtyHarness::spawn_with_content_env_ops_in_dir(
         binary,
         ROWS,
         COLS,
         content,
         &[],
-        &locked_row_env_ops(),
+        &ops,
         Some(project),
     )
 }

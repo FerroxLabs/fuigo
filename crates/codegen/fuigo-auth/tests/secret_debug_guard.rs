@@ -25,6 +25,26 @@ use regex::Regex;
 /// `path::Type[::Variant]::field` (path relative to the workspace root) → why the derived `Debug` is safe.
 const ALLOWED: &[(&str, &str)] = &[
     (
+        "crates/codegen/fuigo-workspace/src/sandbox/mod.rs::ModeStamp::env",
+        "the value of the sandbox-mode switch (`off`/`observe`/`enforce`), not a credential",
+    ),
+    (
+        "crates/codegen/fuigo-workspace/src/sandbox_mode.rs::SandboxModeInputs::env",
+        "the value of the sandbox-mode switch (`off`/`observe`/`enforce`), not a credential",
+    ),
+    (
+        "crates/codegen/fuigo-config/src/sandbox_mode.rs::SandboxModeLayers::env",
+        "the value of the sandbox-mode switch (`off`/`observe`/`enforce`), not a credential",
+    ),
+    (
+        "crates/codegen/fuigo-workspace/src/sandbox/calls.rs::Released::credentials",
+        "`CallId`s of the calls whose proxy credential is to be revoked (identifiers, not the secrets)",
+    ),
+    (
+        "crates/codegen/fuigo-egress-proxy/src/credential.rs::ProxyCredential::token",
+        "`ProxyToken` implements a redacting Debug (`ProxyToken(***)`)",
+    ),
+    (
         "crates/codegen/fuigo-pager/src/peer_ui_state.rs::PeerCall::Decide::token",
         "`Token` (the single-use release token of a held peer message) implements a redacting Debug (`Token(..)`)",
     ),

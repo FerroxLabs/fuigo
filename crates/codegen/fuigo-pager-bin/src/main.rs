@@ -2173,7 +2173,12 @@ fn validate_requirements_or_exit() {
 fn dispatch_subscription_if_requested(args: &PagerArgs) -> bool {
     use fuigo_shell::auth::subscription;
     let Some(command) = args.command.as_ref() else { return false; };
-    if !matches!(command, Command::Login { provider: Some(_), .. } | Command::Logout { provider: Some(_), .. } | Command::Models { provider: Some(_) }) {
+    use fuigo_pager::app::cli::LoginTarget;
+    let early_login = matches!(
+        command,
+        Command::Login { provider: Some(LoginTarget::Chatgpt | LoginTarget::Xai), status: false, .. }
+    );
+    if !(early_login || matches!(command, Command::Logout { provider: Some(_), .. } | Command::Models { provider: Some(_) })) {
         return false;
     }
     // P183: the same requirements gate as the main path (warnings printed, exit 2 on refusal); this path returns before it
@@ -2182,9 +2187,12 @@ fn dispatch_subscription_if_requested(args: &PagerArgs) -> bool {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         runtime.block_on(async {
             match command {
-                Command::Login { provider: Some(provider), status, .. } => {
-                    if *status { subscription::cli_status(*provider).await?; }
-                    else { subscription::cli_login(*provider).await?; }
+                Command::Login { provider: Some(target), .. } => {
+                    let provider = match target {
+                        LoginTarget::Chatgpt => subscription::SubscriptionProvider::Chatgpt,
+                        _ => subscription::SubscriptionProvider::Xai,
+                    };
+                    subscription::cli_login(provider).await?;
                 }
                 Command::Logout { provider: Some(provider), account } => {
                     subscription::default_store()?.logout(*provider, account.as_deref()).await?;
@@ -2342,12 +2350,23 @@ fn main() {
         Ok(HeadlessOutcome::PermissionDenied(denial)) => {
             fuigo_tty_utils::restore_native_stderr();
             finalize_span_profile();
-            fuigo_pager::best_effort_stderr::eprint_line(&fuigo_tty_utils::scrub_unsafe_display(
-                &denial.human_line(),
-                Some(' '),
-            ));
+            // A tool refusal already printed its one line (rule and remedy) when it happened.
+            if !denial.reported {
+                fuigo_pager::best_effort_stderr::eprint_line(&fuigo_tty_utils::scrub_unsafe_display(
+                    &denial.human_line(),
+                    Some(' '),
+                ));
+            }
             drop(_sentry_guard);
             std::process::exit(denial.exit_code());
+        }
+        // A closed stdout (`fuigo export | head`) surfaces as a propagated BrokenPipe: nobody is reading, so end quietly
+        Err(e) if fuigo_tty_utils::best_effort_stdout::error_chain_is_gone_reader(e.as_ref()) => {
+            fuigo_tty_utils::best_effort_stdout::note_reader_gone();
+            fuigo_tty_utils::restore_native_stderr();
+            finalize_span_profile();
+            drop(_sentry_guard);
+            std::process::exit(0);
         }
         Err(e) => {
             fuigo_tty_utils::restore_native_stderr();
@@ -2685,13 +2704,15 @@ async fn async_main(args: PagerArgs) -> Result<HeadlessOutcome> {
                 device_auth,
                 devbox,
             } => {
-                if let Some(provider) = provider {
-                    if status {
-                        fuigo_shell::auth::subscription::cli_status(provider).await?;
-                    } else {
-                        fuigo_shell::auth::subscription::cli_login(provider).await?;
+                // Explicit OIDC flags are the old path; everything else goes through the picker
+                // module (`--provider`, `--status`, or the picker itself).
+                let old_sso_flags = provider.is_none() && !status && (oauth || device_auth || devbox);
+                if !old_sso_flags {
+                    match fuigo_pager::login_cmd::run(provider, status).await? {
+                        fuigo_pager::login_cmd::Next::Done => return Ok(HeadlessOutcome::Finished),
+                        fuigo_pager::login_cmd::Next::Exit(code) => std::process::exit(code),
+                        fuigo_pager::login_cmd::Next::Sso => {}
                     }
-                    return Ok(HeadlessOutcome::Finished);
                 }
                 init_tracing_simple("cli");
                 let _otel_guard = fuigo_telemetry::otel_layer::otel_guard();
@@ -2832,6 +2853,8 @@ async fn async_main(args: PagerArgs) -> Result<HeadlessOutcome> {
         } else {
             None
         };
+    // Subscription model lists older than a day refresh in the background; never blocks startup.
+    fuigo_shell::auth::subscription::catalog::spawn_startup_refresh();
     let result = fuigo_pager::app::run(args, bg_update_rx).await;
     fuigo_sandbox::flush();
     match result {
@@ -3238,7 +3261,9 @@ mod tests {
             tool_title: Some("Write src/main.rs".to_owned()),
             tool_call_id: "tc-1".to_owned(),
             offered_option_kinds: vec!["reject_once".to_owned()],
+            tool_kind: None,
             agent_message: None,
+            reported: false,
         };
         assert_eq!(denial.exit_code(), 3);
         for taken in [0, 1, 2, 130, 143] {
@@ -3261,7 +3286,9 @@ mod tests {
             tool_title: None,
             tool_call_id: "tc-1".to_owned(),
             offered_option_kinds: vec![],
+            tool_kind: None,
             agent_message: None,
+            reported: false,
         };
         for taken in [0, 1, 2, denial.exit_code(), 130, 143] {
             assert_ne!(RUNTIME_STARTUP_FAILURE_EXIT_CODE, taken, "{taken} already means something else");

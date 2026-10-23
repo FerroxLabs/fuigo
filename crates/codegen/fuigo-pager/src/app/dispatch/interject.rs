@@ -86,11 +86,14 @@ pub(super) fn dispatch_interject_on(
     let blocks = if images.is_empty() {
         None
     } else {
-        Some(crate::prompt_images::build_content_blocks_with_workspace(
+        let build = crate::prompt_images::build_content_blocks_with_workspace_report(
             text.clone(),
             images,
             Some(std::path::Path::new(&agent.session.cwd)),
-        ))
+        );
+        app.pending_image_notices
+            .extend(agent.skipped_image_send_notice(&build.skipped_display_numbers));
+        Some(build.blocks)
     };
 
     vec![Effect::SendInterject {
@@ -141,9 +144,12 @@ pub(super) fn dispatch_send_prompt_now(
     app: &mut AppView,
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
+    image_notice: Option<String>,
 ) -> Vec<Effect> {
     // Hard-reset only; `text` may be a queue row, not the composer
     let _ = voice_stop_on_submit(app);
+    // Shown when the dispatch ends, even if the send is held or refused below
+    app.pending_image_notices.extend(image_notice);
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -206,11 +212,14 @@ pub(super) fn dispatch_send_prompt_now(
     // Expect the shell's send-now cancel so the turn-end handling suppresses its marker
     super::queue::arm_send_now_and_paint_dispatched(agent, &prompt_id, &text);
 
-    let blocks = crate::prompt_images::build_content_blocks_with_workspace(
+    let build = crate::prompt_images::build_content_blocks_with_workspace_report(
         text.clone(),
         images,
         Some(std::path::Path::new(&agent.session.cwd)),
     );
+    app.pending_image_notices
+        .extend(agent.skipped_image_send_notice(&build.skipped_display_numbers));
+    let blocks = build.blocks;
 
     // Optimistic queue-pane echo, reconciled by the shell's queue broadcast.
     let sid_str = session_id.0.to_string();

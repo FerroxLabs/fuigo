@@ -13,9 +13,15 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 pub const ODB_PERMITS: usize = 1;
 pub const WALK_TIMEOUT_SECS: u64 = 60;
 pub const ODB_ACQUIRE_SLACK_SECS: u64 = 5;
+/// How long a walk may sit in the queue for the single ODB permit before its waiters give up. The 60 s `WALK_TIMEOUT`
+/// bounds a walk that is RUNNING; it used to also cover the wait behind other repositories' walks, so on a big repository
+/// (about 0.7 s per `status` on a 96k-file tree when idle, 2.3 s under heavy CPU load, 16 s on a saturated host) a few
+/// queued sessions or subagents were enough to fail healthy walks. Waiting in line is not a hung walk.
+pub const ODB_QUEUE_WAIT_SECS: u64 = 300;
 pub const WALK_TIMEOUT: Duration = Duration::from_secs(WALK_TIMEOUT_SECS);
+pub const ODB_QUEUE_WAIT: Duration = Duration::from_secs(ODB_QUEUE_WAIT_SECS);
 pub const ODB_ACQUIRE_WAIT: Duration =
-    Duration::from_secs(WALK_TIMEOUT_SECS + ODB_ACQUIRE_SLACK_SECS);
+    Duration::from_secs(ODB_QUEUE_WAIT_SECS + ODB_ACQUIRE_SLACK_SECS);
 
 #[derive(Clone)]
 pub struct OdbLimiter {

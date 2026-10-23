@@ -1101,9 +1101,14 @@ fn spawn_background_refresh_is_noop_when_real_catalog_present() {
 // Guards in CI that the background refresh never blocks the readiness path; the e2e proofs are `#[ignore]`
 // current_thread: the post-spawn `!polled` check relies on the task not being polled until this test awaits
 #[tokio::test(flavor = "current_thread")]
+#[serial]
 async fn spawn_background_refresh_never_blocks_on_a_hanging_endpoint() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::Notify;
+    // A catalog fetch needs a Flux credential to be attempted at all (see
+    // `catalog_retry_is_skipped_without_a_flux_credential`), so give it one.
+    let _key = EnvGuard::set("FUIGO_API_KEY", "sk-test-catalog-credential");
+    let _legacy = EnvGuard::unset("FUIGO_CODE_API_KEY");
 
     // Never resolves; signals the instant the detached task first polls it.
     struct NeverResolvingEndpoint {
@@ -2184,6 +2189,7 @@ fn make_entry_config_with_id(
         env_key: None,
         api_backend: Default::default(),
         context_window: std::num::NonZeroU64::new(200_000).unwrap(),
+        max_request_bytes: None,
         context_windows: Vec::new(),
         notice: None,
         auto_compact_threshold_percent: None,
@@ -2206,6 +2212,7 @@ fn make_entry_config_with_id(
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,
+        price: None,
         stream_tool_calls: None,
         laziness_detector: config::LazinessDetectorPerModelConfig::default(),
         variants: Vec::new(),
@@ -3021,3 +3028,137 @@ mod auth_reject {
 }
 
 mod persist_401;
+
+// ---- startup default with sign-in as the only step ----
+
+fn subscription_catalog() -> IndexMap<String, ModelEntry> {
+    config::resolve_model_list(&config::Config::default(), None)
+}
+
+#[tokio::test]
+#[serial]
+async fn unset_default_with_one_signed_in_subscription_starts_on_its_best_model() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    use crate::auth::subscription::{SubscriptionProvider, catalog::test_sign_in};
+    let home = fuigo_test_support::FuigoHome::new();
+    let _a = fuigo_test_support::EnvGuard::unset("FLUX_API_KEY");
+    let _b = fuigo_test_support::EnvGuard::unset("FUIGO_API_KEY");
+    let _c = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_API_KEY");
+    test_sign_in(home.path(), SubscriptionProvider::Xai, "acct", &["grok-4.7", "grok-3"]).await;
+    let catalog = subscription_catalog();
+    let (key, entry, _) = resolve_default_model(&config::Config::default(), &catalog, false);
+    assert_eq!(key, "xai/grok-4.7");
+    assert_eq!(entry.info.model, "grok-4.7");
+}
+
+#[tokio::test]
+#[serial]
+async fn an_explicit_default_is_never_overridden_by_a_signed_in_subscription() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    use crate::auth::subscription::{SubscriptionProvider, catalog::test_sign_in};
+    let home = fuigo_test_support::FuigoHome::new();
+    let _a = fuigo_test_support::EnvGuard::unset("FLUX_API_KEY");
+    let _b = fuigo_test_support::EnvGuard::unset("FUIGO_API_KEY");
+    let _c = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_API_KEY");
+    test_sign_in(home.path(), SubscriptionProvider::Xai, "acct", &["grok-4.7"]).await;
+    let catalog = subscription_catalog();
+    let mut cfg = config::Config::default();
+    cfg.models.default = Some("xai/grok-4.7".to_string());
+    let (key, _, _) = resolve_default_model(&cfg, &catalog, false);
+    assert_eq!(key, "xai/grok-4.7");
+    // An explicit default naming a built-in model stays on it.
+    let builtin = crate::models::default_model().to_string();
+    cfg.models.default = Some(builtin.clone());
+    let (key, _, src) = resolve_default_model(&cfg, &catalog, false);
+    assert_eq!(key, builtin, "an explicit default must win over the implicit one");
+    assert!(matches!(src, config::ConfigSource::Config));
+}
+
+#[tokio::test]
+#[serial]
+async fn a_flux_key_outranks_a_subscription_so_the_built_in_default_stands() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    use crate::auth::subscription::{SubscriptionProvider, catalog::test_sign_in};
+    let home = fuigo_test_support::FuigoHome::new();
+    let _a = fuigo_test_support::EnvGuard::set("FLUX_API_KEY", "sk-flux-abcdefgh-1234");
+    let _b = fuigo_test_support::EnvGuard::unset("FUIGO_API_KEY");
+    let _c = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_API_KEY");
+    test_sign_in(home.path(), SubscriptionProvider::Xai, "acct", &["grok-4.7"]).await;
+    let catalog = subscription_catalog();
+    let (key, _, _) = resolve_default_model(&config::Config::default(), &catalog, false);
+    assert_ne!(key, "xai/grok-4.7", "Flux outranks a subscription: keep the built-in default");
+}
+
+// ---- a catalog fetch without a Flux credential is skipped, not retried in a loop ----
+
+struct CountingFailingEndpoint {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl ModelsEndpoint for CountingFailingEndpoint {
+    fn fetch_models(
+        &self,
+        _endpoints: config::EndpointsConfig,
+        _auth: Option<FuigoAuth>,
+        _fetch_auth: ModelFetchAuth,
+    ) -> ModelsFetchFuture {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { None })
+    }
+}
+
+fn counting_manager(calls: Arc<std::sync::atomic::AtomicUsize>) -> ModelsManager {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let auth_manager = Arc::new(AuthManager::new(tmp.path(), FuigoComConfig::default()));
+    let mgr = ModelsManagerBuilder::new(
+        None,
+        IndexMap::new(),
+        acp::ModelId::new("default"),
+        auth_manager,
+        config::Config::default(),
+    )
+    .endpoint(Arc::new(CountingFailingEndpoint { calls }))
+    .cache(test_cache_manager(tmp.path()))
+    .build();
+    std::mem::forget(tmp);
+    mgr
+}
+
+#[tokio::test]
+#[serial]
+async fn catalog_retry_is_skipped_without_a_flux_credential() {
+    let _unset = api_key_env_unset();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mgr = counting_manager(calls.clone());
+    assert!(!mgr.catalog_fetch_has_credential());
+    mgr.spawn_background_refresh_inner(/*remote_fetch_enabled*/ true);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "no credential: nothing may be sent, and no retry ladder may start"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn catalog_retry_runs_with_a_flux_credential() {
+    let _key = EnvGuard::set("FUIGO_API_KEY", "sk-test-catalog-credential");
+    let _legacy = EnvGuard::unset("FUIGO_CODE_API_KEY");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mgr = counting_manager(calls.clone());
+    assert!(mgr.catalog_fetch_has_credential());
+    mgr.spawn_background_refresh_inner(/*remote_fetch_enabled*/ true);
+    for _ in 0..200 {
+        if calls.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(calls.load(Ordering::SeqCst) >= 1, "with a credential the fetch must be attempted");
+}

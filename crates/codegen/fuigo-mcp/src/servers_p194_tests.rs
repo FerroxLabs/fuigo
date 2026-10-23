@@ -62,6 +62,8 @@ async fn recording_service(
         server_name: "recording".to_string(),
         notify_tx: Arc::new(parking_lot::Mutex::new(None)),
         elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
+        request_tracker: Default::default(),
+        service_id: Default::default(),
         progress: Default::default(),
         progress_generation: 0,
     };
@@ -367,6 +369,8 @@ async fn resilient_service(
         server_name: "stalling".to_string(),
         notify_tx: Arc::new(parking_lot::Mutex::new(None)),
         elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
+        request_tracker: Default::default(),
+        service_id: Default::default(),
         progress: Default::default(),
         progress_generation: 0,
     };

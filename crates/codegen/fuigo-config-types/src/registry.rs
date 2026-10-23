@@ -50,6 +50,8 @@ pub enum Feature {
     TerminalTheme,
     /// Named sessions that message each other (1.0.25 rollout gate; no listener or tool exists while off).
     PeerMessaging,
+    /// Every subagent runs on the parent model: the `task` tool's `model` argument is withdrawn.
+    SubagentModelInheritance,
 }
 
 /// How one feature is written on each surface it can be set from.
@@ -247,6 +249,16 @@ pub const FEATURES: &[FeatureSpec] = &[
         path: "features.peer_messaging",
         env: "FUIGO_PEER_MESSAGING",
         // A rollout gate: off until asked for; peer messaging opens no inbox and registers no tool while off.
+        default_enabled: false,
+        // Local-only feature: pin/env/config only, no remote tier.
+        remote: None,
+    },
+    FeatureSpec {
+        id: Feature::SubagentModelInheritance,
+        key: "subagent_model_inheritance",
+        path: "features.subagent_model_inheritance",
+        env: "FUIGO_SUBAGENT_MODEL_INHERITANCE",
+        // Off keeps the explicit `model` argument, so an upgrade changes nothing until asked.
         default_enabled: false,
         // Local-only feature: pin/env/config only, no remote tier.
         remote: None,

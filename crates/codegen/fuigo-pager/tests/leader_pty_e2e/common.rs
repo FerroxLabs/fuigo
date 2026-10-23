@@ -4,8 +4,7 @@
 
 pub(crate) use fuigo_pager_pty_harness::{
     ContentController, EnvOp, LeaderCluster, MockModel, PtyHarness, inference_request_count, keys,
-    pager_binary, submit_turn, wait_for_labels_absent,
-    wait_for_model_via_new_sessions,
+    pager_binary, submit_turn, wait_for_labels_absent, wait_for_model_via_new_sessions,
 };
 pub(crate) use std::time::{Duration, Instant};
 

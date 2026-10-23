@@ -13,10 +13,37 @@ pub(crate) fn is_uuid_shaped(arg: &str) -> bool {
     uuid::Uuid::try_parse(arg).is_ok()
 }
 
-/// Canonical key for title equality: trimmed `str::to_lowercase`.
-/// Plain case-insensitive equality, not full Unicode caseless matching.
+/// The lowercased words of a title or typed text: whatever is not a letter or digit separates them, so
+/// `fix-login-bug`, `fix_login_bug` and `Fix login bug` are the same words.
+/// Plain `str::to_lowercase` per word, not full Unicode caseless matching.
+fn title_words(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Canonical key for title equality: the words of [`title_words`] joined by single spaces.
+/// Text with no letters or digits at all falls back to its trimmed lowercase form, so a title like `???` stays findable.
 fn title_key(s: &str) -> String {
-    s.trim().to_lowercase()
+    let words = title_words(s);
+    if words.is_empty() {
+        s.trim().to_lowercase()
+    } else {
+        words.join(" ")
+    }
+}
+
+/// Newest change first (`last_active_at`, else `updated_at`).
+fn newest_first(found: &mut [&Summary]) {
+    found.sort_by_key(|s| std::cmp::Reverse(s.last_change_unix_ms()));
+}
+
+/// When the session last changed, for a listing.
+fn updated_label(s: &Summary) -> String {
+    chrono::DateTime::from_timestamp_millis(s.last_change_unix_ms())
+        .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 /// Hint appended to every terminal failure for a non-id resume target.
@@ -64,9 +91,18 @@ pub(crate) fn select_by_title<'a>(
             if let [only] = manual.as_slice() {
                 return Ok(Some(**only));
             }
-            let listing = matches
+            let mut newest = matches.clone();
+            newest_first(&mut newest);
+            let listing = newest
                 .iter()
-                .map(|s| format!("  {}  {:?}", s.info.id, s.display_title()))
+                .map(|s| {
+                    format!(
+                        "  {}  {:?}  (updated {})",
+                        s.info.id,
+                        s.display_title(),
+                        updated_label(s)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             anyhow::bail!(
@@ -75,6 +111,93 @@ pub(crate) fn select_by_title<'a>(
                 arg.trim()
             );
         }
+    }
+}
+
+/// Sessions a `/resume <text>` could mean, newest first.
+/// An exact title match (separators and case ignored) wins outright, with a sole manual rename beating colliding auto titles.
+/// Otherwise every session whose title holds every word of `arg`, in any order, qualifies.
+pub(crate) fn resume_candidates<'a>(arg: &str, summaries: &'a [Summary]) -> Vec<&'a Summary> {
+    let needle = title_key(arg);
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut exact: Vec<&Summary> = summaries
+        .iter()
+        .filter(|s| title_key(s.display_title()) == needle)
+        .collect();
+    if !exact.is_empty() {
+        let manual: Vec<&Summary> = exact
+            .iter()
+            .copied()
+            .filter(|s| s.manual_title_opt().is_some_and(|t| title_key(&t) == needle))
+            .collect();
+        if let [only] = manual.as_slice() {
+            return vec![*only];
+        }
+        newest_first(&mut exact);
+        return exact;
+    }
+    let wanted = title_words(arg);
+    let mut hits: Vec<&Summary> = summaries
+        .iter()
+        .filter(|s| {
+            let have = title_words(s.display_title());
+            wanted.iter().all(|w| have.iter().any(|h| h.contains(w.as_str())))
+        })
+        .collect();
+    newest_first(&mut hits);
+    hits
+}
+
+/// Up to `limit` sessions whose titles share at least one word with `arg`, best match first (ties newest first).
+/// Used to suggest something when `arg` matched nothing.
+pub(crate) fn similar_titles<'a>(
+    arg: &str,
+    summaries: &'a [Summary],
+    limit: usize,
+) -> Vec<&'a Summary> {
+    let wanted = title_words(arg);
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let mut scored: Vec<(usize, &Summary)> = summaries
+        .iter()
+        .filter_map(|s| {
+            let have = title_words(s.display_title());
+            let shared = wanted
+                .iter()
+                .filter(|w| have.iter().any(|h| h.contains(w.as_str())))
+                .count();
+            (shared > 0).then_some((shared, s))
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.last_change_unix_ms().cmp(&a.1.last_change_unix_ms()))
+    });
+    scored.into_iter().take(limit).map(|(_, s)| s).collect()
+}
+
+/// [`title_miss_hint`], plus the closest existing titles when there are any.
+pub(crate) fn title_miss_hint_with(arg: &str, similar: &[&Summary]) -> String {
+    let base = title_miss_hint(arg);
+    if similar.is_empty() {
+        return base;
+    }
+    let list = similar
+        .iter()
+        .map(|s| format!("{:?} ({})", s.display_title(), s.info.id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{base}; similar titles: {list}")
+}
+
+/// [`title_miss_hint_with`] for the local sessions of `cwd`.
+pub(crate) fn title_miss_hint_for(arg: &str, cwd: &str, selection: RecentSessionSelection) -> String {
+    match fuigo_shell::session::persistence::local_summaries_for_cwd_sync(cwd, selection) {
+        Ok(all) => title_miss_hint_with(arg, &similar_titles(arg, &all, 3)),
+        Err(_) => title_miss_hint(arg),
     }
 }
 

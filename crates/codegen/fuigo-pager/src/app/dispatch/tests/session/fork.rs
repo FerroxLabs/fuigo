@@ -536,11 +536,18 @@ fn dispatch_fork_no_flag_always_opens_question_modal() {
 }
 
 /// Drive the open fork question with `keys` typed as text, then Enter; return the final outcome.
-fn p152_answer_fork_question_by_typing(app: &mut AppView, typed: &str) -> crate::app::app_view::InputOutcome {
+fn p152_answer_fork_question_by_typing(
+    app: &mut AppView,
+    typed: &str,
+) -> crate::app::app_view::InputOutcome {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     for c in typed.chars() {
-        let mods = if c.is_ascii_uppercase() { KeyModifiers::SHIFT } else { KeyModifiers::NONE };
+        let mods = if c.is_ascii_uppercase() {
+            KeyModifiers::SHIFT
+        } else {
+            KeyModifiers::NONE
+        };
         let _ = agent.handle_question_key_for_test(&KeyEvent::new(KeyCode::Char(c), mods));
     }
     agent.handle_question_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -555,7 +562,10 @@ fn p152_typing_no_to_the_fork_question_forks_without_a_worktree() {
         let mut app = fork_test_app();
         app.fork_worktree_mode = crate::app::app_view::WorktreeMode::Ask;
         let _ = dispatch(Action::Fork(fork_args(None, None)), &mut app);
-        assert!(app.agents[&AgentId(0)].question_view.is_some(), "modal must be open");
+        assert!(
+            app.agents[&AgentId(0)].question_view.is_some(),
+            "modal must be open"
+        );
         match p152_answer_fork_question_by_typing(&mut app, typed) {
             crate::app::app_view::InputOutcome::Action(Action::ForkAnswered {
                 worktree,
@@ -563,9 +573,14 @@ fn p152_typing_no_to_the_fork_question_forks_without_a_worktree() {
                 ..
             }) => {
                 assert!(!worktree, "typed {typed:?} must fork without a worktree");
-                assert!(persist_mode.is_none(), "typed {typed:?} must not persist a mode");
+                assert!(
+                    persist_mode.is_none(),
+                    "typed {typed:?} must not persist a mode"
+                );
             }
-            other => panic!("typed {typed:?}: expected ForkAnswered without a worktree, got {other:?}"),
+            other => {
+                panic!("typed {typed:?}: expected ForkAnswered without a worktree, got {other:?}")
+            }
         }
     }
 }
@@ -578,7 +593,9 @@ fn p152_typing_yes_to_the_fork_question_forks_in_a_worktree() {
         app.fork_worktree_mode = crate::app::app_view::WorktreeMode::Ask;
         let _ = dispatch(Action::Fork(fork_args(None, None)), &mut app);
         match p152_answer_fork_question_by_typing(&mut app, typed) {
-            crate::app::app_view::InputOutcome::Action(Action::ForkAnswered { worktree, .. }) => {
+            crate::app::app_view::InputOutcome::Action(Action::ForkAnswered {
+                worktree, ..
+            }) => {
                 assert!(worktree, "typed {typed:?} must fork in a worktree")
             }
             other => panic!("typed {typed:?}: expected ForkAnswered, got {other:?}"),
@@ -626,12 +643,22 @@ fn p152_letters_on_an_acp_question_do_not_start_a_typed_answer() {
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     let stashed = agent.prompt.stash();
     agent.question_view = Some(QuestionViewState::new("acp-q".into(), vec![q], stashed));
-    assert!(!agent.question_view.as_ref().unwrap().no_freeform, "the ACP card offers a typed answer");
+    assert!(
+        !agent.question_view.as_ref().unwrap().no_freeform,
+        "the ACP card offers a typed answer"
+    );
     for c in "es".chars() {
-        let _ = agent.handle_question_key_for_test(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        let _ = agent
+            .handle_question_key_for_test(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
     }
-    let qv = agent.question_view.as_ref().expect("the ACP question stays open");
-    assert!(!qv.is_on_freeform_row(), "typed letters must not open the typed answer on an ACP question");
+    let qv = agent
+        .question_view
+        .as_ref()
+        .expect("the ACP question stays open");
+    assert!(
+        !qv.is_on_freeform_row(),
+        "typed letters must not open the typed answer on an ACP question"
+    );
     assert_eq!(qv.cursor(), 0, "the focused option is unchanged");
 }
 
@@ -1292,6 +1319,58 @@ fn worktree_forked_does_not_retarget_unrelated_suppress() {
     assert_eq!(app.suppress_code_restore_once.as_deref(), Some("other-sid"));
 }
 
+/// A fork made without a new worktree, from a session that runs in a worktree, runs in that same worktree: the child
+/// must count as a worktree session (dashboard row, status line) and say where it runs, not look like a plain checkout.
+#[test]
+fn a_fork_of_a_worktree_session_runs_in_and_shows_the_worktree_path() {
+    let mut app = fork_test_app();
+    let wt = PathBuf::from("/tmp/fuigo-worktrees/parent-wt/sub");
+    {
+        let parent = app.agents.get_mut(&AgentId(0)).unwrap();
+        parent.session.cwd = wt.clone();
+        parent.session.is_worktree = true;
+        parent.is_worktree = true;
+    }
+    dispatch(Action::Fork(fork_args(Some(false), None)), &mut app);
+    let child = *app.agents.keys().max().expect("fork placeholder");
+    assert_ne!(child, AgentId(0));
+    dispatch(
+        Action::TaskComplete(TaskResult::ForkSessionReady {
+            agent_id: child,
+            new_session_id: "child-sid".into(),
+            cwd: wt.clone(),
+            parent_session_id: acp::SessionId::new("test-session"),
+        }),
+        &mut app,
+    );
+    let child_view = &app.agents[&child];
+    assert_eq!(child_view.session.cwd, wt, "the fork runs in the parent's worktree");
+    assert!(child_view.session.is_worktree && child_view.is_worktree, "the fork is a worktree session");
+    let sb = &child_view.scrollback;
+    let shown = (0..sb.len()).any(|i| match &sb.get(i).expect("entry").block {
+        RenderBlock::System(sys) => sys.text.contains("/tmp/fuigo-worktrees/parent-wt/sub"),
+        _ => false,
+    });
+    assert!(shown, "the worktree path must be shown to the user");
+}
+
+#[test]
+fn a_fork_of_a_plain_checkout_stays_a_plain_checkout() {
+    let mut app = fork_test_app();
+    dispatch(Action::Fork(fork_args(Some(false), None)), &mut app);
+    let child = *app.agents.keys().max().expect("fork placeholder");
+    dispatch(
+        Action::TaskComplete(TaskResult::ForkSessionReady {
+            agent_id: child,
+            new_session_id: "child-sid".into(),
+            cwd: PathBuf::from("/tmp/plain"),
+            parent_session_id: acp::SessionId::new("test-session"),
+        }),
+        &mut app,
+    );
+    assert!(!app.agents[&child].session.is_worktree && !app.agents[&child].is_worktree);
+}
+
 #[test]
 fn fork_session_ready_emits_load_session_with_new_id() {
     let mut app = fork_test_app();
@@ -1660,4 +1739,40 @@ fn handle_ask_user_question_pushes_system_block_when_displaced_local_fork_modal(
         scrollback_len_before + 1,
         "exactly one system block pushed"
     );
+}
+
+/// Row 53.5: `/fork` is refused while a card (approval, question, confirm) is waiting on the user, whatever the worktree flag says.
+#[test]
+fn dispatch_fork_is_blocked_while_a_card_waits_for_an_answer() {
+    use crate::views::question_view::QuestionViewState;
+    use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
+    for worktree_override in [None, Some(false), Some(true)] {
+        let mut app = fork_test_app();
+        let q = Question {
+            question: "Allow?".into(),
+            options: vec![QuestionOption {
+                label: "ok".into(),
+                description: "ok".into(),
+                preview: None,
+                id: None,
+            }],
+            multi_select: Some(false),
+            id: None,
+        };
+        let stashed = app.agents.get_mut(&AgentId(0)).unwrap().prompt.stash();
+        app.agents.get_mut(&AgentId(0)).unwrap().question_view =
+            Some(QuestionViewState::new("pending".into(), vec![q], stashed));
+
+        let effects = dispatch(Action::Fork(fork_args(worktree_override, None)), &mut app);
+        assert!(
+            effects.is_empty(),
+            "no fork may start behind a waiting card (override {worktree_override:?}): {effects:?}"
+        );
+        assert_eq!(app.agents.len(), 1, "no child agent is created");
+        let toast = app.agents[&AgentId(0)]
+            .toast
+            .as_ref()
+            .expect("the refusal is announced");
+        assert!(toast.0.contains("waiting for your answer"), "got: {}", toast.0);
+    }
 }

@@ -1,20 +1,102 @@
 name: release-notes-scroll
 description: >
   Open /release-notes (DocViewer modal) and verify keyboard + mouse-wheel scrolling
-  moves the changelog body. Seeds CHANGELOG cache offline via setup is not available
-  in YAML, so this scenario relies on CDN/cache if present and still asserts the
-  modal chrome + scroll affordances. Prefer the pty_e2e Rust tests for deterministic
-  offline seeding; this YAML exercises the scripted ptyctl runner path.
+  moves the changelog body. Fuigo publishes no changelog CDN, so the scenario seeds
+  the CHANGELOG.md cache that /release-notes reads (`environment.home_files`) and
+  asserts the modal chrome + scroll affordances.
 terminal:
   rows: 40
   cols: 110
+environment:
+  home_files:
+    CHANGELOG.md: |
+      - Release note line 1: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 2: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 3: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 4: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 5: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 6: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 7: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 8: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 9: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 10: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 11: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 12: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 13: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 14: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 15: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 16: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 17: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 18: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 19: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 20: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 21: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 22: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 23: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 24: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 25: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 26: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 27: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 28: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 29: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 30: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 31: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 32: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 33: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 34: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 35: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 36: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 37: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 38: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 39: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 40: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 41: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 42: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 43: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 44: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 45: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 46: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 47: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 48: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 49: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 50: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 51: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 52: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 53: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 54: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 55: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 56: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 57: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 58: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 59: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 60: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 61: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 62: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 63: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 64: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 65: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 66: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 67: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 68: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 69: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 70: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 71: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 72: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 73: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 74: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 75: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 76: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 77: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 78: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 79: a change that is long enough to wrap in a narrow viewport when the modal is small.
+      - Release note line 80: a change that is long enough to wrap in a narrow viewport when the modal is small.
 mock:
   response: "SCRIPTED_RELEASE_NOTES_SCROLL unused for this scenario."
 steps:
   - action: wait_for_text
     text: Quit
     timeout_ms: 20000
-  # Promote welcome → session and open release notes (uses CDN or disk cache).
+  # Promote welcome → session and open release notes (reads the seeded cache).
   - action: type_text
     text: "/release-notes"
   - action: keys

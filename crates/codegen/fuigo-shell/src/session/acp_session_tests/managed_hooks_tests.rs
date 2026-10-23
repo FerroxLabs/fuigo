@@ -64,6 +64,8 @@ fn managed_registry() -> fuigo_hooks::discovery::HookRegistry {
         enabled: true,
         command: Some(std::path::PathBuf::from("exit 0")),
         command_raw: Some("exit 0".to_string()),
+        args: None,
+        shell: None,
         url: None,
         url_raw: None,
         timeout_ms: 5000,

@@ -162,6 +162,8 @@ pub struct DiagramAffordancePlacement {
     pub screen_rect: ratatui::layout::Rect,
     /// Diagram source (the fence body); the data every button acts on.
     pub source: String,
+    /// `Some` for a `[Copy]` row under a code block or table (painted and clicked like a diagram row, copying its own text).
+    pub copy: Option<super::blocks::mermaid_content::CopyRow>,
 }
 
 /// Result of rendering entries.
@@ -788,6 +790,7 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                         height: 1,
                     },
                     source: aff.source,
+                    copy: aff.copy,
                 });
             }
         }

@@ -108,16 +108,25 @@ async fn get_or_refresh_cross_cwd_cache() -> Arc<CrossCwdCache> {
         })
     });
 
+    refresh_cross_cwd_cache(swap, &CROSS_CWD_REFRESHING, scan_cross_cwd_prompts).await
+}
+
+/// The refresh itself, parameterised on its cache, flag and scan so a test can drive it with private ones.
+async fn refresh_cross_cwd_cache(
+    swap: &ArcSwap<CrossCwdCache>,
+    flag: &'static AtomicBool,
+    scan: impl FnOnce() -> Vec<String> + Send + 'static,
+) -> Arc<CrossCwdCache> {
     let current = swap.load_full();
     if current.updated_at.elapsed() < CACHE_TTL {
         return current;
     }
 
-    let Some(_refreshing) = RefreshGuard::try_acquire(&CROSS_CWD_REFRESHING) else {
+    let Some(_refreshing) = RefreshGuard::try_acquire(flag) else {
         return current;
     };
 
-    match tokio::task::spawn_blocking(scan_cross_cwd_prompts).await {
+    match tokio::task::spawn_blocking(scan).await {
         Ok(prompts) => {
             let new = Arc::new(CrossCwdCache {
                 prompts,
@@ -189,16 +198,25 @@ async fn get_or_refresh_shell_history_cache() -> Arc<ShellHistoryCache> {
         })
     });
 
+    refresh_shell_history_cache(swap, &SHELL_HISTORY_REFRESHING, load_shell_history).await
+}
+
+/// The refresh itself, parameterised on its cache, flag and loader so a test can drive it with private ones.
+async fn refresh_shell_history_cache(
+    swap: &ArcSwap<ShellHistoryCache>,
+    flag: &'static AtomicBool,
+    load: impl FnOnce() -> Vec<String> + Send + 'static,
+) -> Arc<ShellHistoryCache> {
     let current = swap.load_full();
     if current.updated_at.elapsed() < SHELL_HISTORY_CACHE_TTL {
         return current;
     }
 
-    let Some(_refreshing) = RefreshGuard::try_acquire(&SHELL_HISTORY_REFRESHING) else {
+    let Some(_refreshing) = RefreshGuard::try_acquire(flag) else {
         return current;
     };
 
-    match tokio::task::spawn_blocking(load_shell_history).await {
+    match tokio::task::spawn_blocking(load).await {
         Ok(commands) => {
             let new = Arc::new(ShellHistoryCache {
                 commands,
@@ -711,55 +729,66 @@ mod tests {
     }
 
     /// A refresh dropped mid-scan (a cancelled completion) must free its flag, or every later refresh is skipped.
+    ///
+    /// Deterministic: the test owns its cache and flag (the process-wide ones are shared with every test that runs a
+    /// suggestion, so another test could legitimately hold the global flag at the moment of the assertion), and the
+    /// scan blocks on a channel until released, so the first poll is always parked mid-scan.
     #[tokio::test]
     async fn cross_cwd_refresh_dropped_mid_scan_frees_its_flag() {
-        for _ in 0..200 {
-            // Make the cache stale so the call takes the refresh path
-            let stale = || CrossCwdCache {
-                prompts: Vec::new(),
-                updated_at: Instant::now() - CACHE_TTL - Duration::from_secs(1),
-            };
-            CROSS_CWD_CACHE
-                .get_or_init(|| ArcSwap::from_pointee(stale()))
-                .store(Arc::new(stale()));
-            // Poll once: parked on its blocking scan, the refresh times out and is dropped
-            let outcome = tokio::time::timeout(Duration::ZERO, get_or_refresh_cross_cwd_cache()).await;
-            if outcome.is_err() {
-                assert!(
-                    !CROSS_CWD_REFRESHING.load(std::sync::atomic::Ordering::Acquire),
-                    "a dropped refresh left CROSS_CWD_REFRESHING set"
-                );
-                return;
-            }
-            // Lost the race (the scan finished on the first poll, or another test holds the flag): retry
-            tokio::time::sleep(Duration::from_millis(5)).await;
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let stale = || CrossCwdCache {
+            prompts: Vec::new(),
+            updated_at: Instant::now() - CACHE_TTL - Duration::from_secs(1),
+        };
+        let swap = ArcSwap::from_pointee(stale());
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let mut refresh = Box::pin(refresh_cross_cwd_cache(&swap, &FLAG, move || {
+            let _ = parked.recv();
+            Vec::new()
+        }));
+        tokio::select! {
+            biased;
+            _ = &mut refresh => panic!("the refresh finished before its scan was released"),
+            _ = std::future::ready(()) => {}
         }
-        panic!("never caught the refresh mid-scan");
+        assert!(FLAG.load(std::sync::atomic::Ordering::Acquire), "a parked refresh must hold the flag");
+        drop(refresh);
+        assert!(
+            !FLAG.load(std::sync::atomic::Ordering::Acquire),
+            "a dropped refresh left the refresh flag set"
+        );
+        drop(release);
+        let again = refresh_cross_cwd_cache(&swap, &FLAG, || vec!["fresh".to_string()]).await;
+        assert_eq!(again.prompts, ["fresh"], "a later refresh must run, not be skipped");
     }
-    /// A refresh dropped mid-scan (a cancelled completion) must free its flag, or every later refresh is skipped.
+
+    /// Same property for the shell-history refresh; see the cross-cwd test above for why it is deterministic.
     #[tokio::test]
     async fn shell_history_refresh_dropped_mid_scan_frees_its_flag() {
-        for _ in 0..200 {
-            // Make the cache stale so the call takes the refresh path
-            let stale = || ShellHistoryCache {
-                commands: Vec::new(),
-                updated_at: Instant::now() - SHELL_HISTORY_CACHE_TTL - Duration::from_secs(1),
-            };
-            SHELL_HISTORY_CACHE
-                .get_or_init(|| ArcSwap::from_pointee(stale()))
-                .store(Arc::new(stale()));
-            // Poll once: parked on its blocking scan, the refresh times out and is dropped
-            let outcome = tokio::time::timeout(Duration::ZERO, get_or_refresh_shell_history_cache()).await;
-            if outcome.is_err() {
-                assert!(
-                    !SHELL_HISTORY_REFRESHING.load(std::sync::atomic::Ordering::Acquire),
-                    "a dropped refresh left SHELL_HISTORY_REFRESHING set"
-                );
-                return;
-            }
-            // Lost the race (the scan finished on the first poll, or another test holds the flag): retry
-            tokio::time::sleep(Duration::from_millis(5)).await;
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let stale = || ShellHistoryCache {
+            commands: Vec::new(),
+            updated_at: Instant::now() - SHELL_HISTORY_CACHE_TTL - Duration::from_secs(1),
+        };
+        let swap = ArcSwap::from_pointee(stale());
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let mut refresh = Box::pin(refresh_shell_history_cache(&swap, &FLAG, move || {
+            let _ = parked.recv();
+            Vec::new()
+        }));
+        tokio::select! {
+            biased;
+            _ = &mut refresh => panic!("the refresh finished before its scan was released"),
+            _ = std::future::ready(()) => {}
         }
-        panic!("never caught the refresh mid-scan");
+        assert!(FLAG.load(std::sync::atomic::Ordering::Acquire), "a parked refresh must hold the flag");
+        drop(refresh);
+        assert!(
+            !FLAG.load(std::sync::atomic::Ordering::Acquire),
+            "a dropped refresh left the refresh flag set"
+        );
+        drop(release);
+        let again = refresh_shell_history_cache(&swap, &FLAG, || vec!["fresh".to_string()]).await;
+        assert_eq!(again.commands, ["fresh"], "a later refresh must run, not be skipped");
     }
 }

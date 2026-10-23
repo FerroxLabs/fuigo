@@ -1225,7 +1225,7 @@ fn make_test_handle(
         gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         status_line_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
-        mcp_servers: vec![],
+        mcp_servers: Default::default(),
         initial_client_mcp_servers: Default::default(),
         display_cwd: None,
         feedback_manager: std::sync::Arc::new(
@@ -3505,6 +3505,7 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             query_params: IndexMap::new(),
             env_http_headers: IndexMap::new(),
             context_window: std::num::NonZeroU64::new(200_000).unwrap(),
+            max_request_bytes: None,
             context_windows: Vec::new(),
             notice: None,
             auto_compact_threshold_percent: None,
@@ -3525,6 +3526,7 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
+            price: None,
             stream_tool_calls: None,
             laziness_detector: crate::agent::config::LazinessDetectorPerModelConfig::default(),
             rate_limit_retry_threshold: None,
@@ -9400,4 +9402,107 @@ fn spawn_prompt_rules_block_is_what_a_rewrite_reapplies() {
     assert!(spawn.contains("<human_rules>"));
     let rewritten = crate::session::human_rules::recompose_with_rules("TEMPLATE-B", Some(&spawn));
     assert_eq!(rewritten, spawn.replacen("TEMPLATE-A", "TEMPLATE-B", 1));
+}
+
+/// The `/model` list must not depend on HOW the one Flux key was supplied. Started with `FUIGO_API_KEY` the
+/// catalogue is prefetched before the agent exists; started with the key the picker saved to `auth.json` it is
+/// not (the key is only loaded at `initialize`), so the catalogue stayed on the bundled four models until a
+/// restart. Both starts must end on the same live catalogue, fetched with the key. Loopback mock only.
+async fn flux_catalogue_after_start(saved: bool) -> (Vec<String>, bool) {
+    use crate::agent::auth_method::{FUIGO_API_KEY_METHOD_ID, set_stored_api_key};
+    use acp::Agent as _;
+    use fuigo_test_support::EnvGuard;
+    use std::io::{Read, Write};
+    const KEY: &str = "fuigo-test-not-a-key-flux-0123456789";
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvGuard::set("FUIGO_HOME", home.path());
+    let _lockdown = EnvGuard::unset("FUIGO_DISABLE_API_KEY_AUTH");
+    let _a = EnvGuard::unset("FUIGO_API_KEY");
+    let _b = EnvGuard::unset("FUIGO_CODE_API_KEY");
+    let _c = EnvGuard::unset("FLUX_API_KEY");
+    let _env = (!saved).then(|| EnvGuard::set("FUIGO_API_KEY", KEY));
+    if saved {
+        crate::auth::store_api_key(home.path(), KEY).unwrap();
+    }
+    set_stored_api_key(None, false);
+    // A mock /v1/models on loopback: three models; records whether a request carried the key as its bearer.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://127.0.0.1:{}/v1", listener.local_addr().unwrap().port());
+    let keyed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let keyed_srv = keyed.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+            if request.contains(&format!("bearer {KEY}")) {
+                keyed_srv.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            let body = serde_json::json!({ "data": [
+                { "id": "mock-opus-5", "name": "Mock Opus 5", "context_window": 200000 },
+                { "id": "mock-gpt-5", "name": "Mock GPT 5", "context_window": 200000 },
+                { "id": "mock-gemini-3", "name": "Mock Gemini 3", "context_window": 200000 },
+            ]})
+            .to_string();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    let mut cfg = crate::agent::config::Config::default();
+    cfg.endpoints.fuigo_api_base_url = base;
+    // The bootstrap: prefetch only when the key is already resolvable (`server.rs` / `app.rs` do exactly this).
+    let fetch_auth = crate::agent::models::ModelFetchAuth::resolve(&cfg.endpoints, false);
+    let prefetched = if fetch_auth == crate::agent::models::ModelFetchAuth::Session {
+        None
+    } else {
+        let endpoints = cfg.endpoints.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::agent::models::prefetch_models_blocking(&endpoints, None, fetch_auth)
+        })
+        .await
+        .unwrap()
+    };
+    let agent = {
+        use crate::auth::{AuthManager, FuigoComConfig};
+        let auth_manager = std::sync::Arc::new(AuthManager::new(home.path(), FuigoComConfig::default()));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        MvpAgent::new(GatewaySender::new(tx), &cfg, auth_manager, prefetched).expect("valid test config")
+    };
+    agent
+        .initialize(acp::InitializeRequest::new(acp::ProtocolVersion::V1))
+        .await
+        .expect("initialize");
+    agent
+        .authenticate(acp::AuthenticateRequest::new(FUIGO_API_KEY_METHOD_ID))
+        .await
+        .expect("authenticate with the key the process holds");
+    for _ in 0..200 {
+        if agent.models_manager.models().contains_key("mock-opus-5") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let ids = agent.models_manager.models().keys().cloned().collect();
+    set_stored_api_key(None, false);
+    (ids, keyed.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn the_flux_key_lists_the_same_live_catalogue_from_the_environment_and_from_the_saved_login() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let local = tokio::task::LocalSet::new();
+    let ((from_env, env_keyed), (from_saved, saved_keyed)) = local
+        .run_until(async { (flux_catalogue_after_start(false).await, flux_catalogue_after_start(true).await) })
+        .await;
+    assert!(env_keyed, "the env key fetched the catalogue with the key");
+    assert_eq!(from_env, ["mock-opus-5", "mock-gpt-5", "mock-gemini-3"], "the live catalogue, not the bundled one");
+    assert_eq!(from_saved, from_env, "the saved key lists the same models (it used to keep the bundled four)");
+    assert!(saved_keyed, "the saved key fetched the catalogue with the key");
 }

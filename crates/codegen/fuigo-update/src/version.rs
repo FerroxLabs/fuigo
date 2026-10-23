@@ -728,7 +728,9 @@ pub(crate) async fn try_fetch_stable_pointer() -> Option<String> {
 ///
 /// Returns `None` if the file doesn't exist, can't be parsed, or has no `stable_version` field (e.g. written by an older binary).
 pub fn cached_stable_version() -> Option<String> {
-    let version_path = fuigo_home().join("version.json");
+    // Read-only: resolve the home without creating it, so `--help` and `--version` leave nothing behind on a first run
+    let home = fuigo_dirs::resolve_fuigo_home().unwrap_or_else(fuigo_dirs::default_fuigo_home);
+    let version_path = home.join("version.json");
     let content = std::fs::read_to_string(&version_path).ok()?;
     let gv: FuigoVersion = serde_json::from_str(&content).ok()?;
     gv.stable_version

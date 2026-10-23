@@ -195,10 +195,8 @@ impl SentMessageToolCallBlock {
         let mut line = self.header(theme, false);
         if let Some(delivery) = self.delivery {
             let delivery: &'static str = delivery.into();
-            line.spans.push(Span::styled(
-                format!(" \u{00b7} {delivery}"),
-                theme.muted(),
-            ));
+            line.spans
+                .push(Span::styled(format!(" \u{00b7} {delivery}"), theme.muted()));
         }
         line
     }

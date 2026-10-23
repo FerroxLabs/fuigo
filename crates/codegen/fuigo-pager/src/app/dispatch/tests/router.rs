@@ -2812,13 +2812,20 @@ fn set_context_window_dispatch_refuses_unlisted_window_and_pending_switch() {
     let model_id = seed_windowed_model(&mut app, id);
     let unlisted = std::num::NonZeroU64::new(250_000).unwrap();
     let effects = dispatch(
-        Action::SetContextWindow { model_id: model_id.clone(), window: unlisted },
+        Action::SetContextWindow {
+            model_id: model_id.clone(),
+            window: unlisted,
+        },
         &mut app,
     );
     assert!(effects.is_empty());
     assert!(!app.agents[&id].session.model_switch_pending);
 
-    app.agents.get_mut(&id).unwrap().session.model_switch_pending = true;
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .model_switch_pending = true;
     let before = app.agents[&id].scrollback.len();
     let effects = dispatch(
         Action::SetContextWindow {
@@ -2828,5 +2835,9 @@ fn set_context_window_dispatch_refuses_unlisted_window_and_pending_switch() {
         &mut app,
     );
     assert!(effects.is_empty());
-    assert_eq!(app.agents[&id].scrollback.len(), before + 1, "a retry message is shown");
+    assert_eq!(
+        app.agents[&id].scrollback.len(),
+        before + 1,
+        "a retry message is shown"
+    );
 }

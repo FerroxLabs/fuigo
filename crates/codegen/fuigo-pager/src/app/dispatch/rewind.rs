@@ -7,7 +7,7 @@ use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::state::ScrollbackState;
 use crate::views::prompt_widget::{PromptWidget, StashedPrompt};
-use crate::views::rewind::{RewindPhase, RewindState};
+use crate::views::rewind::{ConflictChoice, RewindPhase, RewindScope, RewindState};
 
 /// User prompt that participates in the shell's prompt numbering.
 /// Interjections render as user prompts but the shell never numbers them, so counting them would skew the positional prompt-to-entry mapping.
@@ -249,7 +249,69 @@ pub(super) fn dispatch_rewind_confirm(app: &mut AppView, target: usize) -> Vec<E
         .map(|s| s.anchor_entry_idx)
         .unwrap_or(0);
     let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
-    enter_executing(agent, id, target, anchor, draft)
+    enter_executing(agent, id, target, anchor, draft, RewindScope::All)
+}
+
+/// Confirm with an explicit scope ("conversation only" / "files only").
+pub(super) fn dispatch_rewind_confirm_scoped(
+    app: &mut AppView,
+    target: usize,
+    scope: RewindScope,
+) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let anchor = agent
+        .rewind_state
+        .as_ref()
+        .map(|s| s.anchor_entry_idx)
+        .unwrap_or(0);
+    let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
+    enter_executing(agent, id, target, anchor, draft, scope)
+}
+
+/// The user answered the "files changed outside Fuigo" prompt.
+pub(super) fn dispatch_rewind_conflict(app: &mut AppView, choice: ConflictChoice) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let Some(RewindPhase::Conflicts {
+        target_prompt_index,
+        scope,
+        ..
+    }) = agent.rewind_state.as_ref().map(|s| s.phase.clone())
+    else {
+        return vec![];
+    };
+    let anchor = agent
+        .rewind_state
+        .as_ref()
+        .map(|s| s.anchor_entry_idx)
+        .unwrap_or(0);
+    match choice {
+        ConflictChoice::Cancel => dispatch_rewind_dismiss(app),
+        ConflictChoice::Overwrite => {
+            let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
+            start_forced(agent, id, target_prompt_index, anchor, draft, scope)
+        }
+        ConflictChoice::KeepFiles => {
+            let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
+            start_forced(
+                agent,
+                id,
+                target_prompt_index,
+                anchor,
+                draft,
+                RewindScope::ConversationOnly,
+            )
+        }
+    }
 }
 
 /// "Yes, and don't ask again": quiet-persist confirm-before-rewind off, then execute.
@@ -289,15 +351,6 @@ pub(super) fn dispatch_rewind_dismiss_error(app: &mut AppView) -> Vec<Effect> {
     dispatch_rewind_dismiss(app)
 }
 
-/// The single place the inline-edit resubmit gets set: called right before every `Effect::RewindExecute` emission in the rewind flow.
-/// If the inline editor is open, the (trimmed) edited text is stashed for `dispatch_rewind_success` to resubmit after the rewind lands.
-/// Dismiss / error / empty-points paths never set it, so they need no clearing; the editor stays open there.
-fn stash_inline_resubmit_if_editing(agent: &mut crate::app::agent_view::AgentView) {
-    if let Some(ref edit) = agent.inline_edit {
-        agent.pending_inline_resubmit = Some(edit.textarea.text().trim().to_string());
-    }
-}
-
 /// Enter `Executing` and emit `RewindExecute` (shared by confirm Yes and immediate execute when confirm-before-rewind is off).
 fn enter_executing(
     agent: &mut crate::app::agent_view::AgentView,
@@ -305,6 +358,47 @@ fn enter_executing(
     target: usize,
     anchor: usize,
     draft: Option<StashedPrompt>,
+    scope: RewindScope,
+) -> Vec<Effect> {
+    // A conversation-only rewind touches no file, so there is nothing to preview. Anything that restores files
+    // is a dry run first: the engine lists the files and any that were changed outside Fuigo (never overwritten unasked).
+    if scope == RewindScope::ConversationOnly {
+        return start_forced(agent, agent_id, target, anchor, draft, scope);
+    }
+    let Some(session_id) = agent.session.session_id.clone() else {
+        if let Some(d) = draft {
+            agent.prompt.restore(d);
+        }
+        agent.rewind_state = None;
+        agent.rewind_points = None;
+        return vec![];
+    };
+    agent.rewind_state = Some(RewindState {
+        phase: RewindPhase::Previewing {
+            target_prompt_index: target,
+            scope,
+        },
+        anchor_entry_idx: anchor,
+        stashed_draft: draft,
+        selected_prompt_index: None,
+    });
+    vec![Effect::RewindExecute {
+        agent_id,
+        session_id,
+        target_prompt_index: target,
+        mode: scope,
+        force: false,
+    }]
+}
+
+/// Execute for real (`force: true`).
+fn start_forced(
+    agent: &mut crate::app::agent_view::AgentView,
+    agent_id: AgentId,
+    target: usize,
+    anchor: usize,
+    draft: Option<StashedPrompt>,
+    scope: RewindScope,
 ) -> Vec<Effect> {
     let Some(session_id) = agent.session.session_id.clone() else {
         if let Some(d) = draft {
@@ -322,11 +416,12 @@ fn enter_executing(
         stashed_draft: draft,
         selected_prompt_index: None,
     });
-    stash_inline_resubmit_if_editing(agent);
     vec![Effect::RewindExecute {
         agent_id,
         session_id,
         target_prompt_index: target,
+        mode: scope,
+        force: true,
     }]
 }
 
@@ -353,57 +448,35 @@ fn begin_rewind(
         });
         return vec![];
     }
-    enter_executing(agent, agent_id, target, anchor, draft)
+    enter_executing(agent, agent_id, target, anchor, draft, RewindScope::All)
 }
 
-pub(super) fn dispatch_inline_edit_submit(app: &mut AppView) -> Vec<Effect> {
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return vec![];
-    };
-    let Some(session_id) = agent.session.session_id.clone() else {
-        app.show_toast(NO_SESSION_NOTICE);
-        return vec![];
-    };
-    let Some(edit) = agent.inline_edit.as_ref() else {
-        return vec![];
-    };
-
-    // Unchanged/empty edits have nothing to submit: just close the editor.
-    let text = edit.textarea.text().trim().to_string();
-    if text.is_empty() || text == edit.original.trim() {
-        agent.exit_inline_edit();
-        return vec![];
+/// One line saying what a finished rewind did, from the engine's own `reverted_files`.
+pub(crate) fn rewind_result_message(response: &crate::views::rewind::RewindResponse) -> String {
+    let n = response.reverted_files.len();
+    let files_only = response.mode.as_deref() == Some("files_only");
+    let conversation_only = response.mode.as_deref() == Some("conversation_only");
+    let file_word = if n == 1 { "file" } else { "files" };
+    match (files_only, conversation_only, n) {
+        (true, _, 0) => "No tracked file changes to restore".to_string(),
+        (true, _, n) => format!("Restored {n} {file_word}"),
+        (_, true, _) | (_, _, 0) => "Reverted conversation".to_string(),
+        (_, _, n) => format!("Reverted conversation and {n} {file_word}"),
     }
+}
 
-    let target = edit.prompt_index;
-    let anchor = agent
-        .scrollback
-        .index_of_id(edit.entry_id)
-        .or_else(|| agent.scrollback.selected())
-        .unwrap_or(0);
-    let draft = stash_prompt(&mut agent.prompt);
-
-    if agent.session.state.is_busy() {
-        // Mid-turn submit: the same cancel offer `/rewind` raises appears over the still-open editor
-        // Confirm cancels the turn and re-enters the flow; dismiss returns to the editor
-        agent.rewind_state = Some(RewindState::new_cancel_offer(anchor, draft, Some(target)));
-        return vec![];
+/// `msg` plus the restored paths, one per line (capped so a huge rewind cannot flood the transcript).
+fn restored_files_block(msg: &str, files: &[String]) -> String {
+    const MAX: usize = 20;
+    let mut out = msg.to_string();
+    for f in files.iter().take(MAX) {
+        out.push_str("\n  ");
+        out.push_str(f);
     }
-
-    agent.rewind_state = Some(RewindState {
-        phase: RewindPhase::Loading,
-        anchor_entry_idx: anchor,
-        stashed_draft: draft,
-        selected_prompt_index: Some(target),
-    });
-
-    vec![Effect::FetchRewindPoints {
-        agent_id: id,
-        session_id,
-    }]
+    if files.len() > MAX {
+        out.push_str(&format!("\n  and {} more", files.len() - MAX));
+    }
+    out
 }
 
 pub(super) fn dispatch_rewind_success(
@@ -415,8 +488,43 @@ pub(super) fn dispatch_rewind_success(
         return vec![];
     };
 
-    // Inline-edit resubmit text; taken unconditionally so a failed rewind drops it
-    let inline_resubmit = agent.pending_inline_resubmit.take();
+    if let Some(RewindPhase::Previewing {
+        target_prompt_index,
+        scope,
+    }) = agent.rewind_state.as_ref().map(|s| s.phase.clone())
+    {
+        let anchor = agent
+            .rewind_state
+            .as_ref()
+            .map(|s| s.anchor_entry_idx)
+            .unwrap_or(0);
+        let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
+        if !response.conflicts.is_empty() {
+            agent.rewind_state = Some(RewindState {
+                phase: RewindPhase::Conflicts {
+                    target_prompt_index,
+                    scope,
+                    conflicts: response.conflicts,
+                    active_idx: 0,
+                },
+                anchor_entry_idx: anchor,
+                stashed_draft: draft,
+                selected_prompt_index: Some(target_prompt_index),
+            });
+            return vec![];
+        }
+        if let Some(err) = response.error {
+            // A refusal (damaged history, unreadable snapshots): nothing changed.
+            agent.rewind_state = Some(RewindState {
+                phase: RewindPhase::Error { message: err },
+                anchor_entry_idx: anchor,
+                stashed_draft: draft,
+                selected_prompt_index: None,
+            });
+            return vec![];
+        }
+        return start_forced(agent, agent_id, target_prompt_index, anchor, draft, scope);
+    }
 
     if !response.success {
         let err = response.error.unwrap_or_else(|| "unknown error".into());
@@ -432,18 +540,26 @@ pub(super) fn dispatch_rewind_success(
             stashed_draft: draft,
             selected_prompt_index: None,
         });
-        // The inline editor (if any) stays open; dismissing the error returns to editing
         return vec![];
-    }
-
-    // The rewind went through: the inline editor's job is done. Close it before the truncation below removes its entry.
-    if inline_resubmit.is_some() {
-        agent.inline_edit = None;
-        agent.scrollback.set_inline_edit_height(None);
     }
 
     let target = response.target_prompt_index;
     let stashed_draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
+    let msg = rewind_result_message(&response);
+    if response.mode.as_deref() == Some("files_only") {
+        // Files only: the conversation and the prompt box stay exactly as they were.
+        if let Some(draft) = stashed_draft {
+            agent.prompt.restore(draft);
+        }
+        if app.screen_mode.is_minimal() || !response.reverted_files.is_empty() {
+            agent.scrollback.push_block(RenderBlock::system(restored_files_block(&msg, &response.reverted_files)));
+        } else {
+            agent.show_toast(&msg);
+        }
+        agent.set_active_pane(crate::app::agent_view::ActivePane::Prompt, false);
+        agent.rewind_points = None;
+        return vec![];
+    }
 
     // The summary describes turns the rewind just removed (the shell clears its persisted copy on the same branch)
     // Bump gen so a late SessionMetaFromDisk hydrate cannot restore the pre-rewind summary.json value into the cleared field
@@ -457,26 +573,18 @@ pub(super) fn dispatch_rewind_success(
         crate::memory_release::release_retained_memory("rewind-truncate");
     }
 
-    // An inline resubmit skips the confirmation; the edited prompt re-appearing at the same spot is self-explanatory
-    if inline_resubmit.is_none() {
-        const MSG: &str = "Reverted conversation";
-        if app.screen_mode.is_minimal() {
-            // Minimal has no toast area and can't erase committed lines, so the confirmation stays in scrollback there
-            agent
-                .scrollback
-                .push_block(RenderBlock::system(MSG.to_string()));
-        } else {
-            agent.show_toast(MSG);
-        }
+    if app.screen_mode.is_minimal() || !response.reverted_files.is_empty() {
+        // Minimal has no toast area and can't erase committed lines, so the confirmation stays in scrollback there.
+        // The restored files are listed in scrollback in every mode, so the user can see exactly what changed.
+        agent
+            .scrollback
+            .push_block(RenderBlock::system(restored_files_block(&msg, &response.reverted_files)));
+    } else {
+        agent.show_toast(&msg);
     }
 
-    if inline_resubmit.is_some() {
-        // Restore the full draft before a non-consuming resubmit.
-        if let Some(draft) = stashed_draft {
-            agent.prompt.restore(draft);
-        }
-    } else if let Some(ref prompt_text) = response.prompt_text {
-        agent.prompt.set_text(prompt_text);
+    if let Some(ref prompt_text) = response.prompt_text {
+        agent.prompt.set_text_discarding_images(prompt_text);
     } else if let Some(draft) = stashed_draft {
         agent.prompt.restore(draft);
     }
@@ -485,25 +593,6 @@ pub(super) fn dispatch_rewind_success(
 
     agent.rewind_points = None;
     agent.scrollback.goto_bottom();
-
-    if let Some(text) = inline_resubmit {
-        if app.active_view == ActiveView::Agent(agent_id) {
-            // Resubmit from the rewound point; `consume_input=false` keeps the composer draft, `literal=true` sends slash-lookalike text as a prompt
-            // (The transcript is already truncated; running it as a command would swallow the resubmit.)
-            return super::prompt::dispatch_send_prompt_inner(
-                app, text, /* consume_input */ false, /* literal */ true,
-                /* is_follow_up */ false,
-            );
-        }
-        // View switched mid-rewind: fall back to prefilling that composer, appending so an existing draft isn't clobbered
-        if let Some(agent) = app.agents.get_mut(&agent_id) {
-            if agent.prompt.text().trim().is_empty() {
-                agent.prompt.set_text(&text);
-            } else {
-                agent.prompt.append_text(&format!("\n{text}"));
-            }
-        }
-    }
 
     vec![]
 }
@@ -592,8 +681,6 @@ pub(super) fn handle_rewind_execute_failed(
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
     };
-    // A pending inline resubmit dies with its rewind; the editor itself stays open so dismissing the error returns to editing
-    agent.pending_inline_resubmit = None;
     let anchor = agent
         .rewind_state
         .as_ref()

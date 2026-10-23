@@ -367,10 +367,10 @@ impl SessionActor {
     /// Check if the session has been idle and proactively refresh model metadata.
     ///
     /// Called at the start of each turn.
-    /// When idle exceeds `IDLE_REFRESH_THRESHOLD_SECS`, fetches `/models-v2` from cli-chat-proxy.
+    /// When idle exceeds `IDLE_REFRESH_THRESHOLD_SECS`, fetches `{base}/models` (`/v1/models`, as the main catalog does) from cli-chat-proxy.
     /// Updates the cached context_window / max_completion_tokens if remote settings changed them.
     ///
-    /// Skipped for BYOK users (no remote settings, no `/models-v2`).
+    /// Skipped for BYOK users (no remote settings, no model list).
     #[tracing::instrument(level = "debug", skip_all)]
     pub(super) async fn maybe_refresh_model_metadata_on_resume(&self) {
         if !self.is_session_based_auth() {
@@ -416,23 +416,14 @@ impl SessionActor {
                 None,
                 None,
                 None,
-                "models_v2_refresh",
+                "idle_models_refresh",
             ),
         );
         let middleware_client =
             crate::http::with_auth_retry(crate::http::shared_client(), provider);
-        let url = format!("{}/models-v2", base_url);
+        let url = idle_refresh_url(base_url);
         let parse_models_response =
-            |json: serde_json::Value| -> Option<(std::num::NonZeroU64, Option<u32>)> {
-                let data = json.get("data")?.as_array()?;
-                for entry in data {
-                    let parsed = crate::remote::client::parse_remote_model_value(entry, base_url)?;
-                    if parsed.model == *current_model {
-                        return Some((parsed.context_window, parsed.max_completion_tokens));
-                    }
-                }
-                None
-            };
+            |json: serde_json::Value| refreshed_metadata(json, base_url, current_model);
         let request = idle_refresh_models_request(&middleware_client, &url);
         let built = match request.build() {
             Ok(r) => r,
@@ -731,7 +722,29 @@ impl SessionActor {
     }
 }
 
-/// The idle-resume `GET /models-v2` request. P43: the client version is identity-class, so only a
+/// The idle-resume model list URL: the same `{base}/models` (`/v1/models`) the main catalog reads.
+/// The old `/models-v2` path is gone; FluxRouter answers it with 404.
+fn idle_refresh_url(base_url: &str) -> String {
+    format!("{}/models", base_url.trim_end_matches('/'))
+}
+
+/// The current model's context window and output cap in a `/v1/models` body. Parsed by the main
+/// catalog's own code ([`crate::remote::model_source::oai::parse_models`]); an entry that does not
+/// parse is skipped, not fatal.
+fn refreshed_metadata(
+    json: serde_json::Value,
+    base_url: &str,
+    current_model: &str,
+) -> Option<(std::num::NonZeroU64, Option<u32>)> {
+    let body: crate::remote::model_source::oai::ModelsResponse =
+        serde_json::from_value(json).ok()?;
+    crate::remote::model_source::oai::parse_models(body.data, base_url)
+        .into_iter()
+        .find(|m| m.model == current_model)
+        .map(|m| (m.context_window, m.max_completion_tokens))
+}
+
+/// The idle-resume `GET {base}/models` request. P43: the client version is identity-class, so only a
 /// FluxRouter-operated destination gets it.
 fn idle_refresh_models_request(
     client: &reqwest_middleware::ClientWithMiddleware,
@@ -761,16 +774,85 @@ mod p43_identity_tests {
         let client = reqwest_middleware::ClientBuilder::new(crate::http::shared_client()).build();
         let (base, seen, handle) =
             crate::remote::identity_tests::spawn_recording_mock("{}").await;
-        let request = super::idle_refresh_models_request(&client, &format!("{base}/models-v2"))
+        let request = super::idle_refresh_models_request(&client, &super::idle_refresh_url(&base))
             .build()
             .unwrap();
         let _ = fuigo_auth::execute_with_stamp(&client, request).await;
         handle.abort();
         crate::remote::identity_tests::assert_no_identity(&seen, "idle_model_refresh");
         let fluxrouter =
-            super::idle_refresh_models_request(&client, "https://api.fluxrouter.ai/v1/models-v2")
+            super::idle_refresh_models_request(&client, "https://api.fluxrouter.ai/v1/models")
                 .build()
                 .unwrap();
         assert_eq!(fluxrouter.headers()["x-fuigo-client-version"], fuigo_version::VERSION);
+    }
+}
+
+#[cfg(test)]
+mod idle_refresh_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The idle refresh reads the same `/v1/models` the main catalog reads, never `/models-v2`.
+    #[test]
+    fn idle_refresh_url_is_the_main_catalog_models_path() {
+        assert_eq!(
+            super::idle_refresh_url("https://api.fluxrouter.ai/v1"),
+            "https://api.fluxrouter.ai/v1/models"
+        );
+        assert_eq!(
+            super::idle_refresh_url("https://api.fluxrouter.ai/v1/"),
+            "https://api.fluxrouter.ai/v1/models"
+        );
+    }
+
+    /// Mock server: only `/v1/models` answers (the leftover `/models-v2` is a 404, as on FluxRouter).
+    /// The refresh request goes to `/v1/models` and its result is applied, even when an earlier
+    /// entry in the list does not parse.
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_refresh_hits_v1_models_and_applies_the_result() {
+        use axum::routing::get;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let v2_hits = Arc::new(AtomicUsize::new(0));
+        let (h, v2) = (hits.clone(), v2_hits.clone());
+        let app = axum::Router::new()
+            .route(
+                "/v1/models",
+                get(move || async move {
+                    h.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(serde_json::json!({ "data": [
+                        { "model": "broken", "context_window": 0 },
+                        { "model": "other", "context_window": 1000 },
+                        { "model": "test-model", "context_window": 300_000, "max_completion_tokens": 16384 }
+                    ]}))
+                }),
+            )
+            .route(
+                "/v1/models-v2",
+                get(move || async move {
+                    v2.fetch_add(1, Ordering::SeqCst);
+                    (axum::http::StatusCode::NOT_FOUND, "This endpoint is not available on FluxRouter")
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = reqwest_middleware::ClientBuilder::new(crate::http::shared_client()).build();
+        let response = super::idle_refresh_models_request(&client, &super::idle_refresh_url(&base))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success(), "{}", response.status());
+        let json = response.json::<serde_json::Value>().await.unwrap();
+        let applied = super::refreshed_metadata(json, &base, "test-model");
+        server.abort();
+
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "/v1/models hit once");
+        assert_eq!(v2_hits.load(Ordering::SeqCst), 0, "/v1/models-v2 never hit");
+        assert_eq!(
+            applied,
+            Some((std::num::NonZeroU64::new(300_000).unwrap(), Some(16384)))
+        );
     }
 }

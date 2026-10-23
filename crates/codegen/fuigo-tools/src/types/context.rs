@@ -9,9 +9,9 @@ const MAX_LINES_READ_DEFAULT: usize = 20_000;
 /// corrupts single-line files (minified JSON, data dumps) with no way for
 /// the model to recover the clipped bytes. Non-skill reads are bounded by
 /// the per-call `MAX_READ_BYTES` cap instead, which truncates at a line
-/// boundary and names the next offset (skill files are exempt from all read
-/// limits by design). Other agent CLIs likewise apply no
-/// per-line cap. The wire field (`TruncationConfig.max_chars_per_line` in
+/// boundary and names the next offset (skill and instruction files are
+/// returned whole only while they fit that cap, see [`WholeReadPolicy`]).
+/// Other agent CLIs likewise apply no per-line cap. The wire field (`TruncationConfig.max_chars_per_line` in
 /// fuigo-tools.proto) is deprecated and ignored.
 #[derive(Debug, Clone, Default)]
 pub struct TruncationConfig {
@@ -28,6 +28,27 @@ pub struct TruncationConfig {
     /// `[mcp] max_output_bytes`) never changes non-MCP readers like the
     /// opencode bash cap.
     pub mcp_max_output_bytes: Option<usize>,
+    /// Which file classes `read_file` returns whole while they fit the per-call cap.
+    pub whole_read: WholeReadPolicy,
+}
+
+/// Which files `read_file` returns whole (ignoring `offset` and `limit`) while they fit the per-call byte cap.
+/// A class that is off reads like any other file. A file over the cap is read in a window in either case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct WholeReadPolicy {
+    /// `SKILL.md` and Markdown files under a `skills` directory.
+    pub skill_markdown: bool,
+    /// Project instruction files such as `AGENTS.md` and `CLAUDE.md`.
+    pub instruction_files: bool,
+}
+
+impl Default for WholeReadPolicy {
+    fn default() -> WholeReadPolicy {
+        WholeReadPolicy {
+            skill_markdown: true,
+            instruction_files: true,
+        }
+    }
 }
 
 impl TruncationConfig {

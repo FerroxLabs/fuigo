@@ -36,7 +36,10 @@ fn three_pager_writers_in_three_processes_lose_nothing() {
         "dashboard".to_owned(),
         format!("market|{}", sources.path().display()),
     ];
-    let children: Vec<_> = roles.iter().map(|r| (r, spawn_role(home.path(), r))).collect();
+    let children: Vec<_> = roles
+        .iter()
+        .map(|r| (r, spawn_role(home.path(), r)))
+        .collect();
     for (role, child) in children {
         let out = child.wait_with_output().unwrap();
         assert!(
@@ -50,7 +53,11 @@ fn three_pager_writers_in_three_processes_lose_nothing() {
     let v: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let sources_list = v["marketplace"]["sources"].as_array().unwrap();
     for i in 0..EACH {
-        assert_eq!(v["hints"][format!("h{i}")].as_bool(), Some(true), "hint h{i}");
+        assert_eq!(
+            v["hints"][format!("h{i}")].as_bool(),
+            Some(true),
+            "hint h{i}"
+        );
         let want = sources.path().join(format!("m{i}")).display().to_string();
         assert!(
             sources_list
@@ -59,7 +66,11 @@ fn three_pager_writers_in_three_processes_lose_nothing() {
             "source {want}"
         );
     }
-    assert_eq!(v["dashboard"]["enabled"].as_bool(), Some(true), "dashboard persist lost");
+    assert_eq!(
+        v["dashboard"]["enabled"].as_bool(),
+        Some(true),
+        "dashboard persist lost"
+    );
     let temps: Vec<String> = std::fs::read_dir(home.path())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -117,7 +128,9 @@ fn p61_pager_child_role() {
             for i in 0..EACH {
                 let dir = Path::new(base).join(format!("m{i}"));
                 std::fs::create_dir_all(&dir).unwrap();
-                retrying(|| crate::plugin_cmd::marketplace_add(&[], &dir.display().to_string(), false));
+                retrying(|| {
+                    crate::plugin_cmd::marketplace_add(&[], &dir.display().to_string(), false)
+                });
             }
         }
         ["fail-market", source] => {
@@ -185,6 +198,10 @@ fn a_failed_marketplace_add_leaves_the_config_and_no_temp() {
         ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     assert_untouched(home.path(), &path);
 }

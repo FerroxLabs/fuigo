@@ -921,3 +921,7 @@ mod tests {
         assert!(MemoryConfig::default().enabled);
     }
 }
+
+#[cfg(test)]
+#[path = "memory_rowsa2_tests.rs"]
+mod rowsa2_tests;

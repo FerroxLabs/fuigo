@@ -193,6 +193,30 @@ fn observe_for_recovery(capture: &FailedResponseCapture, event: &rs::ResponseStr
 
 /// Transform a raw Responses API event stream into a stream of [`SamplingEvent`]s.
 ///
+/// The tools a request advertised: every client tool name, and the subset declared `custom` (freeform).
+/// A bare name set converts with no custom tools.
+#[derive(Debug, Clone, Default)]
+pub struct ClientTools {
+    pub all: HashSet<String>,
+    pub custom: HashSet<String>,
+}
+
+impl From<HashSet<String>> for ClientTools {
+    fn from(all: HashSet<String>) -> Self {
+        Self { all, custom: HashSet::new() }
+    }
+}
+
+impl ClientTools {
+    /// The advertised tools of a request.
+    pub fn of_request(tools: &[fuigo_sampling_types::ToolSpec]) -> Self {
+        Self {
+            all: tools.iter().map(|t| t.name.clone()).collect(),
+            custom: tools.iter().filter(|t| t.is_freeform()).map(|t| t.name.clone()).collect(),
+        }
+    }
+}
+
 /// Yields exactly one terminal event ([`SamplingEvent::Completed`] or [`SamplingEvent::Failed`]) per request.
 /// Server-side `ResponseFailed` and `ResponseError` events are translated to `SamplingError::Api { status: 500, .. }`.
 /// The 500 status makes the actor's retry loop treat them as retryable.
@@ -206,7 +230,7 @@ pub fn stream_responses<'a>(
     request_id: RequestId,
     idle_timeout: Duration,
     doom_loop: Option<crate::doom_loop::DoomLoopSignalCollector>,
-    client_tools: HashSet<String>,
+    client_tools: ClientTools,
 ) -> impl Stream<Item = SamplingEvent> + Send + 'a {
     stream_responses_tracked(
         raw_stream,
@@ -231,8 +255,9 @@ pub(crate) fn stream_responses_tracked<'a>(
     failed_response: FailedResponseCapture,
     // Names of the client tools the request advertised: a `custom_tool_call` naming one is a freeform client tool
     // call (streamed like a function call); any other `custom_tool_call` is backend-executed x_search
-    client_tools: HashSet<String>,
+    client_tools: ClientTools,
 ) -> impl Stream<Item = SamplingEvent> + Send + 'a {
+    let ClientTools { all: client_tools, custom: custom_tools } = client_tools;
     async_stream::stream! {
         use rs::{ResponseStreamEvent, Status};
 
@@ -716,9 +741,11 @@ pub(crate) fn stream_responses_tracked<'a>(
         // Convert to ConversationItem(s); patch in accumulated reasoning text as a fallback when the final response lacks `content` or `summary`
         // The streaming deltas may have arrived out of band
         // Splice policy lives in `inject_streaming_reasoning_fallback`.
-        let mut items = fuigo_sampling_types::response_to_conversation_items(response, |name| {
-            client_tools.contains(name)
-        });
+        let mut items = fuigo_sampling_types::response_to_conversation_items_with_custom(
+            response,
+            |name| client_tools.contains(name),
+            |name| custom_tools.contains(name),
+        );
         fuigo_sampling_types::inject_streaming_reasoning_fallback(&mut items, reasoning_acc);
 
         let has_tool_calls = items.iter().any(|i| match i {
@@ -1866,7 +1893,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
-            HashSet::from(["apply_patch".to_string()]),
+            HashSet::from(["apply_patch".to_string()]).into(),
         ))
         .await;
 
@@ -1911,7 +1938,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
-            HashSet::from(["apply_patch".to_string()]),
+            HashSet::from(["apply_patch".to_string()]).into(),
         ))
         .await;
         assert!(!events.iter().any(|e| matches!(e, SamplingEvent::ToolCallDelta { .. })), "{events:?}");
@@ -1922,6 +1949,91 @@ mod tests {
                 assert_eq!(response.stop_reason, Some(StopReason::Stop));
                 assert!(response.assistant().unwrap().tool_calls.is_empty());
                 assert!(matches!(&response.items[0], ConversationItem::BackendToolCall(b) if b.id() == "ctc_1"));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// Streaming: a `function_call` for a custom-declared tool with `{"input": text}` arguments completes as the
+    /// freeform call (the text), not the JSON envelope.
+    #[tokio::test]
+    async fn downgraded_custom_call_streams_to_freeform_tool_call() {
+        let patch = "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch\n";
+        let args = serde_json::json!({ "input": patch }).to_string();
+        let fc = rs_types::FunctionToolCall {
+            arguments: args.clone(),
+            call_id: "call_1".into(),
+            name: "apply_patch".into(),
+            id: Some("fc_1".into()),
+            status: Some(rs_types::OutputStatus::Completed),
+        };
+        let mut started = fc.clone();
+        started.arguments = String::new();
+        let mut response = build_response(rs_types::Status::Completed);
+        response.output = vec![rs_types::OutputItem::FunctionCall(fc.clone())];
+        let frames = vec![
+            rs::ResponseStreamEvent::ResponseOutputItemAdded(rs_types::ResponseOutputItemAddedEvent {
+                sequence_number: 0,
+                output_index: 0,
+                item: rs_types::OutputItem::FunctionCall(started),
+            }),
+            rs::ResponseStreamEvent::ResponseOutputItemDone(rs_types::ResponseOutputItemDoneEvent {
+                sequence_number: 1,
+                output_index: 0,
+                item: rs_types::OutputItem::FunctionCall(fc),
+            }),
+            rs::ResponseStreamEvent::ResponseCompleted(rs_types::ResponseCompletedEvent {
+                response,
+                sequence_number: 2,
+            }),
+        ];
+        let raw = stream::iter(frames.into_iter().map(Ok)).boxed();
+        let tools = ClientTools {
+            all: HashSet::from(["apply_patch".to_string()]),
+            custom: HashSet::from(["apply_patch".to_string()]),
+        };
+        let events = collect(stream_responses(raw, None, rid(), Duration::from_secs(60), None, tools)).await;
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
+                let assistant = response.assistant().expect("assistant");
+                assert_eq!(assistant.tool_calls.len(), 1);
+                assert_eq!(assistant.tool_calls[0].arguments.as_ref(), patch);
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// Streaming, same frames, but the tool is not declared custom: the arguments are untouched.
+    #[tokio::test]
+    async fn function_call_for_function_tool_keeps_its_json_arguments() {
+        let args = r#"{"input":"x"}"#;
+        let fc = rs_types::FunctionToolCall {
+            arguments: args.into(),
+            call_id: "call_1".into(),
+            name: "apply_patch".into(),
+            id: Some("fc_1".into()),
+            status: Some(rs_types::OutputStatus::Completed),
+        };
+        let mut response = build_response(rs_types::Status::Completed);
+        response.output = vec![rs_types::OutputItem::FunctionCall(fc)];
+        let raw = stream::iter(vec![Ok(rs::ResponseStreamEvent::ResponseCompleted(
+            rs_types::ResponseCompletedEvent { response, sequence_number: 0 },
+        ))])
+        .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+            HashSet::from(["apply_patch".to_string()]).into(),
+        ))
+        .await;
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                let assistant = response.assistant().expect("assistant");
+                assert_eq!(assistant.tool_calls[0].arguments.as_ref(), args);
             }
             other => panic!("expected Completed, got {other:?}"),
         }

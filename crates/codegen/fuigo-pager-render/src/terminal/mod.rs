@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use fuigo_ratatui_inline::WidthShrink;
+
 use crate::host::HostOs;
 
 pub mod da2;
@@ -13,6 +15,7 @@ pub mod image;
 pub mod keyboard;
 pub mod kitty_keyboard;
 pub mod overlay;
+pub mod pop_fence;
 pub(crate) mod probe;
 pub mod term_version;
 pub mod tmux;
@@ -34,9 +37,11 @@ pub use keyboard::{
     keyboard_capabilities_for_host,
 };
 pub use kitty_keyboard::{
-    kitty_event_types_withheld, kitty_flags_pushed, kitty_releases_reported,
-    negotiated_kitty_flags, pushed_kitty_flags, set_pushed_kitty_flags, take_kitty_flags_pushed,
+    kitty_event_types_withheld, kitty_flags_pushed, kitty_probe_unsupported, kitty_releases_reported,
+    negotiated_kitty_flags, pushed_kitty_flags, set_kitty_probe_unsupported, set_pushed_kitty_flags,
+    take_kitty_flags_pushed,
 };
+pub use pop_fence::{PopFence, PopFenceOutcome};
 pub use term_version::{TermVersion, TermVersionSource};
 
 #[cfg(test)]
@@ -105,6 +110,32 @@ pub enum TerminalName {
 }
 
 impl TerminalName {
+    /// Only brands known to re-wrap on-screen rows when the window narrows return [`WidthShrink::Rewraps`].
+    /// Warp skips the re-wrap for panes it classifies as CLI agents.
+    pub fn width_shrink(self) -> WidthShrink {
+        match self {
+            Self::AppleTerminal
+            | Self::Ghostty
+            | Self::Iterm2
+            | Self::VsCode
+            | Self::Cursor
+            | Self::Windsurf
+            | Self::Zed
+            | Self::WezTerm
+            | Self::Kitty
+            | Self::Alacritty
+            | Self::Rio
+            | Self::Foot
+            | Self::FuigoDesktop
+            | Self::Vte
+            | Self::Terminator
+            | Self::WindowsTerminal => WidthShrink::Rewraps,
+            Self::WarpTerminal | Self::JetBrains | Self::Otty | Self::Unknown => {
+                WidthShrink::Truncates
+            }
+        }
+    }
+
     pub fn is_vte_based(self) -> bool {
         matches!(self, Self::Vte | Self::Terminator)
     }
@@ -151,10 +182,6 @@ impl TerminalName {
         )
     }
 
-    /// Only Otty is known to wrap macOS IME commits in bracketed paste.
-    pub fn delivers_ime_as_bracketed_paste(self) -> bool {
-        matches!(self, Self::Otty)
-    }
 }
 
 impl TerminalContext {
@@ -292,6 +319,21 @@ impl TerminalContext {
     /// That needs focus reporting enabled upstream (e.g. tmux `focus-events on`, off by default).
     pub fn repaints_pane_out_of_band(&self) -> bool {
         self.embedded_editor.is_some() || self.multiplexer != MultiplexerKind::Undetected
+    }
+
+    /// How the innermost layer drawing our pane treats on-screen rows when the width shrinks.
+    /// Fails closed to [`WidthShrink::Truncates`]. A wrong `Rewraps` clears committed rows.
+    pub fn width_shrink(&self) -> WidthShrink {
+        if self.embedded_editor.is_some() {
+            return WidthShrink::Truncates;
+        }
+        match self.multiplexer {
+            MultiplexerKind::Tmux | MultiplexerKind::Zellij | MultiplexerKind::Cmux => {
+                WidthShrink::Rewraps
+            }
+            MultiplexerKind::Screen | MultiplexerKind::Herdr => WidthShrink::Truncates,
+            MultiplexerKind::Undetected => self.env_brand.width_shrink(),
+        }
     }
 
     /// In Byobu-on-tmux, this is `~/.byobu/.tmux.conf`; otherwise `~/.tmux.conf`.

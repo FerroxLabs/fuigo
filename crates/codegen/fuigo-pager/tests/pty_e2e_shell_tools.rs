@@ -26,10 +26,10 @@ mod edit_hl_inplace_refresh_pty;
 mod edit_merge_parallel_pty;
 #[path = "pty_e2e/edit_merge_sequential_pty.rs"]
 mod edit_merge_sequential_pty;
+#[path = "pty_e2e/rewind_restores_files_pty.rs"]
+mod rewind_restores_files_pty;
 #[path = "pty_e2e/file_path_with_space_emits_full_osc8_hyperlink.rs"]
 mod file_path_with_space_emits_full_osc8_hyperlink;
-#[path = "pty_e2e/headless_denial_exits_three_under_a_real_tty.rs"]
-mod headless_denial_exits_three_under_a_real_tty;
 #[path = "pty_e2e/folder_trust_cwd_is_home_git_repo_no_prompt.rs"]
 mod folder_trust_cwd_is_home_git_repo_no_prompt;
 #[path = "pty_e2e/folder_trust_decline_quits_without_grant.rs"]
@@ -40,14 +40,16 @@ mod folder_trust_feature_off_shows_no_question;
 mod folder_trust_home_git_repo_subdir_keys_on_subdir;
 #[path = "pty_e2e/folder_trust_question_renders_and_accept_persists_grant.rs"]
 mod folder_trust_question_renders_and_accept_persists_grant;
+#[path = "pty_e2e/headless_denial_exits_three_under_a_real_tty.rs"]
+mod headless_denial_exits_three_under_a_real_tty;
 #[path = "pty_e2e/managed_policy_gate_refusal_reaches_real_terminal.rs"]
 mod managed_policy_gate_refusal_reaches_real_terminal;
+#[path = "pty_e2e/mcp_elicitation_decline_leaves_a_notice.rs"]
+mod mcp_elicitation_decline_leaves_a_notice;
 #[path = "pty_e2e/mcp_menu_loads_servers_in_non_project_dir.rs"]
 mod mcp_menu_loads_servers_in_non_project_dir;
 #[path = "pty_e2e/mcp_menu_loads_servers_in_project_dir.rs"]
 mod mcp_menu_loads_servers_in_project_dir;
-#[path = "pty_e2e/mcp_elicitation_decline_leaves_a_notice.rs"]
-mod mcp_elicitation_decline_leaves_a_notice;
 #[path = "pty_e2e/mcp_menu_unavailable_server_shows_reason.rs"]
 mod mcp_menu_unavailable_server_shows_reason;
 #[path = "pty_e2e/mcps_needs_auth_shows_why_the_refresh_was_refused.rs"]

@@ -606,7 +606,9 @@ pub(crate) async fn generate_session_compact(
     if cancel.is_cancelled() {
         return Err(CompactFailure::Cancelled);
     }
-    let prepared_history = chat_history.into().prepare(compaction_tool_tokens);
+    let prepared_history = chat_history
+        .into()
+        .prepare(sampling_config.max_request_bytes, compaction_tool_tokens);
     let budget = prepared_history.image_budget;
     if budget.inline_images > 0 {
         tracing::info!(

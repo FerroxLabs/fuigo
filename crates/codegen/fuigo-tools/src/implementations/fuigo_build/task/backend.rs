@@ -13,10 +13,10 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use super::types::{
-    ActiveAgentMessageOutcome, ActiveAgentMessageRequest, SpawnedSubagentRef,
-    SubagentActiveMessageRequest, SubagentCancelOutcome, SubagentCancelRequest,
+    ActiveAgentMessageOutcome, ActiveAgentMessageRequest, HandedOffForegroundSubagent,
+    SpawnedSubagentRef, SubagentActiveMessageRequest, SubagentCancelOutcome, SubagentCancelRequest,
     SubagentCancelTarget, SubagentDescribeOutcome, SubagentDescribeRequest, SubagentEvent,
-    SubagentEventSender, SubagentInspectRequest, SubagentInspection, SubagentListRunningRequest,
+    SubagentEventSender, SubagentHandOffForegroundRequest, SubagentInspectRequest, SubagentInspection, SubagentListRunningRequest,
     SubagentQueryRequest, SubagentRegistryCounts, SubagentRegistryCountsRequest, SubagentRequest,
     SubagentResult, SubagentSnapshot, SubagentSpawnRequest, SubagentSpawnedRefsRequest,
     SubagentValidateTypeOutcome, SubagentValidateTypeRequest,
@@ -449,6 +449,32 @@ impl ChannelBackend {
                 prompt_id: prompt_id.to_owned(),
                 respond_to,
             }))
+            .is_err()
+        {
+            return Vec::new();
+        }
+        response_rx.await.unwrap_or_default()
+    }
+
+    /// Move the foreground children `prompt_id` spawned to the background and report them, so the model can be told
+    /// they were not cancelled. Empty when this backend is not bound to a parent session.
+    pub async fn hand_off_foreground_for_prompt(
+        &self,
+        prompt_id: &str,
+    ) -> Vec<HandedOffForegroundSubagent> {
+        let Some(parent_session_id) = self.parent_session_id.as_deref().map(str::to_owned) else {
+            return Vec::new();
+        };
+        let (respond_to, response_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(SubagentEvent::HandOffForeground(
+                SubagentHandOffForegroundRequest {
+                    parent_session_id,
+                    prompt_id: prompt_id.to_owned(),
+                    respond_to,
+                },
+            ))
             .is_err()
         {
             return Vec::new();

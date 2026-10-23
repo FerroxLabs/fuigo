@@ -457,7 +457,8 @@ mod p120_tests {
 
     #[test]
     fn p120_wrapped_program_does_not_inherit_fuigo_secrets() {
-        const NAME: &str = "pty_wrap::p120_tests::p120_wrapped_program_does_not_inherit_fuigo_secrets";
+        const NAME: &str =
+            "pty_wrap::p120_tests::p120_wrapped_program_does_not_inherit_fuigo_secrets";
         const REGISTERED: &str = "P120_WRAP_BEARER";
         if probe::in_parent(NAME, &[REGISTERED]) {
             return;
@@ -470,16 +471,30 @@ mod p120_tests {
             .copied()
             .filter(|name| cmd.get_env(name).is_some())
             .collect();
-        assert!(present.is_empty(), "the wrapped program would inherit {present:?}");
-        assert!(cmd.get_env(REGISTERED).is_some(), "control: the user's own registered credential name stays");
-        assert_eq!(cmd.get_env("P120_BENIGN").and_then(|v| v.to_str()), Some("kept"), "control");
-        assert!(cmd.get_env("FUIGO_OSC52_SINK").is_some(), "control: the wrapper's own variables stay");
+        assert!(
+            present.is_empty(),
+            "the wrapped program would inherit {present:?}"
+        );
+        assert!(
+            cmd.get_env(REGISTERED).is_some(),
+            "control: the user's own registered credential name stays"
+        );
+        assert_eq!(
+            cmd.get_env("P120_BENIGN").and_then(|v| v.to_str()),
+            Some("kept"),
+            "control"
+        );
+        assert!(
+            cmd.get_env("FUIGO_OSC52_SINK").is_some(),
+            "control: the wrapper's own variables stay"
+        );
     }
     /// P120 (Astra r3 #4): a secret that only the builder's own base environment holds (on Windows, the registry
     /// environment `CommandBuilder::new` loads) is removed too.
     #[test]
     fn p120_wrapped_program_loses_secrets_only_the_builder_holds() {
-        const NAME: &str = "pty_wrap::p120_tests::p120_wrapped_program_loses_secrets_only_the_builder_holds";
+        const NAME: &str =
+            "pty_wrap::p120_tests::p120_wrapped_program_loses_secrets_only_the_builder_holds";
         const REGISTERED: &str = "P120_BUILDER_ONLY_BEARER";
         if probe::in_parent(NAME, &[]) {
             return;
@@ -490,7 +505,13 @@ mod p120_tests {
         cmd.env(REGISTERED, "fake-p120-registry");
         cmd.env("FUIGO_API_KEY", "fake-p120-registry");
         apply_wrap_child_env(&mut cmd, None);
-        assert!(cmd.get_env(REGISTERED).is_some(), "the user's own registered name held by the builder stays");
-        assert!(cmd.get_env("FUIGO_API_KEY").is_none(), "a first-party key held only by the builder survives");
+        assert!(
+            cmd.get_env(REGISTERED).is_some(),
+            "the user's own registered name held by the builder stays"
+        );
+        assert!(
+            cmd.get_env("FUIGO_API_KEY").is_none(),
+            "a first-party key held only by the builder survives"
+        );
     }
 }

@@ -9,7 +9,12 @@ pub fn prompt_inset(compact: bool) -> u16 {
     if compact { 0 } else { 2 }
 }
 
-fn prompt_style(focus: WelcomePromptFocus, compact: bool, pad_left: u16, pad_right: u16) -> PromptStyle {
+fn prompt_style(
+    focus: WelcomePromptFocus,
+    compact: bool,
+    pad_left: u16,
+    pad_right: u16,
+) -> PromptStyle {
     PromptStyle {
         focused: focus == WelcomePromptFocus::Focused,
         show_prefix: true,

@@ -1151,7 +1151,11 @@ mod tests {
             let mut buf = Buffer::empty(area);
             pane.render(area, &mut buf, false, &LayoutConfig::default(), None, false);
             assert_eq!(pane.last_theme, crate::theme::cache::render_key());
-            assert_ne!(pane.list_style.selection_bg, ratatui::style::Color::Rgb(1, 2, 3), "lock={locked}: list style not refreshed");
+            assert_ne!(
+                pane.list_style.selection_bg,
+                ratatui::style::Color::Rgb(1, 2, 3),
+                "lock={locked}: list style not refreshed"
+            );
         }
     }
 

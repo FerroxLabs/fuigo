@@ -680,7 +680,10 @@ async fn real_leader_version_mismatch_reaches_headless_handler() {
     let banner = crate::glyphs::sanitize_toast_message(
         "⚠ Version mismatch: client 0.1.157, leader 0.1.150. Restart fuigo to match",
     );
-    assert!(logs.contains(banner.as_ref()), "log carries the exact banner: {logs}");
+    assert!(
+        logs.contains(banner.as_ref()),
+        "log carries the exact banner: {logs}"
+    );
 }
 
 #[test]
@@ -714,7 +717,10 @@ fn headless_config_notice_decodes_and_is_worded_as_a_warning() {
     match handle_ext_notification(&notice) {
         ExtEvent::Lifecycle(l @ Lifecycle::ConfigNotice { .. }) => {
             let line = l.plain_message();
-            assert!(line.starts_with("warning: /w/repo/.fuigo/config.toml"), "{line}");
+            assert!(
+                line.starts_with("warning: /w/repo/.fuigo/config.toml"),
+                "{line}"
+            );
             assert!(line.contains("FUIGO_API_KEY"), "{line}");
         }
         _ => panic!("expected ConfigNotice"),
@@ -739,14 +745,20 @@ fn p188_retry_state_with_discard_decodes_to_response_discarded() {
         .unwrap()
     };
     let on = wire(true);
-    assert_eq!(on["discardEmitted"], true, "the wire name Murage reads: {on}");
+    assert_eq!(
+        on["discardEmitted"], true,
+        "the wire name Murage reads: {on}"
+    );
     assert_eq!(on["messageId"], "msg_1", "{on}");
     assert!(matches!(
         handle_ext_notification(&make_ext_notif("fuigo/session_notification", on)),
         ExtEvent::Stream(event) if matches!(*event, StreamEvent::ResponseDiscarded { ref message_id, stream_start_ms: Some(9) } if message_id.as_deref() == Some("msg_1"))
     ));
     let off = wire(false);
-    assert!(off.get("discardEmitted").is_none(), "absent when false, as on older shells: {off}");
+    assert!(
+        off.get("discardEmitted").is_none(),
+        "absent when false, as on older shells: {off}"
+    );
     assert!(matches!(
         handle_ext_notification(&make_ext_notif("fuigo/session_notification", off)),
         ExtEvent::None
@@ -761,7 +773,10 @@ fn headless_compact_failed_line_drops_hidden_characters() {
     let failed = Lifecycle::CompactFailed {
         error: "bad\u{e0041} \u{00ad}thing\u{2028}\x1b[31m happened".to_string(),
     };
-    assert_eq!(failed.plain_message(), "Auto-compact failed - bad thing [31m happened");
+    assert_eq!(
+        failed.plain_message(),
+        "Auto-compact failed - bad thing [31m happened"
+    );
 }
 
 /// P181 (Grok round): a config key from a project file is untrusted text; an OSC 0 title in it must not reach stderr.
@@ -835,8 +850,17 @@ fn headless_mcp_server_status_reports_only_a_failed_start() {
         ExtEvent::McpStartFailed { name, kind: K::ExitedBeforeAnswer } if name == "dead"
     ));
     assert!(matches!(
-        mcp_status_kind("t", "unavailable", "handshake_failed", None, Some(serde_json::json!({"timeout": {"secs": 5}}))),
-        ExtEvent::McpStartFailed { kind: K::Timeout { secs: 5 }, .. }
+        mcp_status_kind(
+            "t",
+            "unavailable",
+            "handshake_failed",
+            None,
+            Some(serde_json::json!({"timeout": {"secs": 5}}))
+        ),
+        ExtEvent::McpStartFailed {
+            kind: K::Timeout { secs: 5 },
+            ..
+        }
     ));
     assert!(matches!(
         mcp_status("old", "unavailable", "handshake_failed", Some("boom")),
@@ -850,7 +874,10 @@ fn headless_mcp_server_status_reports_only_a_failed_start() {
         ("needs_auth", "auth_expired"),
     ] {
         assert!(
-            matches!(mcp_status_kind("s", status, reason, None, kind("other")), ExtEvent::None),
+            matches!(
+                mcp_status_kind("s", status, reason, None, kind("other")),
+                ExtEvent::None
+            ),
             "{status}/{reason}"
         );
     }
@@ -860,14 +887,27 @@ fn headless_mcp_server_status_reports_only_a_failed_start() {
 #[test]
 fn headless_mcp_unknown_failure_kind_still_reports_handshake_failed() {
     use fuigo_shell::extensions::mcp::McpFailureKind as K;
-    for k in [serde_json::json!("from_the_future"), serde_json::json!({"future": {"n": 1}})] {
-        let ev = mcp_status_kind("dead", "unavailable", "handshake_failed", Some("boom"), Some(k));
+    for k in [
+        serde_json::json!("from_the_future"),
+        serde_json::json!({"future": {"n": 1}}),
+    ] {
+        let ev = mcp_status_kind(
+            "dead",
+            "unavailable",
+            "handshake_failed",
+            Some("boom"),
+            Some(k),
+        );
         let ExtEvent::McpStartFailed { name, kind } = ev else {
             panic!("an unknown kind must still be reported");
         };
         assert_eq!((name.as_str(), kind), ("dead", K::Unknown));
         let (_, notice) = crate::headless::reducer::Lifecycle::mcp_start_failed(&name, kind);
-        assert!(notice.plain_message().contains("failed to start: the start-up handshake failed."));
+        assert!(
+            notice
+                .plain_message()
+                .contains("failed to start: the start-up handshake failed.")
+        );
     }
 }
 
@@ -876,9 +916,18 @@ fn headless_mcp_unknown_failure_kind_still_reports_handshake_failed() {
 #[test]
 fn headless_mcp_server_status_keeps_sign_in_servers_silent() {
     let kind = Some(serde_json::json!("needs_auth"));
-    for detail in ["MCP server 'gh' handshake failed: HTTP 401 Unauthorized", "MCP server 'x': Auth required (non-interactive session)"] {
+    for detail in [
+        "MCP server 'gh' handshake failed: HTTP 401 Unauthorized",
+        "MCP server 'x': Auth required (non-interactive session)",
+    ] {
         assert!(matches!(
-            mcp_status_kind("gh", "unavailable", "handshake_failed", Some(detail), kind.clone()),
+            mcp_status_kind(
+                "gh",
+                "unavailable",
+                "handshake_failed",
+                Some(detail),
+                kind.clone()
+            ),
             ExtEvent::None
         ));
     }
@@ -890,18 +939,29 @@ fn headless_mcp_start_failed_line_names_server_fixed_reason_and_doctor() {
     use fuigo_shell::extensions::mcp::McpFailureKind as K;
     for (kind, reason) in [
         (K::CommandNotStarted, "the command could not be started"),
-        (K::ExitedBeforeAnswer, "the server exited before it answered"),
-        (K::Timeout { secs: 5 }, "the server did not answer within 5 s"),
+        (
+            K::ExitedBeforeAnswer,
+            "the server exited before it answered",
+        ),
+        (
+            K::Timeout { secs: 5 },
+            "the server did not answer within 5 s",
+        ),
         (K::Unreachable, "the server could not be reached"),
         (K::Other, "the start-up handshake failed"),
-        (K::ServerRejected, "the server rejected the connection (it may need sign-in)"),
+        (
+            K::ServerRejected,
+            "the server rejected the connection (it may need sign-in)",
+        ),
         (K::Unknown, "the start-up handshake failed"),
     ] {
         let (_, notice) = crate::headless::reducer::Lifecycle::mcp_start_failed("srv", kind);
         let line = notice.plain_message();
         assert_eq!(
             line,
-            format!("warning: MCP server \"srv\" failed to start: {reason}. Run `fuigo mcp doctor`.")
+            format!(
+                "warning: MCP server \"srv\" failed to start: {reason}. Run `fuigo mcp doctor`."
+            )
         );
     }
 }
@@ -911,15 +971,74 @@ fn headless_mcp_start_failed_line_names_server_fixed_reason_and_doctor() {
 #[test]
 fn headless_mcp_start_failed_name_is_inert_and_capped() {
     use fuigo_shell::extensions::mcp::McpFailureKind as K;
-    let (printed, notice) = crate::headless::reducer::Lifecycle::mcp_start_failed("ev\u{1b}]0;owned\u{7}\nil\"x", K::Other);
+    let (printed, notice) = crate::headless::reducer::Lifecycle::mcp_start_failed(
+        "ev\u{1b}]0;owned\u{7}\nil\"x",
+        K::Other,
+    );
     let line = notice.plain_message();
-    assert!(!line.contains('\u{1b}') && !line.contains('\u{7}') && !line.contains('\n'), "{line:?}");
+    assert!(
+        !line.contains('\u{1b}') && !line.contains('\u{7}') && !line.contains('\n'),
+        "{line:?}"
+    );
     assert_eq!(printed, "ev ]0;owned  il'x");
     assert!(line.contains("\"ev ]0;owned  il'x\""), "{line}");
 
-    let (printed, _) = crate::headless::reducer::Lifecycle::mcp_start_failed(&"n".repeat(500), K::Other);
+    let (printed, _) =
+        crate::headless::reducer::Lifecycle::mcp_start_failed(&"n".repeat(500), K::Other);
     assert_eq!(printed.chars().count(), 80);
     assert!(printed.ends_with("..."));
-    let (printed, _) = crate::headless::reducer::Lifecycle::mcp_start_failed(&"n".repeat(80), K::Other);
+    let (printed, _) =
+        crate::headless::reducer::Lifecycle::mcp_start_failed(&"n".repeat(80), K::Other);
     assert_eq!(printed, "n".repeat(80), "an 80-character name is not cut");
+}
+
+#[test]
+fn goal_updated_decodes_to_a_goal_status() {
+    for (status, active) in [
+        ("active", true),
+        ("user_paused", false),
+        ("back_off_paused", false),
+        ("no_progress_paused", false),
+        ("infra_paused", false),
+        ("blocked", false),
+        ("budget_limited", false),
+        ("complete", false),
+        ("cleared", false),
+    ] {
+        let notif = make_ext_notif(
+            "fuigo/session/update",
+            serde_json::json!({
+                "sessionUpdate": "goal_updated",
+                "goal_id": "g1",
+                "objective": "ship it",
+                "status": status,
+                "phase": "executing",
+                "elapsed_ms": 5,
+                "total_deliverables": 0,
+                "completed_deliverables": 0,
+                "total_worker_rounds": 0,
+                "total_verify_rounds": 0,
+            }),
+        );
+        assert!(
+            matches!(
+                handle_ext_notification(&notif),
+                ExtEvent::GoalStatus { goal_id, active: got, status: wire } if goal_id == "g1" && got == active && wire == status
+            ),
+            "status {status}"
+        );
+    }
+}
+
+#[test]
+fn turn_completed_decodes_to_the_end_of_turn_event() {
+    let notif = make_ext_notif(
+        "fuigo/session/update",
+        serde_json::json!({
+            "sessionUpdate": "turn_completed",
+            "prompt_id": "p1",
+            "stop_reason": "end_turn",
+        }),
+    );
+    assert!(matches!(handle_ext_notification(&notif), ExtEvent::TurnCompleted));
 }

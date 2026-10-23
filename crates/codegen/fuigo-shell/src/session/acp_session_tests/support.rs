@@ -136,10 +136,21 @@ pub(crate) async fn test_agent_with_completion_requirement(
     .await
 }
 #[cfg(test)]
-async fn test_agent_from_config(
+pub(crate) async fn test_agent_from_config(
     config: fuigo_tools::registry::types::ToolServerConfig,
     definition: fuigo_agent::AgentDefinition,
     backend: std::sync::Arc<dyn fuigo_tools::computer::types::TerminalBackend>,
+) -> fuigo_agent::Agent {
+    test_agent_from_config_owned(config, definition, backend, None).await
+}
+/// [`test_agent_from_config`] whose shell commands are owned by `owner_session_id`, as in a real session: the terminal
+/// tags each foreground command with it, and an owner-scoped kill matches on it.
+#[cfg(test)]
+pub(crate) async fn test_agent_from_config_owned(
+    config: fuigo_tools::registry::types::ToolServerConfig,
+    definition: fuigo_agent::AgentDefinition,
+    backend: std::sync::Arc<dyn fuigo_tools::computer::types::TerminalBackend>,
+    owner_session_id: Option<String>,
 ) -> fuigo_agent::Agent {
     use fuigo_tools::computer::local::LocalFs;
     use fuigo_tools::computer::types::AsyncFileSystem;
@@ -154,7 +165,7 @@ async fn test_agent_from_config(
         session_folder: std::env::temp_dir().join("fuigo-test"),
         session_env: std::sync::Arc::new(std::collections::HashMap::new()),
         notification_handle: ToolNotificationHandle::noop(),
-        owner_session_id: None,
+        owner_session_id,
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
@@ -247,6 +258,7 @@ pub(crate) fn spawn_test_chat_state(
             env_http_headers: Default::default(),
             context_window: std::num::NonZeroU64::new(context_window)
                 .expect("test context_window must be non-zero"),
+            max_request_bytes: None,
             reasoning_effort: None,
             stream_tool_calls: None,
             mtls_cert_dir: None,
@@ -367,6 +379,7 @@ pub(crate) async fn create_test_actor_with_terminal(
             context_window_selection: Default::default(),
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
+            overflow_compactions_since_response: std::cell::Cell::new(0),
             previous_model: std::cell::Cell::new(None),
             compaction_mode: fuigo_chat_state::CompactionMode::Transcript,
             verbatim_input: true,
@@ -836,6 +849,8 @@ pub(crate) fn pre_tool_use_spec(
         enabled: true,
         command: Some(std::path::PathBuf::from(script)),
         command_raw: Some(script.to_string()),
+        args: None,
+        shell: None,
         url: None,
         url_raw: None,
         timeout_ms: 5000,
@@ -1035,6 +1050,12 @@ pub(crate) fn spawn_capturing_gateway_loop(
 }
 #[cfg(test)]
 pub(crate) async fn actor_with_persistence_drain() -> std::sync::Arc<SessionActor> {
+    actor_with_persistence_drain_and_sampler(fuigo_sampler::SamplerHandle::noop()).await
+}
+#[cfg(test)]
+pub(crate) async fn actor_with_persistence_drain_and_sampler(
+    sampler: fuigo_sampler::SamplerHandle,
+) -> std::sync::Arc<SessionActor> {
     let (gateway_tx, mut gateway_rx) =
         tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
     tokio::task::spawn_local(async move { while gateway_rx.recv().await.is_some() {} });
@@ -1047,7 +1068,7 @@ pub(crate) async fn actor_with_persistence_drain() -> std::sync::Arc<SessionActo
             }
         }
     });
-    let (actor, _) = create_test_actor_with_terminal(
+    let (mut actor, _) = create_test_actor_with_terminal(
         0,
         256_000,
         85,
@@ -1056,6 +1077,7 @@ pub(crate) async fn actor_with_persistence_drain() -> std::sync::Arc<SessionActo
         Arc::new(DummyTerminal),
     )
     .await;
+    actor.sampler_handle = sampler;
     std::sync::Arc::new(actor)
 }
 /// Fresh per-step transient-retry state for direct `handle_sampling_failure` calls: `step_attempts` used, full turn budget, no open episode.

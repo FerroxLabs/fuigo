@@ -132,7 +132,9 @@ pub(crate) fn is_transport_loss_error(message: &str) -> bool {
 fn request_id_of(line: &str) -> Option<String> {
     let json = serde_json::from_str::<serde_json::Value>(line).ok()?;
     json.get("method")?;
-    json.get("id").filter(|id| !id.is_null()).map(|id| id.to_string())
+    json.get("id")
+        .filter(|id| !id.is_null())
+        .map(|id| id.to_string())
 }
 
 /// The error answer for a request (by canonical id) that the dead connection will never answer.
@@ -156,11 +158,17 @@ struct InflightRequests(std::sync::Mutex<std::collections::HashSet<String>>);
 
 impl InflightRequests {
     fn record(&self, id: String) {
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id);
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id);
     }
     /// Forget the request a leader RESPONSE line answers. Requests and notifications from the leader are ignored.
     fn note_leader_line(&self, line: &str) {
-        let mut set = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut set = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if set.is_empty() {
             return;
         }
@@ -169,14 +177,23 @@ impl InflightRequests {
             id: Option<serde_json::Value>,
             method: Option<serde::de::IgnoredAny>,
         }
-        if let Ok(Head { id: Some(id), method: None }) = serde_json::from_str::<Head>(line) {
+        if let Ok(Head {
+            id: Some(id),
+            method: None,
+        }) = serde_json::from_str::<Head>(line)
+        {
             set.remove(&id.to_string());
         }
     }
     /// The error answers for every unanswered request, which are forgotten.
     fn fail_all(&self) -> Vec<String> {
-        let mut set = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        set.drain().filter_map(|id| lost_request_failure_line(&id)).collect()
+        let mut set = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set.drain()
+            .filter_map(|id| lost_request_failure_line(&id))
+            .collect()
     }
 }
 
@@ -197,7 +214,10 @@ struct ReconnectTokens {
 impl ReconnectTokens {
     /// Pager to leader. Returns the line to send instead when it needed the token added.
     fn on_outbound(&mut self, line: &str) -> Option<String> {
-        if !(line.contains("session/load") || line.contains("session/resume") || line.contains("session/new")) {
+        if !(line.contains("session/load")
+            || line.contains("session/resume")
+            || line.contains("session/new"))
+        {
             return None;
         }
         let mut json = serde_json::from_str::<serde_json::Value>(line).ok()?;
@@ -212,7 +232,9 @@ impl ReconnectTokens {
                 self.load_reqs.insert(id, session_id.clone());
                 let token = self.by_session.get(&session_id)?.clone();
                 let params = json.get_mut("params")?.as_object_mut()?;
-                let meta = params.entry("_meta").or_insert_with(|| serde_json::json!({}));
+                let meta = params
+                    .entry("_meta")
+                    .or_insert_with(|| serde_json::json!({}));
                 meta.as_object_mut()?.insert(
                     fuigo_shell::leader::protocol::LEADER_RECONNECT_TOKEN_KEY.to_string(),
                     serde_json::json!(token),
@@ -236,7 +258,10 @@ impl ReconnectTokens {
         }
         let id = json.get("id").filter(|id| !id.is_null())?.to_string();
         let session_id = if self.new_reqs.remove(&id) {
-            json.get("result")?.get("sessionId").and_then(|v| v.as_str()).map(str::to_owned)
+            json.get("result")?
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
         } else {
             self.load_reqs.remove(&id)
         };
@@ -261,20 +286,26 @@ impl ReconnectTokens {
         if !line.contains(fuigo_shell::leader::protocol::LEADER_OWNER_TOKEN_METHOD) {
             return false;
         }
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else { return false };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
+            return false;
+        };
         if json.get("id").is_some()
-            || json.get("method").and_then(|m| m.as_str()) != Some(fuigo_shell::leader::protocol::LEADER_OWNER_TOKEN_METHOD)
+            || json.get("method").and_then(|m| m.as_str())
+                != Some(fuigo_shell::leader::protocol::LEADER_OWNER_TOKEN_METHOD)
         {
             return false;
         }
         let params = json.get("params");
-        let session_id = params.and_then(|p| p.get("sessionId")).and_then(|v| v.as_str());
+        let session_id = params
+            .and_then(|p| p.get("sessionId"))
+            .and_then(|v| v.as_str());
         let token = params
             .and_then(|p| p.get("_meta"))
             .and_then(|m| m.get(fuigo_shell::leader::protocol::LEADER_RECONNECT_TOKEN_KEY))
             .and_then(|v| v.as_str());
         if let (Some(session_id), Some(token)) = (session_id, token) {
-            self.by_session.insert(session_id.to_owned(), token.to_owned());
+            self.by_session
+                .insert(session_id.to_owned(), token.to_owned());
         }
         true
     }
@@ -619,14 +650,9 @@ pub(crate) mod real_leader_harness {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(sock.exists(), "leader socket never bound");
-        let conn = LeaderClient::connect(
-            sock,
-            "p128-client",
-            ClientMode::Stdio,
-            capabilities,
-        )
-        .await
-        .expect("connect to real leader");
+        let conn = LeaderClient::connect(sock, "p128-client", ClientMode::Stdio, capabilities)
+            .await
+            .expect("connect to real leader");
         let (leader_tx, leader_rx) = conn.into_channels();
         let bridge = bridge_channels(
             leader_tx,
@@ -657,7 +683,8 @@ mod tests {
         let notice = serde_json::json!({ "jsonrpc": "2.0", "method": method, "params": { "sessionId": "s1", "_meta": { key: "tok-promoted" } } }).to_string();
         assert!(t.on_owner_token(&notice), "consumed, not shown to the app");
         let load = r#"{"jsonrpc":"2.0","id":9,"method":"session/load","params":{"sessionId":"s1","cwd":"/","mcpServers":[]}}"#;
-        let sent: serde_json::Value = serde_json::from_str(&t.on_outbound(load).expect("token added")).unwrap();
+        let sent: serde_json::Value =
+            serde_json::from_str(&t.on_outbound(load).expect("token added")).unwrap();
         assert_eq!(sent["params"]["_meta"][key], "tok-promoted");
         assert!(!t.on_owner_token(r#"{"jsonrpc":"2.0","method":"session/update","params":{}}"#));
     }
@@ -667,31 +694,64 @@ mod tests {
         let key = fuigo_shell::leader::protocol::LEADER_RECONNECT_TOKEN_KEY;
         let mut t = ReconnectTokens::default();
         // session/new: the response's token is stored for the new session and stripped from the line the app sees.
-        assert!(t.on_outbound(r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}"#).is_none());
-        let resp = format!(r#"{{"jsonrpc":"2.0","id":1,"result":{{"sessionId":"s1","_meta":{{"{key}":"tok-a","keep":1}}}}}}"#);
-        let shown: serde_json::Value = serde_json::from_str(&t.on_inbound(&resp).expect("token stripped")).unwrap();
+        assert!(
+            t.on_outbound(
+                r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}"#
+            )
+            .is_none()
+        );
+        let resp = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"result":{{"sessionId":"s1","_meta":{{"{key}":"tok-a","keep":1}}}}}}"#
+        );
+        let shown: serde_json::Value =
+            serde_json::from_str(&t.on_inbound(&resp).expect("token stripped")).unwrap();
         assert_eq!(shown["result"]["sessionId"], "s1");
         assert_eq!(shown["result"]["_meta"]["keep"], 1);
-        assert!(shown["result"]["_meta"].get(key).is_none(), "the app never sees the token");
+        assert!(
+            shown["result"]["_meta"].get(key).is_none(),
+            "the app never sees the token"
+        );
         // A reload of that session (after a leader reconnect) presents it; another session's does not.
         let load = r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"s1","cwd":"/tmp","mcpServers":[]}}"#;
-        let sent: serde_json::Value = serde_json::from_str(&t.on_outbound(load).expect("token added")).unwrap();
+        let sent: serde_json::Value =
+            serde_json::from_str(&t.on_outbound(load).expect("token added")).unwrap();
         assert_eq!(sent["params"]["_meta"][key], "tok-a");
         let other = r#"{"jsonrpc":"2.0","id":3,"method":"session/load","params":{"sessionId":"s2","cwd":"/tmp","mcpServers":[]}}"#;
-        assert!(t.on_outbound(other).is_none(), "no token for a session this pager never drove");
+        assert!(
+            t.on_outbound(other).is_none(),
+            "no token for a session this pager never drove"
+        );
         // The reload's response carries a rotated token; it replaces the old one and is stripped.
-        let resp = format!(r#"{{"jsonrpc":"2.0","id":2,"result":{{"_meta":{{"{key}":"tok-b"}}}}}}"#);
+        let resp =
+            format!(r#"{{"jsonrpc":"2.0","id":2,"result":{{"_meta":{{"{key}":"tok-b"}}}}}}"#);
         let shown: serde_json::Value = serde_json::from_str(&t.on_inbound(&resp).unwrap()).unwrap();
-        assert!(shown["result"].get("_meta").is_none(), "an emptied _meta is dropped");
+        assert!(
+            shown["result"].get("_meta").is_none(),
+            "an emptied _meta is dropped"
+        );
         let sent: serde_json::Value = serde_json::from_str(
-            &t.on_outbound(r#"{"jsonrpc":"2.0","id":4,"method":"session/load","params":{"sessionId":"s1"}}"#).unwrap(),
+            &t.on_outbound(
+                r#"{"jsonrpc":"2.0","id":4,"method":"session/load","params":{"sessionId":"s1"}}"#,
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(sent["params"]["_meta"][key], "tok-b");
         // A foreign load (no token in the response) leaves it alone; unrelated lines pass untouched.
-        assert!(t.on_inbound(r#"{"jsonrpc":"2.0","id":3,"result":{}}"#).is_none());
-        assert!(t.on_inbound(r#"{"jsonrpc":"2.0","method":"session/update","params":{}}"#).is_none());
-        assert!(t.on_outbound(r#"{"jsonrpc":"2.0","id":9,"method":"session/prompt","params":{"sessionId":"s1"}}"#).is_none());
+        assert!(
+            t.on_inbound(r#"{"jsonrpc":"2.0","id":3,"result":{}}"#)
+                .is_none()
+        );
+        assert!(
+            t.on_inbound(r#"{"jsonrpc":"2.0","method":"session/update","params":{}}"#)
+                .is_none()
+        );
+        assert!(
+            t.on_outbound(
+                r#"{"jsonrpc":"2.0","id":9,"method":"session/prompt","params":{"sessionId":"s1"}}"#
+            )
+            .is_none()
+        );
         t.connection_replaced();
         assert!(t.new_reqs.is_empty() && t.load_reqs.is_empty());
     }
@@ -704,18 +764,27 @@ mod tests {
     fn stale_request_failure_line_answers_requests_only() {
         let req = r#"{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{}}"#;
         let answer: serde_json::Value =
-            serde_json::from_str(&stale_request_failure_line(req).expect("a request is answered")).unwrap();
+            serde_json::from_str(&stale_request_failure_line(req).expect("a request is answered"))
+                .unwrap();
         assert_eq!(answer["id"], 7);
         assert_eq!(answer["error"]["code"], -32603);
         assert_eq!(answer["error"]["message"], STALE_REQUEST_ERROR_MESSAGE);
         let str_id = r#"{"jsonrpc":"2.0","id":"a-1","method":"session/load","params":{}}"#;
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&stale_request_failure_line(str_id).unwrap()).unwrap()["id"],
+            serde_json::from_str::<serde_json::Value>(&stale_request_failure_line(str_id).unwrap())
+                .unwrap()["id"],
             "a-1"
         );
-        assert!(stale_request_failure_line(r#"{"jsonrpc":"2.0","method":"session/cancel","params":{}}"#).is_none());
+        assert!(
+            stale_request_failure_line(
+                r#"{"jsonrpc":"2.0","method":"session/cancel","params":{}}"#
+            )
+            .is_none()
+        );
         assert!(stale_request_failure_line(r#"{"jsonrpc":"2.0","id":3,"result":{}}"#).is_none());
-        assert!(stale_request_failure_line(r#"{"jsonrpc":"2.0","id":null,"method":"x"}"#).is_none());
+        assert!(
+            stale_request_failure_line(r#"{"jsonrpc":"2.0","id":null,"method":"x"}"#).is_none()
+        );
         assert!(stale_request_failure_line("not json").is_none());
     }
 
@@ -765,16 +834,26 @@ mod tests {
             assert_eq!(rx.recv().await.as_deref(), Some(line));
         }
         // The leader answers request "b"; a leader notification and a leader request change nothing.
-        inflight.note_leader_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"id":1}}"#);
+        inflight
+            .note_leader_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"id":1}}"#);
         inflight.note_leader_line(r#"{"jsonrpc":"2.0","id":1,"method":"fs/read","params":{}}"#);
         inflight.note_leader_line(r#"{"jsonrpc":"2.0","id":"b","result":{}}"#);
         let owed = inflight.fail_all();
-        assert_eq!(owed.len(), 1, "only the unanswered prompt is owed: {owed:?}");
+        assert_eq!(
+            owed.len(),
+            1,
+            "only the unanswered prompt is owed: {owed:?}"
+        );
         let answer: serde_json::Value = serde_json::from_str(&owed[0]).unwrap();
         assert_eq!(answer["id"], 1);
         assert_eq!(answer["error"]["message"], LOST_REQUEST_ERROR_MESSAGE);
-        assert!(is_transport_loss_error(answer["error"]["message"].as_str().unwrap()));
-        assert!(inflight.fail_all().is_empty(), "each request is failed once");
+        assert!(is_transport_loss_error(
+            answer["error"]["message"].as_str().unwrap()
+        ));
+        assert!(
+            inflight.fail_all().is_empty(),
+            "each request is failed once"
+        );
         // A request whose send never succeeded is not recorded (the stale-drop path answers it instead).
         let (dead_tx, dead_rx) = mpsc::unbounded_channel::<String>();
         drop(dead_rx);
@@ -789,7 +868,9 @@ mod tests {
         .await;
         assert!(inflight.fail_all().is_empty());
         assert!(is_transport_loss_error(STALE_REQUEST_ERROR_MESSAGE));
-        assert!(!is_transport_loss_error("Server error (500): Something went wrong on our side."));
+        assert!(!is_transport_loss_error(
+            "Server error (500): Something went wrong on our side."
+        ));
     }
 
     #[tokio::test]

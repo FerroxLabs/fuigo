@@ -17,6 +17,8 @@ mod jwt;
 pub(crate) mod manager;
 mod model;
 pub mod oidc;
+pub mod key_models;
+pub mod provider_status;
 mod pre_tui;
 pub(crate) mod recovery;
 pub(crate) mod refresh;

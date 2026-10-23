@@ -84,9 +84,9 @@ fn request(command: &str) -> TerminalRunRequest {
 fn backends(scope: &ProcessScope) -> Vec<(&'static str, LocalTerminalBackend)> {
     let shadows = super::SearchShadowConfig::default;
     vec![
-        ("static", LocalTerminalBackend::new_local_with_login_shell_capture(shadows(), true, None, Some(scope.clone()))),
-        ("plain", LocalTerminalBackend::new_local_with_login_shell_capture(shadows(), false, None, Some(scope.clone()))),
-        ("persistent", LocalTerminalBackend::new_local_with_persistent_shell(shadows(), None, Some(scope.clone()))),
+        ("static", LocalTerminalBackend::new_local_with_login_shell_capture(shadows(), true, None, Some(scope.clone()), None)),
+        ("plain", LocalTerminalBackend::new_local_with_login_shell_capture(shadows(), false, None, Some(scope.clone()), None)),
+        ("persistent", LocalTerminalBackend::new_local_with_persistent_shell(shadows(), None, Some(scope.clone()), None)),
     ]
 }
 
@@ -154,8 +154,8 @@ fn real_subagent_clone_lands_in_root_cgroup_and_two_sessions_differ() {
     let subagent_scope = root.clone();
     run_local(async {
         let shadows = super::SearchShadowConfig::default;
-        let sub = LocalTerminalBackend::new_local_with_login_shell_capture(shadows(), false, None, Some(subagent_scope));
-        let o = LocalTerminalBackend::new_local_with_login_shell_capture(shadows(), false, None, Some(other.clone()));
+        let sub = LocalTerminalBackend::new_local_with_login_shell_capture(shadows(), false, None, Some(subagent_scope), None);
+        let o = LocalTerminalBackend::new_local_with_login_shell_capture(shadows(), false, None, Some(other.clone()), None);
         let r = sub.run(request("cat /proc/self/cgroup")).await.unwrap();
         assert!(r.combined_output.contains(&w_root));
         let r = o.run(request("cat /proc/self/cgroup")).await.unwrap();
@@ -178,6 +178,7 @@ fn real_session_end_keeps_nohup_alive_and_directory_then_empty_dir_is_removed() 
             false,
             None,
             Some(scope.clone()),
+            None,
         );
         let r = backend
             .run(request(&format!("nohup setsid sh -c 'echo $$ > {}; sleep 60' >/dev/null 2>&1 &", nh.display())))

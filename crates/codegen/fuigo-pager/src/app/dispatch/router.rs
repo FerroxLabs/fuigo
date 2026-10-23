@@ -1,8 +1,9 @@
 //! Top-level action router: maps actions and action results to handlers.
 use super::auth::{
-    dispatch_cancel_login, dispatch_enter_api_key, dispatch_login, dispatch_logout,
-    dispatch_submit_api_key, dispatch_submit_auth_code, dispatch_switch_account,
-    dispatch_use_detected_key,
+    dispatch_cancel_login, dispatch_cancel_picker, dispatch_cancel_sign_in, dispatch_enter_api_key,
+    dispatch_login, dispatch_logout, dispatch_open_sign_in_picker, dispatch_pick_welcome_model, dispatch_provider_key_info,
+    dispatch_sign_in_subscription, dispatch_submit_api_key, dispatch_submit_auth_code,
+    dispatch_switch_account, dispatch_use_detected_key,
 };
 use super::ctx::{
     active_agent_session_id, get_active_agent_mut, navigate_clearing_selection, open_url_or_show,
@@ -49,9 +50,9 @@ use super::prompt::{
 use super::queue;
 use super::queue::dispatch_drain_queue;
 use super::rewind::{
-    dispatch_inline_edit_submit, dispatch_rewind, dispatch_rewind_cancel_offer,
-    dispatch_rewind_confirm, dispatch_rewind_confirm_never_ask, dispatch_rewind_dismiss,
-    dispatch_rewind_dismiss_error, dispatch_rewind_picker_select, dispatch_rewind_show_picker,
+    dispatch_rewind, dispatch_rewind_cancel_offer, dispatch_rewind_confirm,
+    dispatch_rewind_confirm_never_ask, dispatch_rewind_confirm_scoped, dispatch_rewind_conflict, dispatch_rewind_dismiss, dispatch_rewind_dismiss_error,
+    dispatch_rewind_picker_select, dispatch_rewind_show_picker,
 };
 use super::session::foreign::dispatch_fetch_session_list;
 use super::session::fork::{
@@ -68,7 +69,7 @@ use super::session::lifecycle::{
 use super::session::load::{
     dispatch_cycle_session_source_filter, dispatch_load_session, dispatch_pick_content_session,
     dispatch_pick_content_session_in_worktree, dispatch_pick_session,
-    dispatch_pick_session_in_worktree, dispatch_session_picker_closed,
+    dispatch_pick_session_in_worktree, dispatch_resume_by_query, dispatch_session_picker_closed,
     dispatch_show_session_picker, dispatch_trigger_deep_search, session_picker_entry_matches,
     session_picker_external_filter_active,
 };
@@ -76,19 +77,20 @@ use super::session::modal::{dispatch_rename_session, dispatch_reset_session_titl
 use super::settings::setters::{
     clear_default_model, clear_fork_secondary_model, preview_auto_dark_theme,
     preview_auto_light_theme, preview_theme, set_ask_user_question_timeout_enabled,
+    set_subagent_model_inheritance,
     set_auto_dark_theme, set_auto_light_theme, set_auto_update, set_collapsed_edit_blocks,
     set_combine_queued_prompts, set_compact_mode, set_confirm_before_rewind,
-    set_contextual_hint_image_input, set_contextual_hint_plan_mode, set_contextual_hint_send_now,
-    set_contextual_hint_export_copy, set_contextual_hint_small_screen, set_contextual_hint_ssh_wrap,
-    set_contextual_hint_undo,
-    set_contextual_hint_word_select, set_default_model, set_default_selected_permission,
-    set_display_refresh_auto_cadence, set_follow_up_behavior, set_fork_secondary_model,
-    set_group_tool_verbs, set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection,
-    set_max_thoughts_width, set_multiline_mode, set_page_flip_on_send, set_prompt_suggestions,
-    set_remember_tool_approvals, set_render_mermaid, set_respect_manual_folds, set_screen_mode,
-    set_scroll_lines, set_scroll_mode, set_scroll_speed, set_show_thinking_blocks, set_show_tips,
-    set_simple_mode, set_theme, set_timeline, set_timestamps, set_vim_mode, set_voice_capture_mode,
-    set_voice_keybind_enabled, set_voice_stt_language,
+    set_contextual_hint_export_copy, set_contextual_hint_image_input,
+    set_contextual_hint_plan_mode, set_contextual_hint_send_now, set_contextual_hint_small_screen,
+    set_contextual_hint_ssh_wrap, set_contextual_hint_undo, set_contextual_hint_word_select,
+    set_default_model, set_default_selected_permission, set_display_refresh_auto_cadence,
+    set_follow_up_behavior, set_fork_secondary_model, set_group_tool_verbs, set_hunk_tracker_mode,
+    set_invert_scroll, set_keep_text_selection, set_max_thoughts_width, set_multiline_mode,
+    set_page_flip_on_send, set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,
+    set_respect_manual_folds, set_screen_mode, set_tool_density_default, set_scroll_lines, set_scroll_mode, set_scroll_speed,
+    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_theme, set_timeline,
+    set_timestamps, set_vim_mode, set_voice_capture_mode, set_voice_keybind_enabled,
+    set_voice_stt_language,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -97,10 +99,11 @@ use super::settings::ui::{
     dispatch_toggle_vim_mode,
 };
 use super::status::{
-    dispatch_copy_session_id, dispatch_manage_billing, dispatch_open_gboom, dispatch_open_tutorial,
-    dispatch_privacy_banner_opt_in, dispatch_privacy_banner_opt_out, dispatch_share_session,
-    dispatch_show_context_info, dispatch_show_queue, dispatch_show_release_notes,
-    dispatch_show_session_info, dispatch_show_tasks, dispatch_show_usage, set_coding_data_sharing,
+    dispatch_copy_session_id, dispatch_manage_billing, dispatch_open_gboom, dispatch_open_stoke,
+    dispatch_open_tutorial, dispatch_privacy_banner_opt_in, dispatch_privacy_banner_opt_out,
+    dispatch_share_session, dispatch_show_context_info, dispatch_show_queue,
+    dispatch_show_release_notes, dispatch_show_session_info, dispatch_show_tasks,
+    dispatch_show_usage, set_coding_data_sharing,
 };
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
@@ -148,9 +151,53 @@ pub(super) fn dispatch_copy_auth_url(
 pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
     // Packet 12b: any change of which view is active or fullscreen disturbs the screen and closes an open peer dialog.
     let before = app.focus_signature();
+    // Every action enters here, including the nested dispatches a slash command or task result issues.
+    // Only the outermost call shows the image notices the whole tree queued, so a nested action's own toast cannot bury them
+    // and one submission yields one message.
+    app.dispatch_depth = app.dispatch_depth.saturating_add(1);
     let effects = dispatch_inner(action, app);
+    app.dispatch_depth = app.dispatch_depth.saturating_sub(1);
+    if app.dispatch_depth == 0 {
+        flush_image_notices(app);
+    }
     app.note_focus_change_since(before);
     effects
+}
+
+/// Show the image notices queued so far as one message on the visible surface; true when a surface changed.
+/// The command that queued them may have navigated away (`/home`, `/new`), so the originating agent's own toast could be off-screen or gone.
+pub(crate) fn flush_image_notices(app: &mut AppView) -> bool {
+    if app.pending_image_notices.is_empty() {
+        return false;
+    }
+    if !app.screen_mode.is_minimal() {
+        let message = join_image_notices(&mut app.pending_image_notices);
+        app.show_toast(&message);
+        return true;
+    }
+    let target = match app.active_view {
+        ActiveView::Agent(id) => app.agents.get_mut(&id),
+        _ => app.agents.values_mut().next(),
+    };
+    let Some(agent) = target else {
+        return false;
+    };
+    let message = join_image_notices(&mut app.pending_image_notices);
+    agent
+        .scrollback
+        .push_block(crate::scrollback::block::RenderBlock::system(message));
+    true
+}
+
+/// Drain the queued notices into one `; `-joined message, dropping repeats.
+fn join_image_notices(pending: &mut Vec<String>) -> String {
+    let mut notices: Vec<String> = Vec::new();
+    for notice in pending.drain(..) {
+        if !notices.contains(&notice) {
+            notices.push(notice);
+        }
+    }
+    notices.join("; ")
 }
 
 fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
@@ -241,6 +288,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::FetchSessionList => dispatch_fetch_session_list(app),
         Action::CycleSessionSourceFilter => dispatch_cycle_session_source_filter(app),
         Action::ShowSessionPicker => dispatch_show_session_picker(app),
+        Action::ResumeByQuery(query) => dispatch_resume_by_query(app, query),
         Action::SessionPickerClosed => dispatch_session_picker_closed(app),
         Action::PickSession(index) => dispatch_pick_session(app, index),
         Action::PickSessionInWorktree(index) => dispatch_pick_session_in_worktree(app, index),
@@ -356,9 +404,11 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             dispatch_send_prompt_inner(app, text, false, false, false)
         }
         Action::Interject { text, images } => dispatch_interject(app, text, images),
-        Action::SendPromptNow { text, images } => {
-            super::interject::dispatch_send_prompt_now(app, text, images)
-        }
+        Action::SendPromptNow {
+            text,
+            images,
+            image_notice,
+        } => super::interject::dispatch_send_prompt_now(app, text, images, image_notice),
         Action::EnableVoiceMode => dispatch_enable_voice_mode(app, true),
         Action::VoiceToggle => dispatch_voice_toggle(app),
         Action::VoiceStop => dispatch_voice_stop(app),
@@ -1062,12 +1112,27 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ToggleYolo => dispatch_toggle_yolo(app),
         Action::ToggleMultiline => dispatch_toggle_multiline(app),
         Action::ToggleCompactMode => dispatch_toggle_compact_mode(app),
+        Action::SetToolDensity(compact) => {
+            with_active_agent(app, |agent| {
+                let compact = compact.unwrap_or_else(|| {
+                    agent.scrollback.tool_density() != Some(crate::scrollback::DisplayMode::Collapsed)
+                });
+                agent.scrollback.set_tool_density(compact);
+                agent.show_toast(if compact {
+                    "Tool call density: compact"
+                } else {
+                    "Tool call density: detailed"
+                });
+            });
+            vec![]
+        }
         Action::ToggleVimMode => dispatch_toggle_vim_mode(app),
         Action::SetVimMode(v) => set_vim_mode(app, v),
         Action::SetRememberToolApprovals(v) => set_remember_tool_approvals(app, v),
         Action::SetAskUserQuestionTimeoutEnabled(v) => {
             set_ask_user_question_timeout_enabled(app, v)
         }
+        Action::SetSubagentModelInheritance(v) => set_subagent_model_inheritance(app, v),
         Action::SetKeepTextSelection(v) => set_keep_text_selection(app, v),
         Action::SetScrollSpeed(v) => set_scroll_speed(app, v),
         Action::SetScrollMode(v) => set_scroll_mode(app, v),
@@ -1081,6 +1146,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetDefaultSelectedPermission(s) => set_default_selected_permission(app, s),
         Action::SetHunkTrackerMode(s) => set_hunk_tracker_mode(app, s),
         Action::SetScreenMode(s) => set_screen_mode(app, s),
+        Action::SetToolDensityDefault(s) => set_tool_density_default(app, s),
         Action::SetVoiceKeybindEnabled(v) => set_voice_keybind_enabled(app, v),
         Action::SetVoiceCaptureMode(s) => set_voice_capture_mode(app, s),
         Action::SetVoiceSttLanguage(s) => set_voice_stt_language(app, s),
@@ -1180,6 +1246,29 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::Login => dispatch_login(app),
         Action::CancelLogin => dispatch_cancel_login(app),
         Action::SubmitAuthCode(code) => dispatch_submit_auth_code(app, code),
+        Action::OpenSignInPicker => dispatch_open_sign_in_picker(app),
+        Action::CancelPicker => dispatch_cancel_picker(app),
+        Action::SignInSubscription(provider) => dispatch_sign_in_subscription(app, provider),
+        Action::CancelSignIn => dispatch_cancel_sign_in(app),
+        Action::SignOutSubscription(provider) => {
+            vec![Effect::SubscriptionSignOut { provider }]
+        }
+        Action::ProviderKeysPage => {
+            app.picker_page = crate::app::pending_menu::PickerPage::ProviderKeys;
+            app.welcome_menu_index = None;
+            vec![]
+        }
+        Action::PickerBack => {
+            app.picker_page = crate::app::pending_menu::PickerPage::Main;
+            app.welcome_menu_index = None;
+            vec![]
+        }
+        Action::PickWelcomeModel(index) => dispatch_pick_welcome_model(app, index),
+        Action::ToggleMakeDefault => {
+            app.pick_make_default = !app.pick_make_default;
+            vec![]
+        }
+        Action::ProviderKeyInfo(id) => dispatch_provider_key_info(app, &id),
         Action::EnterApiKey => dispatch_enter_api_key(app),
         Action::SubmitApiKey(key) => dispatch_submit_api_key(app, key.0),
         Action::UseDetectedKey(index) => dispatch_use_detected_key(app, index),
@@ -1349,6 +1438,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::OpenGboom => dispatch_open_gboom(app),
+        Action::OpenStoke => dispatch_open_stoke(app),
         Action::SuspendForEditor {
             path,
             refresh_agents_modal,
@@ -1512,10 +1602,11 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::RewindConfirm(target) => dispatch_rewind_confirm(app, target),
         Action::RewindConfirmNeverAsk(target) => dispatch_rewind_confirm_never_ask(app, target),
+        Action::RewindConfirmScoped(target, scope) => dispatch_rewind_confirm_scoped(app, target, scope),
+        Action::RewindConflict(choice) => dispatch_rewind_conflict(app, choice),
         Action::RewindCancelOffer => dispatch_rewind_cancel_offer(app),
         Action::RewindDismiss => dispatch_rewind_dismiss(app),
         Action::RewindDismissError => dispatch_rewind_dismiss_error(app),
-        Action::InlineEditSubmit => dispatch_inline_edit_submit(app),
         Action::JumpShowPicker => dispatch_jump_show_picker(app),
         Action::JumpPickerSelect(turn_idx) => dispatch_jump_picker_select(app, turn_idx),
         Action::JumpDismiss => dispatch_jump_dismiss(app),

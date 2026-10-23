@@ -12,7 +12,7 @@ pub(super) fn dispatch_jump_show_picker(app: &mut AppView) -> Vec<Effect> {
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    // Refuse if another prompt overlay owns the input slot (rewind, inline-edit, /btw, or a pending permission/question/cancel-turn/plan overlay)
+    // Refuse if another prompt overlay owns the input slot (rewind, /btw, or a pending permission/question/cancel-turn/plan overlay)
     // An opened picker would be hidden but still eat input
     if agent.jump_slot_taken() {
         return vec![];

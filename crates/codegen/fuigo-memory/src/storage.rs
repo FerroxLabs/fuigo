@@ -540,7 +540,7 @@ impl MemoryStorage {
         }
     }
 
-    /// List all memory files (`.md`) across global and workspace directories.
+    /// List all memory files (`.md`) across global and workspace directories. Symbolic links are not listed.
     ///
     /// Returns paths sorted by scope: global files first, then workspace files.
     pub fn list_memory_files(&self) -> std::io::Result<Vec<PathBuf>> {
@@ -548,13 +548,13 @@ impl MemoryStorage {
 
         // Global MEMORY.md
         let global_file = self.global_memory_file();
-        if self.global_enabled && global_file.is_file() {
+        if self.global_enabled && is_plain_file(&global_file) {
             files.push(global_file);
         }
 
         // Workspace MEMORY.md
         let workspace_file = self.workspace_memory_file();
-        if workspace_file.is_file() {
+        if is_plain_file(&workspace_file) {
             files.push(workspace_file);
         }
 
@@ -565,7 +565,8 @@ impl MemoryStorage {
                 .filter_map(|entry| {
                     let entry = entry.ok()?;
                     let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                    // A link is skipped: it is another file's content under this name, and `/memory` lists the notes themselves.
+                    if path.extension().and_then(|e| e.to_str()) == Some("md") && is_plain_file(&path) {
                         Some(path)
                     } else {
                         None
@@ -820,6 +821,11 @@ impl MemoryStorage {
 }
 
 /// Never infer emptiness from absence of session files or follow links during GC.
+/// A regular file that is not itself a symbolic link.
+fn is_plain_file(path: &Path) -> bool {
+    path.symlink_metadata().is_ok_and(|meta| meta.is_file())
+}
+
 fn is_empty_workspace(dir: &Path) -> bool {
     std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none())
 }

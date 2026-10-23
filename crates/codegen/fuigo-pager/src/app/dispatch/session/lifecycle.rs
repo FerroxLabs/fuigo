@@ -22,7 +22,6 @@ use crate::app::dispatch::task_result::unregister_session_effect;
 use crate::app::dispatch::transcript::extensions_modal_tab_fetches;
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
-use crate::scrollback::state::ScrollbackState;
 use agent_client_protocol as acp;
 use fuigo_shell::sampling::types::ReasoningEffort;
 use std::time::Instant;
@@ -460,8 +459,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
     reseed_tip_for_new_session(app);
     let agent_id = AgentId(app.next_agent_id);
     app.next_agent_id += 1;
-    let mut scrollback = ScrollbackState::new();
-    scrollback.set_appearance(app.appearance.clone());
+    let mut scrollback = app.new_scrollback();
     let agent = AgentView::new(
         AgentSession {
             id: agent_id,
@@ -542,7 +540,11 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
         }
     }
     // The hidden home must not steal a leftover `/chat` intent; the reveal path re-reads it.
-    let chat_kind = if hidden { false } else { consume_chat_kind(app) };
+    let chat_kind = if hidden {
+        false
+    } else {
+        consume_chat_kind(app)
+    };
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.chat_kind = chat_kind;
         agent.conversation_entry = chat_kind;
@@ -726,7 +728,9 @@ pub(in crate::app::dispatch) fn trust_gate_outcome(
     match resolution {
         GrantResolution::Trusted => TrustGateOutcome::Finish,
         GrantResolution::SessionLocal if !leader_mode => TrustGateOutcome::FinishSessionLocal,
-        GrantResolution::SessionLocal | GrantResolution::Unrecorded => TrustGateOutcome::StayPending,
+        GrantResolution::SessionLocal | GrantResolution::Unrecorded => {
+            TrustGateOutcome::StayPending
+        }
     }
 }
 
@@ -752,7 +756,8 @@ pub(in crate::app::dispatch) fn dispatch_trust_folder(app: &mut AppView) -> Vec<
         TrustGateOutcome::StayPending => {
             let msg = match &outcome {
                 fuigo_workspace::folder_trust::GrantOutcome::Granted {
-                    persist: fuigo_workspace::folder_trust::PersistStatus::ProcessLocalOnly { error },
+                    persist:
+                        fuigo_workspace::folder_trust::PersistStatus::ProcessLocalOnly { error },
                     ..
                 } => format!(
                     "Couldn't save folder trust ({error}), and the agent runs in the leader process, which only sees a \
@@ -1012,8 +1017,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
     let mut effects = abandon_unused_home_session(app);
     let agent_id = AgentId(app.next_agent_id);
     app.next_agent_id += 1;
-    let mut scrollback = ScrollbackState::new();
-    scrollback.set_appearance(app.appearance.clone());
+    let mut scrollback = app.new_scrollback();
     let mut agent = AgentView::new(
         AgentSession {
             id: agent_id,
@@ -1198,7 +1202,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
                 page_flip_entry: None,
             }
         } else {
-            maybe_drain_queue(agent)
+            maybe_drain_queue(agent, &mut app.pending_image_notices)
         };
         let mut effects = std::mem::take(&mut drain.effects);
         agent.session.prompt_history_loading = true;
@@ -1207,7 +1211,11 @@ pub(in crate::app::dispatch) fn handle_session_created(
             cwd: cwd.clone(),
             session_id: session_id_clone.to_string(),
         });
-        effects.extend(crate::app::dispatch::peer::startup_effects(agent, agent_id, &session_id_clone.to_string()));
+        effects.extend(crate::app::dispatch::peer::startup_effects(
+            agent,
+            agent_id,
+            &session_id_clone.to_string(),
+        ));
         effects.push(Effect::FetchSessionAgentName {
             agent_id,
             session_id: session_id_clone.clone(),
@@ -1308,7 +1316,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
                 page_flip_entry: None,
             }
         } else {
-            maybe_drain_queue(agent)
+            maybe_drain_queue(agent, &mut app.pending_image_notices)
         };
         let mut effects = std::mem::take(&mut drain.effects);
         agent.session.prompt_history_loading = true;
@@ -1317,7 +1325,11 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
             cwd: cwd.clone(),
             session_id: session_id_clone.to_string(),
         });
-        effects.extend(crate::app::dispatch::peer::startup_effects(agent, agent_id, &session_id_clone.to_string()));
+        effects.extend(crate::app::dispatch::peer::startup_effects(
+            agent,
+            agent_id,
+            &session_id_clone.to_string(),
+        ));
         effects.push(Effect::FetchSessionAgentName {
             agent_id,
             session_id: session_id_clone.clone(),
@@ -1553,7 +1565,7 @@ pub(in crate::app::dispatch) fn handle_context_window_set(
         }
     }
     let mut effects = Vec::new();
-    let drain = maybe_drain_queue(agent);
+    let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
     effects.extend(drain.effects);
     note_peek_page_flip(app, agent_id, drain.page_flip_entry);
     effects
@@ -1566,7 +1578,8 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
     result: Result<(), SwitchModelError>,
     prev_model_id: Option<acp::ModelId>,
 ) -> Vec<Effect> {
-    if let Some(agent) = app.agents.get_mut(&agent_id) {
+    let mut app_model_rollback: Option<acp::ModelId> = None;
+    let effects = if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.session.model_switch_pending = false;
         let mut effects = match result {
             Ok(()) => {
@@ -1592,7 +1605,11 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                     };
                     agent.scrollback.push_block(RenderBlock::system(msg));
                 }
-                if unchanged {
+                if app.session_only_model.as_ref() == Some(&model_id) {
+                    // Picked on the welcome page for this session only: not saved as the default.
+                    app.session_only_model = None;
+                    vec![]
+                } else if unchanged {
                     vec![]
                 } else {
                     vec![Effect::PersistPreferredModel {
@@ -1613,16 +1630,42 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                 agent
                     .scrollback
                     .push_block(RenderBlock::system(format!("Couldn't switch model: {msg}")));
-                vec![]
+                // The settings modal moved the footer and queued the saved default before the shell answered
+                // (`prev_model_id` is set only on that path); a refused switch puts both back on the running model.
+                match prev_model_id {
+                    Some(prev) => {
+                        agent.session.models.set_current(prev.clone(), None);
+                        app_model_rollback = Some(prev.clone());
+                        if fuigo_shell::agent::chat_modes::process_chat_mode_enabled() {
+                            vec![]
+                        } else {
+                            vec![Effect::PersistSetting {
+                                key: "default_model",
+                                value: crate::settings::SettingValue::String(prev.0.to_string()),
+                                rollback_value: crate::settings::SettingValue::String(
+                                    model_id.0.to_string(),
+                                ),
+                            }]
+                        }
+                    }
+                    None => vec![],
+                }
             }
         };
-        let drain = maybe_drain_queue(agent);
+        let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         effects.extend(drain.effects);
         note_peek_page_flip(app, agent_id, drain.page_flip_entry);
         effects
     } else {
         vec![]
+    };
+    // A later `/new` clones `app.models`; keep it on the running model too.
+    if let Some(prev) = app_model_rollback
+        && app.models.available.contains_key(&prev)
+    {
+        app.models.set_current(prev, None);
     }
+    effects
 }
 pub(in crate::app::dispatch) fn dispatch_agent_type_mismatch_answered(
     app: &mut AppView,

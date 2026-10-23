@@ -1,0 +1,36 @@
+# The ignored PTY suite: what `final-gate.sh --pty` (and so release-gate.sh) runs, each as `cargo test ... -- --ignored`.
+#
+# These tests spawn the real pager binary in a pseudo-terminal and are marked #[ignore], so a plain `cargo test` (the default
+# gate) never runs them. They need the built pager binary; the gate builds it and passes it as PAGER_BINARY.
+#
+# Line format:  <package> <test|lib|tests> <target|-> <threads> [name-filter]
+#   test   one integration-test target (`--test <target>`)
+#   lib    the package's unit-test binary; the optional name filter restricts it (the lib also holds ignored tests that are not
+#          terminal tests, e.g. a child-process helper that only means something when its parent test launches it)
+#   tests  every test target of the package (lib, bins and integration tests)
+#   <threads> is --test-threads for that invocation. leader_pty_e2e and the in-process leader cluster run one at a time: each test starts a
+#   leader and several clients, and two of them at once starve each other.
+#
+# Every `#[ignore]` terminal test in the tree has to be reachable from here. After adding a test target with ignored tests, add it below;
+# gate-selftest.sh checks that every `test` line names a target that exists.
+# Not listed on purpose: peer_laundering_live (talks to live services, has its own README).
+fuigo-pager test pty_e2e_smoke 2
+fuigo-pager test pty_e2e_queue 2
+fuigo-pager test pty_e2e_scroll_selection 2
+fuigo-pager test pty_e2e_minimal 2
+fuigo-pager test pty_e2e_config_ui 2
+fuigo-pager test pty_e2e_shell_tools 2
+fuigo-pager test pty_e2e_persistence 2
+fuigo-pager test pty_e2e_clipboard 2
+fuigo-pager test leader_pty_e2e 1
+fuigo-pager test pty_auto_mode 2
+fuigo-pager test pty_xtversion 2
+fuigo-pager test pty_stoke 2
+fuigo-pager test doctor_early_dispatch 2
+fuigo-pager test settings_e2e 2
+fuigo-pager test scripted_scenarios 2
+fuigo-pager test headless_denial_exit_code 2
+fuigo-pager test login_cli 2
+fuigo-pager test mermaid_render_subprocess 2
+fuigo-pager lib - 1 app::leader_cluster
+fuigo-pager-pty-harness tests - 2

@@ -38,6 +38,7 @@ default-bazel = []
 tempfile = { workspace = true }
 serde_json = { workspace = true }
 serial_test = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "time", "process"] }
 
 [lints]
 workspace = true

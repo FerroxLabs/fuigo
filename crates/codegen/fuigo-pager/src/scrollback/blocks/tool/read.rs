@@ -186,6 +186,8 @@ impl ReadToolCallBlock {
         // Extra suffix for errors or empty content
         let extra_suffix = if self.content.as_ref().is_some_and(|c| c.is_empty()) {
             " (empty)".to_string()
+        } else if let Some(err) = &self.error {
+            format!(" (failed: {})", failure_reason(err))
         } else if let Some(media) = &self.media_kind {
             match media {
                 ReadMediaKind::Image => " (image)".to_string(),
@@ -332,6 +334,18 @@ impl ReadToolCallBlock {
     }
 }
 
+/// The first line of a read failure, shortened for the header: the card says why the read failed without being opened.
+fn failure_reason(error: &str) -> String {
+    const MAX_CHARS: usize = 60;
+    let first = error.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("unknown error");
+    if first.chars().count() <= MAX_CHARS {
+        first.to_string()
+    } else {
+        let cut: String = first.chars().take(MAX_CHARS - 1).collect();
+        format!("{cut}…")
+    }
+}
+
 /// Count decimal digits in a number (for gutter width).
 fn digit_count(n: usize) -> usize {
     n.checked_ilog10().map_or(1, |d| d as usize + 1)
@@ -472,6 +486,24 @@ mod tests {
             is_selected: false,
             cwd: None,
         }
+    }
+
+    /// 54.5: a failed read says why on the collapsed header.
+    #[test]
+    fn a_failed_read_explains_why_in_its_header() {
+        let block = ReadToolCallBlock::new("/work/missing.rs")
+            .with_error("No such file or directory (os error 2)\nsecond line");
+        let text: String = block.output(&make_ctx()).lines[0]
+            .content
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.starts_with("Read "), "{text}");
+        assert!(text.ends_with("(failed: No such file or directory (os error 2))"), "{text}");
+        let long = ReadToolCallBlock::new("/work/x.rs").with_error("e".repeat(200));
+        let text: String = long.output(&make_ctx()).lines[0].content.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("(failed: ") && text.contains('…'), "{text}");
     }
 
     #[test]

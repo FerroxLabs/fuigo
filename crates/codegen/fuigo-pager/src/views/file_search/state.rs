@@ -80,6 +80,11 @@ pub struct FileSearchState {
     /// So `poll` drops any snapshot whose `generation` predates the floor and, on accept, raises the floor to the accepted generation.
     /// This keeps matches from a prior query from flickering in.
     min_generation: usize,
+    /// The query the current `results` were computed for was replaced and the matcher has not answered yet.
+    /// The old list stays drawn (no flicker) but is not accepted from.
+    results_stale: bool,
+    /// Matcher query last handed to the daemon, to tell a new query from a repeated one.
+    last_query: Option<String>,
     /// Directory being drilled into; keeps the @-token alive when its name has whitespace (`my dir`).
     /// Self-validating: applies only while the path matches.
     drill_prefix: Option<String>,
@@ -99,6 +104,8 @@ impl FileSearchState {
             hovered: None,
             scroll_offset: 0,
             min_generation: 0,
+            results_stale: false,
+            last_query: None,
             drill_prefix: None,
         }
     }
@@ -142,6 +149,11 @@ impl FileSearchState {
         daemon.set_query(query, false);
         // Advance the stale-result fence past the prior query (see `min_generation`).
         self.min_generation += 1;
+        // A different query (or a restarted walk) makes the list on screen the previous answer
+        if self.last_query.as_deref() != Some(query) || matches!(restart, RestartWalk::Restart { .. }) {
+            self.results_stale = true;
+        }
+        self.last_query = Some(query.to_owned());
         self.selected = 0;
         self.hovered = None;
         self.scroll_offset = 0;
@@ -243,6 +255,8 @@ impl FileSearchState {
                 self.context = None;
                 self.drill_prefix = None;
                 self.results = FuzzyMatcherDaemonResults::default();
+                self.results_stale = false;
+                self.last_query = None;
                 return;
             }
             (None, None) => return,
@@ -258,6 +272,8 @@ impl FileSearchState {
         self.context = None;
         self.drill_prefix = None;
         self.results = FuzzyMatcherDaemonResults::default();
+        self.results_stale = false;
+        self.last_query = None;
     }
 
     // ── Tick / polling ──────────────────────────────────────────────────
@@ -277,6 +293,10 @@ impl FileSearchState {
         let results = daemon.get();
 
         if Arc::ptr_eq(&results.topk, &self.results.topk) {
+            // The matcher answered the current query with the very list already shown: it is current
+            if self.results_stale && results.generation >= self.min_generation && results.status.done {
+                self.results_stale = false;
+            }
             return false;
         }
 
@@ -286,6 +306,7 @@ impl FileSearchState {
             if results.generation >= self.min_generation {
                 self.min_generation = results.generation;
                 self.results = results;
+                self.results_stale = false;
                 if !self.results.topk.is_empty() {
                     self.selected = self.selected.min(self.results.topk.len() - 1);
                 }
@@ -333,6 +354,7 @@ impl FileSearchState {
     /// Returns `true` if there was a valid hovered item to select.
     pub fn select_hovered(&mut self) -> bool {
         if let Some(idx) = self.hovered
+            && !self.results_stale
             && idx < self.results.topk.len()
         {
             self.selected = idx;
@@ -343,6 +365,9 @@ impl FileSearchState {
 
     /// Get the currently selected fuzzy match result.
     pub fn selected_result(&self) -> Option<&FuzzyMatchResult> {
+        if self.results_stale {
+            return None;
+        }
         self.results.topk.get(self.selected)
     }
 
@@ -354,6 +379,9 @@ impl FileSearchState {
     /// The `src` parameter is the full prompt text, needed to detect that no-op `/`-append.
     pub fn try_replace(&self, src: &str) -> Option<FileSearchReplacement> {
         let ctx = self.context.as_ref()?;
+        if self.results_stale {
+            return None;
+        }
         let res = self.results.topk.get(self.selected)?;
 
         // Dir-only contract: this always appends `/`, so it is valid only for a directory chosen in dir mode
@@ -409,6 +437,7 @@ impl FileSearchState {
         results: Vec<FuzzyMatchResult>,
         selected: usize,
     ) {
+        self.last_query = Some(context.matcher_query().to_owned());
         self.context = Some(context);
         self.results = FuzzyMatcherDaemonResults {
             topk: Arc::from(results),
@@ -417,6 +446,7 @@ impl FileSearchState {
             generation: self.min_generation,
         };
         self.min_generation += 1;
+        self.results_stale = false;
         self.selected = selected;
     }
 
@@ -477,6 +507,45 @@ mod tests {
         assert!(r.dismiss);
         assert_eq!(r.text, "src/");
         assert_eq!(r.cursor, 5 + '\u{a0}'.len_utf8());
+    }
+
+    /// Typing quickly changes the query faster than the matcher answers. Until it does, the list on screen belongs to the
+    /// PREVIOUS query: accepting from it would insert a file the user has already typed past.
+    #[test]
+    fn a_match_from_an_earlier_query_is_not_accepted_after_the_query_changes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("alpha_marker.txt"), "a").unwrap();
+        std::fs::write(dir.path().join("zeta_only.txt"), "z").unwrap();
+        let mut state = FileSearchState::new(dir.path());
+        let wait_for = |state: &mut FileSearchState, needle: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                state.poll();
+                if state.selected_result().is_some_and(|r| r.path.to_string().contains(needle)) {
+                    return;
+                }
+                assert!(std::time::Instant::now() < deadline, "no match for {needle:?} in time");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+
+        state.update_context("@alpha", 6);
+        wait_for(&mut state, "alpha_marker");
+
+        // The same query again (a cursor move) keeps its answer.
+        state.update_context("@alpha", 6);
+        assert!(state.selected_result().is_some());
+
+        // A different query: the old list may still be drawn, but nothing in it can be accepted.
+        state.update_context("@zeta", 5);
+        assert!(
+            state.selected_result().is_none(),
+            "accepted a match for \"alpha\" while the query is \"zeta\""
+        );
+        assert!(!state.select_hovered());
+
+        // Once the matcher answers the new query, its matches are acceptable.
+        wait_for(&mut state, "zeta_only");
     }
 
     #[test]

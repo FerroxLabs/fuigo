@@ -162,6 +162,7 @@ fuigo-agent = { path = "../fuigo-agent" }
 fuigo-bundle = { workspace = true }
 fuigo-config = { workspace = true }
 fuigo-config-types = { workspace = true }
+fuigo-external-agent-migration = { workspace = true }
 fuigo-peer = { workspace = true }
 fuigo-dirs = { workspace = true }
 fuigo-memory = { workspace = true }
@@ -208,6 +209,7 @@ fuigo-win-acl = { workspace = true, features = ["test-support"] }
 
 [dev-dependencies]
 fuigo-secrets = { workspace = true, features = ["test-support"] }
+fuigo-sampler = { path = "../fuigo-sampler", features = ["test-support"] }
 # P71 test seam: loopback mocks stand in for a FluxRouter-operated proxy. Dev-dependency ONLY (upload_gate_guard pins it).
 fuigo-file-utils = { path = "../fuigo-file-utils", features = ["test-loopback-operator"] }
 rcgen = { workspace = true }

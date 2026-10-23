@@ -34,6 +34,7 @@ mod managed_cache;
 pub mod managed_text;
 mod paths;
 pub mod policy_sources;
+pub mod sandbox_mode;
 pub mod shell;
 pub mod signed_policy;
 mod validation;
@@ -105,7 +106,7 @@ pub use loader::blank_hook as blank_recheck_seam;
 pub use macos_managed::mdm_override;
 pub use validation::{
     RequirementsError, RequirementsLayer, RequirementsSource, load_merged_requirements,
-    BrokenAdminFile, AdminLockdown, admin_lockdowns, admin_lockdowns_at, admin_lockdown_lifted_notice, admin_lockdown_ended_invalid_notice, admin_lockdown_emptied_notice, admin_lockdown_gone_notice, admin_policy_valid_in_force_notice, AdminFileClass, AdminFileState, admin_policy_states_at, admin_policy_reader, RequirementsBroken, admin_lockdown_requirements, admin_lockdown_managed_config, admin_requirements_copy_exists, admin_requirements_copy_id, lockdown_entries, LOCKDOWN_UNSET, broken_admin_files, requirements_layers, requirements_layers_checked, REQUIREMENTS_BOOL_FEATURES, requirements_file_load_error, validate_requirements, validate_requirements_for_dirs,
+    BrokenAdminFile, AdminLockdown, admin_lockdowns, admin_lockdowns_at, admin_lockdown_lifted_notice, admin_lockdown_ended_invalid_notice, admin_lockdown_emptied_notice, admin_lockdown_gone_notice, admin_policy_valid_in_force_notice, AdminFileClass, AdminFileState, admin_policy_states_at, admin_policy_reader, RequirementsBroken, admin_lockdown_requirements, admin_lockdown_managed_config, admin_requirements_copy_exists, admin_requirements_copy_id, lockdown_entries, LOCKDOWN_UNSET, broken_admin_files, requirements_layers, requirements_layers_checked, REQUIREMENTS_BOOL_FEATURES, REQUIREMENTS_RESOLVE_BOOL_FEATURES, requirements_file_load_error, validate_requirements, validate_requirements_for_dirs,
     validate_requirements_with_warnings,
 };
 // P183 round 7: the shapes other crates' policy readers decode (kept in step by tests there), and the managed-settings reader

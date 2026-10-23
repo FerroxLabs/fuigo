@@ -464,31 +464,6 @@ async fn scripted_small_screen_tip_no_show_tiny() {
     run_scenario("small_screen_tip_no_show_tiny.yaml").await;
 }
 
-/// Inline edit-and-resubmit happy path: Enter on a selected previous prompt opens the in-place editor.
-/// Enter with changed text raises the confirm dialog.
-/// `y` rewinds the conversation and resubmits the edited text as a fresh turn, with no "Reverted conversation" note.
-/// Distinct per-turn mock sentinels prove the tail was truncated.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "scripted scenario; run with cargo test -- --ignored"]
-async fn scripted_inline_edit_resubmit() {
-    run_scenario("inline_edit_resubmit.yaml").await;
-}
-
-/// Enter on an unchanged inline edit just closes the editor: no rewind popup, no resubmit, and the transcript stays untouched.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "scripted scenario; run with cargo test -- --ignored"]
-async fn scripted_inline_edit_unchanged_exit() {
-    run_scenario("inline_edit_unchanged_exit.yaml").await;
-}
-
-/// Esc from the inline resubmit popup returns to the still-open editor with the edit intact.
-/// A second Esc discards the edit and restores the original prompt text in place.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "scripted scenario; run with cargo test -- --ignored"]
-async fn scripted_inline_edit_dismiss_returns_to_editor() {
-    run_scenario("inline_edit_dismiss_returns_to_editor.yaml").await;
-}
-
 /// Sanity-check: every scenario YAML in the list below must parse.
 /// This runs at `cargo test` time without `--ignored`, so a malformed YAML breaks CI immediately, not only when the scripted runner is opted in.
 #[test]
@@ -519,9 +494,6 @@ fn scenarios_parse() {
         "small_screen_tip_band.yaml",
         "small_screen_tip_no_show_tall.yaml",
         "small_screen_tip_no_show_tiny.yaml",
-        "inline_edit_resubmit.yaml",
-        "inline_edit_unchanged_exit.yaml",
-        "inline_edit_dismiss_returns_to_editor.yaml",
     ] {
         let path = scenario_path(name);
         let scenario =

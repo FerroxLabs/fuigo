@@ -77,49 +77,26 @@ fn str_arg<'a>(args: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
 }
 
 /// Extract the workspace path that a tool call targets, to serialize concurrent same-file edits inside `execute_tool_calls`.
+/// Shared with the tools crate (`fuigo_tools::util::lock_path`) so every dispatcher keys one file identically: relative
+/// vs absolute, `./`/`..` aliases and symlinked ancestors all collapse to one key.
 ///
-/// Different toolsets advertise the path under different JSON keys:
-/// - `file_path`: fuigo_build (`search_replace`), opencode (`EditTool`, `WriteTool`, `ReadTool`), codex (`read_file`),
-///   fuigo_build_hashline (`hashline_edit`)
-/// - `path`: alternate edit/read tools
-/// - `target_file`: fuigo_build (`read_file`, via `#[serde(rename)]`)
-///
-/// Returning the same key for two calls in a batch causes them to share a `tokio::sync::Mutex` and so run sequentially in model-emitted order.
-/// Returning `None` lets the call run fully concurrently with everything else.
-///
-/// `target_directory` is deliberately omitted: a directory listing isn't an edit and must not share a file lock.
+/// Different toolsets advertise the path under different JSON keys; this fixed list is the fallback for a tool that
+/// declares none (MCP and dynamic tools). A built-in tool declares its own key, see [`lock_path_for_call`].
 pub(super) fn lock_path_for_args(args: &serde_json::Value, cwd: &Path) -> Option<String> {
-    let input = Path::new(str_arg(args, &["file_path", "path", "target_file"])?);
-    let absolute = if input.is_absolute() {
-        input.to_path_buf()
-    } else {
-        cwd.join(input)
-    };
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            component => normalized.push(component.as_os_str()),
-        }
-    }
-    let lock_path = canonicalize_existing_ancestor(&normalized).unwrap_or(normalized);
-    Some(lock_path.to_string_lossy().into_owned())
+    fuigo_tools::util::lock_path::lock_path_for_args(args, cwd)
 }
 
-fn canonicalize_existing_ancestor(path: &Path) -> Option<PathBuf> {
-    let mut ancestor = path;
-    let mut suffix = Vec::new();
-    loop {
-        if let Ok(mut canonical) = dunce::canonicalize(ancestor) {
-            suffix.reverse();
-            canonical.extend(suffix);
-            return Some(canonical);
-        }
-        suffix.push(ancestor.file_name()?.to_owned());
-        ancestor = ancestor.parent()?;
+/// The lock key for one call: the argument its tool declares (`ToolMetadata::lock_path_param`, canonical name, applied
+/// to arguments already mapped back to canonical names), or the fixed fallback keys when the tool declares none.
+/// A declaring tool is keyed on exactly its own argument, so an unrelated `path`-like argument never aliases it.
+pub(super) fn lock_path_for_call(
+    args: &serde_json::Value,
+    declared: Option<&str>,
+    cwd: &Path,
+) -> Option<String> {
+    match declared {
+        Some(param) => fuigo_tools::util::lock_path::lock_path_for_keys(args, &[param], cwd),
+        None => lock_path_for_args(args, cwd),
     }
 }
 

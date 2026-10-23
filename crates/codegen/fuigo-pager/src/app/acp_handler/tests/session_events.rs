@@ -1663,6 +1663,7 @@
             disabled: false,
             pinned: false,
             removable: false,
+            health: Default::default(),
         }
     }
 

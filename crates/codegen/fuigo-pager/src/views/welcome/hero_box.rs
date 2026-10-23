@@ -1,26 +1,22 @@
-//! Hero box component: the logo and menu sit side by side inside a bordered box.
+//! Hero layout: the Wind mark above a plain left-aligned column of version, tagline, menu and info slot. No border, no fill.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
-use ratatui::widgets::{Block, BorderType, Borders, Widget};
 
 use crate::theme::Theme;
 
 use super::WelcomeLayout;
 
-/// Minimum terminal width for the side-by-side hero box layout.
-pub(super) const HERO_BOX_MIN_WIDTH: u16 = 90;
+/// Minimum terminal width for the hero layout (mark above a centred text column).
+pub(super) const HERO_BOX_MIN_WIDTH: u16 = 60;
 
-/// Vertical padding (rows) between the box border and its inner content.
-const V_PAD: u16 = 1;
+/// Width of the centred text column.
+const COLUMN_WIDTH: u16 = 56;
 
-/// Horizontal inset (cols) between the right column's content and the box border; also the collapsed left-column width when the logo is hidden.
-const H_INSET: u16 = 2;
-
-/// Horizontal gap (cols) between the logo and the right column inside the box.
-const LOGO_H_PAD: u16 = 3;
+/// Rows between the mark and the text column.
+const MARK_GAP: u16 = 1;
 
 /// Rows the promo upgrade CTA reserves in the info slot: a spacer row above the `[label]` button row.
 /// Reserved on top of the announcement text rows so the message never paints over the button.
@@ -43,16 +39,22 @@ fn right_col_height(menu_height: u16, info_height: u16) -> u16 {
     1 + subtitle_rows(info_height) + info_gap + info_height + 1 + menu_height
 }
 
-/// Minimum content-area height the hero box needs to render without truncating.
-/// That covers the optional error row, the box, a one-row flex gap, and the fixed rows below (tip + prompt + version).
-/// The box always shows the full-height logo, so a terminal shorter than this falls back to the stacked layout instead of overflowing.
+/// Minimum content-area height the hero layout needs to render the text without truncating.
+/// That covers the optional error row, the text column, a one-row flex gap, and the fixed rows below (tip + prompt + version).
+/// The mark is optional and never counts here: text has priority. A terminal shorter than this falls back to the stacked layout.
 pub(super) fn min_content_height(
     error_height: u16,
     menu_height: u16,
     tip_height: u16,
     info_height: u16,
 ) -> u16 {
-    min_content_height_with_prompt(error_height, menu_height, tip_height, info_height, PROMPT_HEIGHT)
+    min_content_height_with_prompt(
+        error_height,
+        menu_height,
+        tip_height,
+        info_height,
+        PROMPT_HEIGHT,
+    )
 }
 
 /// [`min_content_height`] beside a composer of `prompt_height` rows: a taller draft never reflows the
@@ -64,8 +66,7 @@ pub(super) fn min_content_height_with_prompt(
     info_height: u16,
     prompt_height: u16,
 ) -> u16 {
-    let inner = super::logo::full_logo_line_count().max(right_col_height(menu_height, info_height));
-    let hero_box_height = 2 + V_PAD * 2 + inner;
+    let hero_box_height = right_col_height(menu_height, info_height);
     let gap_after_error = if error_height > 0 { 1u16 } else { 0 };
     gap_after_error
         + error_height
@@ -90,20 +91,10 @@ pub(super) fn clamp_info_height(
         .unwrap_or(0)
 }
 
-/// Width (cols) of the hero box's left (logo) column, including padding.
-/// Collapses to a small inset when the logo is hidden.
-fn left_col_width() -> u16 {
-    let logo_width = super::logo::full_logo_visual_width();
-    if logo_width == 0 {
-        H_INSET
-    } else {
-        logo_width + LOGO_H_PAD.saturating_sub(1) + LOGO_H_PAD
-    }
-}
-
-/// Compute the hero box layout: a bordered box with the logo on the left and the version and menu on the right.
+/// Compute the hero layout: the mark slot above a borderless column with the version, tagline, info slot and menu.
 ///
-/// Sizes the in-box info slot here (the announcement clamped to fit, else the fixed `changelog_height`) so the renderer just draws into `hero_info`.
+/// Sizes the info slot here (the announcement clamped to fit, else the fixed `changelog_height`) so the renderer just draws into `hero_info`.
+/// The mark gets whatever rows the text leaves, as the largest mask that fits, or none: it never takes rows from the text.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compute_hero_box(
     content_area: Rect,
@@ -120,16 +111,11 @@ pub(super) fn compute_hero_box(
     let tip_gap = if tip_height > 0 { 1u16 } else { 0 };
     let fixed_below = WelcomeLayout::fixed_below_with_prompt(tip_height, prompt_height);
 
-    // Column widths are height-independent, so derive them once and reuse for both the measurement and the rects
-    // `hero_info.width == info_slot_width`, so the measured width is the drawn width
-    let box_width = content_area.width.saturating_sub(6).min(120);
-    let inner_width = box_width.saturating_sub(2);
-    let left_col_width = left_col_width();
-    let right_width = inner_width.saturating_sub(left_col_width);
-    let info_slot_width = right_width.saturating_sub(H_INSET);
+    // The column width is height-independent, so derive it once and reuse it for both the measurement and the rects
+    let column_width = content_area.width.saturating_sub(4).min(COLUMN_WIDTH);
     let info_height = match announcement {
         Some(ann) => clamp_info_height(
-            announcement_desired_rows(ann, info_slot_width, expanded, has_upgrade_cta),
+            announcement_desired_rows(ann, column_width, expanded, has_upgrade_cta),
             content_area.height,
             error_height,
             menu_height,
@@ -138,36 +124,45 @@ pub(super) fn compute_hero_box(
         None => changelog_height,
     };
 
-    let logo_rows = super::logo::full_logo_line_count();
     let info_gap = if info_height > 0 { 1u16 } else { 0 };
-    let inner_height = logo_rows.max(right_col_height(menu_height, info_height));
-    let hero_box_height = 2 + V_PAD * 2 + inner_height;
+    let text_height = right_col_height(menu_height, info_height);
 
     let gap_after_error = if error_height > 0 { 1 } else { 0 };
     let fixed_above = gap_after_error + error_height;
 
-    // Top padding for vertical centering (use the default menu height and the one-line prompt so the logo position stays constant regardless of picker/focus state or draft length)
-    let default_menu_height = 4u16;
-    let default_inner = logo_rows.max(right_col_height(default_menu_height, info_height));
-    let default_hero = 2 + V_PAD * 2 + default_inner;
-    let remaining = content_area.height.saturating_sub(fixed_above);
-    let top_pad = remaining
-        .saturating_sub(default_hero)
-        .saturating_sub(WelcomeLayout::fixed_below(tip_height))
-        / 3;
-    // Centering derives top_pad from the default-menu box, but the fit gate (min_content_height) sizes for the actual box with no pad
-    // Clamp to the real slack so a taller menu or draft can't push the rows below the box off the bottom at the tight boundary
-    let top_pad = top_pad.min(
+    // The mark takes only the rows the text leaves, as the largest mask that fits, or none.
+    // Its size and the vertical centring come from the default menu and a one-line composer, so the text column holds still while the
+    // composer grows or the menu changes; a squeezed mark then shrinks upward instead of moving the text.
+    let mark_block = |rows: u16| if rows > 0 { rows + MARK_GAP } else { 0 };
+    let default_text = right_col_height(4, info_height);
+    let default_below = WelcomeLayout::fixed_below(tip_height);
+    let stable_rows = super::wind_mark::slot_rows(
+        content_area.width,
         content_area
             .height
-            .saturating_sub(fixed_above + hero_box_height + 1 + fixed_below),
+            .saturating_sub(fixed_above + default_text + 1 + default_below + MARK_GAP),
+    );
+    let stable_top = content_area
+        .height
+        .saturating_sub(fixed_above + mark_block(stable_rows) + default_text + 1 + default_below)
+        / 3;
+    let spare = content_area
+        .height
+        .saturating_sub(fixed_above + text_height + 1 + fixed_below + MARK_GAP);
+    let mark_rows = super::wind_mark::slot_rows(content_area.width, spare).min(stable_rows);
+    let top_pad = (stable_top + mark_block(stable_rows) - mark_block(mark_rows)).min(
+        content_area
+            .height
+            .saturating_sub(fixed_above + mark_block(mark_rows) + text_height + 1 + fixed_below),
     );
 
     let [
         _,
         _,
         error,
-        hero_box_slot,
+        mark_slot,
+        _,
+        text_slot,
         _,
         tip,
         _,
@@ -178,7 +173,9 @@ pub(super) fn compute_hero_box(
         Constraint::Length(top_pad),
         Constraint::Length(gap_after_error),
         Constraint::Length(error_height),
-        Constraint::Length(hero_box_height),
+        Constraint::Length(mark_rows),
+        Constraint::Length(if mark_rows > 0 { MARK_GAP } else { 0 }),
+        Constraint::Length(text_height),
         Constraint::Min(1), // flex gap
         Constraint::Length(tip_height),
         Constraint::Length(tip_gap),
@@ -188,94 +185,59 @@ pub(super) fn compute_hero_box(
     ])
     .areas(content_area);
 
-    // Horizontally center the hero box (`box_width` derived above).
+    // Horizontally center the mark slot (full width: the painter centres the mask) and the text column
     let [_, hero_box, _] = Layout::horizontal([
         Constraint::Min(0),
-        Constraint::Length(box_width),
+        Constraint::Length(column_width),
         Constraint::Min(0),
     ])
     .flex(Flex::Center)
-    .areas(hero_box_slot);
+    .areas(text_slot);
 
-    // Inner area inside the border and the vertical pad
-    // Widths reuse the values above; only x and y come from the laid-out box
-    let inner = Rect {
-        x: hero_box.x + 1,
-        y: hero_box.y + 1 + V_PAD,
-        width: inner_width,
-        height: inner_height,
-    };
-
-    // Left column: balanced padding around the logo; collapses to a small inset when the logo is hidden
-    let logo_width = super::logo::full_logo_visual_width();
-    // Logo body leans right; shave a column off the left pad to optically center.
-    let logo_left_pad = LOGO_H_PAD.saturating_sub(1);
-
-    // The logo is top-aligned and horizontally centered within the left column
-    let hero_logo = Rect {
-        x: inner.x + logo_left_pad,
-        y: inner.y,
-        width: logo_width.min(inner.width.saturating_sub(logo_left_pad)),
-        height: logo_rows.min(inner.height),
-    };
-
-    // The right column takes the rest of the inner width after the left column
-    let right_x = inner.x + left_col_width;
-
-    // Version line at top of right column.
+    // Version line at the top of the column
     let hero_version = Rect {
-        x: right_x,
-        y: inner.y,
-        width: right_width,
         height: 1,
+        ..hero_box
     };
-
     // Subtitle line below the version; hidden when the info slot is shown
     let hero_subtitle = if subtitle_rows(info_height) > 0 {
         Rect {
-            x: right_x,
-            y: inner.y + 1,
-            width: right_width,
+            y: hero_box.y + 1,
             height: 1,
+            ..hero_box
         }
     } else {
         zero
     };
-
     // Info block (announcement or changelog) below the version and optional subtitle
-    let info_y = inner.y + 1 + subtitle_rows(info_height) + info_gap;
+    let info_y = hero_box.y + 1 + subtitle_rows(info_height) + info_gap;
     let hero_info = if info_height > 0 {
         Rect {
-            x: right_x,
             y: info_y,
-            width: info_slot_width,
             height: info_height,
+            ..hero_box
         }
     } else {
         zero
     };
-
     // version + subtitle + info_gap + info + gap-before-menu
     let right_header_rows = 1 + subtitle_rows(info_height) + info_gap + info_height + 1;
-
-    // The menu sits below the header rows, left-aligned in the right column
+    // The menu sits below the header rows; shortcuts right-align inside the column
     let hero_menu = Rect {
-        x: right_x,
-        y: inner.y + right_header_rows,
-        width: info_slot_width,
-        height: menu_height.min(inner.height.saturating_sub(right_header_rows)),
+        y: hero_box.y + right_header_rows,
+        height: menu_height.min(hero_box.height.saturating_sub(right_header_rows)),
+        ..hero_box
     };
 
     WelcomeLayout {
-        logo: zero,
         error,
         menu: zero,
         changelog: zero,
         tip,
         prompt,
         version: version_slot,
+        hero_mark: if mark_rows > 0 { mark_slot } else { zero },
         hero_box,
-        hero_logo,
         hero_version,
         hero_subtitle,
         hero_info,
@@ -297,7 +259,7 @@ pub(super) struct HeroBoxRects {
     pub(super) upgrade_cta_rect: Option<Rect>,
 }
 
-/// Render the bordered hero box with the logo on the left and the version, subtitle, and menu on the right.
+/// Render the hero text column: version, subtitle, info slot and menu.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_hero_box(
     layout: &WelcomeLayout,
@@ -312,24 +274,13 @@ pub(super) fn render_hero_box(
     changelog_has_full_notes: bool,
     upgrade_cta: Option<&str>,
 ) -> HeroBoxRects {
-    // Dim the box border toward the background for a softer, dimmer gray.
-    let border_color = crate::render::color::blend_color(theme.bg_base, theme.gray_dim, 0.45)
-        .unwrap_or(theme.gray_dim);
-    let border_block = Block::new()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_color));
-    border_block.render(layout.hero_box, buf);
-
-    super::logo::render_full_logo(layout.hero_logo, buf, theme);
-
     super::render_version_badge(
         layout.hero_version,
         buf,
         theme,
         None,
         0,
-        false,
+        None,
         super::VersionBadgeMode::HeroInline,
     );
 

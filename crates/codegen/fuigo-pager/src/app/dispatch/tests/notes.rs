@@ -4,7 +4,15 @@ use super::*;
 use crate::app::dispatch::{recap_unavailable_toast, scrollback_has_user_messages};
 
 fn send_minimal_btw(app: &mut AppView, question: &str) -> uuid::Uuid {
-    match dispatch(Action::SendBtw { question: question.into(), images: Vec::new() }, app).as_slice() {
+    match dispatch(
+        Action::SendBtw {
+            question: question.into(),
+            images: Vec::new(),
+        },
+        app,
+    )
+    .as_slice()
+    {
         [
             Effect::SendBtw {
                 minimal_request_id: Some(id),
@@ -368,7 +376,13 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
 fn fullscreen_btw_response_after_dismiss_keeps_existing_behavior() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let effects = dispatch(Action::SendBtw { question: "side question".into(), images: Vec::new() }, &mut app);
+    let effects = dispatch(
+        Action::SendBtw {
+            question: "side question".into(),
+            images: Vec::new(),
+        },
+        &mut app,
+    );
     assert!(matches!(
         effects.as_slice(),
         [Effect::SendBtw {
@@ -401,13 +415,31 @@ fn btw_no_session_feedback_is_mode_specific() {
     let mut minimal = test_app_with_agent();
     minimal.screen_mode = crate::app::ScreenMode::Minimal;
     minimal.agents.get_mut(&id).unwrap().session.session_id = None;
-    assert!(dispatch(Action::SendBtw { question: "q".into(), images: Vec::new() }, &mut minimal).is_empty());
+    assert!(
+        dispatch(
+            Action::SendBtw {
+                question: "q".into(),
+                images: Vec::new()
+            },
+            &mut minimal
+        )
+        .is_empty()
+    );
     assert!(minimal.agents[&id].toast.is_none());
     assert!(last_system_text(&minimal, id).contains("No active session"));
 
     let mut fullscreen = test_app_with_agent();
     fullscreen.agents.get_mut(&id).unwrap().session.session_id = None;
-    assert!(dispatch(Action::SendBtw { question: "q".into(), images: Vec::new() }, &mut fullscreen).is_empty());
+    assert!(
+        dispatch(
+            Action::SendBtw {
+                question: "q".into(),
+                images: Vec::new()
+            },
+            &mut fullscreen
+        )
+        .is_empty()
+    );
     assert_eq!(
         fullscreen.agents[&id]
             .toast
@@ -1547,7 +1579,11 @@ fn p152_feedback_failure_shows_one_message_and_no_thanks() {
         "a report that was not sent must not be thanked for: {texts:?}"
     );
     let failures: Vec<_> = texts.iter().filter(|t| t.contains("feedback")).collect();
-    assert_eq!(failures.len(), 1, "exactly one message about the failed send: {texts:?}");
+    assert_eq!(
+        failures.len(),
+        1,
+        "exactly one message about the failed send: {texts:?}"
+    );
     assert!(
         failures[0].contains("Feedback is disabled"),
         "the message says why: {texts:?}"
@@ -1568,7 +1604,9 @@ fn p152_feedback_thanks_follow_the_confirmed_send() {
         &mut app,
     );
     assert!(
-        p152_system_texts(&app, id).iter().all(|t| !t.contains("Thanks")),
+        p152_system_texts(&app, id)
+            .iter()
+            .all(|t| !t.contains("Thanks")),
         "no thanks before the send is confirmed"
     );
     let _ = dispatch(
@@ -1805,11 +1843,18 @@ fn inline_btw_carries_composer_images_as_content_blocks() {
     assert!(composed.contains("[Image #1]"));
 
     let effects = dispatch(Action::SendPrompt(composed), &mut app);
-    let [Effect::SendBtw { blocks, question, .. }] = effects.as_slice() else {
+    let [
+        Effect::SendBtw {
+            blocks, question, ..
+        },
+    ] = effects.as_slice()
+    else {
         panic!("expected a single SendBtw effect, got {effects:?}");
     };
     assert!(question.contains("what is this"));
-    let blocks = blocks.as_ref().expect("an image-bearing /btw sends content blocks");
+    let blocks = blocks
+        .as_ref()
+        .expect("an image-bearing /btw sends content blocks");
     assert!(
         blocks
             .iter()
@@ -2277,10 +2322,15 @@ fn send_feedback_preserves_composer_draft() {
 
 #[test]
 fn memory_saved_message_names_the_path_the_shell_wrote() {
-    let msg = crate::app::dispatch::notes::memory_saved_message("/srv/work/.fuigo/memory/proj-abc12345/MEMORY.md");
+    let msg = crate::app::dispatch::notes::memory_saved_message(
+        "/srv/work/.fuigo/memory/proj-abc12345/MEMORY.md",
+    );
     assert!(msg.starts_with("Memory saved to "), "{msg}");
     assert!(msg.contains("proj-abc12345/MEMORY.md"), "{msg}");
-    assert!(!msg.ends_with("memory/MEMORY.md"), "must not claim the global file: {msg}");
+    assert!(
+        !msg.ends_with("memory/MEMORY.md"),
+        "must not claim the global file: {msg}"
+    );
 }
 
 #[test]
@@ -2294,6 +2344,74 @@ fn memory_note_saved_error_is_shown_as_not_saved() {
         Err("temporary folder, so the note was not saved".to_owned()),
     );
     assert!(app.agents.get(&id).unwrap().scrollback.len() > before);
-    let msg = crate::app::dispatch::notes::memory_save_failed_message("temporary folder, so the note was not saved");
+    let msg = crate::app::dispatch::notes::memory_save_failed_message(
+        "temporary folder, so the note was not saved",
+    );
     assert!(msg.contains("not saved"), "{msg}");
+}
+
+fn sized_png(bytes: usize) -> crate::prompt_images::PastedImage {
+    let mut image = crate::app::agent_view::test_fixtures::test_pasted_image();
+    image.byte_len = bytes;
+    image
+}
+
+/// Images past the side-question cap are cut; the user, not only the model, is told.
+#[test]
+fn btw_over_the_image_cap_tells_the_user() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let effects = dispatch(
+        Action::SendBtw {
+            question: "what are these".into(),
+            images: vec![sized_png(40_000_000), sized_png(20_000_000)],
+        },
+        &mut app,
+    );
+    assert!(matches!(effects.as_slice(), [Effect::SendBtw { .. }]), "{effects:?}");
+    let toast = app.agents[&id].toast.as_ref().map(|(m, _)| m.clone());
+    assert_eq!(
+        toast.as_deref(),
+        Some("1 attached image(s) were not included (over the 50MB side-question limit).")
+    );
+}
+
+#[test]
+fn btw_over_the_image_cap_in_minimal_mode_writes_a_transcript_line() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    dispatch(
+        Action::SendBtw {
+            question: "what are these".into(),
+            images: vec![sized_png(40_000_000), sized_png(20_000_000)],
+        },
+        &mut app,
+    );
+    assert!(app.agents[&id].toast.is_none());
+    assert_eq!(
+        last_system_text(&app, id),
+        "1 attached image(s) were not included (over the 50MB side-question limit)."
+    );
+}
+
+/// With no session the side question never goes out, and its images go with it: say so.
+#[test]
+fn btw_without_a_session_says_its_images_were_dropped() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.session_id = None;
+    let effects = dispatch(
+        Action::SendBtw {
+            question: "what is this".into(),
+            images: vec![sized_png(10)],
+        },
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    let toast = app.agents[&id].toast.as_ref().map(|(m, _)| m.clone());
+    assert!(
+        toast.as_deref().is_some_and(|t| t.contains("attached image(s) were not sent")),
+        "{toast:?}"
+    );
 }

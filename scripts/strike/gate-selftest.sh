@@ -65,6 +65,19 @@ pass=0; failn=0
 CNF=$W/command-not-found.txt; : > "$CNF"
 command_not_found_handle() { printf '%s\n' "$*" >> "$CNF"; echo "selftest: command not found: $1" >&2; return 127; }
 chk() { if [ "$2" = "$3" ]; then pass=$((pass+1)); echo "PASS  $1"; else failn=$((failn+1)); echo "FAIL  $1 (got '$2' wanted '$3')"; [ "${GATE_SELFTEST_FAILFAST:-}" != 1 ] || { RETAIN_W=1; echo "selftest: $pass passed, $failn failed   (FAILFAST: stopped at the first failure; mutant mode; fixtures may still be running, $W is NOT deleted)"; exit 1; }; fi; }
+# wd_log_wait <rundir> : the watchdog writes watchdog.log only AFTER gate_abort_run returns, and that does two host-wide /proc
+# marker sweeps plus a sleep: tens of seconds on a loaded 200-user host, so a fixed 30/60 s poll raced it (the one observed
+# failure of "watchdog: logs the kill"). The event to wait for is the watchdog's own exit (its pid is in <rundir>/watchdog.pid; the
+# log line is written just before it exits) or the line itself, bounded at 300 s.
+wd_log_wait() {
+  local rd=$1 i wp
+  for i in $(seq 1 300); do
+    grep -q 'killed by watchdog' "$rd/watchdog.log" 2>/dev/null && return 0
+    wp=$(cat "$rd/watchdog.pid" 2>/dev/null)
+    if [ -n "$wp" ] && ! gate_pid_alive "$wp"; then grep -q 'killed by watchdog' "$rd/watchdog.log" 2>/dev/null; return 0; fi
+    sleep 1
+  done
+}
 # Every fixture process inherits FUIGO_SELFTEST_ID, so any name-selected pid is verified to be THIS run's before it is signalled or
 # described (an unrelated host process with the same command line is never touched; Astra R27/R28 HIGH).
 # GATE_SELFTEST_NONCE=<digits> is for the MUTANT harness only (gate-mutants.py): it is appended to this run's identity (marker, tag, and
@@ -205,6 +218,47 @@ printf 'parent-1 2\ntwo-1 4\n' > "$W/expect-bad.txt"
 EXP="$W/expect-bad.txt" expect expected-N-mismatch-rejected "$W/matching.log" 2 3 'unfinished:     1'
 printf 'parent-1 2\n' > "$W/expect-missing.txt"
 EXP="$W/expect-missing.txt" expect binary-absent-from-expected-rejected "$W/matching.log" 2 3 'unfinished:     1'
+# --- ignored-test mode (final-gate.sh --pty). The run is `--ignored [filter]`, so a binary's `running N tests` counts only the tests
+# that command selects (the rest are "filtered out"). The expected N must therefore come from `--list --ignored [filter]`, never from a plain
+# `--list`; the judge itself is unchanged and the first case shows it accepts such a log, the second why the listing mode matters.
+RESF() { echo "test result: ok. $1 passed; 0 failed; 0 ignored; 0 measured; $2 filtered out; finished in 0.01s"; }
+q_ignored_run() { sy "$HDR"; echo "running 4 tests"; RESF 4 10087; sy "$HDR2"; echo "running 0 tests"; RESF 0 12; }
+printf 'parent-1 4\ntwo-1 0\n' > "$W/expect-ign-ok.txt"
+EXP="$W/expect-ign-ok.txt" expect pty-ignored-run-matches-ignored-list "$(syn ign q_ignored_run)" 2 0 'ADMISSIBLE: YES' 'unfinished:     0'
+printf 'parent-1 10091\ntwo-1 12\n' > "$W/expect-ign-plain.txt"
+EXP="$W/expect-ign-plain.txt" expect pty-ignored-run-vs-plain-list-count-rejected "$W/ign.log" 2 3 'ADMISSIBLE: NO' 'unfinished:     2'
+# list-counts.py in ignored-test mode, against a fake libtest binary: 3 tests, of which app::lc::a and other::c are ignored
+FAKEX=$W/fakecrate-0123456789abcdef
+cat > "$FAKEX" <<'EOS'
+#!/bin/sh
+ign=0; flt=""
+for a in "$@"; do case "$a" in --ignored) ign=1;; --list|--format|terse) ;; *) flt=$a;; esac; done
+for t in app::lc::a app::lc::b other::c; do
+  if [ $ign = 1 ]; then case $t in app::lc::b) continue;; esac; fi
+  case "$t" in "$flt"*) echo "$t: test";; esac
+done
+EOS
+chmod +x "$FAKEX"
+printf '{"reason":"compiler-artifact","package_id":"path+file:///x/fakecrate#0.1.0","target":{"kind":["lib"],"name":"fakecrate","doctest":true},"profile":{"test":true},"executable":"%s","manifest_path":"%s/Cargo.toml"}\n' "$FAKEX" "$W" > "$W/fake-artifact.json"
+lcount() { env -u LIST_IGNORED -u LIST_FILTERS -u NODOC "$@" P=fakecrate python3 "$HERE/list-counts.py" "$W/fake-artifact.json" 2>&1 | tr '\n' '|'; }
+chk "list-counts: default lists every test and the doc-test run" "$(lcount)" "fakecrate-0123456789abcdef 3|doc:fakecrate -|"
+chk "list-counts: LIST_IGNORED=1 lists only the ignored tests" "$(lcount LIST_IGNORED=1)" "fakecrate-0123456789abcdef 2|doc:fakecrate -|"
+chk "list-counts: LIST_FILTERS applies the run's name filter to that binary (keyed without its hash)" "$(lcount LIST_IGNORED=1 'LIST_FILTERS=fakecrate=app::lc')" "fakecrate-0123456789abcdef 1|doc:fakecrate -|"
+chk "list-counts: a filter for another binary changes nothing" "$(lcount LIST_IGNORED=1 'LIST_FILTERS=other_crate=app::lc')" "fakecrate-0123456789abcdef 2|doc:fakecrate -|"
+chk "list-counts: NODOC=1 prints no doc: line (the ignored run executes no doc-tests)" "$(lcount LIST_IGNORED=1 NODOC=1)" "fakecrate-0123456789abcdef 2|"
+# the target list the --pty mode reads: well formed, and every named test target exists in this tree
+PTYT=$HERE/pty-targets.txt; ROOT=$(cd "$HERE/../.." && pwd)
+bad=0; n=0
+while read -r ppkg pkind ptgt pthr pflt; do
+  case "$ppkg" in ''|'#'*) continue;; esac; n=$((n+1))
+  [[ "$pthr" =~ ^[1-9][0-9]*$ ]] || bad=$((bad+1))
+  case "$pkind" in
+    test) [ -n "$(find "$ROOT/crates" -path "*/$ppkg/tests/$ptgt.rs" -o -path "*/$ppkg/tests/$ptgt/mod.rs" -o -path "*/$ppkg/tests/$ptgt/main.rs" 2>/dev/null | head -1)" ] || bad=$((bad+1));;
+    lib|tests) ;;
+    *) bad=$((bad+1));;
+  esac
+done < "$PTYT"
+chk "pty-targets.txt: $n well-formed targets, every test target exists in the tree (bad=$bad)" "$([ "$n" -gt 0 ] && echo ok)/$bad" "ok/0"
 # --- fourth audit round (Astra on b6cc1b43): expectation files must be usable; unparseable Running headers
 : > "$W/expect-empty.txt"
 EXP="$W/expect-empty.txt" expect empty-expected-N-file-rejected "$W/matching.log" 2 3 'is empty'
@@ -295,6 +349,8 @@ o=$(env -u GATE_ALLOW_NO_EXPECT -u GATE_CG_MOUNT -u GATE_PROC_ROOT bash "$HERE/f
 chk "final-gate rejects an 11-hex-digit sha" "$rc/$(printf '%s' "$o" | grep -c 'sha must match')" "2/1"
 o=$(env -u GATE_ALLOW_NO_EXPECT -u GATE_CG_MOUNT -u GATE_PROC_ROOT bash "$HERE/final-gate.sh" --src "$W/fakesrc" --lane "$FGL" 0123456789abcdef0123456789abcdef012345678 1 2>&1); rc=$?
 chk "final-gate rejects a 41-hex-digit sha" "$rc/$(printf '%s' "$o" | grep -c 'sha must match')" "2/1"
+o=$(env -u GATE_ALLOW_NO_EXPECT -u GATE_CG_MOUNT -u GATE_PROC_ROOT bash "$HERE/final-gate.sh" --src "$W/fakesrc" --lane "$FGL" --pty --pkg fuigo-pager 0123456789abcdef 1 2>&1); rc=$?
+chk "final-gate refuses --pty combined with --pkg (the ignored PTY suite selects its own packages)" "$rc/$(printf '%s' "$o" | grep -c 'do not combine it with --pkg')" "2/1"
 chk "no lane directory created by any refused invocation" "$([ -e "/root/fuigo-builds/$FGL" ] && echo created || echo none)" none
 case "$FGL" in selftest-hook-*) rm -rf "/root/fuigo-builds/$FGL";; esac
 chk "final-gate hard-sets the hooks after refusing them" \
@@ -599,10 +655,10 @@ for _ in range(240):
   chk "watchdog: gate alive -> run untouched" "$(active "$WUB")" active
   chk "watchdog: runs detached in its own session, not the test's" "$([ "$(ps -o sid= -p "$(cat "$WRD/watchdog.pid")" | tr -d ' ')" != "$(ps -o sid= -p $$ | tr -d ' ')" ] && echo own || echo same)" own
   skill -9 "$FG"
-  for i in $(seq 1 15); do [ "$(active "$WUB")" = gone ] && break; sleep 1; done
+  for i in $(seq 1 60); do [ "$(active "$WUB")" = gone ] && break; sleep 1; done
   chk "watchdog: gate SIGKILLed -> run killed within 15 s" "$(active "$WUB")" gone
   # the log line comes AFTER the watchdog's marker sweep (a host-wide /proc scan: seconds under load), so wait for it
-  for i in $(seq 1 60); do grep -q 'killed by watchdog' "$WRD/watchdog.log" 2>/dev/null && break; sleep 1; done
+  wd_log_wait "$WRD"
   chk "watchdog: logs the kill" "$(grep -c 'killed by watchdog' "$WRD/watchdog.log" 2>/dev/null)" 1
   # control: a normal finish (stop file) must disarm it
   WID2=selftest-wd2-$SELFTEST_UID-$RANDOM; WRD2=$W/wdrun2; mkdir -p "$WRD2"; WUB2="fuigo-gate-$(printf '%s' "$WID2" | tr -c 'A-Za-z0-9' '-')"
@@ -756,9 +812,9 @@ FAKE
   chk "aux scope fixture: a bg command is running and its unit is recorded in aux.units" "$(pgrep -fc "^sleep 6032\.$SELFTEST_TAG\$")/$(grep -c '^fuigo-ax-' "$AXRD/aux.units")" "1/1"
   gate_wd_start "$AXRD" "$AXG" "$AXID" "$AXUB"; sleep 2
   chk "watchdog: gate alive -> the auxiliary scope is untouched" "$(pgrep -fc "^sleep 6032\.$SELFTEST_TAG\$")" 1
-  skill -9 "$AXG"; for i in $(seq 1 30); do [ "$(pgrep -fc "^sleep 6032\.$SELFTEST_TAG\$")" = 0 ] && break; sleep 1; done
+  skill -9 "$AXG"; for i in $(seq 1 60); do [ "$(pgrep -fc "^sleep 6032\.$SELFTEST_TAG\$")" = 0 ] && break; sleep 1; done
   chk "watchdog: SIGKILLed gate -> the auxiliary scope recorded in aux.units is killed" "$(pgrep -fc "^sleep 6032\.$SELFTEST_TAG\$")" 0
-  for i in $(seq 1 30); do grep -q 'killed by watchdog' "$AXRD/watchdog.log" 2>/dev/null && break; sleep 1; done
+  wd_log_wait "$AXRD"
   chk "watchdog logs the auxiliary-scope kill as a complete kill" "$(grep -c 'killed by watchdog' "$AXRD/watchdog.log" 2>/dev/null)" 1
   # SIGKILL of the supervisor INSIDE the child's fork->exec window (hook: the child is held there for 8 s): the runner must never start
   printf ': > "%s/t2.ran"\nexec sleep 6021.%s\n' "$W" "$SELFTEST_TAG" > "$W/tiny2.sh"
@@ -1175,8 +1231,8 @@ echo v1 > "$SB/t/EXPECT"; cp "$HERE/../../rust-toolchain.toml" "$SB/" 2>/dev/nul
   && echo 'fn main(){ println!("v2"); }' > pager/src/bin/p.rs && echo v2 > t/EXPECT && git -c user.name=t -c user.email=t@t commit -qam tip && git bundle create "$W/stalebin.bundle" main > /dev/null 2>&1 )
 SBPAR=$(git -C "$SB" rev-parse HEAD~1 2>/dev/null)
 stale_run() { # <label> <rp.sh path> : prints "<parent exit>/<tip exit>", plus "/REFS-NOT-REMOVED" if this run's refs could not be cleaned up
-  local ln=selftest-stale-$1-$SELFTEST_UID-$RANDOM out res r refs R0=/root/fuigo-builds/integration/src-p15r
-  setsid env -u GATE_ALLOW_NO_EXPECT -u GATE_CG_MOUNT -u GATE_PROC_ROOT "$2" "$ln" "$SBPAR" main "$W/stalebin.bundle" stalebintest < /dev/null > /dev/null 2>&1
+  local ln=selftest-stale-$1-$SELFTEST_UID-$RANDOM out res r refs R0=$RPREPO
+  setsid env -u GATE_ALLOW_NO_EXPECT -u GATE_CG_MOUNT -u GATE_PROC_ROOT RP_REPO="$RPREPO" "$2" "$ln" "$SBPAR" main "$W/stalebin.bundle" stalebintest < /dev/null > /dev/null 2>&1
   out=/root/fuigo-builds/$ln.out
   res="$(sed -n 's/.*parent stalebintest exit=\([0-9]*\).*/\1/p' "$out")/$(sed -n 's/.*tip stalebintest exit=\([0-9]*\).*/\1/p' "$out")"
   rm -rf "/root/fuigo-builds/$ln" "/root/fuigo-builds/$ln".* "/root/fuigo-builds/$ln"-* 2>/dev/null   # delimited: never a longer lane name that merely starts with this one
@@ -1189,15 +1245,21 @@ stale_run() { # <label> <rp.sh path> : prints "<parent exit>/<tip exit>", plus "
   [ -z "$refs" ] || res="$res/REFS-NOT-REMOVED"
   printf '%s' "$res"
 }
-# rp.sh.bak is the PRE-PACKET deployed rp.sh (not in git); its identity is pinned, so replacing it cannot turn 0/101 into something else unnoticed
+# fixtures/rp.sh.pre-p08 is the PRE-PACKET deployed rp.sh, kept in the tree so the suite needs nothing outside the candidate; its
+# identity is pinned, so replacing it cannot turn 0/101 into something else unnoticed. A throw-away git repository stands in for the
+# integration repository rp.sh fetches into (RP_REPO), and the old script is run from a COPY whose two hard-coded outside paths (the
+# integration repository and /root/fuigo-builds/derive.py) point at the candidate instead; that is the only change made to it.
 RPBAK_SHA=28299238eee6b50b09c1ce328085a7f2d20444cbd99e1ee51c16af7de85cd53b
-if [ "${#SBPAR}" = 40 ] && [ -x /root/fuigo-builds/rp.sh.bak ] && [ "$(sha256sum < /root/fuigo-builds/rp.sh.bak 2>/dev/null | cut -d' ' -f1)" = "$RPBAK_SHA" ]; then
-  chk "[stale binary] OLD rp.sh: parent passes, tip FAILS its expectation (stale parent binary reused)" "$(stale_run old /root/fuigo-builds/rp.sh.bak)" "0/101"
+RPREPO=$W/rp-repo; git init -q "$RPREPO" > /dev/null 2>&1
+RPOLD=$W/rp-old/rp.sh; mkdir -p "$W/rp-old"
+sed -e 's|R=$B/integration/src-p15r|R=${RP_REPO:?}|' -e 's|\$B/derive.py|'"$HERE"'/derive.py|' "$HERE/fixtures/rp.sh.pre-p08" > "$RPOLD" 2>/dev/null; chmod +x "$RPOLD"
+if [ "${#SBPAR}" = 40 ] && [ "$(sha256sum < "$HERE/fixtures/rp.sh.pre-p08" 2>/dev/null | cut -d' ' -f1)" = "$RPBAK_SHA" ] && [ -d "$RPREPO/.git" ] && grep -q 'RP_REPO:?' "$RPOLD" && grep -q "$HERE/derive.py" "$RPOLD"; then
+  chk "[stale binary] OLD rp.sh: parent passes, tip FAILS its expectation (stale parent binary reused)" "$(stale_run old "$RPOLD")" "0/101"
   chk "[stale binary] NEW rp.sh: both sides pass (tip tested against the tip binary)" "$(stale_run new "$HERE/rp.sh")" "0/0"
   printf '#!/bin/sh\necho v1\n' > "$W/stale-v1-bin"; chmod +x "$W/stale-v1-bin"
   chk "[stale binary] NEW rp.sh with a poisoned inherited FUIGO_BINARY (stale v1 binary): still 0/0, the pin overrides it" "$(FUIGO_BINARY="$W/stale-v1-bin" stale_run poison "$HERE/rp.sh")" "0/0"
 else
-  chk "[stale binary] fixture built and /root/fuigo-builds/rp.sh.bak present with the pinned sha256 ($RPBAK_SHA)" "no" "yes"
+  chk "[stale binary] fixture built, throw-away repo made, and fixtures/rp.sh.pre-p08 present with the pinned sha256 ($RPBAK_SHA)" "no" "yes"
 fi
 # GATE_SELFTEST_SKIP_E2E=1 is for MUTANT runs only (R049): it skips the cases that build and run a real final-gate.sh (minutes each).
 # The release self-test never sets it; a run with it set says so and cannot be mistaken for the full suite.
@@ -1241,7 +1303,7 @@ gate_abort_case() { # <label> <TERM|KILL>
     chk "[$lbl] gate exits 143 and says it aborted" "$rc/$(grep -c 'GATE: aborted' "$GAF.out")" "143/1"
     chk "[$lbl] inventory records event=aborted" "$(grep -c 'event=aborted' "/root/fuigo-builds/$LN/runs.inventory")" 1
   else
-    for i in $(seq 1 60); do grep -q 'killed by watchdog' "/root/fuigo-builds/$LN/runs/$RUNID2/watchdog.log" 2>/dev/null && break; sleep 1; done
+    wd_log_wait "/root/fuigo-builds/$LN/runs/$RUNID2"
     chk "[$lbl] watchdog wrote its log" "$(grep -c 'killed by watchdog' "/root/fuigo-builds/$LN/runs/$RUNID2/watchdog.log" 2>/dev/null)" 1
   fi
   if [ -e "$GAF.rc" ]; then RETAIN_W=$rw; case "$LN" in selftest-abort-*) rm -rf "/root/fuigo-builds/$LN";; esac

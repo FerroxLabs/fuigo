@@ -100,6 +100,7 @@ fn make_handle_with_factory(
         require_explicit_toolset,
         confine_fs_to_workspace_root,
         bind_mcp: None,
+        sandbox: None,
     };
     let handle = WorkspaceHandle::build(
         config,
@@ -929,6 +930,15 @@ pub(crate) fn background_capable_cfg() -> ToolServerConfig {
         behavior_preset: None,
     }
 }
+/// How long a task started by [`terminal_run_request`] may run before the backend stops it.
+///
+/// This is a real limit, not a formality: a background task is killed when its request timeout elapses (the bash
+/// tool passes the model's own `timeout` for that), and a foreground command is killed too unless it moves to the
+/// background first. Every test using this helper starts something it means to keep alive for the whole test
+/// (`sleep 600`), so the limit must be out of reach of a test that a loaded host stretches to minutes. At 60 s a
+/// stalled run expired its `run_background` task mid-test, which left the snapshot with only the task that had
+/// moved from the foreground (moving resets its limit) and no `run_background` task.
+const TEST_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
 /// A minimal bash-kind [`TerminalRunRequest`] for `command`, writing output under `out_dir`.
 ///
 /// [`TerminalRunRequest`]: fuigo_tools::computer::types::TerminalRunRequest
@@ -941,7 +951,7 @@ pub(crate) fn terminal_run_request(
         command: command.to_string(),
         working_directory: out_dir.to_path_buf(),
         env: std::collections::HashMap::new(),
-        timeout: std::time::Duration::from_secs(60),
+        timeout: TEST_TASK_TIMEOUT,
         output_byte_limit: 4096,
         output_file: out_dir.join(format!("{tool_call_id}.out")),
         notification_handle: fuigo_tools::notification::ToolNotificationHandle::noop(),
@@ -963,7 +973,7 @@ pub(crate) async fn start_background_sleep(
 ) -> fuigo_tools::computer::types::BackgroundHandle {
     session
         .terminal_backend()
-        .run_background(terminal_run_request("sleep 30", out_dir, tool_call_id))
+        .run_background(terminal_run_request("sleep 600", out_dir, tool_call_id))
         .await
         .expect("start background task")
 }
@@ -1267,6 +1277,7 @@ fn make_persistent_shell_handle() -> WorkspaceHandle {
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
         bind_mcp: None,
+        sandbox: None,
     };
     WorkspaceHandle::build(
         config,
@@ -1702,6 +1713,7 @@ pub(crate) fn make_handle_with_events() -> (WorkspaceHandle, tempfile::TempDir) 
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
         bind_mcp: None,
+        sandbox: None,
     };
     let home = tempfile::tempdir().unwrap();
     let handle = WorkspaceHandle::build(
@@ -2341,6 +2353,7 @@ fn make_queue_backed_handle_with_source(
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
         bind_mcp: None,
+        sandbox: None,
     };
     let home = tempfile::tempdir().expect("workspace home tempdir");
     let policy = fuigo_file_utils::queue::UploadRetryPolicy {
@@ -3145,6 +3158,7 @@ async fn hook_registry_loads_from_settings_file() {
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
         bind_mcp: None,
+        sandbox: None,
     };
     let handle = WorkspaceHandle::new(config).expect("ok");
     let registry = handle.hook_registry();
@@ -3181,6 +3195,7 @@ async fn hook_registry_loads_from_directory() {
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
         bind_mcp: None,
+        sandbox: None,
     };
     let handle = WorkspaceHandle::new(config).expect("ok");
     let registry = handle.hook_registry();
@@ -3201,6 +3216,8 @@ async fn hook_registry_snapshot_is_disconnected() {
             enabled: true,
             command: Some("echo injected".into()),
             command_raw: Some("echo injected".into()),
+            args: None,
+            shell: None,
             url: None,
             url_raw: None,
             timeout_ms: 10_000,
@@ -3239,6 +3256,7 @@ async fn hook_load_errors_reported_for_bad_file() {
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
         bind_mcp: None,
+        sandbox: None,
     };
     let handle = WorkspaceHandle::new(config).expect("construction must still succeed");
     assert!(
@@ -3281,6 +3299,7 @@ async fn hook_registry_global_and_project_sources_merge() {
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
         bind_mcp: None,
+        sandbox: None,
     };
     let handle = WorkspaceHandle::new(config).expect("ok");
     let registry = handle.hook_registry();
@@ -3310,6 +3329,7 @@ async fn hook_registry_missing_source_is_non_fatal() {
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
         bind_mcp: None,
+        sandbox: None,
     };
     let handle = WorkspaceHandle::new(config).expect("must not panic on missing source");
     assert!(handle.hook_registry().is_empty());
@@ -3343,6 +3363,7 @@ async fn hook_registry_empty_directory_yields_empty_registry() {
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
         bind_mcp: None,
+        sandbox: None,
     };
     let handle = WorkspaceHandle::new(config).expect("ok");
     assert!(handle.hook_registry().is_empty());
@@ -8185,6 +8206,7 @@ fn make_handle_with_queue_routing(
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
         bind_mcp: None,
+        sandbox: None,
     };
     let home = tempfile::tempdir().unwrap();
     let auth: Arc<dyn AuthProvider> = Arc::new(AuthCredential::bearer("test-token"));
@@ -9218,4 +9240,17 @@ fn auxiliary_service_wiring_default_collection_stays_disabled_with_a_proxy() {
         .unset(WORKSPACE_DATA_COLLECTION_DISABLED_ENV);
     let wiring = auxiliary_service_wiring(&wiring_test_auth());
     assert!(wiring.data_collection_disabled);
+}
+/// Row 48.5, path "ACP cancel of one tool call": it marks only that call as completed; a parallel call of the
+/// same session (and another session's call) stays active.
+#[tokio::test]
+async fn cancel_tool_call_leaves_parallel_calls_active() {
+    let handle = make_handle();
+    let tracker = handle.activity_tracker().clone();
+    tracker.tool_call_started("par-c1", "run_terminal_command", Some("par-sess"));
+    tracker.tool_call_started("par-c2", "run_terminal_command", Some("par-sess"));
+    tracker.tool_call_started("oth-c1", "run_terminal_command", Some("other-sess"));
+    handle.cancel_tool_call("par-sess", "par-c1");
+    assert_eq!(tracker.snapshot_session("par-sess").active_tool_calls, 1, "the sibling call stays active");
+    assert_eq!(tracker.snapshot_session("other-sess").active_tool_calls, 1, "another session is untouched");
 }

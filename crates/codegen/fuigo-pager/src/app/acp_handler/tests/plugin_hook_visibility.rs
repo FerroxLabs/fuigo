@@ -171,7 +171,7 @@
     }
 
     /// F045 stays for every source: non-plugin success and skip leave nothing, a non-plugin failure gets its one line and no badge,
-    /// a plugin failure gets the line AND a badge, a plugin deny gets neither (the shell's annotation reports it once).
+    /// a plugin failure gets a badge only (chip-only, see the next test), a plugin deny gets neither (the shell's annotation reports it once).
     #[test]
     fn f045_is_kept_and_only_plugin_runs_are_badged() {
         let mut app = make_app_with_agent(SID);
@@ -201,7 +201,7 @@
             sb.get(i).map(|e| &e.block),
             Some(RenderBlock::SessionEvent(b)) if matches!(b.event, SessionEvent::HookOutcome { .. })
         )).count();
-        assert_eq!(outcome_lines, 2, "and keeps its F045 line");
+        assert_eq!(outcome_lines, 1, "a plugin failure is chip-only: only the non-plugin failure kept its line");
         let badge = (0..sb.len()).find(|&i| matches!(
             sb.get(i).map(|e| &e.block), Some(RenderBlock::ToolCall(ToolCallBlock::Lifecycle(_)))
         )).unwrap();
@@ -213,6 +213,41 @@
             HookRunStatusDto::Failed { error: "denied".into(), elapsed_ms: 2, blocked: true },
         )]);
         assert_eq!(app.agents[&AgentId(0)].scrollback.len(), len, "a plugin deny adds nothing");
+    }
+
+    /// 1.0.32 HOOKS-COMPAT: a plugin hook that ran and failed (a RUNTIME failure) is counted in the hooks chip and
+    /// expandable there, but adds no transcript line of its own, however many times it fails. A user's own (non-plugin) hook
+    /// has no chip, so it keeps its single "failed, ignored" line.
+    #[test]
+    fn a_plugin_runtime_failure_is_chip_only_and_adds_no_transcript_line() {
+        let mut app = make_app_with_agent(SID);
+        let before = app.agents[&AgentId(0)].scrollback.len();
+        for _ in 0..5 {
+            deliver(&mut app, SID, "user_prompt_submit", None, vec![run(
+                &plugin("noisy"),
+                HookRunStatusDto::Failed { error: "exit 1: boom".into(), elapsed_ms: 2, blocked: false },
+            )]);
+        }
+        let sb = &app.agents[&AgentId(0)].scrollback;
+        let outcome_lines = (0..sb.len()).filter(|&i| matches!(
+            sb.get(i).map(|e| &e.block),
+            Some(RenderBlock::SessionEvent(b)) if matches!(b.event, SessionEvent::HookOutcome { .. })
+        )).count();
+        assert_eq!(outcome_lines, 0, "no per-failure transcript line for a plugin hook");
+        assert!(count_lifecycle_blocks(sb) >= 1, "the failures are badged in the chip");
+        let badge = (0..sb.len()).find(|&i| matches!(
+            sb.get(i).map(|e| &e.block), Some(RenderBlock::ToolCall(ToolCallBlock::Lifecycle(_)))
+        )).unwrap();
+        assert!(rendered_text(sb, badge, false).contains("[hooks: "), "the chip shows the failure count");
+        assert!(rendered_text(sb, badge, true).contains("boom"), "the full error is behind expand");
+        assert!(app.agents[&AgentId(0)].scrollback.len() > before);
+
+        let len = sb.len();
+        deliver(&mut app, SID, "user_prompt_submit", None, vec![run(
+            "global/mine",
+            HookRunStatusDto::Failed { error: "exit 2: mine".into(), elapsed_ms: 2, blocked: false },
+        )]);
+        assert_eq!(app.agents[&AgentId(0)].scrollback.len(), len + 1, "a non-plugin failure keeps its one line");
     }
 
     #[test]

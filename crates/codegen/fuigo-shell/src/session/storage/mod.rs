@@ -116,21 +116,41 @@ fn write_bytes_atomic_outcome_with(
     }
 }
 
+/// Flush `file` to stable media with ONE `F_FULLFSYNC`.
+///
+/// macOS `fsync` may stop at the drive's volatile cache, so the flush that counts is `F_FULLFSYNC`. Rust's own
+/// `File::sync_all` is already `fcntl(F_FULLFSYNC)` on Apple targets, so calling it and then `fullfsync_raw` flushed the
+/// same descriptor twice. A full flush is the expensive part of every durable write there (a few ms on the internal SSD,
+/// hundreds of ms on an external or busy volume) and a rewind makes dozens of durable writes, so the second flush doubled
+/// a wait the user sits through at `/rewind` and `/resume`. `fullfsync_raw` alone carries the whole guarantee, whatever
+/// `sync_all` does.
 #[cfg(target_os = "macos")]
 pub(crate) fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
     use std::os::fd::AsRawFd;
 
-    file.sync_all()?;
     fullfsync_raw(file.as_raw_fd())
 }
 
 #[cfg(target_os = "macos")]
 pub(crate) fn fullfsync_raw(fd: std::os::fd::RawFd) -> io::Result<()> {
+    #[cfg(test)]
+    FULLFSYNC_CALLS.with(|calls| calls.set(calls.get() + 1));
     // macOS fsync may stop at volatile drive caches; F_FULLFSYNC requests stable media.
-    if unsafe { libc::fcntl(fd, libc::F_FULLFSYNC) } == -1 {
-        return Err(io::Error::last_os_error());
+    loop {
+        if unsafe { libc::fcntl(fd, libc::F_FULLFSYNC) } != -1 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
     }
-    Ok(())
+}
+
+// `F_FULLFSYNC` calls made on this thread (tests only): the cost a durable write pays on macOS.
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    pub(crate) static FULLFSYNC_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(any(all(unix, not(target_os = "macos")), windows))]
@@ -152,8 +172,7 @@ pub(crate) fn sync_dir_durable(dir: &Path) -> io::Result<()> {
     use std::os::fd::AsRawFd;
 
     let file = std::fs::File::open(dir)?;
-    file.sync_all()?;
-    // Match file durability: macOS fsync may stop at volatile drive caches.
+    // Same single full flush as `sync_file_durable`.
     fullfsync_raw(file.as_raw_fd())
 }
 
@@ -2067,6 +2086,21 @@ pub trait StorageAdapter: Send + Sync {
         info: &Info,
     ) -> io::Result<Option<crate::session::usage_file::SessionUsageFile>>;
 
+    /// Read-modify-write the session's `usage.json` under an exclusive lock on a sidecar `usage.json.lock`.
+    /// Two processes that both append turns to one session (a leader and an attached client, a resume racing a live
+    /// session) lose none of them, because the lock spans the whole read-modify-write.
+    /// Returns the file that was written.
+    async fn update_usage(
+        &self,
+        info: &Info,
+        update: Box<
+            dyn FnOnce(
+                    Option<crate::session::usage_file::SessionUsageFile>,
+                ) -> crate::session::usage_file::SessionUsageFile
+                + Send,
+        >,
+    ) -> io::Result<crate::session::usage_file::SessionUsageFile>;
+
     async fn write_usage(
         &self,
         info: &Info,
@@ -2338,6 +2372,9 @@ pub(crate) struct RawChunkMetaPeek {
     pub prompt_index: Option<u64>,
     #[serde(default, rename = "hostTurn")]
     pub host_turn: Option<bool>,
+    /// Set on the user chunk of a turn the runtime started on its own (see [`AUTOMATIC_TURN_META_KEY`]).
+    #[serde(default, rename = "automaticTurn")]
+    pub automatic_turn: Option<bool>,
 }
 
 /// Role of one item in the rewind timeline, as seen by [`filter_rewind_by`].
@@ -2905,6 +2942,58 @@ pub(crate) struct ContentPeek<'a> {
 pub(crate) struct ContentMetaPeek<'a> {
     #[serde(borrow, default)]
     pub bash_command: Option<std::borrow::Cow<'a, str>>,
+}
+
+/// Chunk `_meta` key marking the user chunk of a turn the runtime started by itself (a finished background task or subagent, a workflow
+/// result, a peer message, a goal nudge, a scheduled wake): no one typed it, so the rewind picker does not offer it.
+pub(crate) const AUTOMATIC_TURN_META_KEY: &str = "automaticTurn";
+
+/// The prompt indices of the runtime-started turns in an `updates.jsonl`, honouring rewind markers (a rewind to `n` drops every index `>= n`).
+/// A missing file is an empty set. Only lines that mention the marker key are parsed, so the scan stays cheap on a large file.
+pub fn collect_automatic_prompt_indices(
+    path: &std::path::Path,
+) -> std::io::Result<std::collections::BTreeSet<usize>> {
+    use std::io::BufRead;
+    let mut found = std::collections::BTreeSet::new();
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+        Err(e) => return Err(e),
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(found);
+        }
+        if line.contains(&*REWIND_MARKER) {
+            if let PromptExtractEvent::RewindTo(target) = parse_prompt_extract_event(line.trim()) {
+                found.retain(|index| *index < target);
+            }
+            continue;
+        }
+        if !line.contains(AUTOMATIC_TURN_META_KEY) || !line.contains(&*USER_MESSAGE_CHUNK) {
+            continue;
+        }
+        let line = line.trim();
+        let raw_params = serde_json::from_str::<RawLinePeek<'_>>(line)
+            .ok()
+            .and_then(|env| env.params.map(|p| p.get()))
+            .unwrap_or(line);
+        let Ok(peek) = serde_json::from_str::<ParamsPeek<'_>>(raw_params) else {
+            continue;
+        };
+        if peek.update.session_update != *USER_MESSAGE_CHUNK {
+            continue;
+        }
+        if let Some(meta) = peek.update.meta
+            && meta.automatic_turn == Some(true)
+            && let Some(index) = meta.prompt_index
+        {
+            found.insert(index as usize);
+        }
+    }
 }
 
 /// Parse one `updates.jsonl` line into a [`PromptExtractEvent`].
@@ -4338,6 +4427,42 @@ mod tests {
             collect_prompts_from_events(PromptExtractIterator::open(f.path()).unwrap().unwrap());
 
         assert_eq!(prompts, vec!["first prompt", "new second prompt"]);
+    }
+
+    /// Row 48.1: the runtime-started turns are found from the chunk marker, and a rewind forgets the ones it rewound past.
+    #[test]
+    fn automatic_prompt_indices_follow_the_marker_and_respect_rewinds() {
+        let typed0 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"fix it"},"_meta":{"promptIndex":0}}"#,
+        );
+        let auto1 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"task finished"},"_meta":{"promptIndex":1,"automaticTurn":true}}"#,
+        );
+        let typed2 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"thanks"},"_meta":{"promptIndex":2}}"#,
+        );
+        let auto3 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"workflow done"},"_meta":{"promptIndex":3,"automaticTurn":true}}"#,
+        );
+        let f = write_updates_file(&[&typed0, &auto1, &typed2, &auto3]);
+        let found = collect_automatic_prompt_indices(f.path()).unwrap();
+        assert_eq!(found.into_iter().collect::<Vec<_>>(), vec![1, 3]);
+
+        let rw = fuigo_envelope(
+            r#"{"sessionUpdate":"rewind_marker","target_prompt_index":2,"created_at":"2024-01-01"}"#,
+        );
+        let f = write_updates_file(&[&typed0, &auto1, &typed2, &auto3, &rw]);
+        let found = collect_automatic_prompt_indices(f.path()).unwrap();
+        assert_eq!(
+            found.into_iter().collect::<Vec<_>>(),
+            vec![1],
+            "a rewind to prompt 2 forgets the automatic turn after it"
+        );
+        assert!(
+            collect_automatic_prompt_indices(std::path::Path::new("/nonexistent/updates.jsonl"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

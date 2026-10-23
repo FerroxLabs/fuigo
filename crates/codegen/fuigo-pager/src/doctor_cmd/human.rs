@@ -214,7 +214,10 @@ fn format_finding(out: &mut String, finding: &DiagnosticFinding) {
     if let Some(automatic) = finding.automatic_remediation {
         let command = crate::diagnostics::human_fix_command(automatic.fix_id)
             .unwrap_or_else(|| automatic.command.to_owned());
-        out.push_str(&format!("    → Automatic setup: `{}`\n", untrusted(command)));
+        out.push_str(&format!(
+            "    → Automatic setup: `{}`\n",
+            untrusted(command)
+        ));
     }
     if let Some(remediation) = &finding.remediation {
         let instruction = match (&remediation.config_path, &finding.automatic_remediation) {
@@ -257,4 +260,60 @@ fn probe_status(status: ProbeStatus) -> &'static str {
         ProbeStatus::Unavailable => "unavailable",
         ProbeStatus::Error => "error",
     }
+}
+
+/// The `Hooks` section of `fuigo doctor`: every hook with its source, event, state, why it is not running and what to do.
+/// Empty when there are no hooks, so a machine without hooks sees the report it always had.
+pub(super) fn format_hooks_section(hooks: &[fuigo_hooks_plugins_types::HookInfo]) -> String {
+    use fuigo_hooks_plugins_types::HookState;
+    if hooks.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nHooks\n\n");
+    let (mut ok, mut skipped, mut failing) = (0usize, 0usize, 0usize);
+    for hook in hooks {
+        match hook.health.state {
+            HookState::Ok => ok += 1,
+            HookState::Skipped => skipped += 1,
+            HookState::Failing => failing += 1,
+        }
+        let command = hook
+            .command
+            .as_deref()
+            .or(hook.url.as_deref())
+            .unwrap_or("(no command)");
+        let command = command.lines().next().unwrap_or("");
+        let command = if command.chars().count() > 60 {
+            format!("{}...", command.chars().take(57).collect::<String>())
+        } else {
+            command.to_owned()
+        };
+        let source = if hook.health.source.is_empty() {
+            "-"
+        } else {
+            hook.health.source.as_str()
+        };
+        out.push_str(&format!(
+            "  {:<8} {:<16} {:<22} {}\n",
+            hook.health.state.label(),
+            untrusted(source),
+            untrusted(hook.event.to_string()),
+            untrusted(command)
+        ));
+        if let Some(reason) = hook.health.reason.as_deref().filter(|r| !r.trim().is_empty()) {
+            out.push_str(&format!(
+                "           why: {}\n",
+                untrusted(reason.lines().next().unwrap_or(reason))
+            ));
+        }
+        if let Some(hint) = hook.health.fix_hint.as_deref().filter(|h| !h.trim().is_empty()) {
+            out.push_str(&format!("           fix: {}\n", untrusted(hint)));
+        }
+    }
+    out.push_str(&format!(
+        "\n  {} {}: {ok} ok, {skipped} skipped, {failing} failing. Turn a hook off or on with /hooks.\n",
+        hooks.len(),
+        plural(hooks.len(), "hook", "hooks")
+    ));
+    out
 }

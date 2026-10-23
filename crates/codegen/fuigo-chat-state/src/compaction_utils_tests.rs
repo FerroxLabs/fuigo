@@ -893,6 +893,71 @@ async fn test_compaction_state_context_build() {
     assert_eq!(ctx.running_tasks[0].command, "cargo test");
 }
 #[tokio::test]
+async fn an_active_goal_objective_seeds_the_last_query_over_a_stale_prompt() {
+    // The stale prompt carries an <image_files> block and an image part: a goal objective must not inherit them.
+    let conversation = vec![
+        image_prompt("review the PR", &["data:image/png;base64,stale"]),
+        ConversationItem::assistant("reviewing"),
+    ];
+    let with = |objective: Option<&str>| CompactionInputs {
+        goal_objective: objective.map(str::to_owned),
+        ..Default::default()
+    };
+    let none = CompactionStateContext::build(&conversation, with(None)).await;
+    assert_eq!(none.last_user_query.as_deref(), Some("review the PR"));
+    assert_eq!(
+        none.images.last_turn_image_files.as_deref(),
+        Some(IMAGE_FILES_BLOCK),
+        "control: without a goal the stale prompt's images are carried"
+    );
+    assert_eq!(1, none.images.last_turn_image_parts.len());
+    let seeded = CompactionStateContext::build(&conversation, with(Some("ship the device test"))).await;
+    assert_eq!(seeded.last_user_query.as_deref(), Some("ship the device test"));
+    assert!(
+        seeded.images.last_turn_image_files.is_none() && seeded.images.last_turn_image_parts.is_empty(),
+        "a goal objective carries no images from the stale prompt: {:?}",
+        seeded.images
+    );
+    let blank = CompactionStateContext::build(&conversation, with(Some("  \n"))).await;
+    assert_eq!(
+        blank.last_user_query.as_deref(),
+        Some("review the PR"),
+        "a blank objective seeds nothing"
+    );
+    assert_eq!(
+        blank.images.last_turn_image_files.as_deref(),
+        Some(IMAGE_FILES_BLOCK),
+        "a blank objective keeps the prompt's images"
+    );
+}
+/// The goal objective reaches the rebuilt history as the last user query, with none of the stale prompt's
+/// images, and survives `for_compaction()` unchanged.
+#[tokio::test]
+async fn goal_objective_query_carries_no_images() {
+    let conversation = vec![
+        ConversationItem::system("sys"),
+        image_prompt("what is this?", &["data:image/png;base64,human"]),
+        ConversationItem::assistant("looking"),
+    ];
+    let state_context = CompactionStateContext::build(
+        &conversation,
+        CompactionInputs {
+            goal_objective: Some("ship the release".into()),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        state_context.for_compaction().last_user_query,
+        state_context.last_user_query
+    );
+    let compacted = build_compacted_history(image_history_input(&state_context));
+    assert_eq!(
+        serde_json::to_value(ConversationItem::user(wrap_user_query("ship the release"))).unwrap(),
+        serde_json::to_value(at(&compacted, 2)).unwrap()
+    );
+}
+#[tokio::test]
 async fn build_stores_running_subagents() {
     let conversation = vec![
         ConversationItem::user("<user_query>\ntask\n</user_query>"),

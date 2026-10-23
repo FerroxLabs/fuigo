@@ -48,7 +48,17 @@ impl AsyncFileSystem for LocalFs {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).await?;
         }
-        fs::write(path, data).await?;
+        // Never exposes a truncated file: a failed write leaves the previous contents in place
+        let (path, data) = (path.to_path_buf(), data.to_vec());
+        tokio::task::spawn_blocking(move || {
+            fuigo_config::write_through::replace_file_contents(
+                &path,
+                &data,
+                fuigo_config::write_through::NewFileMode::Default,
+            )
+        })
+        .await
+        .map_err(std::io::Error::other)??;
         Ok(())
     }
 

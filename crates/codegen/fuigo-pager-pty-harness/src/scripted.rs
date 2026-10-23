@@ -129,6 +129,12 @@ pub struct EnvironmentConfig {
     /// For example, `[ui] keep_text_selection` keeps selection highlights alive long enough to assert on.
     #[serde(default)]
     pub config_toml: Option<String>,
+    /// Files written into the run's isolated `$FUIGO_HOME` before spawn, keyed by path relative to it.
+    /// For example `CHANGELOG.md`, the cache `/release-notes` reads when no changelog CDN is configured.
+    /// Parent directories are created as needed; the run's `.metadata_version` is stamped with the current version so
+    /// startup keeps them.
+    #[serde(default)]
+    pub home_files: std::collections::BTreeMap<String, String>,
 }
 
 impl EnvironmentConfig {
@@ -185,10 +191,10 @@ pub struct ImageFixture {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageFixtureKind {
-    /// 8x8 RGBA PNG; meets the minimum vision-model dimension requirement.
+    /// 32x32 RGBA PNG; meets the pager's minimum image size (at least 512 total pixels).
     #[default]
     Standard,
-    /// 1x1 RGBA PNG, below the 8 px minimum; rejected client-side.
+    /// 1x1 RGBA PNG, below the minimum size; rejected client-side.
     #[serde(rename = "tiny_1x1")]
     Tiny1x1,
     /// Valid 64x64 PNG header with a clobbered IDAT CRC; full decode rejects.
@@ -521,6 +527,33 @@ impl ScriptedScenarioRunner {
                 .with_context(|| format!("create scenario FUIGO_HOME {}", fuigo_home.display()))?;
             fs::write(fuigo_home.join("config.toml"), config_toml)
                 .context("write scenario config.toml")?;
+        }
+
+        if !scenario.environment.home_files.is_empty() {
+            // Startup removes the cached changelog files of any previous version, judged by this marker;
+            // stamping the current version keeps the seeded files.
+            let fuigo_home = content.home().join(".fuigo");
+            fs::create_dir_all(&fuigo_home)
+                .with_context(|| format!("create scenario FUIGO_HOME {}", fuigo_home.display()))?;
+            fs::write(fuigo_home.join(".metadata_version"), fuigo_version::VERSION)
+                .context("write scenario .metadata_version")?;
+        }
+        for (relative, body) in &scenario.environment.home_files {
+            let relative_path = Path::new(relative);
+            if relative_path.is_absolute()
+                || relative_path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+            {
+                bail!("scenario home file {relative:?} must be a relative path inside FUIGO_HOME");
+            }
+            let target = content.home().join(".fuigo").join(relative_path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            fs::write(&target, body)
+                .with_context(|| format!("write scenario home file {}", target.display()))?;
         }
 
         let env_refs: Vec<(&str, &str)> = scenario
@@ -1326,7 +1359,7 @@ fn standard_png_bytes() -> Result<Vec<u8>> {
     use image::{ImageBuffer, ImageFormat, Rgba};
 
     let buffer: ImageBuffer<Rgba<u8>, Vec<u8>> =
-        ImageBuffer::from_pixel(8, 8, Rgba([128, 64, 32, 255]));
+        ImageBuffer::from_pixel(32, 32, Rgba([128, 64, 32, 255]));
     let mut png = Vec::new();
     buffer.write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)?;
     Ok(png)
@@ -2270,8 +2303,8 @@ mod tests {
             &bodies,
             1,
             "image/png",
-            &DimensionAssertion::Exact(8),
-            &DimensionAssertion::Exact(8),
+            &DimensionAssertion::Exact(32),
+            &DimensionAssertion::Exact(32),
         )
         .expect("exact match");
         // Range form succeeds when width is at least 1
@@ -2289,18 +2322,18 @@ mod tests {
             },
         )
         .expect("range match");
-        // Range form fails when width must be at least 28 but the actual is 8
+        // Range form fails when width must be at least 64 but the actual is 32
         assert!(
             assert_inline_images(
                 &bodies,
                 1,
                 "image/png",
                 &DimensionAssertion::Range {
-                    min: Some(28),
+                    min: Some(64),
                     max: None
                 },
                 &DimensionAssertion::Range {
-                    min: Some(28),
+                    min: Some(64),
                     max: None
                 },
             )

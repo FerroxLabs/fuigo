@@ -168,7 +168,9 @@ fn cap_chars(text: &str, max: usize) -> String {
 
 /// The fixed, safe-to-print reason for a start failure. The raw error text is never used: it can hold URL passwords,
 /// header values, tokens, env strings and command-line arguments.
-pub(crate) fn mcp_start_failed_reason(kind: fuigo_shell::extensions::mcp::McpFailureKind) -> String {
+pub(crate) fn mcp_start_failed_reason(
+    kind: fuigo_shell::extensions::mcp::McpFailureKind,
+) -> String {
     use fuigo_shell::extensions::mcp::McpFailureKind as K;
     match kind {
         K::CommandNotStarted => "the command could not be started".to_string(),
@@ -221,7 +223,10 @@ impl Lifecycle {
             Lifecycle::ImageCompressed { message } => message.clone(),
             // Config keys, paths and server names come from project files, so the notice is untrusted text on stderr
             Lifecycle::ConfigNotice { message } => {
-                format!("warning: {}", fuigo_tty_utils::scrub_unsafe_display(message, Some(' ')))
+                format!(
+                    "warning: {}",
+                    fuigo_tty_utils::scrub_unsafe_display(message, Some(' '))
+                )
             }
             Lifecycle::MemoryFlushStarted => "Memory flush started.".to_string(),
             // `result` can hold an API error message and `path` a project path: both are untrusted text on stderr

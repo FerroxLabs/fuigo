@@ -1204,6 +1204,33 @@ mod tests {
         );
     }
 
+    /// The model-facing schema is one inline form: `tool_name` + `tool_input`, both required, no file forms and no
+    /// `oneOf`/`anyOf` union at the root (providers differ in how they compile a root union, and a call that fits
+    /// none of its branches fails there).
+    #[test]
+    fn schema_is_the_single_inline_form() {
+        let schema = serde_json::to_value(schemars::schema_for!(UseToolInput)).unwrap();
+        let mut props: Vec<String> = schema["properties"]
+            .as_object()
+            .expect("object schema")
+            .keys()
+            .cloned()
+            .collect();
+        props.sort();
+        assert_eq!(props, ["tool_input", "tool_name"], "{schema}");
+        let mut required: Vec<String> = schema["required"]
+            .as_array()
+            .expect("required list")
+            .iter()
+            .map(|name| name.as_str().unwrap().to_owned())
+            .collect();
+        required.sort();
+        assert_eq!(required, ["tool_input", "tool_name"], "{schema}");
+        for union in ["oneOf", "anyOf", "allOf"] {
+            assert!(schema.get(union).is_none(), "root {union} in {schema}");
+        }
+    }
+
     // ── MCP dump classification (.json extension + jq/python steer) ──
 
     #[test]

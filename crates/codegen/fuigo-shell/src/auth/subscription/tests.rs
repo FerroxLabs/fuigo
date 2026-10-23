@@ -1713,10 +1713,10 @@ async fn a_certificate_rejected_under_a_configured_ca_bundle_is_a_local_tls_erro
 
 #[test]
 fn a_local_tls_error_is_not_reported_to_sampling_as_a_login_problem() {
-    let tls = inference::sampling_error(SubscriptionError::LocalTls("detail".into())).to_string();
+    let tls = inference::sampling_error(SubscriptionProvider::Xai, SubscriptionError::LocalTls("detail".into())).to_string();
     assert!(tls.contains("TLS/CA configuration"), "{tls}");
     assert!(!tls.contains("fuigo login"), "{tls}");
-    let login = inference::sampling_error(SubscriptionError::LoginRequired).to_string();
+    let login = inference::sampling_error(SubscriptionProvider::Xai, SubscriptionError::LoginRequired).to_string();
     assert!(login.contains("fuigo login"), "{login}");
 }
 
@@ -1778,4 +1778,250 @@ async fn a_connection_dropped_after_the_request_was_sent_forces_a_relogin() {
         Err(SubscriptionError::LoginRequired)
     ));
     assert!(live.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn tui_sign_in_completes_from_the_browser_callback_without_printing() {
+    for provider in [SubscriptionProvider::Chatgpt, SubscriptionProvider::Xai] {
+        let server = server(move |_| response(provider, "tui-acct")).await;
+        let temp = tempfile::tempdir().unwrap();
+        let store = SubscriptionStore::new(temp.path());
+        let attempt = LoginAttempt::bind(provider, 0)
+            .await
+            .unwrap()
+            .with_endpoint(server.endpoint.clone());
+        let (port, path, state, _) = attempt_parts(&attempt);
+        let (_keep_open, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result, _) = tokio::join!(
+            super::flow::finish_for_tui(attempt, &store, rx, false),
+            async { assert!(callback(port, &path, &state).await.starts_with("HTTP/1.1 200")) }
+        );
+        result.unwrap();
+        let status = store.status(provider).await.unwrap();
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0].account, "tui-acct");
+        // Only the mock token endpoint was contacted.
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn tui_sign_in_accepts_a_pasted_code_and_rejects_a_pasted_url() {
+    let provider = SubscriptionProvider::Xai;
+    let server = server(move |_| response(provider, "pasted")).await;
+    let temp = tempfile::tempdir().unwrap();
+    let store = SubscriptionStore::new(temp.path());
+    let attempt = LoginAttempt::bind(provider, 0)
+        .await
+        .unwrap()
+        .with_endpoint(server.endpoint.clone());
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tx.send("fake-pasted-code".to_string()).unwrap();
+    super::flow::finish_for_tui(attempt, &store, rx, false).await.unwrap();
+    assert_eq!(store.status(provider).await.unwrap()[0].account, "pasted");
+    assert_eq!(server.requests.lock().unwrap()[0]["code"], "fake-pasted-code");
+
+    let attempt = LoginAttempt::bind(provider, 0).await.unwrap();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tx.send("https://evil.example/?code=x".to_string()).unwrap();
+    let err = super::flow::finish_for_tui(attempt, &store, rx, false).await.unwrap_err();
+    assert!(matches!(err, SubscriptionError::Callback));
+}
+
+#[cfg(unix)]
+mod paste_pty {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+
+    pub(super) struct Pty {
+        pub master: std::fs::File,
+        pub slave: std::fs::File,
+        pub monitor: std::fs::File,
+    }
+    pub(super) fn pty() -> Pty {
+        let pty = nix::pty::openpty(None, None).unwrap();
+        let master = std::fs::File::from(pty.master);
+        let slave = std::fs::File::from(pty.slave);
+        for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
+            // SAFETY: live test-owned descriptors; only the nonblocking flag changes.
+            unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                assert!(flags >= 0);
+                assert_eq!(libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK), 0);
+            }
+        }
+        let monitor = slave.try_clone().unwrap();
+        Pty {
+            master,
+            slave,
+            monitor,
+        }
+    }
+    pub(super) fn lflag(file: &std::fs::File) -> libc::tcflag_t {
+        let mut value = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: live PTY; initialized on successful tcgetattr.
+        unsafe {
+            assert_eq!(libc::tcgetattr(file.as_raw_fd(), value.as_mut_ptr()), 0);
+            value.assume_init().c_lflag
+        }
+    }
+    /// Complete lines still queued for the slave's reader.
+    pub(super) fn queued(file: &std::fs::File) -> libc::c_int {
+        let mut count: libc::c_int = -1;
+        // SAFETY: live PTY and a valid out pointer.
+        assert_eq!(
+            unsafe { libc::ioctl(file.as_raw_fd(), libc::FIONREAD as _, &mut count) },
+            0
+        );
+        count
+    }
+    /// Anything the terminal wrote back to the emulator (an echo would land here).
+    pub(super) fn echoed(master: &mut std::fs::File) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut buffer = [0u8; 256];
+        loop {
+            match master.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buffer[..n]),
+                Err(_) => break,
+            }
+        }
+        out
+    }
+    pub(super) async fn silent(monitor: &std::fs::File) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while lflag(monitor) & libc::ECHO != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    pub(super) fn write(master: &mut std::fs::File, bytes: &[u8]) {
+        master.write_all(bytes).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn pasted_code_is_never_echoed_and_no_extra_input_survives_any_exit() {
+    use paste_pty::*;
+    for (input, ok) in [
+        (&b"fake-manual-code\nspilled-line\nmore\n"[..], true),
+        (&b"two words\nspilled-line\n"[..], false),
+    ] {
+        let mut pty = pty();
+        let original = lflag(&pty.monitor);
+        let reader = tokio::spawn(super::manual::read_from(pty.slave));
+        silent(&pty.monitor).await;
+        write(&mut pty.master, input);
+        let result = reader.await.unwrap();
+        assert_eq!(result.is_ok(), ok);
+        assert!(echoed(&mut pty.master).is_empty(), "paste was echoed");
+        assert_eq!(queued(&pty.monitor), 0, "unread input left for the shell");
+        assert_eq!(lflag(&pty.monitor), original);
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn paste_prompt_is_silent_before_it_is_shown_and_flushes_through_the_exchange() {
+    use paste_pty::*;
+    let provider = SubscriptionProvider::Xai;
+    let failing = b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+    for fail in [false, true] {
+        let mut pty = pty();
+        let original = lflag(&pty.monitor);
+        let prompt = super::manual::Prompt::on(pty.slave);
+        // Silent from the moment the prompt exists: no poll, no reader task yet.
+        assert_eq!(lflag(&pty.monitor) & libc::ECHO, 0);
+        write(&mut pty.master, b"fake-manual-code\n");
+        let during = std::sync::Mutex::new(pty.master.try_clone().unwrap());
+        let (endpoint, _keep): (String, Box<dyn std::any::Any>) = if fail {
+            let raw = raw_server(failing).await;
+            write(&mut pty.master, b"spilled-before-exchange\n");
+            (raw.endpoint.clone(), Box::new(raw))
+        } else {
+            let server = server(move |_| {
+                // Typed while the exchange is in flight, after the code was consumed.
+                write(&mut during.lock().unwrap(), b"typed-during-exchange\n");
+                response(provider, "a")
+            })
+            .await;
+            (server.endpoint.clone(), Box::new(server))
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let store = SubscriptionStore::new(temp.path());
+        let attempt = LoginAttempt::bind(provider, 0)
+            .await
+            .unwrap()
+            .with_endpoint(endpoint);
+        let result = attempt
+            .finish_with_code_input(
+                &store,
+                CancellationToken::new(),
+                Duration::from_secs(5),
+                prompt.code(),
+            )
+            .await;
+        assert_eq!(result.is_err(), fail);
+        // The prompt outlives the exchange; only its drop returns the terminal.
+        assert_eq!(lflag(&pty.monitor) & libc::ECHO, 0);
+        drop(prompt);
+        assert!(echoed(&mut pty.master).is_empty(), "paste was echoed");
+        assert_eq!(queued(&pty.monitor), 0, "unread input left for the shell");
+        assert_eq!(lflag(&pty.monitor), original);
+    }
+}
+
+fn id_token(claims: serde_json::Value) -> String {
+    format!("h.{}.s", URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap()))
+}
+
+#[test]
+fn display_identity_prefers_email_then_name_then_username_and_never_the_account_id() {
+    let body = |claims| serde_json::json!({ "id_token": id_token(claims) });
+    assert_eq!(
+        flow::display_identity(&body(serde_json::json!({"email":"sam@example.com","name":"Sam","sub":"acct-1"}))),
+        Some("sam@example.com".into())
+    );
+    assert_eq!(flow::display_identity(&body(serde_json::json!({"name":"Sam Doe","sub":"acct-1"}))), Some("Sam Doe".into()));
+    assert_eq!(
+        flow::display_identity(&body(serde_json::json!({"preferred_username":"sam","sub":"acct-1"}))),
+        Some("sam".into())
+    );
+    // Only opaque ids, blank values, control characters, no id token: nothing to show.
+    assert_eq!(flow::display_identity(&body(serde_json::json!({"sub":"acct-1","principal_id":"p"}))), None);
+    assert_eq!(flow::display_identity(&body(serde_json::json!({"email":"  ","sub":"acct-1"}))), None);
+    assert_eq!(flow::display_identity(&body(serde_json::json!({"email":"a\u{1b}[31m@x.com"}))), None);
+    assert_eq!(flow::display_identity(&serde_json::json!({"access_token":"x"})), None);
+}
+
+#[tokio::test]
+async fn the_exchange_returns_the_display_identity_from_the_id_token_and_stores_none_of_it() {
+    for provider in [SubscriptionProvider::Chatgpt, SubscriptionProvider::Xai] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SubscriptionStore::new(temp.path());
+        let with_id = server(move |_| {
+            let mut body = response(provider, "acct-77");
+            body["id_token"] = id_token(serde_json::json!({
+                "iss": provider.issuer(), "email": "sam@example.com", "sub": "acct-77",
+                "https://api.openai.com/auth": {"chatgpt_account_id": "acct-77"},
+            }))
+            .into();
+            body
+        })
+        .await;
+        let client = flow::TokenClient::local(provider, with_id.endpoint.clone());
+        let (credential, identity) = client.exchange("c", "v", "http://127.0.0.1/cb").await.unwrap();
+        assert_eq!(identity.as_deref(), Some("sam@example.com"));
+        store.save(credential).await.unwrap();
+        let disk = std::fs::read_to_string(temp.path().join("subscriptions/credentials.json")).unwrap();
+        assert!(!disk.contains("sam@example.com"), "identity is display only, never persisted");
+        // A response with no id token carries no identity.
+        let bare = server(move |_| response(provider, "acct-77")).await;
+        let client = flow::TokenClient::local(provider, bare.endpoint.clone());
+        assert_eq!(client.exchange("c", "v", "http://127.0.0.1/cb").await.unwrap().1, None);
+    }
 }

@@ -1089,6 +1089,7 @@ mod platform {
 #[cfg(not(target_os = "macos"))]
 mod platform {
     use super::ImageData;
+    #[cfg(target_os = "linux")]
     use std::process::{Command, Stdio};
 
     /// No subprocess-free pasteboard probe exists off-macOS.
@@ -1241,6 +1242,44 @@ mod platform {
     /// The worker's `Clipboard` instance leaks with it; harmless while the lease keeps the shared backend alive.
     const ARBOARD_READ_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
+    /// Copies run on the UI thread, so a write waits only briefly for an in-flight read.
+    const ARBOARD_WRITE_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+    /// Run one arboard operation while no other arboard operation runs in this process, or fail after `wait`.
+    ///
+    /// Windows allows one open clipboard at a time, and arboard opens it inside every operation. Its docs warn that
+    /// parallel operations are likely to fail or deadlock and say to use the clipboard from one thread.
+    ///
+    /// Linux stays unlocked: a Wayland read can block forever, and holding the lock through it would fail every later
+    /// operation.
+    fn run_arboard_exclusive<T>(
+        wait: std::time::Duration,
+        op: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        #[cfg(target_os = "windows")]
+        {
+            static ARBOARD_OP_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+            run_exclusive(&ARBOARD_OP_LOCK, wait, op)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = wait;
+            op()
+        }
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    fn run_exclusive<T>(
+        lock: &parking_lot::Mutex<()>,
+        wait: std::time::Duration,
+        op: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let Some(_guard) = lock.try_lock_for(wait) else {
+            anyhow::bail!("arboard busy: an earlier clipboard operation is still running");
+        };
+        op()
+    }
+
     fn arboard_read_with_deadline<T: Send + 'static>(
         op: impl FnOnce(&mut arboard::Clipboard) -> anyhow::Result<T> + Send + 'static,
     ) -> anyhow::Result<T> {
@@ -1249,9 +1288,11 @@ mod platform {
             anyhow::bail!("arboard leg disabled (FUIGO_CLIPBOARD_NO_DATA_CONTROL)");
         }
         let result = spawn_with_deadline("clipboard-read", ARBOARD_READ_WAIT, move || {
-            arboard::Clipboard::new()
-                .map_err(anyhow::Error::from)
-                .and_then(|mut clipboard| op(&mut clipboard))
+            run_arboard_exclusive(ARBOARD_READ_WAIT, || {
+                arboard::Clipboard::new()
+                    .map_err(anyhow::Error::from)
+                    .and_then(|mut clipboard| op(&mut clipboard))
+            })
         });
         match result {
             Ok(inner) => inner,
@@ -1289,33 +1330,35 @@ mod platform {
     }
 
     fn arboard_set_text(text: &str) -> anyhow::Result<()> {
-        arboard_lease()?.lock().set_text(text)?;
-        Ok(())
-    }
-
-    fn arboard_get_image() -> anyhow::Result<Option<ImageData>> {
-        arboard_read_with_deadline(|clipboard| {
-            let img_data = match clipboard.get_image() {
-                Ok(data) => data,
-                Err(arboard::Error::ContentNotAvailable) => return Ok(None),
-                Err(err) => return Err(err.into()),
-            };
-
-            let png_bytes = encode_rgba_to_png(
-                &img_data.bytes,
-                img_data.width as u32,
-                img_data.height as u32,
-            )?;
-
-            Ok(Some(ImageData {
-                data: png_bytes,
-                mime_type: "image/png".to_owned(),
-            }))
+        run_arboard_exclusive(ARBOARD_WRITE_WAIT, || {
+            arboard_lease()?.lock().set_text(text)?;
+            Ok(())
         })
     }
 
-    // -- Linux CLI tools ------------------------------------------------------
-    //
+    /// The PNG encode runs after the read returns so it does not hold [`run_arboard_exclusive`]'s lock.
+    fn arboard_get_image() -> anyhow::Result<Option<ImageData>> {
+        let Some(img_data) = arboard_read_with_deadline(|clipboard| match clipboard.get_image() {
+            Ok(data) => Ok(Some(data)),
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(err) => Err(err.into()),
+        })?
+        else {
+            return Ok(None);
+        };
+
+        let png_bytes = encode_rgba_to_png(
+            &img_data.bytes,
+            img_data.width as u32,
+            img_data.height as u32,
+        )?;
+
+        Ok(Some(ImageData {
+            data: png_bytes,
+            mime_type: "image/png".to_owned(),
+        }))
+    }
+
     // arboard is built with `wayland-data-control`
     // On compositors exposing the data-control protocol (probe: `wayland_data_control_supported`) it sets the Wayland selection focus-free
     // That arboard write is authoritative
@@ -1908,18 +1951,18 @@ mod platform {
     // -- Public API ----------------------------------------------------------
 
     pub fn get_text() -> anyhow::Result<Option<String>> {
-        let mut arboard_error = None;
-        match arboard_get_text() {
+        // An expression, not a mutable `None` that is overwritten on every path where Linux's wl-paste fallback is compiled out.
+        let arboard_error = match arboard_get_text() {
             Ok(Some(text)) => return Ok(Some(text)),
             // Wayland-only: arboard's empty answer is not authoritative, fall through to wl-paste (see `wayland_tool_selected`)
             #[cfg(target_os = "linux")]
-            Ok(None) if wayland_tool_selected(linux_tool_spec()) => {}
+            Ok(None) if wayland_tool_selected(linux_tool_spec()) => None,
             Ok(None) => return Ok(None),
             Err(e) => {
                 tracing::debug!("arboard get_text failed: {e}");
-                arboard_error = Some(e);
+                Some(e)
             }
-        }
+        };
         #[cfg(target_os = "linux")]
         if let Some(spec) = linux_tool_spec() {
             // Not checked: `wl-paste -t text` exits non-zero on image-only boards.
@@ -2014,18 +2057,18 @@ mod platform {
     }
 
     pub fn get_image() -> anyhow::Result<Option<ImageData>> {
-        let mut arboard_error = None;
-        match arboard_get_image() {
+        // An expression, not a mutable `None` that is overwritten on every path where Linux's wl-paste fallback is compiled out.
+        let arboard_error = match arboard_get_image() {
             Ok(Some(image)) => return Ok(Some(image)),
             // Wayland-only: arboard's empty answer is not authoritative, fall through to wl-paste (see `wayland_tool_selected`)
             #[cfg(target_os = "linux")]
-            Ok(None) if wayland_tool_selected(linux_tool_spec()) => {}
+            Ok(None) if wayland_tool_selected(linux_tool_spec()) => None,
             Ok(None) => return Ok(None),
             Err(e) => {
                 tracing::debug!("arboard get_image failed: {e}");
-                arboard_error = Some(e);
+                Some(e)
             }
-        }
+        };
         #[cfg(target_os = "linux")]
         if let Some(spec) = linux_tool_spec()
             && let Some(argv) = spec.read_png
@@ -2150,12 +2193,30 @@ mod platform {
         })
     }
 
-    /// Contract tests for `spawn_with_deadline` (private to this module, so they live here; any non-macOS test host runs them).
+    /// Contract tests for `spawn_with_deadline` and `run_exclusive` (private to this module, so they live here; any
+    /// non-macOS test host runs them).
     #[cfg(test)]
     mod worker_deadline_tests {
         use super::*;
         use std::sync::mpsc::RecvTimeoutError;
         use std::time::Duration;
+
+        #[test]
+        fn run_exclusive_fails_without_running_when_holder_outlives_wait() {
+            let lock = parking_lot::Mutex::new(());
+            let _held = lock.lock();
+            let ran = std::cell::Cell::new(false);
+            let error = run_exclusive(&lock, Duration::from_millis(10), || {
+                ran.set(true);
+                Ok(())
+            })
+            .expect_err("lock is held");
+            assert_eq!(
+                "arboard busy: an earlier clipboard operation is still running",
+                error.to_string()
+            );
+            assert!(!ran.get());
+        }
 
         #[test]
         fn fast_closure_returns_value() {

@@ -231,6 +231,14 @@ pub async fn set_feedback_trace_card(value: bool) -> Result<()> {
     .await
 }
 
+/// Persist `[features].subagent_model_inheritance`.
+pub async fn set_subagent_model_inheritance(value: bool) -> Result<()> {
+    update_config(|cfg| {
+        cfg.features.subagent_model_inheritance = Some(value);
+    })
+    .await
+}
+
 /// Persist `[ui].fork_secondary_model` via `update_config`.
 ///
 /// Caller must validate against the model catalog.
@@ -395,6 +403,14 @@ pub async fn set_cancel_subagents_on_turn_cancel(value: String) -> Result<()> {
 pub async fn set_screen_mode(value: String) -> Result<()> {
     update_config(|cfg| {
         cfg.ui.screen_mode = if value.is_empty() { None } else { Some(value.clone()) };
+    })
+    .await
+}
+
+/// Persist `[ui].tool_density` (`compact` | `detailed`). Empty clears the key.
+pub async fn set_tool_density(value: String) -> Result<()> {
+    update_config(|cfg| {
+        cfg.ui.tool_density = if value.is_empty() { None } else { Some(value.clone()) };
     })
     .await
 }

@@ -293,6 +293,34 @@ impl SubscriptionStore {
             })
             .collect()
     }
+    /// Display-only account list for synchronous callers (welcome screen, `/provider`,
+    /// `/login`, model-list resolution). Takes no lock and performs no refresh: a torn or
+    /// unreadable store reads as "not signed in". Never use it to authorise a request;
+    /// [`Self::access`] is the only credential path.
+    pub fn status_sync(&self, provider: SubscriptionProvider) -> Vec<SubscriptionStatus> {
+        if !self.root.exists() {
+            return Vec::new();
+        }
+        let Ok(records) = self.read() else {
+            return Vec::new();
+        };
+        let Some(entry) = records.get(&provider) else {
+            return Vec::new();
+        };
+        entry
+            .accounts
+            .iter()
+            .filter(|(account, c)| c.validate(provider, account).is_ok())
+            .map(|(account, c)| SubscriptionStatus {
+                provider,
+                account: account.clone(),
+                selected: entry.selected.as_ref() == Some(account),
+                expires_at: c.expires_at,
+                login_required: c.refresh_pending
+                    || (c.expires_at <= now() && c.refresh_token.is_none()),
+            })
+            .collect()
+    }
     /// Remove every local subscription credential, retaining the stable lock file.
     ///
     /// Takes the same cross-process lock every refresh holds for its whole read / exchange /
@@ -333,7 +361,15 @@ impl SubscriptionStore {
                 .map_err(|_| SubscriptionError::Storage)?;
         }
         let _ = removed;
+        for provider in SubscriptionProvider::ALL {
+            self.forget_model_cache(provider);
+        }
         Ok(())
+    }
+    /// The cached model list is only meaningful while an account is signed in; drop it with the last one.
+    /// Best effort: it holds model IDs only, never a credential.
+    fn forget_model_cache(&self, provider: SubscriptionProvider) {
+        let _ = std::fs::remove_file(self.root.join(format!("models-{}.json", provider.name())));
     }
     /// Omitted account removes only this provider; named logout preserves siblings.
     pub async fn logout(
@@ -363,7 +399,11 @@ impl SubscriptionStore {
         } else {
             records.remove(&provider);
         }
-        self.write(&records)
+        self.write(&records)?;
+        if records.get(&provider).is_none_or(|entry| entry.accounts.is_empty()) {
+            self.forget_model_cache(provider);
+        }
+        Ok(())
     }
     /// Refresh completes/persists even if the requesting turn is cancelled.
     /// A durable pending marker prevents reuse after process death or ambiguous failure.

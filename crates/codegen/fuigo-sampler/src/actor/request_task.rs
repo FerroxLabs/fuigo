@@ -1,7 +1,6 @@
 //! The actor's `Submit` handler spawns this task; it owns the retry loop and consumes a Layer 2 stream from the matching backend transform.
 //! Cancellation is cooperative via `CancellationToken`.
 
-use std::collections::HashSet;
 use std::pin::pin;
 use std::sync::{
     Arc, Mutex,
@@ -473,15 +472,21 @@ struct RetryCounts {
     /// budget ([`retry_mod::EMPTY_RESPONSE_MAX_ATTEMPTS`]). Counted apart from `total` so a
     /// retry of another kind never spends the empty-response budget, and vice versa.
     empty_response: u32,
+    /// Resends of a stalled call, on their own cap ([`retry_mod::IDLE_TIMEOUT_MAX_ATTEMPTS`]) so an earlier retry of
+    /// another kind never spends the one resend a stall is owed.
+    stalled: u32,
 }
 
 impl RetryCounts {
-    /// Record one resend and return the attempt number its `Retrying` event announces: the empty-response count for an empty response, else the total.
-    fn record_resend(&mut self, empty_response: bool) -> u32 {
+    /// Record one resend and return the attempt number its `Retrying` event announces: the kind's own count for an empty response or a stall, else the total.
+    fn record_resend(&mut self, empty_response: bool, stalled: bool) -> u32 {
         self.total += 1;
         if empty_response {
             self.empty_response += 1;
             self.empty_response
+        } else if stalled {
+            self.stalled += 1;
+            self.stalled
         } else {
             self.total
         }
@@ -501,7 +506,8 @@ fn announce_resend(
     request_id: &RequestId,
     err: &SamplingError,
 ) {
-    let attempt = retry_counts.record_resend(empty_response);
+    let stalled = matches!(err, SamplingError::IdleTimeout { .. });
+    let attempt = retry_counts.record_resend(empty_response, stalled);
     let announced = if empty_response {
         retry_mod::empty_response_announced_attempts(
             retry_counts.empty_response,
@@ -576,8 +582,11 @@ async fn apply_retry_decision(
     let configured_max_retries = max_retries;
     let max_retries = retry_mod::effective_max_retries(err, configured_max_retries);
     let empty_response = matches!(err, SamplingError::EmptyResponse { .. });
-    let decision = if empty_response && retry_counts.total + 1 >= configured_max_retries {
+    let stalled = matches!(err, SamplingError::IdleTimeout { .. });
+    let decision = if (empty_response || stalled) && retry_counts.total + 1 >= configured_max_retries {
         RetryDecision::Fatal(clone_error(err))
+    } else if stalled {
+        classify_error(err, retry_counts.stalled, configured_max_retries, rate_limit_threshold)
     } else if empty_response {
         classify_error(
             err,
@@ -845,8 +854,7 @@ async fn run_one_attempt(
             .await
         }
         ApiBackend::Responses => {
-            let client_tools: HashSet<String> =
-                request.tools.iter().map(|t| t.name.clone()).collect();
+            let client_tools = crate::stream::ClientTools::of_request(&request.tools);
             let (raw, metadata, doom_loop) =
                 match init_or_cancel(client.conversation_stream_responses(request), cancel_token).await {
                     Ok(parts) => parts,

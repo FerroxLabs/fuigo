@@ -205,8 +205,36 @@ async fn a_stalled_read_times_out_and_later_reads_fail_fast() {
         let _ = wait.recv();
         Err(BearerTokenFileError::Unreadable)
     }));
-    assert_eq!(file.clone().read().await, Err(BearerTokenFileError::TimedOut));
+    assert_eq!(
+        file.clone().read().await,
+        Err(BearerTokenFileError::TimedOut)
+    );
+    assert_eq!(
+        file.clone().read().await,
+        Err(BearerTokenFileError::TimedOut),
+        "still held: still fast"
+    );
     drop(release);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(file.read().await.as_deref(), Ok("fake-token-12345"), "the slot frees once the stalled read returns");
+    // Wait for the stalled job itself to return, not for a guessed amount of time: a blocking-pool thread on a
+    // starved host can take arbitrarily long to run the closure's tail after its channel closes. Awaiting it
+    // through the slot's own handle is the event the product code keys on (`is_finished`).
+    let mut stalled = file
+        .stalled_read
+        .lock()
+        .take()
+        .expect("the slot holds the stalled read");
+    assert_eq!(
+        (&mut stalled).await.unwrap(),
+        Err(BearerTokenFileError::Unreadable)
+    );
+    assert!(stalled.is_finished());
+    *file.stalled_read.lock() = Some(stalled);
+    // The 50 ms budget above is for the simulated stall. This read is a real one on a loaded host; its bound only
+    // matters if the read hangs, so it is generous and is never waited out.
+    let patient = file.with_timeout(Duration::from_secs(60));
+    assert_eq!(
+        patient.read().await.as_deref(),
+        Ok("fake-token-12345"),
+        "the slot frees once the stalled read returns"
+    );
 }

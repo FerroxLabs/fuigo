@@ -1417,7 +1417,8 @@ pub(crate) fn create_then_break_a_session(
     let mut damaged = Vec::new();
     for entry in std::fs::read_dir(&dir).expect("read session dir").flatten() {
         if entry.path().is_file() {
-            std::fs::write(entry.path(), b"\x00\xff{ not a session").expect("damage a session file");
+            std::fs::write(entry.path(), b"\x00\xff{ not a session")
+                .expect("damage a session file");
             damaged.push(entry.file_name().to_string_lossy().into_owned());
         }
     }

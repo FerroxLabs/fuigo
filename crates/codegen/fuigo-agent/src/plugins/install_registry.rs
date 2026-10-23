@@ -155,10 +155,27 @@ fn git_origin_url(repo: &Path) -> Option<String> {
 }
 
 /// The one URL normaliser for `strictKnownMarketplaces` (P169): the policy's allowlist membership and the checkout
-/// origin check both use it, so they cannot disagree. Lowercases and drops a trailing `.git`; nothing else, so a
+/// origin check both use it, so they cannot disagree. Folds only scheme and host case (a path is identity: lowercasing
+/// it would widen an allowlist entry to other repos) and drops exactly one trailing `.git`; nothing else, so a
 /// difference it does not erase (a trailing slash, `ssh` against `https`) stays a mismatch (fail closed).
 pub fn normalize_git_url(url: &str) -> String {
-    url.to_lowercase().trim_end_matches(".git").to_string()
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    canonical_remote(url).unwrap_or_else(|| url.to_owned())
+}
+
+fn canonical_remote(url: &str) -> Option<String> {
+    if let Some((scheme, rest)) = url.split_once("://") {
+        let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+        return Some(format!(
+            "{}://{}{path}",
+            scheme.to_ascii_lowercase(),
+            authority.to_ascii_lowercase()
+        ));
+    }
+    // Like git, a `/` before the `:` means a local path; requiring `@` keeps `C:/mkt` local.
+    let (user_host, path) = url.split_once(':')?;
+    (user_host.contains('@') && !user_host.contains('/'))
+        .then(|| format!("{}:{path}", user_host.to_ascii_lowercase()))
 }
 
 /// The `origin` URL of the nearest git checkout at or above `path`, or `None`.
@@ -550,6 +567,50 @@ pub enum InstallError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Marketplace allowlist identity folds only what a URL itself treats as case-insensitive (scheme and host)
+    /// and strips exactly one `.git`: a path is identity, so an allowlist entry never widens to another repo.
+    #[test]
+    #[rustfmt::skip]
+    fn git_url_identity_folds_scheme_and_host_and_one_git_suffix() {
+        let rows: [(&str, &str, &str); 5] = [
+            (
+                "HTTPS://Git.Corp.com/Team/Tools.git",
+                "https://git.corp.com/Team/Tools",
+                "scheme+host fold case; one .git strips",
+            ),
+            (
+                "https://h.example/repo.git.git",
+                "https://h.example/repo.git",
+                "`repo.git.git` is a repo named `repo.git`",
+            ),
+            (
+                "Git@GitHub.com:Org/Repo.git",
+                "git@github.com:Org/Repo",
+                "scp-style: user@host folds, path does not",
+            ),
+            ("/tmp/Marketplace", "/tmp/Marketplace", "local paths pass through untouched"),
+            ("/tmp/A@b:c/mkt", "/tmp/A@b:c/mkt", "a `/` before `:` is a local path, not scp"),
+        ];
+        for (input, want, label) in rows {
+            assert_eq!(want, normalize_git_url(input), "{label}");
+        }
+        assert_ne!(
+            normalize_git_url("https://git.corp.com/team/tools"),
+            normalize_git_url("https://git.corp.com/Team/Tools"),
+            "path case is identity: a different-cased path is a different repo"
+        );
+        assert_eq!(
+            normalize_git_url("https://github.com/org/repo.git"),
+            normalize_git_url("HTTPS://GitHub.com/org/repo"),
+            "scheme, host and .git drift is the same repo"
+        );
+        assert_ne!(
+            normalize_git_url("/tmp/Mkt"),
+            normalize_git_url("/tmp/mkt"),
+            "local path case is kept"
+        );
+    }
 
     fn local_repo(dir: &Path, name: &str) -> InstalledRepo {
         InstalledRepo {

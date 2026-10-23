@@ -153,17 +153,114 @@ fn read_data_file(path: &Path) -> io::Result<Vec<ActiveSession>> {
         Ok(bytes) if bytes.is_empty() => Ok(Vec::new()),
         Ok(bytes) => match serde_json::from_slice::<Vec<ActiveSession>>(&bytes) {
             Ok(sessions) => Ok(sessions),
-            Err(e) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "active_sessions.json is corrupted, starting with empty list"
-                );
-                Ok(Vec::new())
-            }
+            Err(e) => Ok(recover_corrupt(path, &bytes, &e)),
         },
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(e),
+    }
+}
+
+/// How many backups of corrupt files are kept beside the data file.
+const MAX_CORRUPT_BACKUPS: usize = 5;
+
+/// A file that does not parse: keep a copy of it, salvage the entries that are still readable, and say so.
+/// The next write replaces the broken file with the recovered list, so the copy is the only record of the original.
+fn recover_corrupt(path: &Path, bytes: &[u8], error: &serde_json::Error) -> Vec<ActiveSession> {
+    let recovered = salvage_entries(bytes);
+    let backup = backup_corrupt_file(path, bytes);
+    tracing::warn!(
+        path = %path.display(),
+        error = %error,
+        recovered = recovered.len(),
+        backup = ?backup.as_ref().ok(),
+        backup_error = ?backup.as_ref().err().map(ToString::to_string),
+        "active_sessions.json is corrupted; kept a backup and recovered the readable entries"
+    );
+    recovered
+}
+
+/// Entries of a damaged list that still decode: every readable element of an intact array, or the complete
+/// objects found in a truncated or otherwise broken one.
+fn salvage_entries(bytes: &[u8]) -> Vec<ActiveSession> {
+    if let Ok(serde_json::Value::Array(items)) = serde_json::from_slice::<serde_json::Value>(bytes) {
+        return items
+            .into_iter()
+            .filter_map(|item| serde_json::from_value(item).ok())
+            .collect();
+    }
+    let mut found = Vec::new();
+    let (mut depth, mut start) = (0i32, None);
+    let (mut in_string, mut escaped) = (false, false);
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_string {
+            match b {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'[' => depth += 1,
+            b'{' => {
+                depth += 1;
+                if depth == 2 {
+                    start = Some(i);
+                }
+            }
+            b'}' => {
+                if depth == 2
+                    && let Some(s) = start.take()
+                    && let Ok(entry) = serde_json::from_slice::<ActiveSession>(&bytes[s..=i])
+                {
+                    found.push(entry);
+                }
+                depth -= 1;
+            }
+            b']' => depth -= 1,
+            _ => {}
+        }
+        depth = depth.max(0);
+    }
+    found
+}
+
+/// Copy the corrupt file to `active_sessions.json.corrupt-<hash of its bytes>` (owner-only), once per distinct content,
+/// and drop the oldest copies beyond [`MAX_CORRUPT_BACKUPS`].
+fn backup_corrupt_file(path: &Path, bytes: &[u8]) -> io::Result<std::path::PathBuf> {
+    use std::hash::{Hash, Hasher};
+    use io::Write as _;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let target = dir.join(format!("{DATA_FILENAME}.corrupt-{:016x}", hasher.finish()));
+    match fuigo_config::owner_only_file_options(OpenOptions::new().write(true).create_new(true))
+        .open(&target)
+    {
+        Ok(mut file) => file.write_all(bytes)?,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(target),
+        Err(e) => return Err(e),
+    }
+    prune_corrupt_backups(dir);
+    Ok(target)
+}
+
+fn prune_corrupt_backups(dir: &Path) {
+    let prefix = format!("{DATA_FILENAME}.corrupt-");
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let mut backups: Vec<_> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    if backups.len() <= MAX_CORRUPT_BACKUPS {
+        return;
+    }
+    backups.sort();
+    for (_, old) in backups.iter().take(backups.len() - MAX_CORRUPT_BACKUPS) {
+        let _ = fs::remove_file(old);
     }
 }
 
@@ -367,5 +464,98 @@ mod tests {
             register_in(dir.path(), make_session("a", 1)).unwrap();
             assert_eq!(mode(&target), 0o644, "symlink target must be untouched");
         }
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn session(id: &str) -> ActiveSession {
+        ActiveSession {
+            session_id: acp::SessionId::new(id),
+            pid: std::process::id(),
+            cwd: "/tmp/test".into(),
+            opened_at: Utc::now(),
+        }
+    }
+
+    fn json(s: &ActiveSession) -> String {
+        serde_json::to_string(s).unwrap()
+    }
+
+    fn backups(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut found: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("active_sessions.json.corrupt"))
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    fn ids(dir: &Path) -> Vec<String> {
+        list_in(dir)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.session_id.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_malformed_entry_keeps_the_readable_ones_and_a_backup() {
+        let dir = TempDir::new().unwrap();
+        let text = format!(
+            "[{}, {{\"session_id\": 42, \"pid\": \"x\"}}, {}]",
+            json(&session("keep-1")),
+            json(&session("keep-2"))
+        );
+        fs::write(dir.path().join(DATA_FILENAME), &text).unwrap();
+        assert_eq!(ids(dir.path()), ["keep-1", "keep-2"]);
+        let saved = backups(dir.path());
+        assert_eq!(saved.len(), 1, "exactly one backup of the corrupt file: {saved:?}");
+        assert_eq!(fs::read_to_string(&saved[0]).unwrap(), text, "the backup is the original bytes");
+    }
+
+    #[test]
+    fn a_truncated_file_recovers_the_complete_entries() {
+        let dir = TempDir::new().unwrap();
+        let second = json(&session("cut"));
+        let text = format!("[{}, {}", json(&session("whole")), &second[..second.len() / 2]);
+        fs::write(dir.path().join(DATA_FILENAME), &text).unwrap();
+        assert_eq!(ids(dir.path()), ["whole"]);
+        assert_eq!(backups(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn unrecoverable_garbage_yields_an_empty_list_and_a_backup() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join(DATA_FILENAME), "not json at all \u{0}\u{1}").unwrap();
+        assert!(ids(dir.path()).is_empty());
+        assert_eq!(backups(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn a_healthy_file_is_never_backed_up() {
+        let dir = TempDir::new().unwrap();
+        register_in(dir.path(), session("ok")).unwrap();
+        assert_eq!(ids(dir.path()), ["ok"]);
+        assert!(backups(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn the_next_write_keeps_the_recovered_entries() {
+        let dir = TempDir::new().unwrap();
+        let text = format!("[{}, {{\"bad\": true}}]", json(&session("old")));
+        fs::write(dir.path().join(DATA_FILENAME), &text).unwrap();
+        register_in(dir.path(), session("new")).unwrap();
+        assert_eq!(ids(dir.path()), ["old", "new"]);
+        assert_eq!(backups(dir.path()).len(), 1);
     }
 }

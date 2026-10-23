@@ -484,3 +484,158 @@ async fn duplicate_legacy_id_is_not_title_addressable() {
         "duplicate-id session must fail closed, not resume: {msg}"
     );
 }
+
+fn summary_at(id: &str, title: &str, updated_at: &str) -> Summary {
+    serde_json::from_value(serde_json::json!({
+        "info": { "id": id, "cwd": "/ws" },
+        "session_summary": "auto summary",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": updated_at,
+        "num_messages": 1,
+        "current_model_id": "fuigo-build",
+        "generated_title": title,
+        "title_is_manual": false,
+    }))
+    .expect("valid Summary JSON")
+}
+
+fn ids_of(found: &[&Summary]) -> Vec<String> {
+    found.iter().map(|s| s.info.id.to_string()).collect()
+}
+
+#[test]
+fn titles_match_whatever_separates_the_words() {
+    let s = [summary("a", Some("Fix login bug"), false)];
+    for arg in ["fix-login-bug", "fix_login_bug", "Fix.login/bug", "  FIX   login   bug "] {
+        assert_eq!(id_of(select_by_title(arg, &s).unwrap()), "a", "{arg:?}");
+    }
+    assert!(select_by_title("fix login", &s).unwrap().is_none(), "a prefix is not the title");
+    assert!(select_by_title("fixlogin bug", &s).unwrap().is_none(), "separators do not vanish");
+}
+
+#[test]
+fn titles_that_differ_only_in_separators_are_ambiguous() {
+    let s = [
+        summary("a", Some("Fix login bug"), false),
+        summary("b", Some("fix-login-bug"), false),
+    ];
+    assert!(select_by_title("fix login bug", &s).is_err());
+}
+
+#[test]
+fn ambiguity_lists_matches_newest_first_with_when_they_were_updated() {
+    let s = [
+        summary_at("old-one", "Dup", "2026-01-01T10:00:00Z"),
+        summary_at("new-one", "Dup", "2026-03-05T12:30:00Z"),
+        summary_at("mid-one", "Dup", "2026-02-02T08:15:00Z"),
+    ];
+    let msg = select_by_title("dup", &s).unwrap_err().to_string();
+    let at = |needle: &str| msg.find(needle).unwrap_or_else(|| panic!("{needle} missing: {msg}"));
+    assert!(at("new-one") < at("mid-one") && at("mid-one") < at("old-one"), "{msg}");
+    assert!(msg.contains("2026-03-05 12:30"), "{msg}");
+    assert!(msg.contains("2026-01-01 10:00"), "{msg}");
+}
+
+#[test]
+fn resume_candidates_take_an_exact_title_first() {
+    let s = [
+        summary("short", Some("Fix login"), false),
+        summary("long", Some("Fix login bug"), false),
+    ];
+    assert_eq!(ids_of(&resume_candidates("fix-login", &s)), ["short"]);
+}
+
+#[test]
+fn resume_candidates_match_every_word_in_any_order() {
+    let s = [
+        summary("a", Some("Fix login bug"), false),
+        summary("b", Some("Refactor billing"), false),
+    ];
+    assert_eq!(ids_of(&resume_candidates("bug LOGIN", &s)), ["a"]);
+    assert!(resume_candidates("login billing", &s).is_empty(), "every word must be present");
+    assert!(resume_candidates("   ", &s).is_empty());
+}
+
+#[test]
+fn resume_candidates_list_newest_first() {
+    let s = [
+        summary_at("old", "Billing fix", "2026-01-01T00:00:00Z"),
+        summary_at("new", "Fix billing again", "2026-04-01T00:00:00Z"),
+        summary_at("mid", "billing: fix", "2026-02-01T00:00:00Z"),
+    ];
+    assert_eq!(ids_of(&resume_candidates("fix billing", &s)), ["new", "mid", "old"]);
+}
+
+#[test]
+fn resume_candidates_prefer_a_sole_manual_rename_among_exact_duplicates() {
+    let s = [
+        summary("auto", Some("Dup"), false),
+        summary("manual", Some("Dup"), true),
+    ];
+    assert_eq!(ids_of(&resume_candidates("dup", &s)), ["manual"]);
+}
+
+#[test]
+fn similar_titles_share_a_word_best_match_first_then_newest() {
+    let s = [
+        summary_at("one-word-old", "Billing cleanup", "2026-01-01T00:00:00Z"),
+        summary_at("two-words", "Fix billing export", "2026-02-01T00:00:00Z"),
+        summary_at("one-word-new", "Export notes", "2026-03-01T00:00:00Z"),
+        summary_at("none", "Unrelated work", "2026-04-01T00:00:00Z"),
+    ];
+    let found = similar_titles("billing export csv", &s, 5);
+    assert_eq!(ids_of(&found), ["two-words", "one-word-new", "one-word-old"]);
+    assert_eq!(similar_titles("billing export csv", &s, 2).len(), 2, "capped at the limit");
+    assert!(similar_titles("zzz", &s, 5).is_empty());
+}
+
+#[test]
+fn a_miss_names_the_closest_existing_titles() {
+    let s = [
+        summary("a-id", Some("Fix login bug"), false),
+        summary("b-id", Some("Refactor billing"), false),
+    ];
+    let hint = title_miss_hint_with("login crash", &similar_titles("login crash", &s, 3));
+    assert!(hint.contains("no session id or title matched"), "{hint}");
+    assert!(hint.contains("\"Fix login bug\" (a-id)"), "{hint}");
+    assert!(!hint.contains("billing"), "{hint}");
+    assert_eq!(title_miss_hint_with("zzz", &[]), title_miss_hint("zzz"));
+}
+
+/// Row 60.3: `--resume <title>` with no local match reports the miss at once, built from the production startup context.
+/// That context never allows remote restore, so no sign-in or network step can sit between the miss and the error, and the
+/// error names the title and points at the local search.
+#[serial_test::serial(FUIGO_HOME)]
+#[tokio::test]
+async fn resume_title_miss_is_reported_locally_without_remote_restore() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let fx = FuigoHomeFixture::new();
+    let cwd_str = fx.cwd_str();
+
+    let mut args =
+        crate::app::cli::PagerArgs::try_parse_from(["fuigo", "--resume", "no such title"]).unwrap();
+    args.pin_local_resume_target_for_cwd(Some(&cwd_str))
+        .expect("a miss is not a pre-sandbox error");
+    let ctx = crate::app::session_startup::MaterializeCtx::from_pager_args(&args);
+    assert!(
+        !ctx.allow_remote_restore,
+        "the production startup context never restores from a remote"
+    );
+
+    let intent = args.session_startup_intent().unwrap();
+    let msg = crate::app::session_startup::materialize_startup_for_cwd(ctx, intent, &cwd_str)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("no session id or title matched"), "{msg}");
+    assert!(msg.contains("no such title"), "the miss names the title: {msg}");
+    assert!(msg.contains("fuigo sessions search"), "the miss points at local search: {msg}");
+    for remote_word in ["sign in", "sign-in", "log in", "login", "remote", "network"] {
+        assert!(
+            !msg.to_lowercase().contains(remote_word),
+            "a local miss must not mention {remote_word:?}: {msg}"
+        );
+    }
+}

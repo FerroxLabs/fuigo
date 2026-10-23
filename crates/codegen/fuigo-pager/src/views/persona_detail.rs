@@ -420,7 +420,10 @@ pub fn render_persona_detail(
     theme: &Theme,
     compact: bool,
 ) {
-    let title = format!("persona: {}", fuigo_tty_utils::scrub_unsafe_title(&state.name));
+    let title = format!(
+        "persona: {}",
+        fuigo_tty_utils::scrub_unsafe_title(&state.name)
+    );
     let shortcuts = build_shortcuts(state);
     let config = ModalWindowConfig {
         title: &title,

@@ -584,6 +584,17 @@ fn compile(pattern: &str) -> Regex {
 mod tests {
     use super::*;
 
+    /// `redact_secrets` with an empty credential registry. The registry is process-wide and the
+    /// `sent_credentials` tests leave short values in it, so a shape test takes the registry lock and clears it
+    /// first; otherwise it fails only when it happens to run after one of them.
+    fn redact_secrets(input: &str) -> Cow<'_, str> {
+        let _registry = crate::sent_credentials::REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::sent_credentials::clear_for_tests();
+        super::redact_secrets(input)
+    }
+
     /// If you add a regex to `MATCH_ANY`, also add a redaction pass in `redact_secrets` and update this count.
     #[test]
     fn match_any_count_matches_redact_secrets_passes() {
@@ -694,6 +705,20 @@ mod tests {
         ] {
             assert_eq!(redact_secrets(input), input, "over-redacted: {input}");
         }
+    }
+
+    /// The credential registry is process-wide and the `sent_credentials` tests record short values such as
+    /// `abcdefgh`, leaving them behind. A shape test must not see them (it once saw `abcdefgh` inside a lookalike).
+    #[test]
+    fn shape_tests_do_not_see_credentials_left_by_registry_tests() {
+        {
+            let _registry = crate::sent_credentials::REGISTRY_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            crate::sent_credentials::record("abcdefgh");
+        }
+        let input = "disk-0123456789abcdefghijklmno";
+        assert_eq!(redact_secrets(input), input, "registry leaked in: {input}");
     }
 
     #[test]

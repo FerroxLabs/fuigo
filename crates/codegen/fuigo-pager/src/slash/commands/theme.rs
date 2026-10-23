@@ -301,7 +301,6 @@ mod tests {
         });
     }
 
-
     /// Typing an alias ranks its canonical row first; the row still inserts the canonical name.
     #[test]
     fn suggest_args_alias_ranks_canonical_row() {

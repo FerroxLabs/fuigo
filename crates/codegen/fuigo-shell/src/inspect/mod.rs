@@ -522,6 +522,9 @@ async fn build_report(cwd: &Path) -> InspectReport {
             ),
         );
     }
+    if let Ok(effective) = effective_config_result.as_ref() {
+        config_warnings.extend(feature_flag_type_warnings(effective));
+    }
     if let Some(error) = config_parse_error {
         config_warnings.push(
             crate::agent::config_model_override_parse::ConfigWarning::config_key(
@@ -1150,6 +1153,31 @@ fn list_mcp_servers(
                 disabled_reason,
                 vendor,
             }
+        })
+        .collect()
+}
+
+/// Warnings for `[features]` flags that are set to something other than `true` or `false`: the loader ignores such a value,
+/// so the feature keeps its default and the user would otherwise never learn why.
+fn feature_flag_type_warnings(
+    effective: &toml::Value,
+) -> Vec<crate::agent::config_model_override_parse::ConfigWarning> {
+    use crate::agent::config_model_override_parse::{ConfigWarning, ConfigWarningKind};
+    let Some(features) = effective.get("features").and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+    fuigo_config::REQUIREMENTS_BOOL_FEATURES
+        .iter()
+        .chain(fuigo_config::REQUIREMENTS_RESOLVE_BOOL_FEATURES)
+        .filter_map(|key| {
+            let value = features.get(*key)?;
+            (!value.is_bool()).then(|| {
+                ConfigWarning::config_key(
+                    format!("features.{key}"),
+                    ConfigWarningKind::InvalidValue,
+                    format!("must be true or false, but is {} ({value}); the setting is ignored", value.type_str()),
+                )
+            })
         })
         .collect()
 }
@@ -2395,6 +2423,33 @@ mod tests {
         assert_eq!(enforced.len(), 1);
         assert_eq!(enforced[0].setting, EnforcedSetting::AlwaysApprove);
         assert_eq!(enforced[0].source, crate::config::MDM_REQUIREMENTS_SOURCE);
+    }
+
+    /// 53.11: a `[features]` flag set to anything but true or false is ignored by the loader; `fuigo inspect` says so.
+    #[test]
+    fn inspect_warns_about_feature_flags_that_are_not_booleans() {
+        let effective: toml::Value = toml::from_str(
+            r#"
+            [features]
+            web_fetch = "yes"
+            lsp_tools = 1
+            voice_mode = true
+            session_search = false
+            mcp_auto_restart = "on"
+            made_up_flag = "anything"
+            "#,
+        )
+        .unwrap();
+        let warnings = feature_flag_type_warnings(&effective);
+        let human = render_config_warnings(&warnings);
+        for key in ["web_fetch", "lsp_tools", "mcp_auto_restart"] {
+            assert!(human.contains(&format!("features.{key}")), "{key} must be reported: {human}");
+        }
+        for key in ["voice_mode", "session_search", "made_up_flag"] {
+            assert!(!human.contains(&format!("features.{key}")), "{key} must not be reported: {human}");
+        }
+        assert!(human.contains("true or false"), "{human}");
+        assert!(feature_flag_type_warnings(&toml::Value::Table(Default::default())).is_empty());
     }
 
     /// Model-override warnings flow from an effective config through `Config` to the human renderer and the JSON report.

@@ -38,6 +38,10 @@ pub(crate) struct CircuitBreakerInner {
     /// than `open_duration` as abandoned and lets one caller reclaim
     /// it, so a lost probe delays recovery by at most one cool-down.
     probe_claimed_at_millis: AtomicU64,
+    /// Makes "claim a slot and stamp `probe_claimed_at_millis`" one step. Without it a second caller could see the
+    /// slot taken, read the previous (stale) stamp before the claimant had written its own, judge the claim
+    /// abandoned and take it over, admitting two probes for one slot.
+    probe_gate: Mutex<()>,
     /// Lock-free mirror of `state == Open`. Written after the
     /// authoritative `state` store with `Release`; read with
     /// `Relaxed` from the `is_open()` hot path.
@@ -68,6 +72,7 @@ impl CircuitBreaker {
                 opened_at_millis: AtomicU64::new(0),
                 half_open_probes: AtomicUsize::new(0),
                 probe_claimed_at_millis: AtomicU64::new(0),
+                probe_gate: Mutex::new(()),
                 is_open_fast: AtomicBool::new(false),
                 window: Mutex::new(SlidingWindow::new()),
                 clock,
@@ -275,14 +280,31 @@ impl CircuitBreaker {
     }
 
     fn try_half_open_probe(&self) -> Result<(), BreakerOpen> {
+        // The observer is called after the gate is released: it is user code and may re-enter the breaker.
+        let admitted = self.claim_probe_slot();
+        self.observer().on_probe_admission(admitted);
+        if admitted {
+            return Ok(());
+        }
+        // Slot-exhausted rejection: callers that map this to HTTP
+        // `Retry-After` shouldn't advertise the full open-duration
+        // cool-down; advertise a small fixed backoff (capped to
+        // `open_duration`).
+        const HALF_OPEN_PROBE_BACKOFF: Duration = Duration::from_millis(50);
+        Err(BreakerOpen {
+            retry_after: HALF_OPEN_PROBE_BACKOFF.min(self.inner.config.open_duration),
+        })
+    }
+
+    fn claim_probe_slot(&self) -> bool {
+        let _gate = self.inner.probe_gate.lock().unwrap_or_else(|e| e.into_inner());
         let now = self.elapsed_millis();
         let prev = self.inner.half_open_probes.fetch_add(1, Ordering::AcqRel);
         if prev < self.inner.config.half_open_max_probes {
             self.inner
                 .probe_claimed_at_millis
                 .store(now, Ordering::Release);
-            self.observer().on_probe_admission(true);
-            return Ok(());
+            return true;
         }
         self.inner.half_open_probes.fetch_sub(1, Ordering::AcqRel);
 
@@ -297,26 +319,12 @@ impl CircuitBreaker {
         // an extra probe slot.
         let lease_millis = self.inner.config.open_duration.as_millis() as u64;
         let claimed = self.inner.probe_claimed_at_millis.load(Ordering::Acquire);
-        if now.saturating_sub(claimed) >= lease_millis
+        now.saturating_sub(claimed) >= lease_millis
             && self
                 .inner
                 .probe_claimed_at_millis
                 .compare_exchange(claimed, now, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
-        {
-            self.observer().on_probe_admission(true);
-            return Ok(());
-        }
-
-        self.observer().on_probe_admission(false);
-        // Slot-exhausted rejection: callers that map this to HTTP
-        // `Retry-After` shouldn't advertise the full open-duration
-        // cool-down; advertise a small fixed backoff (capped to
-        // `open_duration`).
-        const HALF_OPEN_PROBE_BACKOFF: Duration = Duration::from_millis(50);
-        Err(BreakerOpen {
-            retry_after: HALF_OPEN_PROBE_BACKOFF.min(self.inner.config.open_duration),
-        })
     }
 
     fn cas_state(&self, from: BreakerState, to: BreakerState) -> bool {

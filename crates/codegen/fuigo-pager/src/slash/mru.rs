@@ -447,7 +447,11 @@ mod tests {
         let file: MruFile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         for tag in ["a", "b"] {
             for i in 0..30u64 {
-                assert_eq!(file.by_command.get(&format!("{tag}{i}")), Some(&(1_000 + i)), "{tag}{i}");
+                assert_eq!(
+                    file.by_command.get(&format!("{tag}{i}")),
+                    Some(&(1_000 + i)),
+                    "{tag}{i}"
+                );
             }
         }
         let names: Vec<String> = fs::read_dir(dir.path())
@@ -465,12 +469,18 @@ mod tests {
             by_prefix: HashMap::new(),
         })
         .unwrap();
-        let ours = HashMap::from([("x".to_owned(), 7), ("y".to_owned(), 3), ("z".to_owned(), 1)]);
+        let ours = HashMap::from([
+            ("x".to_owned(), 7),
+            ("y".to_owned(), 3),
+            ("z".to_owned(), 1),
+        ]);
         let merged = merge_into_disk(&disk, &ours);
         assert_eq!(merged.get("x"), Some(&7));
         assert_eq!(merged.get("y"), Some(&9));
         assert_eq!(merged.get("z"), Some(&1));
-        let many: HashMap<String, u64> = (0..(MAX_ENTRIES as u64 + 10)).map(|i| (format!("c{i}"), i + 1)).collect();
+        let many: HashMap<String, u64> = (0..(MAX_ENTRIES as u64 + 10))
+            .map(|i| (format!("c{i}"), i + 1))
+            .collect();
         let merged = merge_into_disk(b"not json", &many);
         assert_eq!(merged.len(), MAX_ENTRIES);
         assert!(!merged.contains_key("c0"), "the oldest are cut");

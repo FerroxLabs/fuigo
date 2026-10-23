@@ -8,6 +8,9 @@
 pub mod discovery;
 pub mod git_install;
 pub mod hooks_adapter;
+// the fixtures are sh stubs run through a Unix shell
+#[cfg(all(test, unix))]
+mod hooks_compat_fixture_tests;
 pub mod install_registry;
 pub mod local_refresh;
 pub mod manifest;

@@ -2195,6 +2195,25 @@ pub(super) fn model_changed_ext(
             model_id: model_id.to_string(),
             reasoning_effort: reasoning_effort.map(String::from),
             context_window_selection: None,
+            route: None,
+        },
+        meta: None,
+    };
+    let raw = serde_json::value::to_raw_value(&payload).unwrap();
+    acp::ExtNotification::new("fuigo/session_notification", std::sync::Arc::from(raw))
+}
+pub(super) fn model_changed_ext_with_route(
+    session_id: &str,
+    model_id: &str,
+    route: Option<&str>,
+) -> acp::ExtNotification {
+    let payload = SessionNotification {
+        session_id: acp::SessionId::new(session_id),
+        update: FuigoSessionUpdate::ModelChanged {
+            model_id: model_id.to_string(),
+            reasoning_effort: None,
+            context_window_selection: None,
+            route: route.map(str::to_owned),
         },
         meta: None,
     };
@@ -2212,6 +2231,7 @@ pub(super) fn model_changed_ext_with_event(
             model_id: model_id.to_string(),
             reasoning_effort: None,
             context_window_selection: None,
+            route: None,
         },
         meta: Some(serde_json::json!({ "eventId": event_id })),
     };

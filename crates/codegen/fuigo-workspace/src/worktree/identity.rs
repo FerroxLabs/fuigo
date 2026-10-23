@@ -51,7 +51,7 @@ pub fn worktree_identity_in(worktrees_dir: &Path, cwd: &str) -> Option<WorktreeI
                 &[] as &[&std::ffi::OsStr],
             )
             .ok()?;
-            let root = repo.commondir().parent()?.to_path_buf();
+            let root = crate::session::git::main_worktree_root(&repo, &worktree_root)?;
             // git2 returns symlink-resolved paths, so the containment check must compare canonicalized paths
             // Otherwise a symlinked fuigo home lets a standalone clone report itself as the source
             (!canonical(&root).starts_with(canonical(worktrees_dir))).then_some(root)

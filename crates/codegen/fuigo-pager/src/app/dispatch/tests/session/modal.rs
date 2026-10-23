@@ -199,6 +199,26 @@ fn close_inactive_agent_drops_it() {
     assert_eq!(app.agents.len(), 2);
 }
 
+/// 50.8: closing a tab that is mid-turn drops the prompts queued behind that turn; none of them is sent.
+#[test]
+fn closing_a_busy_tab_sends_none_of_its_queued_prompts() {
+    let mut app = three_agent_app();
+    {
+        let agent = app.agents.get_mut(&AgentId(2)).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+    }
+    enqueue_local(&mut app, AgentId(2), "queued one");
+    enqueue_local(&mut app, AgentId(2), "queued two");
+    let effects = dispatch_sessions_confirm_close(&mut app, AgentId(2));
+    assert!(!app.agents.contains_key(&AgentId(2)));
+    assert!(
+        effects
+            .iter()
+            .all(|e| matches!(e, Effect::UnregisterActiveSession { .. })),
+        "closing must not send a queued prompt, got {effects:?}"
+    );
+}
+
 #[test]
 fn close_agent_releases_retained_memory() {
     use crate::memory_release::test_support;

@@ -26,13 +26,15 @@ mod menu;
 mod prompt;
 mod toast;
 mod top_bar;
+mod wind_mark;
+pub(crate) mod wind_mark_data;
+mod wind_spin;
 
-pub(crate) use logo::shimmer_frame;
-use logo::{logo_line_count, render_logo};
 use menu::render_menu;
 pub(crate) use toast::paint_welcome_toast;
 pub(crate) use top_bar::location_line_at;
 use top_bar::render_top_bar;
+pub(crate) use wind_spin::{mark_frame, note_visible, set_focused, snap_to_rest, spin_pending};
 
 /// True for VS Code and xterm.js embeds (VS Code-family IDEs and Zed) where quit is `Ctrl+D` (canonical: [`TerminalName::is_vscode_family`]).
 fn welcome_in_vscode_family() -> bool {
@@ -163,7 +165,6 @@ const VERSION_GAP: u16 = 1;
 
 /// Computed areas for the welcome screen vertical layout.
 pub(super) struct WelcomeLayout {
-    pub(super) logo: Rect,
     pub(super) error: Rect,
     pub(super) menu: Rect,
     /// Stacked info slot below the menu (narrow layout only): it shows either the announcement or the changelog (the announcement takes priority).
@@ -173,8 +174,10 @@ pub(super) struct WelcomeLayout {
     pub(super) prompt: Rect,
     pub(super) version: Rect,
     // Hero box sub-rects (all zero when hero box is inactive).
+    /// Mark slot above the text column; zero when no mask fits.
+    pub(super) hero_mark: Rect,
+    /// The text column of the hero layout (version, tagline, info slot, menu); zero when the hero layout is inactive.
     pub(super) hero_box: Rect,
-    pub(super) hero_logo: Rect,
     pub(super) hero_version: Rect,
     pub(super) hero_subtitle: Rect,
     /// In-box info slot: it shows either the announcement or the changelog (the announcement takes priority).
@@ -368,12 +371,8 @@ impl WelcomeLayout {
             None => changelog_height,
         };
 
-        // Stacked layout: skip the logo in compact mode (the session picker needs the space); otherwise pick small/full/none by height
-        let logo_rows = if compact {
-            0
-        } else {
-            logo_line_count(content_area.height)
-        };
+        // The stacked layout draws no wordmark: the Wind mark behind it is the only mark
+        let logo_rows = 0u16;
 
         let gap_after_logo = if error_height > 0 { 1 } else { 0 };
         let tip_gap = if tip_height > 0 { 1u16 } else { 0 };
@@ -409,7 +408,7 @@ impl WelcomeLayout {
         let flex_gap = 1u16;
         let [
             _,
-            logo,
+            _,
             _,
             _,
             error,
@@ -440,15 +439,14 @@ impl WelcomeLayout {
         ])
         .areas(content_area);
         Self {
-            logo,
             error,
             menu,
             changelog,
             tip,
             prompt,
             version,
+            hero_mark: zero,
             hero_box: zero,
-            hero_logo: zero,
             hero_version: zero,
             hero_subtitle: zero,
             hero_info: zero,
@@ -473,7 +471,7 @@ pub(super) fn render_version_badge(
     theme: &Theme,
     team_name: Option<&str>,
     h_margin: u16,
-    is_api_key_auth: bool,
+    credential: Option<&str>,
     mode: VersionBadgeMode<'_>,
 ) {
     let version_area = Rect {
@@ -508,9 +506,10 @@ pub(super) fn render_version_badge(
         ));
         spans.push(sep.clone());
     }
-    if show_api_key && is_api_key_auth {
+    // Names the credential in use ("Grok subscription", "Flux Router key"), never a generic "API key".
+    if show_api_key && let Some(credential) = credential {
         spans.push(Span::styled(
-            "Logged in with API key",
+            format!("Logged in with {credential}"),
             Style::default().fg(theme.gray),
         ));
         spans.push(sep);
@@ -579,7 +578,7 @@ fn render_prompt_and_version(
     h_margin: u16,
     compact: bool,
     pending_hint: Option<crate::views::shortcuts_bar::PendingHint>,
-    is_api_key_auth: bool,
+    credential: Option<&str>,
     skip_version: bool,
 ) -> (
     Option<(u16, u16)>,
@@ -624,7 +623,7 @@ fn render_prompt_and_version(
             theme,
             team_name,
             h_margin,
-            is_api_key_auth,
+            credential,
             VersionBadgeMode::Full {
                 subscription_tier: None,
             },
@@ -636,7 +635,7 @@ fn render_prompt_and_version(
             theme,
             team_name,
             h_margin,
-            is_api_key_auth,
+            credential,
             VersionBadgeMode::HeroFooter,
         );
     }
@@ -653,10 +652,13 @@ pub struct WelcomeRenderParams<'a> {
     pub trust_state: &'a TrustState,
     pub consent_state: &'a crate::app::consent::ConsentState,
     pub consent_hover_link: Option<usize>,
-    pub login_label: Option<&'a str>,
-    /// Credentials discovered in the environment. Display-only: the masked
-    /// form is all that ever reaches a render buffer.
-    pub detected_keys: &'a [crate::app::pending_menu::DetectedKeyRow],
+    /// The sign-in picker rows as the dispatcher will run them (`pending_menu::menu_entries`).
+    /// Labels carry only masked keys (last four characters).
+    pub menu_entries: &'a [crate::app::pending_menu::MenuEntry],
+    /// The picker is the `/login` modal.
+    pub picker_modal: bool,
+    /// A neutral line under the heading: the result of the last picker action.
+    pub sign_in_notice: Option<&'a str>,
     pub auth_code_input: &'a str,
     pub auth_code_cursor_byte: usize,
     pub clipboard_delivery: Option<crate::clipboard::ClipboardDelivery>,
@@ -679,7 +681,8 @@ pub struct WelcomeRenderParams<'a> {
     pub pending_update_version: Option<&'a str>,
     /// Recent foreign session offered on ctrl+u, suppressed by a pending update.
     pub foreign_resume_hint: Option<&'a fuigo_foreign_sessions::RecentForeignSession>,
-    pub is_api_key_auth: bool,
+    /// The credential in use, named ("Grok subscription", "Flux Router key"); `None` hides the footer note.
+    pub credential: Option<&'a str>,
     pub session_picker_content_results:
         Option<&'a [fuigo_shell::extensions::session_search::SearchSessionHit]>,
     pub session_picker_content_loading: bool,
@@ -714,6 +717,24 @@ pub struct WelcomeRenderParams<'a> {
     /// Non-blocking welcome privacy banner above the prompt.
     pub privacy_banner: bool,
 }
+
+/// Whether the faint background mark belongs behind this welcome state: only the idle, signed-in screen,
+/// not login, consent, trust, access-gate or session-picker states.
+/// It also steps aside the moment the user types: `prompt_empty` is false as soon as the input holds a character,
+/// and the mark returns (settled, no gust replay) if they clear it again.
+fn wind_mark_wanted(p: &WelcomeRenderParams<'_>, prompt_empty: bool) -> bool {
+    prompt_empty
+        && matches!(p.auth_state, AuthState::Done)
+        && p.has_access
+        && !p.is_zdr_blocked
+        && !matches!(p.consent_state, ConsentState::Pending { .. })
+        && !matches!(p.trust_state, TrustState::Pending { .. })
+        && p.session_picker.is_none()
+        && !p.session_picker_loading
+}
+
+/// Width of the stacked column (menu, info slot) when its content asks for less.
+const STACKED_COLUMN_WIDTH: u16 = 45;
 
 /// Render the welcome screen.
 pub fn render_welcome(
@@ -752,64 +773,26 @@ pub fn render_welcome(
 
     let mut result = match params.auth_state {
         AuthState::Pending { error } => {
-            // API key first. Upstream offered only "Login with grok.com", which
-            // for Fuigo is a host the egress guard refuses and an account that
-            // does not exist. A key is the whole credential here.
-            //
-            // The interactive login row is kept only when something real backs
-            // it -- an OIDC issuer or an external auth provider the operator
-            // configured. `login_label` is None when nothing does, and in that
-            // case offering the row at all would be a dead end.
-            let login_text = params
-                .login_label
-                .map(|label| format!("Login with {}", label));
-            // Built from `pending_menu_rows`, the same function the click
-            // dispatcher uses, so the two cannot disagree about what row N is.
-            use crate::app::pending_menu::{PendingMenuRow, pending_menu_rows, row_shortcut};
-            let rows = pending_menu_rows(params.detected_keys.len(), login_text.is_some());
-            // The masked key rides in the label because `render_menu` is a
-            // two-column widget (label left, shortcut right) used by four call
-            // sites; widening it for one screen is not worth the churn.
-            let detected_labels: Vec<String> = params
-                .detected_keys
-                .iter()
-                .map(|d| format!("Use {} from your environment  {}", d.env_var, d.masked))
-                .collect();
-            let shortcuts: Vec<String> = rows.iter().copied().map(row_shortcut).collect();
-            let menu: Vec<(&str, &str)> = rows
+            // One picker for first run and `/login`. The rows and their labels come from
+            // `pending_menu::menu_entries`, the same list the key and click handlers index into, so
+            // the row a user sees is the row that runs. Flux Router leads and is the default.
+            use crate::app::pending_menu::{PendingMenuRow, row_shortcut};
+            let rows: Vec<PendingMenuRow> = params.menu_entries.iter().map(|e| e.row).collect();
+            let shortcuts: Vec<String> = (0..rows.len()).map(|i| row_shortcut(&rows, i)).collect();
+            let menu: Vec<(&str, &str)> = params
+                .menu_entries
                 .iter()
                 .enumerate()
-                .filter_map(|(i, row)| {
-                    let label: &str = match row {
-                        PendingMenuRow::UseDetectedKey(k) => detected_labels.get(*k)?.as_str(),
-                        PendingMenuRow::EnterApiKey => {
-                            if params.detected_keys.is_empty() {
-                                "Enter API key"
-                            } else {
-                                "Enter API key manually"
-                            }
-                        }
-                        PendingMenuRow::Login => login_text.as_deref()?,
-                        PendingMenuRow::Quit => "Quit",
-                    };
-                    Some((shortcuts[i].as_str(), label))
-                })
+                .map(|(i, entry)| (shortcuts[i].as_str(), entry.label.as_str()))
                 .collect();
-            // No error means first run, not a failure: say what is needed in
+            // No error means first run or the modal, not a failure: say what is being asked in
             // the neutral colour rather than leaving the screen unexplained.
-            const NEEDS_KEY: &str = "Fuigo needs an API key to reach a model.";
-            const FOUND_KEY: &str =
-                "Fuigo needs an API key. Found one in your environment \u{2014} press 1 to use it.";
-            let needs_key = if params.detected_keys.is_empty() {
-                NEEDS_KEY
-            } else {
-                FOUND_KEY
-            };
-            let msg = Some(
-                error
-                    .as_deref()
-                    .map_or((needs_key, theme.gray), |e| (e, theme.accent_error)),
-            );
+            const CHOOSE: &str = fuigo_shell::auth::provider_status::CHOOSE_LINE;
+            let msg = Some(match (error.as_deref(), params.sign_in_notice) {
+                (Some(e), _) => (e, theme.accent_error),
+                (None, Some(note)) => (note, theme.gray),
+                (None, None) => (CHOOSE, theme.gray),
+            });
             let info = PromptInfo {
                 model_name: params.model_name,
                 flags: params.flags,
@@ -835,7 +818,7 @@ pub fn render_welcome(
             }
         }
         AuthState::Authenticating { auth_url, mode, .. } => {
-            let llc = logo_line_count(content_area.height);
+            let llc = 0;
             let (url_rect, fallback_rect) = render_welcome_authenticating(
                 content_area,
                 buf,
@@ -931,6 +914,9 @@ pub fn render_welcome(
     result
 }
 
+/// Most rows the blocked screens give their message; a longer one is cut here rather than pushing the menu off the screen.
+const MAX_BLOCKED_MESSAGE_ROWS: u16 = 5;
+
 /// Render a blocked welcome screen: logo, optional message, menu, version.
 ///
 /// Used for both the login screen (Pending) and the ZDR gate. The layout is:
@@ -952,7 +938,22 @@ fn render_welcome_blocked(
 ) -> (Vec<Rect>, Option<crate::terminal::overlay::PostFlush>) {
     let theme = Theme::current();
 
-    let msg_height = if message.is_some() { 2u16 } else { 0u16 };
+    // The message wraps to the width it is painted at, so a long error stays whole on a narrow terminal
+    // The slot is the wrapped rows plus the blank row below them
+    let message_rows: Vec<Line<'static>> = message
+        .map(|(text, color)| {
+            let text = Line::from(Span::styled(text.to_owned(), Style::default().fg(color)));
+            crate::render::wrapping::word_wrap_lines(
+                std::iter::once(text),
+                usize::from(content_area.width.max(1)),
+            )
+        })
+        .unwrap_or_default();
+    let msg_height = if message.is_some() {
+        (message_rows.len() as u16).clamp(1, MAX_BLOCKED_MESSAGE_ROWS) + 1
+    } else {
+        0u16
+    };
     let menu_height = menu_items.len() as u16;
     let mut layout_input = WelcomeLayoutInput {
         content_area,
@@ -974,12 +975,13 @@ fn render_welcome_blocked(
     // Force the stacked layout: this renderer only paints the stacked logo/menu rects, which the hero-box layout would leave empty
     let layout = WelcomeLayout::compute_stacked(layout_input);
 
-    render_logo(layout.logo, buf, &theme, content_area.height);
-
-    if let Some((text, color)) = message {
-        let line =
-            Line::from(Span::styled(text, Style::default().fg(color))).alignment(Alignment::Center);
-        Paragraph::new(line).render(layout.error, buf);
+    if message.is_some() {
+        let lines: Vec<Line<'static>> = message_rows
+            .into_iter()
+            .take(usize::from(MAX_BLOCKED_MESSAGE_ROWS))
+            .map(|line| line.alignment(Alignment::Center))
+            .collect();
+        Paragraph::new(lines).render(layout.error, buf);
     }
 
     // Inset the menu the same as the input bar / post-auth menu
@@ -1016,7 +1018,7 @@ fn render_welcome_blocked(
         &theme,
         None,
         h_margin,
-        false,
+        None,
         VersionBadgeMode::Full {
             subscription_tier: None,
         },
@@ -1076,7 +1078,6 @@ fn render_welcome_trust(
         ..Default::default()
     });
 
-    render_logo(layout.logo, buf, theme, content_area.height);
     Paragraph::new(lines).render(layout.error, buf);
 
     let menu_area = inset_horizontal(layout.menu, prompt::prompt_inset(compact));
@@ -1088,7 +1089,7 @@ fn render_welcome_trust(
         theme,
         None,
         h_margin,
-        false,
+        None,
         VersionBadgeMode::Full {
             subscription_tier: None,
         },
@@ -1248,7 +1249,7 @@ fn render_raw_url_mode(
         .map(|u| (u.len() as u16).div_ceil(full_width))
         .unwrap_or(0);
     let msg_height = 1 + 1 + url_lines; // hint + blank + URL
-    let [_, logo_area, _, msg_area, _, hint_area, _] = Layout::vertical([
+    let [_, _, _, msg_area, _, hint_area, _] = Layout::vertical([
         Constraint::Length(top_pad),
         Constraint::Length(logo_line_count),
         Constraint::Length(2),
@@ -1258,8 +1259,6 @@ fn render_raw_url_mode(
         Constraint::Min(0),
     ])
     .areas(content_area);
-
-    render_logo(logo_area, buf, theme, content_area.height);
 
     // Render hint above the URL.
     let hint = Line::from(Span::styled(
@@ -1380,7 +1379,7 @@ fn render_browser_status_arm(
     };
     let msg_height = header_rows + code_extra + copy_extra + 1 + 1; // blank + waiting
 
-    let [_, logo_area, _, msg_area, _, hint_area, _] = Layout::vertical([
+    let [_, _, _, msg_area, _, hint_area, _] = Layout::vertical([
         Constraint::Length(top_pad),
         Constraint::Length(logo_line_count),
         Constraint::Length(2),          // gap
@@ -1390,8 +1389,6 @@ fn render_browser_status_arm(
         Constraint::Min(0),
     ])
     .areas(content_area);
-
-    render_logo(logo_area, buf, theme, content_area.height);
 
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(header, Style::default().fg(theme.gray_bright)))
@@ -1463,7 +1460,7 @@ fn render_welcome_authenticating(
         // URL to copy, no browser handoff and nothing to wait for, so the screen
         // is just a heading, the masked box and where to get a key.
         AuthMode::ApiKey => {
-            let [_, logo_area, _, msg_area, _, prompt_area, _, hint_area, _] = Layout::vertical([
+            let [_, _, _, msg_area, _, prompt_area, _, hint_area, _] = Layout::vertical([
                 Constraint::Length(top_pad),
                 Constraint::Length(logo_line_count),
                 Constraint::Length(1), // gap
@@ -1476,17 +1473,15 @@ fn render_welcome_authenticating(
             ])
             .areas(content_area);
 
-            render_logo(logo_area, buf, theme, content_area.height);
-
             let lines = vec![
                 Line::from(Span::styled(
-                    "Paste your FluxRouter API key",
+                    "Paste your Flux Router API key",
                     Style::default().fg(theme.gray_bright),
                 ))
                 .alignment(Alignment::Center),
                 Line::from(vec![
                     Span::styled(
-                        "One key reaches every model  ",
+                        "One key, every model. Get one at  ",
                         Style::default().fg(theme.gray),
                     ),
                     Span::styled("fluxrouter.ai", Style::default().fg(theme.accent_user)),
@@ -1522,6 +1517,13 @@ fn render_welcome_authenticating(
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("  connect    ", Style::default().fg(theme.gray)),
+                Span::styled(
+                    "esc",
+                    Style::default()
+                        .fg(theme.accent_user)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  back    ", Style::default().fg(theme.gray)),
             ];
             hint_spans.extend(quit_hint_spans(theme));
             Paragraph::new(Line::from(hint_spans).alignment(Alignment::Center))
@@ -1552,7 +1554,7 @@ fn render_welcome_authenticating(
             } else {
                 1u16
             };
-            let [_, logo_area, _, msg_area, _, prompt_area, _, hint_area, _] = Layout::vertical([
+            let [_, _, _, msg_area, _, prompt_area, _, hint_area, _] = Layout::vertical([
                 Constraint::Length(top_pad),
                 Constraint::Length(logo_line_count),
                 Constraint::Length(1),          // gap
@@ -1564,8 +1566,6 @@ fn render_welcome_authenticating(
                 Constraint::Min(0),
             ])
             .areas(content_area);
-
-            render_logo(logo_area, buf, theme, content_area.height);
 
             // Instruction text
             let mut lines: Vec<Line> = Vec::new();
@@ -1659,7 +1659,7 @@ fn render_welcome_authenticating(
 
         AuthMode::Pending => {
             // Connecting: status text
-            let [_, logo_area, _, msg_area, _, hint_area, _] = Layout::vertical([
+            let [_, _, _, msg_area, _, hint_area, _] = Layout::vertical([
                 Constraint::Length(top_pad),
                 Constraint::Length(logo_line_count),
                 Constraint::Length(2),
@@ -1669,8 +1669,6 @@ fn render_welcome_authenticating(
                 Constraint::Min(0),
             ])
             .areas(content_area);
-
-            render_logo(logo_area, buf, theme, content_area.height);
 
             let msg = Line::from(Span::styled(
                 "Connecting...",
@@ -1709,9 +1707,7 @@ fn render_changelog_section(
     clickable: bool,
     mouse_pos: Option<(u16, u16)>,
 ) -> Option<Rect> {
-    let menu_width = logo::logo_visual_width(content_height)
-        .max(30)
-        .max(min_width_hint);
+    let menu_width = STACKED_COLUMN_WIDTH.max(30).max(min_width_hint);
     let [_, centered, _] = Layout::horizontal([
         Constraint::Min(0),
         Constraint::Length(menu_width),
@@ -1764,9 +1760,8 @@ fn render_changelog_section(
 
 /// Wrap width of the stacked info slot, centered at the menu width inside the inset.
 /// Both `compute`'s height measurement and `render_announcement_section` go through here, so the widths cannot drift.
-/// `logo_height` selects the min menu width.
-fn stacked_info_width(avail_width: u16, logo_height: u16, min_width_hint: u16) -> u16 {
-    logo::logo_visual_width(logo_height)
+fn stacked_info_width(avail_width: u16, _content_height: u16, min_width_hint: u16) -> u16 {
+    STACKED_COLUMN_WIDTH
         .max(30)
         .max(min_width_hint)
         .min(avail_width)
@@ -1784,7 +1779,7 @@ fn stacked_info_budget(
     if compact {
         return 0;
     }
-    let logo_rows = logo_line_count(content_area.height);
+    let logo_rows = 0u16;
     let gap_after_logo = if error_height > 0 { 1u16 } else { 0 };
     let fixed_above = logo_rows + 1 + gap_after_logo + error_height;
     let fixed_below = WelcomeLayout::fixed_below(tip_height);
@@ -1976,6 +1971,12 @@ fn render_welcome_done(
     }
     let layout = WelcomeLayout::compute(layout_input);
 
+    // The mark owns its own slot above the text, so it never overlaps a widget and needs no opaque fill under them
+    if layout.hero_mark.height > 0 && wind_mark_wanted(p, prompt.text().is_empty()) {
+        let screen = *buf.area();
+        wind_mark::paint_live(buf, screen, layout.hero_mark, theme);
+    }
+
     // Render startup warning in the error area (same slot as auth errors).
     let import_banner_rect = render_startup_warnings(layout.error, buf, theme, p.startup_warnings);
 
@@ -2016,7 +2017,7 @@ fn render_welcome_done(
         );
         (vec![], Some(hit_areas))
     } else if layout.has_hero_box() {
-        // Wide layout: render the bordered hero box with the logo left, version and menu right
+        // Hero layout: the version, tagline and menu as a plain column under the mark
         let rects = hero_box::render_hero_box(
             &layout,
             buf,
@@ -2036,9 +2037,8 @@ fn render_welcome_done(
         upgrade_cta_rect = rects.upgrade_cta_rect;
         (rects.menu_rects, None)
     } else {
-        // Narrow layout: stacked logo above, menu below
+        // Narrow layout: stacked menu; its rows are opaque so the backdrop never shows between the labels
         // Inset the menu the same as the input bar (`prompt_inset`) so it keeps side spacing instead of touching the window edge on narrow terminals
-        render_logo(layout.logo, buf, theme, content_area.height);
         let menu_area = inset_horizontal(layout.menu, prompt::prompt_inset(p.compact));
         (
             render_menu(
@@ -2168,7 +2168,7 @@ fn render_welcome_done(
             theme,
             p.team_name,
             h_margin,
-            p.is_api_key_auth,
+            p.credential,
             VersionBadgeMode::Full {
                 subscription_tier: p.subscription_tier,
             },
@@ -2308,7 +2308,7 @@ fn render_welcome_done(
             h_margin,
             p.compact,
             p.pending_hint,
-            p.is_api_key_auth,
+            p.credential,
             layout.has_hero_box(),
         )
     };
@@ -2778,7 +2778,7 @@ mod tests {
     fn badge_text(mode: VersionBadgeMode<'_>, team: Option<&str>) -> String {
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
-        render_version_badge(area, &mut buf, &Theme::current(), team, 0, false, mode);
+        render_version_badge(area, &mut buf, &Theme::current(), team, 0, None, mode);
         (0..area.width)
             .map(|x| buf.cell((x, 0)).map_or(" ", |c| c.symbol()).to_string())
             .collect::<String>()
@@ -2910,12 +2910,34 @@ mod tests {
         assert!((0..area.width).any(|x| buffer[(x, 1)].bg == theme.text_primary));
     }
 
-    /// Render the pending welcome screen and return its text content.
-    fn render_pending_text(detected: &[crate::app::pending_menu::DetectedKeyRow]) -> String {
+    use fuigo_shell::auth::provider_status::ProviderStatus;
+
+    const FLUX_KEY: &str = "sk-flux-SUPERSECRETMIDDLE-1234";
+
+    fn picker_status(env: &[(&str, &str)], sso: bool) -> ProviderStatus {
+        let env: Vec<(String, String)> = env
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        ProviderStatus::collect(
+            std::path::Path::new("/nonexistent-fuigo-home"),
+            move |name| env.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()),
+            sso,
+        )
+    }
+
+    /// Render the picker as the welcome screen paints it and return its text content.
+    fn render_picker_text(status: &ProviderStatus, modal: bool) -> String {
         let auth_state = AuthState::Pending { error: None };
         let trust_state = TrustState::Done;
+        let entries = crate::app::pending_menu::menu_entries(
+            status,
+            modal,
+            crate::app::pending_menu::PickerPage::Main,
+        );
         let mut params = render_params(&auth_state, &trust_state, None);
-        params.detected_keys = detected;
+        params.menu_entries = &entries;
+        params.picker_modal = modal;
         let area = Rect::new(0, 0, 100, 40);
         let mut buffer = Buffer::empty(area);
         let mut prompt = PromptWidget::default();
@@ -2926,54 +2948,84 @@ mod tests {
                 (0..area.width)
                     .map(|x| buffer[(x, y)].symbol())
                     .collect::<String>()
+                    .trim_end()
+                    .to_string()
             })
+            .filter(|line| !line.is_empty())
             .collect::<Vec<_>>()
             .join("\n")
     }
 
-    fn detected_row() -> crate::app::pending_menu::DetectedKeyRow {
-        crate::app::pending_menu::DetectedKeyRow {
-            provider_label: "FluxRouter".into(),
-            env_var: "FLUX_API_KEY".into(),
-            masked: "sk-B0g...eERw".into(),
-        }
+    /// First run with nothing configured: Flux Router leads and is recommended; subscriptions and
+    /// provider keys follow; Quit closes. No enterprise copy.
+    #[test]
+    fn first_run_picker_offers_flux_first_then_subscriptions_and_keys() {
+        let text = render_picker_text(&picker_status(&[], false), false);
+        eprintln!("--- first run picker ---\n{text}\n------------------------");
+        assert!(text.contains("Choose how Fuigo reaches a model."), "{text}");
+        let flux = text.find("Flux Router: one key, every model (recommended)").expect("flux row");
+        let chatgpt = text.find("ChatGPT subscription (Plus/Pro)").expect("chatgpt row");
+        let grok = text.find("Grok subscription").expect("grok row");
+        let keys = text.find("Provider API key...").expect("keys row");
+        let quit = text.find("Quit").expect("quit row");
+        assert!(flux < chatgpt && chatgpt < grok && grok < keys && keys < quit, "{text}");
+        assert!(!text.to_lowercase().contains("enterprise"), "{text}");
+        assert!(!text.contains("Cancel"), "{text}");
+        assert!(!text.contains("Fuigo needs an API key"), "{text}");
     }
 
-    /// With nothing detected the screen must be exactly what it was before.
     #[test]
-    fn pending_menu_without_detection_is_unchanged() {
-        let text = render_pending_text(&[]);
-        assert!(text.contains("Enter API key"), "{text}");
-        assert!(text.contains("Quit"));
-        assert!(!text.contains("from your environment"));
-        assert!(text.contains("Fuigo needs an API key to reach a model."));
-    }
-
-    #[test]
-    fn detected_key_is_offered_as_a_numbered_row() {
-        let text = render_pending_text(&[detected_row()]);
+    fn a_flux_key_in_the_environment_is_offered_masked_as_the_first_row() {
+        let text = render_picker_text(&picker_status(&[("FLUX_API_KEY", FLUX_KEY)], false), false);
         assert!(
-            text.contains("Use FLUX_API_KEY from your environment"),
+            text.contains("Use FLUX_API_KEY from your environment \u{2022}\u{2022}\u{2022}\u{2022}1234"),
             "{text}"
         );
-        assert!(text.contains("sk-B0g...eERw"), "masked key must be shown");
-        assert!(text.contains("Enter API key manually"));
-        assert!(text.contains("press 1 to use it"));
     }
 
-    /// The one thing this feature must never do.
+    /// The one thing this screen must never do.
     #[test]
     fn a_full_secret_never_reaches_the_render_buffer() {
-        // The row carries only the masked form, so even a renderer bug cannot
-        // paint the secret -- there is nothing to paint. This asserts the
-        // property end to end rather than trusting that.
-        const REAL_SECRET: &str = "sk-B0gKjPvHYSUPERSECRETMIDDLEeERw";
-        let text = render_pending_text(&[detected_row()]);
-        assert!(
-            !text.contains("SUPERSECRETMIDDLE"),
-            "a full key reached the render buffer"
+        let text = render_picker_text(&picker_status(&[("FLUX_API_KEY", FLUX_KEY)], false), false);
+        assert!(!text.contains("SUPERSECRETMIDDLE"), "a full key reached the render buffer");
+        assert!(!text.contains(FLUX_KEY));
+    }
+
+    #[test]
+    fn the_login_modal_ends_in_cancel_and_the_sso_row_needs_an_issuer() {
+        let modal = render_picker_text(&picker_status(&[], false), true);
+        eprintln!("--- /login picker ---\n{modal}\n---------------------");
+        assert!(modal.contains("Cancel") && !modal.contains("Quit"), "{modal}");
+        assert!(!modal.contains("Enterprise SSO"), "{modal}");
+        let with_sso = render_picker_text(&picker_status(&[], true), true);
+        assert!(with_sso.contains("Enterprise SSO"), "{with_sso}");
+    }
+
+    fn credential_badge_text(credential: Option<&str>) -> String {
+        let area = Rect::new(0, 0, 100, 1);
+        let mut buf = Buffer::empty(area);
+        render_version_badge(
+            area,
+            &mut buf,
+            &Theme::current(),
+            None,
+            0,
+            credential,
+            VersionBadgeMode::HeroFooter,
         );
-        assert!(!text.contains(REAL_SECRET));
+        (0..area.width).map(|x| buf[(x, 0)].symbol()).collect::<String>()
+    }
+
+    /// "Logged in with API key" was printed whatever the credential was, including for a subscription.
+    #[test]
+    fn the_footer_names_the_credential_in_use() {
+        let _theme = crate::theme::cache::pin_theme();
+        assert!(credential_badge_text(Some("Grok subscription")).contains("Logged in with Grok subscription"));
+        assert!(credential_badge_text(Some("Flux Router key")).contains("Logged in with Flux Router key"));
+        assert!(credential_badge_text(Some("OpenAI key from OPENAI_API_KEY"))
+            .contains("Logged in with OpenAI key from OPENAI_API_KEY"));
+        assert!(!credential_badge_text(Some("Grok subscription")).contains("API key"));
+        assert!(!credential_badge_text(None).contains("Logged in"));
     }
 
     fn make_entry(id: &str, summary: &str, repo_name: &str) -> SessionPickerEntry {
@@ -3009,8 +3061,9 @@ mod tests {
             trust_state,
             consent_state: &ConsentState::Done,
             consent_hover_link: None,
-            login_label: None,
-            detected_keys: &[],
+            menu_entries: &[],
+            picker_modal: false,
+            sign_in_notice: None,
             auth_code_input: "",
             auth_code_cursor_byte: 0,
             clipboard_delivery: None,
@@ -3032,7 +3085,7 @@ mod tests {
             startup_warnings: &[],
             pending_update_version: None,
             foreign_resume_hint: None,
-            is_api_key_auth: false,
+            credential: None,
             session_picker_content_results: None,
             session_picker_content_loading: false,
             session_picker_entries_query: None,
@@ -3055,6 +3108,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn wind_mark_is_wanted_only_while_the_session_is_empty() {
+        let params = render_params(&AuthState::Done, &TrustState::Done, None);
+        let mut prompt = PromptWidget::new();
+        assert!(wind_mark_wanted(&params, prompt.text().is_empty()));
+        // One typed character removes it.
+        prompt.set_text("a");
+        assert!(!wind_mark_wanted(&params, prompt.text().is_empty()));
+        // Clearing the input while the session is still empty brings it back.
+        prompt.set_text("");
+        assert!(wind_mark_wanted(&params, prompt.text().is_empty()));
+    }
+
+    #[test]
+    fn wind_mark_is_not_wanted_on_login_gate_or_picker_screens() {
+        let pending = AuthState::Pending { error: None };
+        let params = render_params(&pending, &TrustState::Done, None);
+        assert!(!wind_mark_wanted(&params, true));
+        let mut gated = render_params(&AuthState::Done, &TrustState::Done, None);
+        gated.has_access = false;
+        assert!(!wind_mark_wanted(&gated, true));
+        let entries: Vec<SessionPickerEntry> = Vec::new();
+        let picker = render_params(&AuthState::Done, &TrustState::Done, Some(&entries));
+        assert!(!wind_mark_wanted(&picker, true));
+    }
+
     fn render_done_text(params: &WelcomeRenderParams<'_>) -> String {
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
@@ -3062,6 +3141,25 @@ mod tests {
         let mut picker = PickerState::default();
         render_welcome(area, &mut buf, params, &mut prompt, &mut picker);
         buffer_text(&buf)
+    }
+
+    /// An unsupported-platform sandbox warning must be on the first screen, not only on stderr before the TUI starts.
+    #[test]
+    fn welcome_first_screen_shows_the_sandbox_unavailable_warning() {
+        let _theme = crate::theme::cache::pin_theme();
+        let auth = AuthState::Done;
+        let text = fuigo_sandbox::unavailable_warning_for("workspace", true);
+        let warnings: Vec<StartupWarning> =
+            crate::startup::sandbox_unavailable_startup_warning(text.as_deref())
+                .into_iter()
+                .collect();
+        let mut params = render_params(&auth, &TrustState::Done, None);
+        params.startup_warnings = &warnings;
+        let screen = render_done_text(&params);
+        assert!(screen.contains("Sandbox profile workspace is set"), "{screen}");
+        assert!(screen.contains("not available on Windows"), "{screen}");
+        assert!(screen.contains("run unsandboxed"), "{screen}");
+        assert!(crate::startup::sandbox_unavailable_startup_warning(None).is_none());
     }
 
     #[test]
@@ -3506,7 +3604,8 @@ mod tests {
 
     #[test]
     fn changelog_shown_on_tall_terminal() {
-        let area = Rect::new(0, 0, 80, 50);
+        // 59 cols: one under the hero layout's 60, so the stacked layout (and its own changelog slot) applies
+        let area = Rect::new(0, 0, 59, 50);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
             menu_height: 4,
@@ -3518,9 +3617,9 @@ mod tests {
 
     #[test]
     fn stacked_slot_sized_for_announcement_over_changelog() {
-        // Narrow terminal: 80 cols is under the 90 the hero box needs
+        // Narrow terminal: 59 cols is under the 60 the hero layout needs
         // With both present, the stacked info slot is sized for the announcement (priority), not the changelog
-        let area = Rect::new(0, 0, 80, 50);
+        let area = Rect::new(0, 0, 59, 50);
         let a = long_ann();
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
@@ -3536,7 +3635,7 @@ mod tests {
     #[test]
     fn stacked_slot_uses_announcement_when_no_changelog() {
         // Narrow terminal, announcement but no changelog: the stacked slot is still allocated for the announcement (it used to be changelog-only)
-        let area = Rect::new(0, 0, 80, 50);
+        let area = Rect::new(0, 0, 59, 50);
         let a = long_ann();
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
@@ -3603,7 +3702,7 @@ mod tests {
         // Use narrow width to avoid hero box path, keeping stacked layout.
         // With tip_height=2: fixed_below(2) = 8. min = 1 + 4 + 1 + 8 = 14.
         // Threshold = 14 + 6 = 20. At h=19 the tip pushes changelog out.
-        let with_tip = Rect::new(0, 0, 60, 19);
+        let with_tip = Rect::new(0, 0, 59, 19);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: with_tip,
             menu_height: 4,
@@ -3614,7 +3713,7 @@ mod tests {
         assert_eq!(layout.changelog.height, 0);
 
         // Same size without tip: threshold = 17 <= 19, changelog fits.
-        let without_tip = Rect::new(0, 0, 60, 19);
+        let without_tip = Rect::new(0, 0, 59, 19);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: without_tip,
             menu_height: 4,
@@ -3719,19 +3818,17 @@ mod tests {
         assert!(layout.has_hero_box(), "hero box should be active at 90x50");
         assert!(layout.hero_box.width > 0);
         assert!(layout.hero_box.height > 0);
-        // Logo and menu slots are zero in hero box mode (content is inside the box).
-        assert_eq!(layout.logo.width, 0);
+        // The stacked menu slot is zero in hero box mode (content is inside the box).
         assert_eq!(layout.menu.width, 0);
         // Sub-rects inside the hero box are valid.
-        assert!(layout.hero_logo.height > 0);
         assert!(layout.hero_menu.height > 0);
         assert_eq!(layout.hero_version.height, 1);
     }
 
     #[test]
     fn hero_box_inactive_on_narrow_terminal() {
-        // 80 cols is below the 90-col threshold.
-        let area = Rect::new(0, 0, 80, 50);
+        // 59 cols is below the 60-col threshold.
+        let area = Rect::new(0, 0, 59, 50);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
             menu_height: 4,
@@ -3739,14 +3836,14 @@ mod tests {
         });
         assert!(
             !layout.has_hero_box(),
-            "hero box should be inactive at 80x50"
+            "hero layout should be inactive at 59x50"
         );
         assert_eq!(layout.hero_box.width, 0);
     }
 
     #[test]
     fn hero_box_boundary_at_min_width() {
-        let just_below = Rect::new(0, 0, 89, 50);
+        let just_below = Rect::new(0, 0, 59, 50);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: just_below,
             menu_height: 4,
@@ -3754,10 +3851,10 @@ mod tests {
         });
         assert!(
             !layout.has_hero_box(),
-            "hero box should be inactive at 89 cols"
+            "hero layout should be inactive at 59 cols"
         );
 
-        let at_threshold = Rect::new(0, 0, 90, 50);
+        let at_threshold = Rect::new(0, 0, 60, 50);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: at_threshold,
             menu_height: 4,
@@ -3765,7 +3862,7 @@ mod tests {
         });
         assert!(
             layout.has_hero_box(),
-            "hero box should be active at 90 cols"
+            "hero layout should be active at 60 cols"
         );
     }
 
@@ -3789,8 +3886,8 @@ mod tests {
 
     #[test]
     fn hero_box_inactive_on_short_terminal() {
-        // 16 rows is one short of the 17 the box needs (11 box + 1 flex gap + 5 fixed-below), so it falls back to the stacked layout
-        let area = Rect::new(0, 0, 90, 16);
+        // 12 rows is one short of the 13 the text needs (7 text rows + 1 flex gap + 5 fixed-below), so it falls back to the stacked layout
+        let area = Rect::new(0, 0, 90, 12);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
             menu_height: 4,
@@ -3798,19 +3895,17 @@ mod tests {
         });
         assert!(
             !layout.has_hero_box(),
-            "hero box should be inactive at 90x16 (needs 17 rows)"
+            "hero layout should be inactive at 90x12 (needs 13 rows)"
         );
     }
 
     #[test]
     fn hero_box_inactive_when_warning_would_overflow() {
-        // Regression: the box is forced to the full logo, so even a 3-item menu
-        // needs 10 box rows (6-line wordmark; upstream's 7-line mark needed 11).
+        // Regression: even a 3-item menu needs 6 column rows (version, subtitle, gap, menu).
         // A startup warning (error_height = 2) pushes the total past the
         // available height, and the gate must fall back to the stacked layout
-        // rather than overflow by a row. The boundary moved down one row with
-        // the logo.
-        let area = Rect::new(0, 0, 90, 18);
+        // rather than overflow by a row.
+        let area = Rect::new(0, 0, 90, 14);
         let with_warning = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
             error_height: 2,
@@ -3825,6 +3920,44 @@ mod tests {
             ..Default::default()
         });
         assert!(no_warning.has_hero_box());
+    }
+
+    /// A long sign-in error wraps instead of running off the edge of a narrow terminal.
+    #[test]
+    fn blocked_screen_error_wraps_on_a_narrow_terminal() {
+        let _theme = crate::theme::cache::pin_theme();
+        let error = "Sign-in failed: the authorization server rejected the request because the code expired";
+        let area = Rect::new(0, 0, 30, 30);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::current();
+        let (_menu, _escapes) = render_welcome_blocked(
+            area,
+            &mut buf,
+            Some((error, theme.accent_error)),
+            &[("1", "Sign in")],
+            None,
+            None,
+            0,
+            false,
+        );
+        let rows: Vec<String> = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            })
+            .collect();
+        let shown: Vec<&String> = rows.iter().filter(|r| !r.is_empty()).collect();
+        let text = shown.iter().map(|r| r.as_str()).collect::<Vec<_>>().join(" ");
+        assert!(text.contains("Sign-in failed"), "start of the error: {rows:#?}");
+        assert!(text.contains("expired"), "end of the error is not cut off: {rows:#?}");
+        let error_rows = rows
+            .iter()
+            .filter(|r| error.contains(r.as_str()) && !r.is_empty())
+            .count();
+        assert!(error_rows >= 3, "the error spans several rows at 30 columns: {rows:#?}");
     }
 
     #[test]
@@ -3849,10 +3982,6 @@ mod tests {
         });
         assert!(!blocked.has_hero_box());
         assert!(
-            blocked.logo.height > 0,
-            "logo must be painted on the login screen"
-        );
-        assert!(
             blocked.menu.height > 0,
             "menu must be painted on the login screen"
         );
@@ -3860,11 +3989,11 @@ mod tests {
 
     #[test]
     fn hero_box_does_not_overflow_with_tall_menu() {
-        // A 6-item menu makes the box 2 rows taller than the default-4 box
-        // The centering pad (derived from the default box) must be clamped
-        // Otherwise the box gets pushed down and the version row clips at exactly min_content_height
-        // 19 == min_content_height(0, 6, 0, 0): a 13-row box + 1 flex gap + 5 fixed-below
-        let area = Rect::new(0, 0, 100, 19);
+        // A 6-item menu makes the column 2 rows taller than the default-4 column
+        // The centering pad (derived from the default column) must be clamped
+        // Otherwise the column gets pushed down and the version row clips at exactly min_content_height
+        // 15 == min_content_height(0, 6, 0, 0): a 9-row column + 1 flex gap + 5 fixed-below
+        let area = Rect::new(0, 0, 100, 15);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
             menu_height: 6,
@@ -3889,11 +4018,8 @@ mod tests {
     }
 
     #[test]
-    fn hero_box_height_accounts_for_borders_and_padding() {
-        // At h >= 26 the full logo is used. Fuigo's wordmark is 6 lines where
-        // upstream's braille mark was 7, so the arithmetic shifts down a row:
-        // right_col = 2 + 0 + 0 + 1 + 3 = 6, inner = max(6, 6) = 6.
-        // hero_box_height = 2 (borders) + 2 (v_pad) + 6 = 10.
+    fn hero_column_height_is_the_text_rows_only() {
+        // right_col = version 1 + subtitle 1 + gap 1 + menu 3 = 6; no border, no padding.
         let area = Rect::new(0, 0, 100, 50);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
@@ -3901,19 +4027,19 @@ mod tests {
             ..Default::default()
         });
         assert!(layout.has_hero_box());
-        assert_eq!(layout.hero_box.height, 10);
+        assert_eq!(layout.hero_box.height, 6);
     }
 
     #[test]
-    fn hero_box_logo_top_aligned() {
+    fn hero_column_version_top_aligned() {
         let area = Rect::new(0, 0, 100, 50);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
             menu_height: 3,
             ..Default::default()
         });
-        // Logo y should be at hero_box.y + 1 (border) + 1 (v_pad).
-        assert_eq!(layout.hero_logo.y, layout.hero_box.y + 2);
+        // The version line is the first row of the column.
+        assert_eq!(layout.hero_version.y, layout.hero_box.y);
     }
 
     #[test]
@@ -4004,9 +4130,8 @@ mod tests {
     }
 
     #[test]
-    fn hero_box_keeps_one_bottom_pad_below_actions() {
-        // With a changelog/announcement the subtitle is hidden, but there's still exactly one padding row between the actions and the bottom border
-        // (menu=4 + info=3 fills the inner, so the menu reaches the pad.)
+    fn hero_column_menu_ends_flush_with_the_column() {
+        // With a changelog/announcement the subtitle is hidden; the menu still ends on the column's last row (no border, no pad)
         let area = Rect::new(0, 0, 100, 50);
         let a = long_ann();
         let no_info = WelcomeLayout::compute(WelcomeLayoutInput {
@@ -4022,13 +4147,8 @@ mod tests {
         });
         assert_eq!(no_info.hero_subtitle.height, 1);
         assert_eq!(with_info.hero_subtitle.height, 0);
-        let menu_bottom = with_info.hero_menu.y + with_info.hero_menu.height;
-        let border_bottom = with_info.hero_box.y + with_info.hero_box.height - 1;
-        assert_eq!(
-            border_bottom - menu_bottom,
-            1,
-            "one pad row below the actions"
-        );
+        assert_eq!(with_info.hero_menu.bottom(), with_info.hero_box.bottom());
+        assert_eq!(no_info.hero_menu.bottom(), no_info.hero_box.bottom());
     }
 
     /// Flatten a rendered buffer into one string for substring assertions.
@@ -4078,7 +4198,7 @@ mod tests {
             area,
             &mut buf,
             &theme,
-            logo_line_count(area.height),
+            0,
             Some(url),
             AuthMode::Device,
             "", // auth_code_input — unused in device mode
@@ -4134,7 +4254,7 @@ mod tests {
             area,
             &mut buf,
             &theme,
-            logo_line_count(area.height),
+            0,
             Some(url),
             AuthMode::Device,
             "",
@@ -4162,7 +4282,7 @@ mod tests {
             area,
             &mut buf,
             &theme,
-            logo_line_count(area.height),
+            0,
             Some(url),
             AuthMode::Device,
             "",
@@ -4200,7 +4320,7 @@ mod tests {
             area,
             &mut buf,
             &theme,
-            logo_line_count(area.height),
+            0,
             Some(url),
             AuthMode::Device,
             "",
@@ -4240,7 +4360,7 @@ mod tests {
             area,
             &mut buf,
             &theme,
-            logo_line_count(area.height),
+            0,
             Some(url),
             AuthMode::Command,
             "", // auth_code_input — unused
@@ -4394,7 +4514,7 @@ the usual channels. "
     #[test]
     fn stacked_info_width_clamps_to_available() {
         // Min menu width is MENU_MIN_WIDTH, capped at the available (inset) slot.
-        let unclamped = logo::logo_visual_width(50).max(30).max(MENU_MIN_WIDTH);
+        let unclamped = STACKED_COLUMN_WIDTH.max(30).max(MENU_MIN_WIDTH);
         assert_eq!(stacked_info_width(200, 50, MENU_MIN_WIDTH), unclamped);
         assert_eq!(stacked_info_width(40, 50, MENU_MIN_WIDTH), 40);
     }
@@ -4406,7 +4526,7 @@ the usual channels. "
         // Regression: over-reserving once collapsed the whole slot to zero, hiding it
         let a = long_ann();
         for height in 20u16..=60 {
-            let area = Rect::new(0, 0, 80, height);
+            let area = Rect::new(0, 0, 59, height);
             assert!(area.width < hero_box::HERO_BOX_MIN_WIDTH);
             let layout = WelcomeLayout::compute(WelcomeLayoutInput {
                 content_area: area,
@@ -4488,5 +4608,143 @@ the usual channels. "
         assert!(text.contains("Logout"), "{text}");
         assert!(text.contains("Quit"), "{text}");
         assert!(!text.contains("ctrl+g"), "{text}");
+    }
+
+    fn rects_intersect(a: Rect, b: Rect) -> bool {
+        a.width > 0 && a.height > 0 && b.width > 0 && b.height > 0 && a.intersects(b)
+    }
+
+    /// Layout for the idle signed-in screen the way `render_welcome_done` builds it: four menu rows, a one-row composer.
+    fn idle_layout(width: u16, height: u16) -> (Rect, WelcomeLayout) {
+        // Top margin, top bar and bottom margin take three rows from the terminal
+        let content_area = Rect::new(0, 2, width, height.saturating_sub(3));
+        let layout = WelcomeLayout::compute(WelcomeLayoutInput {
+            content_area,
+            menu_height: 4,
+            ..Default::default()
+        });
+        (content_area, layout)
+    }
+
+    #[test]
+    fn mark_and_text_never_intersect_across_terminal_sizes() {
+        let mut saw_mark = 0;
+        for width in (70..=220u16).step_by(5) {
+            for height in 24..=60u16 {
+                let (area, layout) = idle_layout(width, height);
+                let text = [
+                    layout.error,
+                    layout.hero_box,
+                    layout.hero_version,
+                    layout.hero_subtitle,
+                    layout.hero_info,
+                    layout.hero_menu,
+                    layout.tip,
+                    layout.prompt,
+                    layout.version,
+                ];
+                for (i, r) in text.iter().enumerate() {
+                    assert!(
+                        r.width == 0 || r.height == 0 || area.contains(r.as_position()) || i == 8,
+                        "{width}x{height}: rect {i} {r:?} outside {area:?}"
+                    );
+                    assert!(
+                        !rects_intersect(layout.hero_mark, *r),
+                        "{width}x{height}: mark {:?} overlaps text rect {i} {r:?}",
+                        layout.hero_mark
+                    );
+                }
+                if layout.hero_mark.height > 0 {
+                    saw_mark += 1;
+                    assert!(
+                        layout.hero_mark.width >= 24
+                            && layout.hero_mark.bottom() <= layout.hero_box.y
+                    );
+                }
+            }
+        }
+        assert!(
+            saw_mark > 100,
+            "the mark should fit at many sizes, saw {saw_mark}"
+        );
+    }
+
+    /// Text has priority: whenever the hero layout is active the whole menu is laid out inside the column, whatever the mark does.
+    #[test]
+    fn menu_always_stays_visible_and_the_mark_yields_first() {
+        for width in (70..=220u16).step_by(5) {
+            for height in 24..=60u16 {
+                let (_, layout) = idle_layout(width, height);
+                assert!(
+                    layout.has_hero_box(),
+                    "{width}x{height}: text must always have the hero layout"
+                );
+                assert_eq!(
+                    layout.hero_menu.height, 4,
+                    "{width}x{height}: menu rows must all fit"
+                );
+                assert!(layout.hero_menu.bottom() <= layout.hero_box.bottom());
+                assert!(
+                    layout.hero_menu.bottom() <= layout.prompt.y,
+                    "{width}x{height}: menu runs into the composer"
+                );
+            }
+        }
+        // The mark shrinks before it disappears: a larger terminal never has a smaller mask than a smaller one of equal width
+        let rows = |h| idle_layout(120, h).1.hero_mark.height;
+        assert!(rows(30) >= 12 || rows(30) == 0);
+        assert!(rows(60) >= rows(40) && rows(40) >= rows(30));
+        assert_eq!(
+            rows(24),
+            0,
+            "no room at 24 rows: the mark yields, the menu stays"
+        );
+    }
+
+    #[test]
+    fn mark_slot_is_exactly_one_mask_tall() {
+        for height in 24..=60u16 {
+            let (_, layout) = idle_layout(160, height);
+            if layout.hero_mark.height > 0 {
+                assert!(
+                    wind_mark::MASKS_ROWS.contains(&layout.hero_mark.height),
+                    "{height}: {:?}",
+                    layout.hero_mark
+                );
+            }
+        }
+    }
+
+    /// Nothing paints a fill: every cell on the idle welcome screen has the theme background (the composer is the one box with its own).
+    #[test]
+    fn no_cell_has_a_fill_background_different_from_the_theme() {
+        // `render_welcome` reads the process-global theme more than once; a sibling test that switches it mid-render
+        // (the day theme's bg is Rgb(238,238,238)) paints later rows with another bg. Hold the pin for the whole body.
+        let _theme_pin = crate::theme::cache::pin_theme();
+        let theme = crate::theme::Theme::current();
+        let auth_state = AuthState::Done;
+        let trust_state = TrustState::Done;
+        for (width, height) in [(160u16, 48u16), (100, 30)] {
+            let params = render_params(&auth_state, &trust_state, None);
+            let area = Rect::new(0, 0, width, height);
+            let mut buf = Buffer::empty(area);
+            let mut prompt = PromptWidget::new();
+            let mut picker = PickerState::default();
+            let _ = render_welcome(area, &mut buf, &params, &mut prompt, &mut picker);
+            let mut odd = Vec::new();
+            for y in 0..height {
+                for x in 0..width {
+                    let bg = buf[(x, y)].bg;
+                    if bg != theme.bg_base {
+                        odd.push((x, y, bg));
+                    }
+                }
+            }
+            assert!(
+                odd.is_empty(),
+                "{width}x{height}: cells with a foreign background: {:?}",
+                &odd[..odd.len().min(10)]
+            );
+        }
     }
 }

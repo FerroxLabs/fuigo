@@ -78,6 +78,36 @@ pub struct ReindexResult {
     pub removed: usize,
 }
 
+/// Index written before CJK segmentation holds each note's raw text. Rebuild the keyword index from `chunks` once, and only
+/// when some chunk actually holds CJK text (the segmentation leaves every other text as it was).
+fn migrate_keyword_index(db: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    let stored: Option<String> = db
+        .query_row(schema::GET_META_SQL, params!["fts_cjk_v"], |r| r.get(0))
+        .ok();
+    if stored.as_deref() == Some(super::cjk::FTS_SEGMENTATION_VERSION) {
+        return Ok(());
+    }
+    let rows: Vec<(i64, String)> = db
+        .prepare("SELECT rowid, text FROM chunks")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    let tx = db.unchecked_transaction()?;
+    if rows.iter().any(|(_, text)| super::cjk::contains_cjk(text)) {
+        tx.execute_batch(schema::RESET_FTS_SQL)?;
+        for (rowid, text) in &rows {
+            tx.execute(
+                "INSERT INTO chunks_fts(rowid, text) VALUES (?1, ?2)",
+                params![rowid, &*super::cjk::fts_text(text)],
+            )?;
+        }
+    }
+    tx.execute(
+        schema::UPSERT_META_SQL,
+        params!["fts_cjk_v", super::cjk::FTS_SEGMENTATION_VERSION],
+    )?;
+    tx.commit()
+}
+
 /// SQLite-backed memory index.
 pub struct MemoryIndex {
     db: rusqlite::Connection,
@@ -164,6 +194,8 @@ impl MemoryIndex {
             };
 
         db.execute_batch(&schema::schema_sql(dimensions, vec_available))?;
+
+        migrate_keyword_index(&db)?;
 
         // Store/verify embedding dimensions in meta table
         let stored_dims: Option<String> = db
@@ -425,7 +457,7 @@ impl MemoryIndex {
                     // Delete old FTS entry and insert new one
                     tx.execute(
                         "INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', ?1, ?2)",
-                        params![old.rowid, old.text],
+                        params![old.rowid, &*super::cjk::fts_text(&old.text)],
                     )?;
                     let new_rowid: Option<i64> = tx
                         .query_row(
@@ -437,7 +469,7 @@ impl MemoryIndex {
                     if let Some(rid) = new_rowid {
                         tx.execute(
                             "INSERT INTO chunks_fts(rowid, text) VALUES (?1, ?2)",
-                            params![rid, chunk.text],
+                            params![rid, &*super::cjk::fts_text(&chunk.text)],
                         )?;
                     }
                     // Delete stale embedding (will be re-embedded later)
@@ -469,7 +501,7 @@ impl MemoryIndex {
                     let rowid = tx.last_insert_rowid();
                     tx.execute(
                         "INSERT INTO chunks_fts(rowid, text) VALUES (?1, ?2)",
-                        params![rowid, chunk.text],
+                        params![rowid, &*super::cjk::fts_text(&chunk.text)],
                     )?;
                     result.added += 1;
                 }
@@ -481,7 +513,7 @@ impl MemoryIndex {
             if !seen_ids.contains(old_id) {
                 tx.execute(
                     "INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', ?1, ?2)",
-                    params![old_record.rowid, old_record.text],
+                    params![old_record.rowid, &*super::cjk::fts_text(&old_record.text)],
                 )?;
                 if self.vec_available {
                     let _ = tx.execute(
@@ -516,7 +548,7 @@ impl MemoryIndex {
             return Ok(vec![]);
         }
         let keywords = super::query_expansion::extract_keywords(&query.replace('_', " "));
-        let fts_query = keywords.join(" OR ");
+        let fts_query = super::cjk::match_expression(&keywords);
         if fts_query.is_empty() {
             return Ok(vec![]);
         }
@@ -554,7 +586,7 @@ impl MemoryIndex {
 
     pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<FtsResult>, rusqlite::Error> {
         let keywords = super::query_expansion::extract_keywords(&query.replace('_', " "));
-        let fts_query = keywords.join(" OR ");
+        let fts_query = super::cjk::match_expression(&keywords);
         if fts_query.is_empty() {
             return Ok(vec![]);
         }
@@ -594,7 +626,13 @@ impl MemoryIndex {
                     super::query_expansion::extract_keywords(&chunk.text.replace('_', " "))
                         .into_iter()
                         .collect();
-                let coverage = keywords.iter().filter(|k| terms.contains(*k)).count() as f64
+                let lowered = chunk.text.to_lowercase();
+                let coverage = keywords
+                    .iter()
+                    .map(|k| {
+                        if terms.contains(k) { 1.0 } else { super::cjk::cjk_keyword_coverage(&lowered, k) }
+                    })
+                    .sum::<f64>()
                     / keywords.len().max(1) as f64;
                 // Absolute query coverage: one weak candidate cannot promote itself
                 // merely because it is the only result. A one-word query tops at .85.
@@ -822,7 +860,7 @@ impl MemoryIndex {
             // Contentless FTS5 requires the original text for the 'delete' command.
             tx.execute(
                 "INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', ?1, ?2)",
-                params![record.rowid, record.text],
+                params![record.rowid, &*super::cjk::fts_text(&record.text)],
             )?;
             if self.vec_available {
                 let _ = tx.execute(
@@ -897,7 +935,7 @@ impl MemoryIndex {
     fn insert_fts_entry(&self, rowid: i64, text: &str) -> Result<(), rusqlite::Error> {
         self.db.execute(
             "INSERT INTO chunks_fts(rowid, text) VALUES (?1, ?2)",
-            params![rowid, text],
+            params![rowid, &*super::cjk::fts_text(text)],
         )?;
         Ok(())
     }
@@ -910,7 +948,7 @@ impl MemoryIndex {
     fn delete_fts_entry(&self, rowid: i64, text: &str) -> Result<(), rusqlite::Error> {
         self.db.execute(
             "INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', ?1, ?2)",
-            params![rowid, text],
+            params![rowid, &*super::cjk::fts_text(text)],
         )?;
         Ok(())
     }

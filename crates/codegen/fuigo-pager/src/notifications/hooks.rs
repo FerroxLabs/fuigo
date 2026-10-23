@@ -283,10 +283,7 @@ mod tests {
     /// Polls for the hook's COMPLETE output instead of a fixed sleep: the spawned thread and the fork/exec take variable time on
     /// loaded systems. The file exists as soon as the shell's redirect creates it, before the payload writes, so "file exists" is
     /// not "hook done": wait until `complete` accepts the content. 30 s is a hang guard only.
-    fn wait_for_complete_output(
-        out: &std::path::Path,
-        complete: impl Fn(&str) -> bool,
-    ) -> String {
+    fn wait_for_complete_output(out: &std::path::Path, complete: impl Fn(&str) -> bool) -> String {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if let Ok(c) = std::fs::read_to_string(out)
@@ -427,11 +424,20 @@ mod p120_tests {
         fuigo_tools::util::shell_env_policy::register_credential_env_names([REGISTERED]);
         let dir = probe::scratch_dir("p120-hook");
         let out = dir.join("env.txt");
-        execute_hook(&format!("env > '{}'", out.display()), "p120", "message", Some("sid"), Duration::from_secs(20));
+        execute_hook(
+            &format!("env > '{}'", out.display()),
+            "p120",
+            "message",
+            Some("sid"),
+            Duration::from_secs(20),
+        );
         let dump = std::fs::read_to_string(&out).expect("the hook ran");
         probe::assert_clean(&dump, &[]);
         probe::assert_kept(&dump, REGISTERED);
-        assert!(dump.lines().any(|l| l == "FUIGO_EVENT=p120"), "control: the hook's own variables arrive");
+        assert!(
+            dump.lines().any(|l| l == "FUIGO_EVENT=p120"),
+            "control: the hook's own variables arrive"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

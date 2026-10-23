@@ -861,6 +861,8 @@ mod p6a {
             enabled: true,
             command: Some(std::path::PathBuf::from(script)),
             command_raw: Some(script.to_string()),
+            args: None,
+            shell: None,
             url: None,
             url_raw: None,
             timeout_ms: 5000,
@@ -2420,7 +2422,7 @@ mod p7s {
             assert!(denials.match_carried_any(std::slice::from_ref(&key)).is_some());
             denials.record_keys(vec![fuigo_workspace::permission::denial_key(&bash_req("rm -rf build"))], fuigo_workspace::permission::mono_secs());
             assert!(b.peer_admission.take_notices(now_mono()).is_empty(), "nothing flushed yet");
-            let _ = t(b.handle_tool_error(&acp::ToolCallId::new("c1"), "c1", "bash", None, &anyhow::anyhow!("permission denied"), "m")).await;
+            let _ = t(b.handle_tool_error(&acp::ToolCallId::new("c1"), "c1", "bash", None, &anyhow::anyhow!("permission denied"), "m", None)).await;
             let n = b.peer_admission.take_notices(now_mono());
             assert!(n.iter().any(|n| n.kind == NoticeKind::LaunderingRefused && n.message_id == "m11"), "{n:?}");
             let stored = t(b.chat_state_handle.get_conversation()).await;
@@ -2552,7 +2554,7 @@ mod p7s {
             carry_directly(&a, "m60");
             t(a.persist_peer_state()).await;
             a.flush_laundering_hits();
-            let _ = t(a.handle_tool_error(&acp::ToolCallId::new("c1"), "c1", "bash", None, &anyhow::anyhow!("x"), "m")).await;
+            let _ = t(a.handle_tool_error(&acp::ToolCallId::new("c1"), "c1", "bash", None, &anyhow::anyhow!("x"), "m", None)).await;
             let stored = t(a.chat_state_handle.get_conversation()).await;
             assert!(!stored.iter().any(ConversationItem::is_peer_denial_data_marker), "no marker item");
             assert!(fuigo_sampling_types::history_peer_denials(&stored).is_empty());

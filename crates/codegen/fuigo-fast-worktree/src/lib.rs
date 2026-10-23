@@ -47,7 +47,10 @@ pub use api::cleanup_orphaned_btrfs_snapshots;
 #[cfg(target_os = "linux")]
 pub use api::cleanup_orphaned_overlay_snapshots;
 #[cfg(feature = "metadata")]
-pub use api::gc::{GcOptions, GcReport, KeptWorktree, gc_worktrees, gc_worktrees_with_delegate};
+pub use api::gc::{
+    GcOptions, GcReport, InUse, KeptWorktree, gc_worktrees, gc_worktrees_with_delegate,
+    worktree_in_use,
+};
 pub use api::{
     BtrfsDelegate, BtrfsMode, CleanupReport, CopyReport, CreationMode, DelegateSnapshotResult,
     DirtyFilesReport, ENOSPC_OS_MESSAGE, IgnoredFilesMode, OUT_OF_DISK_CONTEXT, RemoveReport,
@@ -72,7 +75,7 @@ pub use discovery::{
     rebuild_worktree_db, rebuild_worktree_db_with_grove_data,
 };
 pub use git::checkout::{
-    rehydrate_worktree_from_ref, snapshot_worktree_to_ref, transfer_snapshot_to_repo,
+    dropped_uninitialised_gitlinks, parse_gitlinks, rehydrate_worktree_from_ref, snapshot_worktree_to_ref, transfer_snapshot_to_repo,
 };
 pub use git::{
     KeepReason, Reclaim, reclaimable_after_snapshot, remove_stale_worktree_registration,

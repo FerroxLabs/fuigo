@@ -36,6 +36,8 @@ pub mod headless;
 pub mod hyperlink_route;
 pub mod inline_media_ffmpeg;
 pub mod input_log;
+pub mod install_check;
+pub mod login_cmd;
 pub mod mcp_cmd;
 pub mod memory_cmd;
 pub mod memory_release;
@@ -44,12 +46,14 @@ pub mod memory_trace;
 pub mod minimal_api;
 #[path = "minimal/hook.rs"]
 pub mod minimal_hook;
+#[path = "minimal/reprint.rs"]
+pub mod minimal_reprint;
 pub mod models;
 pub mod notifications;
-pub mod peer_ui;
-pub mod peer_ui_state;
 #[allow(unused_imports, unused_macros)]
 pub mod obf;
+pub mod peer_ui;
+pub mod peer_ui_state;
 pub mod plugin_cmd;
 mod provider_config_edit;
 pub mod pty_wrap;
@@ -59,7 +63,9 @@ pub mod sessions_cmd;
 pub mod settings;
 pub mod share_cmd;
 pub mod slash;
+pub(crate) mod signal_streams;
 pub mod startup;
+pub mod stoke;
 pub mod tips;
 pub mod tool_usage;
 pub mod tutorial_docs;
@@ -130,6 +136,9 @@ mod insta_source_tree_tests {
             }
         }
         let update_no = update.as_deref() == Some("no");
-        assert!(update_no, "insta.yaml must set `behavior.update: \"no\"`:\n{cfg}");
+        assert!(
+            update_no,
+            "insta.yaml must set `behavior.update: \"no\"`:\n{cfg}"
+        );
     }
 }

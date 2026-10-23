@@ -817,3 +817,16 @@ pub(super) fn dispatch_show_release_notes(
     }
     vec![]
 }
+
+/// Open the hidden `/stoke` easter egg as a full-screen overlay on the active agent view.
+/// Pure view state: nothing is sent to the model and no message is added to the history.
+pub(super) fn dispatch_open_stoke(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    agent.stoke = Some(crate::stoke::StokeState::new());
+    vec![]
+}

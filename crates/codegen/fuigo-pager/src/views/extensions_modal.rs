@@ -87,6 +87,40 @@ fn hook_row_label(hook: &fuigo_hooks_plugins_types::HookInfo) -> String {
     format!("on:{}{matcher}", hook.event)
 }
 
+/// Description lines under a hook row that cannot run or is failing: its source, state and reason, then what to do about it.
+/// Empty for a healthy hook and for one the user disabled (its `[disabled]` badge already says so).
+fn hook_health_lines(hook: &fuigo_hooks_plugins_types::HookInfo) -> Vec<String> {
+    use fuigo_hooks_plugins_types::HookState;
+    let health = &hook.health;
+    if health.state == HookState::Ok || hook.disabled {
+        return Vec::new();
+    }
+    let who = if health.source.is_empty() {
+        String::new()
+    } else {
+        format!("{}: ", health.source)
+    };
+    let mut lines = Vec::new();
+    match health.reason.as_deref().filter(|r| !r.trim().is_empty()) {
+        Some(reason) => lines.push(format!("{who}{} ({})", health.state.label(), reason.lines().next().unwrap_or(reason))),
+        None => lines.push(format!("{who}{}", health.state.label())),
+    }
+    if let Some(hint) = health.fix_hint.as_deref().filter(|h| !h.trim().is_empty()) {
+        lines.push(format!("fix: {hint}"));
+    }
+    lines
+}
+
+/// The row badge for a hook that cannot run (`[skipped]`) or ran and failed (`[failing]`).
+fn hook_health_badge(hook: &fuigo_hooks_plugins_types::HookInfo) -> Option<&'static str> {
+    use fuigo_hooks_plugins_types::HookState;
+    match hook.health.state {
+        HookState::Ok => None,
+        HookState::Skipped => Some("[skipped]"),
+        HookState::Failing => Some("[failing]"),
+    }
+}
+
 /// Logical source kind for hook group rank (independent of display copy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum HookSourceKind {
@@ -1754,6 +1788,10 @@ pub struct WorkflowInfo {
     pub path: Option<String>,
 }
 
+/// Group key of the Hooks tab's "Hook load errors" group.
+/// It is not a source directory, so no hook belongs to it and the remove / toggle actions find nothing to act on.
+pub(crate) const HOOK_LOAD_ERRORS_GROUP: &str = "(hook load errors)";
+
 /// State for the hooks/plugins modal popup.
 pub struct ExtensionsModalState {
     /// Shared modal window chrome state (close button, tabs, footer shortcuts, popup area).
@@ -1826,6 +1864,8 @@ pub struct ExtensionsModalState {
     pub hooks_collapsed_groups: std::collections::HashSet<String>,
     /// See [`Self::seed_hook_groups_once`].
     pub hooks_groups_seeded: bool,
+    /// Whether the "Hook load errors" group has been given its collapsed default (once, the first time errors are shown).
+    pub hooks_load_errors_seeded: bool,
     /// Collapsed plugin source groups (by [`PluginGroup`] key).
     pub plugins_collapsed_groups: std::collections::HashSet<String>,
     /// See [`Self::seed_plugin_groups_once`].
@@ -1918,6 +1958,7 @@ impl ExtensionsModalState {
             skills_groups_seeded: false,
             hooks_collapsed_groups: std::collections::HashSet::new(),
             hooks_groups_seeded: false,
+            hooks_load_errors_seeded: false,
             plugins_collapsed_groups: std::collections::HashSet::new(),
             plugins_groups_seeded: false,
             marketplace_collapsed_sources: std::collections::HashSet::new(),
@@ -2179,7 +2220,12 @@ impl ExtensionsModalState {
                     *pi
                 } else {
                     // On an index miss the exact (name, path) pair counts only when exactly one entry carries it
-                    let mut found = source.plugins.iter().enumerate().filter(|(_, p)| same(p)).map(|(i, _)| i);
+                    let mut found = source
+                        .plugins
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, p)| same(p))
+                        .map(|(i, _)| i);
                     let only = found.next()?;
                     if found.next().is_some() {
                         return None;
@@ -3017,6 +3063,48 @@ pub fn render_extensions_modal(
                         state.hooks_filter,
                         state.picker_state.query(),
                     );
+                    // Errors from hook files that failed to load: a group of their own, collapsed until opened
+                    if !state.hooks_load_errors_seeded && !data.load_errors.is_empty() {
+                        state.hooks_load_errors_seeded = true;
+                        state
+                            .hooks_collapsed_groups
+                            .insert(HOOK_LOAD_ERRORS_GROUP.to_string());
+                    }
+                    if !data.load_errors.is_empty() {
+                        let searching = !state.picker_state.query().is_empty();
+                        let collapsed = !searching
+                            && state.hooks_collapsed_groups.contains(HOOK_LOAD_ERRORS_GROUP);
+                        let count = data.load_errors.len();
+                        let noun = if count == 1 { "error" } else { "errors" };
+                        entry_labels.push(format!("Hook load errors ({count} {noun})"));
+                        entry_right_labels.push(String::new());
+                        entry_desc_lines.push(vec![]);
+                        entry_summary_lines.push(vec![]);
+                        entry_fields.push(vec![]);
+                        entry_is_header.push(false); // group header, but selectable
+                        entry_dimmed.push(false);
+                        entry_indent.push(0);
+                        entry_data_indices.push(None);
+                        entry_group_keys.push(Some(HOOK_LOAD_ERRORS_GROUP.to_string()));
+                        entry_badge_text.push(String::new());
+                        entry_badge_color.push(None);
+                        if !collapsed {
+                            for error in &data.load_errors {
+                                entry_labels.push(error.replace(['\n', '\r'], " "));
+                                entry_right_labels.push(String::new());
+                                entry_desc_lines.push(vec![]);
+                                entry_summary_lines.push(vec![]);
+                                entry_fields.push(vec![]);
+                                entry_is_header.push(false);
+                                entry_dimmed.push(false);
+                                entry_indent.push(1);
+                                entry_data_indices.push(None);
+                                entry_group_keys.push(None);
+                                entry_badge_text.push(String::new());
+                                entry_badge_color.push(None);
+                            }
+                        }
+                    }
                     for group in &groups {
                         let source_dir = group.source_dir;
                         let label = &group.label;
@@ -3050,7 +3138,9 @@ pub fn render_extensions_modal(
                                 .as_deref()
                                 .unwrap_or(hook.url.as_deref().unwrap_or("(no command)"));
                             entry_right_labels.push(String::new());
-                            entry_desc_lines.push(vec![format!("\u{2192} {}", cmd)]);
+                            let mut desc = vec![format!("\u{2192} {}", cmd)];
+                            desc.extend(hook_health_lines(hook));
+                            entry_desc_lines.push(desc);
                             entry_summary_lines.push(vec![]);
                             entry_fields.push(vec![]);
                             entry_is_header.push(false);
@@ -3065,14 +3155,18 @@ pub fn render_extensions_modal(
                             } else if hook.disabled {
                                 "[disabled]".into()
                             } else {
-                                String::new()
+                                hook_health_badge(hook).map(String::from).unwrap_or_default()
                             });
                             entry_badge_color.push(if hook.pinned {
                                 Some(theme.warning)
                             } else if hook.disabled {
                                 Some(theme.accent_error)
                             } else {
-                                None
+                                match hook.health.state {
+                                    fuigo_hooks_plugins_types::HookState::Ok => None,
+                                    fuigo_hooks_plugins_types::HookState::Skipped => Some(theme.warning),
+                                    fuigo_hooks_plugins_types::HookState::Failing => Some(theme.accent_error),
+                                }
                             });
                         }
                     }
@@ -3153,7 +3247,8 @@ pub fn render_extensions_modal(
                                 (None, None) => String::new(),
                             };
                             entry_right_labels.push(right);
-                            let desc = marketplace_text(plugin.description.as_deref().unwrap_or(""));
+                            let desc =
+                                marketplace_text(plugin.description.as_deref().unwrap_or(""));
                             if desc.is_empty() {
                                 entry_desc_lines.push(vec![]);
                             } else {
@@ -3175,7 +3270,10 @@ pub fn render_extensions_modal(
                                 fields.push(("category".to_string(), marketplace_text(category)));
                             }
                             if !plugin.tags.is_empty() {
-                                fields.push(("tags".to_string(), marketplace_text(&plugin.tags.join(", "))));
+                                fields.push((
+                                    "tags".to_string(),
+                                    marketplace_text(&plugin.tags.join(", ")),
+                                ));
                             }
                             match &plugin.components {
                                 Some(components) if !components.is_empty() => {
@@ -3197,7 +3295,10 @@ pub fn render_extensions_modal(
                                 }
                             }
                             if plugin.install_status != "not_installed" {
-                                fields.push(("status".to_string(), marketplace_text(&plugin.install_status)));
+                                fields.push((
+                                    "status".to_string(),
+                                    marketplace_text(&plugin.install_status),
+                                ));
                                 if let Some(ref iv) = plugin.installed_version {
                                     fields.push(("installed".to_string(), marketplace_text(iv)));
                                 }
@@ -3297,7 +3398,9 @@ pub fn render_extensions_modal(
                             // P152: say why the server is unavailable instead of guessing, on the collapsed row too
                             // (collapsed rows render only their summary line, Astra r1 #6).
                             let reason_line = server.status_reason.as_deref().map(|reason| {
-                                if server.status == crate::views::mcps_modal::McpServerDisplayStatus::NeedsAuth {
+                                if server.status
+                                    == crate::views::mcps_modal::McpServerDisplayStatus::NeedsAuth
+                                {
                                     // K7: the automatic token refresh was refused
                                     format!("Sign-in needed, refresh refused: {reason}")
                                 } else {
@@ -5180,6 +5283,54 @@ mod tests {
         assert_eq!(buffer_count(&buf, "No workflows available"), 0);
     }
 
+    /// Hook files that failed to load are listed in `/hooks` as a group of their own: the header says how many, opening it shows each error.
+    #[test]
+    fn hook_load_errors_are_an_expandable_group() {
+        let _theme = crate::theme::cache::pin_theme();
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Hooks);
+        state.hooks_data = TabDataState::Loaded(fuigo_hooks_plugins_types::HooksListResponse {
+            hooks: vec![make_hook("user/a", "/home/u/.fuigo", false)],
+            project_trusted: true,
+            load_errors: vec![
+                "/home/u/.fuigo/hooks/bad.json: expected value at line 1".to_string(),
+                "/home/u/.fuigo/hooks/worse.json: missing field `event`".to_string(),
+            ],
+        });
+        let area = Rect::new(0, 0, 110, 40);
+        let draw = |state: &mut ExtensionsModalState| {
+            let mut buf = Buffer::empty(area);
+            render_extensions_modal(&mut buf, area, state, None, false, 0);
+            buf
+        };
+
+        // Closed at first: the count shows, the errors do not
+        let buf = draw(&mut state);
+        assert_eq!(buffer_count(&buf, "Hook load errors (2 errors)"), 1);
+        assert_eq!(buffer_count(&buf, "expected value at line 1"), 0);
+
+        // Open it
+        assert!(state.hooks_collapsed_groups.remove(HOOK_LOAD_ERRORS_GROUP));
+        let buf = draw(&mut state);
+        assert_eq!(buffer_count(&buf, "expected value at line 1"), 1);
+        assert_eq!(buffer_count(&buf, "missing field `event`"), 1);
+        // It stays open on the next frame (the closed default is applied once)
+        let buf = draw(&mut state);
+        assert_eq!(buffer_count(&buf, "expected value at line 1"), 1);
+
+        // The group is not a hook source: nothing can be removed from it
+        let header = state
+            .entry_group_keys
+            .iter()
+            .position(|k| k.as_deref() == Some(HOOK_LOAD_ERRORS_GROUP))
+            .expect("the load-errors header is a selectable group");
+        assert!(!selected_hook_source_removable_at(
+            &state,
+            &state.entry_data_indices,
+            &state.entry_group_keys,
+            header
+        ));
+    }
+
     #[test]
     fn select_row_hint_on_collapsed_header_asks_to_expand_first() {
         let mut state = ExtensionsModalState::new(ExtensionsTab::Plugins);
@@ -6158,7 +6309,48 @@ mod tests {
             disabled,
             pinned: false,
             removable: false,
+            health: Default::default(),
         }
+    }
+
+    /// 1.0.32 HOOKS-COMPAT: `/hooks` shows why a hook is skipped or failing and what to do, and badges it.
+    #[test]
+    fn hooks_tab_lists_state_reason_and_fix_hint_for_unhealthy_hooks() {
+        use fuigo_hooks_plugins_types::{HookHealthInfo, HookState};
+        let healthy = make_hook("global/a", "/g", false);
+        assert!(hook_health_lines(&healthy).is_empty());
+        assert_eq!(hook_health_badge(&healthy), None);
+
+        let mut skipped = make_hook("plugin/stripe/h", "/p", false);
+        skipped.health = HookHealthInfo {
+            source: "stripe".into(),
+            state: HookState::Skipped,
+            reason: Some("command not found: node (not on PATH)".into()),
+            fix_hint: Some("Install node or add it to PATH, then reload hooks.".into()),
+        };
+        assert_eq!(
+            hook_health_lines(&skipped),
+            vec![
+                "stripe: skipped (command not found: node (not on PATH))".to_string(),
+                "fix: Install node or add it to PATH, then reload hooks.".to_string(),
+            ]
+        );
+        assert_eq!(hook_health_badge(&skipped), Some("[skipped]"));
+
+        let mut failing = make_hook("plugin/acme/h", "/p", false);
+        failing.health = HookHealthInfo {
+            source: "acme".into(),
+            state: HookState::Failing,
+            reason: Some("exit 2: boom\nsecond line".into()),
+            fix_hint: None,
+        };
+        assert_eq!(hook_health_lines(&failing), vec!["acme: failing (exit 2: boom)".to_string()]);
+        assert_eq!(hook_health_badge(&failing), Some("[failing]"));
+
+        // The user switched it off: the `[disabled]` badge already says so, so no second explanation.
+        let mut off = skipped.clone();
+        off.disabled = true;
+        assert!(hook_health_lines(&off).is_empty());
     }
 
     /// Group direction: pinned hooks never drive it; a mixed group follows its unpinned hooks.
@@ -6855,7 +7047,10 @@ mod tests {
             .iter()
             .position(|l| l == "evilname")
             .expect("plugin row");
-        assert_eq!(state.resolve_marketplace_selection(&[source]), Some((0, Some(0))));
+        assert_eq!(
+            state.resolve_marketplace_selection(&[source]),
+            Some((0, Some(0)))
+        );
     }
 
     /// P181 (Astra round 1): two plugins whose names differ only by a hidden character show one label, and each row must
@@ -6864,17 +7059,34 @@ mod tests {
     fn marketplace_rows_with_the_same_cleaned_label_resolve_to_their_own_plugin() {
         let mut source = superpowers_source();
         source.plugins = vec![
-            TestPlugin { name: "de\u{00ad}ploy", ..Default::default() }.build(),
-            TestPlugin { name: "deploy", ..Default::default() }.build(),
+            TestPlugin {
+                name: "de\u{00ad}ploy",
+                ..Default::default()
+            }
+            .build(),
+            TestPlugin {
+                name: "deploy",
+                ..Default::default()
+            }
+            .build(),
         ];
         let mut state = marketplace_modal_state(source.clone());
         render_marketplace_into_buffer(&mut state, 100, 40);
-        assert_eq!(state.entry_labels_cache, ["superpowers (2 plugins)", "deploy", "deploy"]);
+        assert_eq!(
+            state.entry_labels_cache,
+            ["superpowers (2 plugins)", "deploy", "deploy"]
+        );
         // Display order is by raw name then index, so the plain `deploy` (index 1) comes first
         state.picker_state.selected = 1;
-        assert_eq!(state.resolve_marketplace_selection(&[source.clone()]), Some((0, Some(1))));
+        assert_eq!(
+            state.resolve_marketplace_selection(&[source.clone()]),
+            Some((0, Some(1)))
+        );
         state.picker_state.selected = 2;
-        assert_eq!(state.resolve_marketplace_selection(&[source]), Some((0, Some(0))));
+        assert_eq!(
+            state.resolve_marketplace_selection(&[source]),
+            Some((0, Some(0)))
+        );
     }
 
     /// P181 (Astra round 2): the query can change between a render and the next key; the row still names the plugin it drew.
@@ -6882,9 +7094,21 @@ mod tests {
     fn marketplace_row_keeps_its_plugin_when_the_query_changes_after_the_render() {
         let mut source = superpowers_source();
         source.plugins = vec![
-            TestPlugin { name: "de\u{00ad}ploy", ..Default::default() }.build(),
-            TestPlugin { name: "deploy", ..Default::default() }.build(),
-            TestPlugin { name: "alpha", ..Default::default() }.build(),
+            TestPlugin {
+                name: "de\u{00ad}ploy",
+                ..Default::default()
+            }
+            .build(),
+            TestPlugin {
+                name: "deploy",
+                ..Default::default()
+            }
+            .build(),
+            TestPlugin {
+                name: "alpha",
+                ..Default::default()
+            }
+            .build(),
         ];
         let mut state = marketplace_modal_state(source.clone());
         state.picker_state.set_query("dep");
@@ -6893,9 +7117,15 @@ mod tests {
         assert_eq!(state.entry_labels_cache[1..], ["deploy", "deploy"]);
         state.picker_state.set_query("");
         state.picker_state.selected = 1;
-        assert_eq!(state.resolve_marketplace_selection(&[source.clone()]), Some((0, Some(1))));
+        assert_eq!(
+            state.resolve_marketplace_selection(&[source.clone()]),
+            Some((0, Some(1)))
+        );
         state.picker_state.selected = 2;
-        assert_eq!(state.resolve_marketplace_selection(&[source]), Some((0, Some(0))));
+        assert_eq!(
+            state.resolve_marketplace_selection(&[source]),
+            Some((0, Some(0)))
+        );
     }
 
     /// P181 (Astra round 3): the catalog can be replaced between a render and the next key; a row keeps naming the plugin
@@ -6904,8 +7134,16 @@ mod tests {
     fn marketplace_row_keeps_its_plugin_when_the_catalog_is_replaced_after_the_render() {
         let mut source = superpowers_source();
         source.plugins = vec![
-            TestPlugin { name: "alpha", ..Default::default() }.build(),
-            TestPlugin { name: "beta", ..Default::default() }.build(),
+            TestPlugin {
+                name: "alpha",
+                ..Default::default()
+            }
+            .build(),
+            TestPlugin {
+                name: "beta",
+                ..Default::default()
+            }
+            .build(),
         ];
         let mut state = marketplace_modal_state(source.clone());
         render_marketplace_into_buffer(&mut state, 100, 40);
@@ -6913,8 +7151,18 @@ mod tests {
         state.picker_state.selected = 2; // beta, plugin index 1
         // A refreshed catalog puts a new plugin first, so index 1 now means alpha
         let mut replaced = source.clone();
-        replaced.plugins.insert(0, TestPlugin { name: "aardvark", ..Default::default() }.build());
-        assert_eq!(state.resolve_marketplace_selection(&[replaced]), Some((0, Some(2))));
+        replaced.plugins.insert(
+            0,
+            TestPlugin {
+                name: "aardvark",
+                ..Default::default()
+            }
+            .build(),
+        );
+        assert_eq!(
+            state.resolve_marketplace_selection(&[replaced]),
+            Some((0, Some(2)))
+        );
         // And a catalog without beta resolves the row to nothing, never to another plugin
         let mut gone = source;
         gone.plugins.truncate(1);
@@ -6927,9 +7175,21 @@ mod tests {
     fn marketplace_row_requires_the_same_relative_path_not_just_the_name() {
         let mut source = superpowers_source();
         source.plugins = vec![
-            TestPlugin { name: "alpha", ..Default::default() }.build(),
-            TestPlugin { name: "helpful", ..Default::default() }.build(),
-            TestPlugin { name: "helpful", ..Default::default() }.build(),
+            TestPlugin {
+                name: "alpha",
+                ..Default::default()
+            }
+            .build(),
+            TestPlugin {
+                name: "helpful",
+                ..Default::default()
+            }
+            .build(),
+            TestPlugin {
+                name: "helpful",
+                ..Default::default()
+            }
+            .build(),
         ];
         source.plugins[1].relative_path = "plugins/one".into();
         source.plugins[2].relative_path = "plugins/two".into();
@@ -6942,12 +7202,29 @@ mod tests {
         assert_eq!(state.resolve_marketplace_selection(&[swapped]), None);
         // The exact pair moved: it is found once, by pair, not by the first of two equal names
         let mut moved = source.clone();
-        moved.plugins.insert(0, TestPlugin { name: "aardvark", ..Default::default() }.build());
-        assert_eq!(state.resolve_marketplace_selection(&[moved]), Some((0, Some(2))));
+        moved.plugins.insert(
+            0,
+            TestPlugin {
+                name: "aardvark",
+                ..Default::default()
+            }
+            .build(),
+        );
+        assert_eq!(
+            state.resolve_marketplace_selection(&[moved]),
+            Some((0, Some(2)))
+        );
         // Two entries carrying the exact pair make the miss ambiguous
         let mut twice = source;
         let pair = twice.plugins[1].clone();
-        twice.plugins.insert(0, TestPlugin { name: "aardvark", ..Default::default() }.build());
+        twice.plugins.insert(
+            0,
+            TestPlugin {
+                name: "aardvark",
+                ..Default::default()
+            }
+            .build(),
+        );
         twice.plugins.insert(0, pair);
         assert_eq!(state.resolve_marketplace_selection(&[twice]), None);
     }
@@ -6957,8 +7234,16 @@ mod tests {
     fn marketplace_ambiguous_label_without_a_drawn_row_resolves_to_nothing() {
         let mut source = superpowers_source();
         source.plugins = vec![
-            TestPlugin { name: "de\u{00ad}ploy", ..Default::default() }.build(),
-            TestPlugin { name: "deploy", ..Default::default() }.build(),
+            TestPlugin {
+                name: "de\u{00ad}ploy",
+                ..Default::default()
+            }
+            .build(),
+            TestPlugin {
+                name: "deploy",
+                ..Default::default()
+            }
+            .build(),
         ];
         let mut state = ExtensionsModalState::new(ExtensionsTab::Marketplace);
         state.entry_data_indices = vec![None, Some(0)];

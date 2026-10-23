@@ -276,7 +276,9 @@ mod p188_tests {
                 message_id: Some("msg_1".into()),
                 stream_start_ms: Some(7),
             }),
-            vec![serde_json::json!({"type": "response_discarded", "messageId": "msg_1", "streamStartMs": 7})]
+            vec![
+                serde_json::json!({"type": "response_discarded", "messageId": "msg_1", "streamStartMs": 7})
+            ]
         );
         assert_eq!(
             r.reduce(StreamEvent::ResponseDiscarded {

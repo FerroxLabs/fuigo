@@ -7,6 +7,8 @@ use fuigo_acp_lib::{AcpAgentTx, acp_send};
 #[derive(Debug, PartialEq, Eq)]
 pub enum AuthStatus {
     ApiKey,
+    /// The Flux key saved in `<fuigo_home>/auth.json` (picker or `login --provider flux`), no env var.
+    SavedKey,
     /// Auth host from `fuigo_ws_origin` (scheme stripped).
     LoggedIn(String),
     /// Catalog key of the first model with own `api_key`/`env_key`.
@@ -20,8 +22,23 @@ impl AuthStatus {
     /// Differs from sampling (`resolve_credentials`: BYOK, then session, then env) so a logged-in user sees the login host.
     /// BYOK uses [`crate::agent::auth_method::should_advertise_fuigo_api_key`] so `disable_api_key_auth` is honored.
     pub fn resolve(agent_config: &AgentConfig) -> Self {
+        let home = fuigo_dirs::resolve_fuigo_home().unwrap_or_default();
+        Self::resolve_in(agent_config, &home)
+    }
+
+    /// [`Self::resolve`] against an explicit fuigo home (the saved-key store), so tests need no real home.
+    ///
+    /// The saved Flux key is a credential source exactly as at runtime (`load_saved_api_key`, which runs at agent
+    /// `initialize`) and in `login --status` (`ProviderStatus::collect`): `fuigo models` runs this banner BEFORE the agent
+    /// is started, so it must read the store itself or it reports "not authenticated" while the listing works.
+    pub fn resolve_in(agent_config: &AgentConfig, home: &std::path::Path) -> Self {
         if crate::agent::auth_method::has_fuigo_api_key_env() {
             return Self::ApiKey;
+        }
+        if !agent_config.fuigo_com_config.api_key_auth_disabled()
+            && crate::auth::read_api_key(home).is_some_and(|k| !k.trim().is_empty())
+        {
+            return Self::SavedKey;
         }
         if agent_config.create_auth_manager().current().is_some() {
             let backend = crate::auth::backend::ActiveAuthBackend::default();
@@ -178,6 +195,32 @@ mod tests {
         let _key = EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "fuigo-test-key");
         assert_eq!(AuthStatus::resolve(&Config::default()), AuthStatus::ApiKey);
     }
+    #[test]
+    #[serial]
+    fn resolve_saved_key_only() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let (_dir, _g) = isolate_auth_sources();
+        let home = tempfile::tempdir().unwrap();
+        crate::auth::store_api_key(home.path(), "saved-key").unwrap();
+        assert_eq!(AuthStatus::resolve_in(&Config::default(), home.path()), AuthStatus::SavedKey);
+        // An env key outranks it, as at runtime.
+        let _key = EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "fuigo-test-key");
+        assert_eq!(AuthStatus::resolve_in(&Config::default(), home.path()), AuthStatus::ApiKey);
+    }
+
+    #[test]
+    #[serial]
+    fn resolve_empty_store_is_not_authenticated() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let (_dir, _g) = isolate_auth_sources();
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(AuthStatus::resolve_in(&Config::default(), home.path()), AuthStatus::NotAuthenticated);
+    }
+
     #[test]
     #[serial]
     fn resolve_legacy_api_key_env() {

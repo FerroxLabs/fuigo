@@ -278,6 +278,38 @@ pub(super) fn dispatch_permission_cancel(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
+/// Turn-end variant of [`drain_permission_queue`]: approval cards raised by a still-running background subagent stay up.
+/// The parent's turn ending says nothing about the child, which keeps waiting on the answer.
+/// Cards for finished or unknown sessions are cancelled as before.
+pub(super) fn drain_permission_queue_at_turn_end(agent: &mut AgentView) {
+    agent.last_permission_click = None;
+    if agent.permission_queue.is_empty() {
+        return;
+    }
+    let root = agent.session.session_id.clone();
+    let live: std::collections::HashSet<String> = agent
+        .subagent_sessions
+        .iter()
+        .filter(|(sid, info)| !info.finished && root.as_ref().is_none_or(|r| r.0.as_ref() != sid.as_str()))
+        .map(|(sid, _)| sid.clone())
+        .collect();
+    let mut kept = std::collections::VecDeque::new();
+    for perm in agent.permission_queue.drain(..) {
+        if live.contains(perm.request.session_id.0.as_ref()) {
+            kept.push_back(perm);
+        } else {
+            perm.request
+                .response_tx
+                .send(Ok(acp::RequestPermissionResponse::new(
+                    acp::RequestPermissionOutcome::Cancelled,
+                )))
+                .ok();
+        }
+    }
+    agent.permission_queue = kept;
+    resolve_permission_queue_transition(agent);
+}
+
 /// Drain all queued permission requests, sending `Cancelled` to each.
 ///
 /// Called on turn-end and turn-cancel; after draining, restores the stashed prompt/pane.
@@ -426,5 +458,53 @@ mod plan_prefill_after_permission_tests {
             "in-progress freeform notes",
             "unrelated restore must not wipe freeform during plan review"
         );
+    }
+}
+
+#[cfg(test)]
+mod turn_end_drain_tests {
+    use super::*;
+    use crate::app::agent_view::test_fixtures::{
+        make_agent, make_followup_permission_state, running_subagent_info,
+    };
+
+    fn card_for(session: &str) -> crate::views::permission_view::PermissionViewState {
+        let mut card = make_followup_permission_state();
+        card.request.request.session_id = acp::SessionId::new(std::sync::Arc::from(session));
+        card
+    }
+
+    #[test]
+    fn turn_end_keeps_cards_of_running_background_subagents() {
+        let mut agent = make_agent();
+        agent
+            .subagent_sessions
+            .insert("child-live".into(), running_subagent_info("child-live"));
+        let mut done = running_subagent_info("child-done");
+        done.finished = true;
+        agent.subagent_sessions.insert("child-done".into(), done);
+        agent.permission_queue.push_back(card_for("child-done"));
+        agent.permission_queue.push_back(card_for("child-live"));
+        agent.permission_queue.push_back(card_for("not-a-subagent"));
+
+        drain_permission_queue_at_turn_end(&mut agent);
+
+        let kept: Vec<&str> = agent
+            .permission_queue
+            .iter()
+            .map(|c| c.request.request.session_id.0.as_ref())
+            .collect();
+        assert_eq!(kept, vec!["child-live"], "only the live subagent's card survives");
+    }
+
+    #[test]
+    fn user_cancel_still_drains_every_card() {
+        let mut agent = make_agent();
+        agent
+            .subagent_sessions
+            .insert("child-live".into(), running_subagent_info("child-live"));
+        agent.permission_queue.push_back(card_for("child-live"));
+        drain_permission_queue(&mut agent);
+        assert!(agent.permission_queue.is_empty());
     }
 }

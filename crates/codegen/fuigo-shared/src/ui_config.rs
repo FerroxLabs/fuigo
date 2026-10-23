@@ -124,6 +124,21 @@ pub struct UiConfig {
     /// Legacy TTL ms; only `Some(0)` counts when `keep_text_selection` is unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection_highlight_duration_ms: Option<u64>,
+    /// Faint dot-matrix Wind mark above the text column of the welcome screen.
+    /// `None` means on (client default). It takes only the rows the text leaves and never overlaps it. Hidden under 70x24
+    /// (the welcome layout itself starts at 60 columns), when too few rows are spare, with `NO_COLOR` or no colour support,
+    /// and while the prompt holds text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_mark: Option<bool>,
+    /// One 3D spin of the background mark when the welcome screen opens, easing to rest with an ember gust. Off shows the
+    /// settled mark from the first frame. Any key press snaps it to rest.
+    /// `None` means on (client default). Also off over SSH and under `NO_COLOR`. Has no effect when `background_mark` is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_mark_animate: Option<bool>,
+    /// Decorative animations (the background mark's spin). `None` means on.
+    /// Read by the pager; also off over SSH and under `NO_COLOR`. See also `background_mark_animate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animations: Option<bool>,
     /// Show agent thinking/reasoning blocks in the TUI scrollback.
     /// `None` means on (client default). Written by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -149,6 +164,10 @@ pub struct UiConfig {
     /// `"fullscreen"` | `"minimal"`; unset uses the product default, fullscreen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_mode: Option<String>,
+    /// `"compact"` | `"detailed"`: how much of each tool call the transcript shows at startup.
+    /// Unset keeps each tool call's own fold. `/density` overrides it for one session and never writes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_density: Option<String>,
     /// Retired hidden opt-in for terminal-like double/triple-click word/line selection.
     /// Superseded by `keep_text_selection = "word_select"`.
     /// Still read only when `keep_text_selection` is unset; Settings clears this on write.
@@ -281,12 +300,16 @@ impl Default for UiConfig {
             cancel_subagents_on_turn_cancel: None,
             keep_text_selection: None,
             selection_highlight_duration_ms: None,
+            background_mark: None,
+            background_mark_animate: None,
+            animations: None,
             show_thinking_blocks: None,
             group_tool_verbs: None,
             collapsed_edit_blocks: None,
             prompt_suggestions: None,
             cursor_blink: None,
             screen_mode: None,
+            tool_density: None,
             double_click_action: None,
             contextual_hints: ContextualHints::default(),
             combine_queued_prompts: None,
@@ -311,6 +334,9 @@ impl UiConfig {
     pub fn show_timeline_enabled(&self) -> bool {
         self.show_timeline.unwrap_or(Self::SHOW_TIMELINE_DEFAULT)
     }
+
+    /// Default for [`Self::background_mark`] and [`Self::background_mark_animate`] when unset.
+    pub const BACKGROUND_MARK_DEFAULT: bool = true;
 
     /// Default for [`Self::page_flip_on_send`] when unset.
     pub const PAGE_FLIP_ON_SEND_DEFAULT: bool = true;

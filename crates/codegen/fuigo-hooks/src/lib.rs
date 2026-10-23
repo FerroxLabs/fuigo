@@ -42,11 +42,17 @@ pub mod dispatcher;
 mod env_expand;
 pub mod error;
 pub mod event;
+pub mod health;
 pub mod matcher;
 pub mod result;
 pub mod runner;
+// Unix-only: the tests write executable shell stubs and run them through sh/bash.
+#[cfg(all(test, unix))]
+mod hooks_compat_tests;
 #[cfg(test)]
 mod p118_tests;
+#[cfg(test)]
+mod rowsa2_tests;
 #[cfg(test)]
 mod p147_tests;
 #[cfg(test)]

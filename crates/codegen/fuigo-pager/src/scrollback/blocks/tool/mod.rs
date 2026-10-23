@@ -114,11 +114,13 @@ impl VerbGroupKind {
             VerbGroupKind::File | VerbGroupKind::Skill => ("Read", "Reading"),
             VerbGroupKind::Search
             | VerbGroupKind::WebSearch
-            | VerbGroupKind::MemorySearch
-            | VerbGroupKind::IntegrationSearch => ("Searched", "Searching"),
+            | VerbGroupKind::MemorySearch => ("Searched", "Searching"),
             VerbGroupKind::Dir => ("Listed", "Listing"),
             VerbGroupKind::WebFetch => ("Fetched", "Fetching"),
-            VerbGroupKind::Subagent | VerbGroupKind::Command | VerbGroupKind::OtherTool => {
+            VerbGroupKind::Subagent
+            | VerbGroupKind::Command
+            | VerbGroupKind::OtherTool
+            | VerbGroupKind::IntegrationSearch => {
                 ("Ran", "Running")
             }
             VerbGroupKind::Message => ("Sent", "Sending"),
@@ -137,7 +139,8 @@ impl VerbGroupKind {
             VerbGroupKind::Dir => ("dir", "dirs"),
             VerbGroupKind::WebFetch | VerbGroupKind::WebSearch => ("website", "websites"),
             VerbGroupKind::MemorySearch => ("memory", "memories"),
-            VerbGroupKind::IntegrationSearch | VerbGroupKind::McpCall => ("MCP tool", "MCP tools"),
+            VerbGroupKind::IntegrationSearch => ("tool search", "tool searches"),
+            VerbGroupKind::McpCall => ("MCP tool", "MCP tools"),
             VerbGroupKind::Subagent => ("subagent", "subagents"),
             VerbGroupKind::Command => ("command", "commands"),
             VerbGroupKind::Message => ("message", "messages"),
@@ -638,7 +641,9 @@ mod tests {
         assert_eq!(VerbGroupKind::WebFetch.verb(true), "Fetching");
         assert_eq!(VerbGroupKind::WebSearch.verb(false), "Searched");
         assert_eq!(VerbGroupKind::MemorySearch.verb(false), "Searched");
-        assert_eq!(VerbGroupKind::IntegrationSearch.verb(true), "Searching");
+        // Tool-search activity reads "Ran N tool searches", not a search of MCP tools
+        assert_eq!(VerbGroupKind::IntegrationSearch.verb(false), "Ran");
+        assert_eq!(VerbGroupKind::IntegrationSearch.verb(true), "Running");
         assert_eq!(VerbGroupKind::Subagent.verb(false), "Ran");
         assert_eq!(VerbGroupKind::Subagent.verb(true), "Running");
         assert_eq!(VerbGroupKind::Command.verb(false), "Ran");
@@ -664,8 +669,8 @@ mod tests {
         // Irregular plural.
         assert_eq!(VerbGroupKind::MemorySearch.noun(1), "memory");
         assert_eq!(VerbGroupKind::MemorySearch.noun(2), "memories");
-        assert_eq!(VerbGroupKind::IntegrationSearch.noun(1), "MCP tool");
-        assert_eq!(VerbGroupKind::IntegrationSearch.noun(2), "MCP tools");
+        assert_eq!(VerbGroupKind::IntegrationSearch.noun(1), "tool search");
+        assert_eq!(VerbGroupKind::IntegrationSearch.noun(2), "tool searches");
         assert_eq!(VerbGroupKind::Subagent.noun(1), "subagent");
         assert_eq!(VerbGroupKind::Subagent.noun(2), "subagents");
         assert_eq!(VerbGroupKind::Command.noun(1), "command");

@@ -39,6 +39,7 @@ members = [
     "crates/codegen/fuigo-dashboard-store",
     "crates/codegen/fuigo-diag-server",
     "crates/codegen/fuigo-env",
+    "crates/codegen/fuigo-egress-proxy",
     "crates/codegen/fuigo-extra-ca",
     "crates/codegen/fuigo-foreign-sessions",
     "crates/codegen/fuigo-gboom",
@@ -62,6 +63,8 @@ members = [
     "crates/codegen/fuigo-sampler",
     "crates/codegen/fuigo-sampling-types",
     "crates/codegen/fuigo-sandbox",
+    "crates/codegen/fuigo-file-lock",
+    "crates/codegen/fuigo-external-agent-migration",
     "crates/codegen/fuigo-secrets",
     "crates/codegen/fuigo-session-events",
     "crates/codegen/fuigo-session-search",
@@ -192,6 +195,7 @@ hmac = "0.12"
 htmd = "0.5.4"
 html-escape = "0.2"
 http = "1"
+httparse = "1"
 http-body-util = "0.1"
 humantime-serde = "1"
 ignore = "0.4"
@@ -273,6 +277,7 @@ siphasher = "1"
 smallvec = "1"
 strip-ansi-escapes = "0.2.1"
 strum = { version = "0.27", features = ["derive"] }
+subtle = "2"
 supports-color = "3.0"
 syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
 tar = "0.4"
@@ -340,10 +345,13 @@ fuigo-auth = { path = "crates/codegen/fuigo-auth" }
 fuigo-bundle = { path = "crates/codegen/fuigo-bundle" }
 fuigo-config = { path = "crates/codegen/fuigo-config" }
 fuigo-config-types = { path = "crates/codegen/fuigo-config-types" }
+fuigo-file-lock = { path = "crates/codegen/fuigo-file-lock" }
+fuigo-external-agent-migration = { path = "crates/codegen/fuigo-external-agent-migration" }
 fuigo-peer = { path = "crates/codegen/fuigo-peer" }
 fuigo-dashboard-store = { path = "crates/codegen/fuigo-dashboard-store" }
 fuigo-diag-server = { path = "crates/codegen/fuigo-diag-server" }
 fuigo-env = { path = "crates/codegen/fuigo-env" }
+fuigo-egress-proxy = { path = "crates/codegen/fuigo-egress-proxy" }
 fuigo-extra-ca = { path = "crates/codegen/fuigo-extra-ca" }
 fuigo-foreign-sessions = { path = "crates/codegen/fuigo-foreign-sessions" }
 fuigo-http = { path = "crates/codegen/fuigo-http" }
@@ -398,12 +406,17 @@ panic = "abort"
 
 # Hardened release profile for shipping to end users (alpha + stable).
 # Use `cargo build --profile release-dist` for distribution builds.
-# Not used by default `--release` to avoid slowing down local dev builds (~2.2x).
+# Not used by default `--release` to avoid slowing down local dev builds. Measured on linux-x64 (stripped, same load):
+# --release 193.2 MB in 6m57; release-dist 165.6 MB in 19m21 (2.8x); release-dist with codegen-units=16 206.6 MB in 8m19
+# (thin LTO with 16 units is LARGER than plain --release, so only codegen-units=1 keeps the size gain).
 #
 # Hardening: thin LTO for cross-crate optimization with reasonable link times,
 # codegen-units=1 maximizes optimization (whole-program analysis, no CGU boundaries).
 # debug=1 emits line-tables DWARF; strip=false keeps symbols so CI can extract
-# .debug sidecars (Linux) or .dSYM bundles (macOS) before stripping post-build.
+# .debug sidecars (Linux) before stripping post-build. split-debuginfo="off" here keeps Linux and
+# Windows output unchanged; the macOS release build overrides it to "packed" via
+# CARGO_PROFILE_RELEASE_DIST_SPLIT_DEBUGINFO in release.yml, so rustc runs dsymutil at link time
+# and leaves <bin>.dSYM next to the binary (a later `dsymutil <bin>` would find no object files).
 # Linker flags (RELRO, NX stack) are set per-target in .cargo/config.toml.
 [profile.release-dist]
 inherits = "release"

@@ -130,10 +130,12 @@ pub(super) fn retire_optimistic_echo(
 /// Drain prompt-side images and snapshot all chip elements (paste blocks, @-file refs, image chips) into the most recently enqueued `QueuedPrompt`.
 ///
 /// Must be called after `enqueue_prompt` / `push_back` and before `prompt.set_text("")` (which clears element and image state).
-/// If the last queued entry already has `wire_blocks` (skill injection), images are dropped with a toast instead of merged.
-pub(super) fn drain_prompt_state_to_last_queued(agent: &mut AgentView) {
+/// If the last queued entry already has `wire_blocks` (skill injection), or is a command (`/compact`) or a bash
+/// command, which carry no images, the images are dropped instead of merged and the returned notice says so.
+/// The caller queues it on `AppView::pending_image_notices`: a toast, or a transcript line in minimal mode.
+pub(super) fn drain_prompt_state_to_last_queued(agent: &mut AgentView, notices: &mut Vec<String>) {
     let prompt_state = agent.prompt.stash();
-    let (_, images, chip_elements) = prompt_state.into_submission();
+    let (_, mut images, chip_elements) = prompt_state.into_submission();
 
     let Some(entry) = agent.session.pending_prompts.back_mut() else {
         return;
@@ -146,12 +148,21 @@ pub(super) fn drain_prompt_state_to_last_queued(agent: &mut AgentView) {
     }
 
     // wire_blocks policy: skill-injected prompts do not carry prompt images.
-    if entry.wire_blocks.is_some() {
-        agent.show_toast("Images removed (skill prompt)");
-        return;
-    }
-
-    entry.images = images;
+    let reason = if entry.wire_blocks.is_some() {
+        "skill prompt"
+    } else {
+        match entry.kind {
+            // Commands and bash commands never reach the model with attachments.
+            crate::app::agent::QueueEntryKind::Command => "commands take text only",
+            crate::app::agent::QueueEntryKind::BashCommand => "bash commands take text only",
+            _ => {
+                entry.images = images;
+                return;
+            }
+        }
+    };
+    crate::prompt_images::drain_and_cleanup(&mut images);
+    notices.push(format!("Images removed ({reason})"));
 }
 
 /// Prepend `<system-reminder>` framing to a cron prompt for the model.
@@ -259,9 +270,11 @@ pub(crate) fn maybe_release_queued_prompt_into_turn(
 
 /// Drain the next queued row. A held side question at the front is sent first (it is no turn),
 /// then the next row drains as before, so the queue keeps its order.
-pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
+///
+/// `notices` is `AppView::pending_image_notices`: a queued image that cannot be read is reported there.
+pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>) -> QueueDrain {
     let mut effects = drain_front_side_questions(agent);
-    let mut drain = maybe_drain_queue_rows(agent);
+    let mut drain = maybe_drain_queue_rows(agent, notices);
     effects.append(&mut drain.effects);
     drain.effects = effects;
     drain
@@ -284,11 +297,10 @@ fn drain_front_side_questions(agent: &mut AgentView) -> Vec<Effect> {
             PromptMode::EditingQueued { id, .. } => Some(*id),
             _ => None,
         };
-        let front_is_side_question = agent
-            .session
-            .pending_prompts
-            .front()
-            .is_some_and(|p| p.kind == QueueEntryKind::SideQuestion && Some(p.id) != editing_id);
+        let front_is_side_question =
+            agent.session.pending_prompts.front().is_some_and(|p| {
+                p.kind == QueueEntryKind::SideQuestion && Some(p.id) != editing_id
+            });
         if !front_is_side_question {
             return effects;
         }
@@ -305,7 +317,11 @@ fn send_held_side_question(
     agent_id: AgentId,
     row: crate::app::agent::QueuedPrompt,
 ) -> Vec<Effect> {
-    let question = row.text.strip_prefix("/btw ").unwrap_or(&row.text).to_owned();
+    let question = row
+        .text
+        .strip_prefix("/btw ")
+        .unwrap_or(&row.text)
+        .to_owned();
     super::notes::start_side_question(
         agent,
         agent_id,
@@ -315,7 +331,7 @@ fn send_held_side_question(
     )
 }
 
-fn maybe_drain_queue_rows(agent: &mut AgentView) -> QueueDrain {
+fn maybe_drain_queue_rows(agent: &mut AgentView, notices: &mut Vec<String>) -> QueueDrain {
     use crate::app::agent::QueueEntryKind;
     use crate::unified_log as ulog;
 
@@ -531,11 +547,13 @@ fn maybe_drain_queue_rows(agent: &mut AgentView) -> QueueDrain {
                 // Pass the session cwd so orphan `[Image #N: <path>]` placeholders can be recovered from disk via the shared helper
                 // Orphans come from a paste in a previous session and the like
                 // Token ranges are not stamped here: the builder rewrites the text (placeholder stripping), which would shift byte offsets
-                let mut blocks = crate::prompt_images::build_content_blocks_with_workspace(
+                let build = crate::prompt_images::build_content_blocks_with_workspace_report(
                     queued.text,
                     queued.images,
                     Some(std::path::Path::new(&agent.session.cwd)),
                 );
+                notices.extend(agent.skipped_image_send_notice(&build.skipped_display_numbers));
+                let mut blocks = build.blocks;
                 if let Some(acp::ContentBlock::Text(tb)) = blocks.first_mut() {
                     let map = tb.meta.get_or_insert_with(acp::Meta::new);
                     fuigo_prompt_queue::stamp_combined_display_texts(map, &combined_segs);
@@ -633,7 +651,10 @@ fn maybe_drain_queue_rows(agent: &mut AgentView) -> QueueDrain {
             // none; the id keeps the generated suffix and the shell treats it as it always did.
             let prompt_id = format!(
                 "scheduler-fired-{}",
-                queued.fire_ticket.as_ref().map_or(prompt_id.as_str(), |t| t.expose())
+                queued
+                    .fire_ticket
+                    .as_ref()
+                    .map_or(prompt_id.as_str(), |t| t.expose())
             );
             agent.note_self_originated_prompt(&prompt_id);
             agent.start_turn_boundary(Some(&prompt_id));
@@ -1161,7 +1182,7 @@ pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: Agent
         let Some(agent) = app.agents.get_mut(&agent_id) else {
             return vec![];
         };
-        maybe_drain_queue(agent)
+        maybe_drain_queue(agent, &mut app.pending_image_notices)
     };
     note_peek_page_flip(app, agent_id, drain.page_flip_entry);
     drain.effects
@@ -1377,7 +1398,7 @@ mod tests {
         for _ in 0..2 {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.session.enqueue_command("/compact".into());
-            let drain = maybe_drain_queue(agent);
+            let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
             assert!(
                 matches!(drain.effects.as_slice(), [Effect::Compact { .. }]),
                 "command drain must start one compact, got {:?}",
@@ -2140,7 +2161,7 @@ mod tests {
         let mut app = test_app_with_agent();
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         agent.session.enqueue_prompt("first".into());
-        let started = maybe_drain_queue(agent);
+        let started = maybe_drain_queue(agent, &mut app.pending_image_notices);
         let entry_id = started.page_flip_entry.expect("prompt starts a page flip");
         assert_eq!(
             agent.scrollback.index_of_id(entry_id),
@@ -2148,7 +2169,7 @@ mod tests {
         );
 
         agent.session.enqueue_prompt("queued".into());
-        let blocked = maybe_drain_queue(agent);
+        let blocked = maybe_drain_queue(agent, &mut app.pending_image_notices);
         assert!(blocked.effects.is_empty());
         assert!(blocked.page_flip_entry.is_none());
     }
@@ -2160,7 +2181,7 @@ mod tests {
         agent.session.enqueue_prompt("queued follow-up".into());
         agent.session.hook_block_hold = true;
 
-        let held = maybe_drain_queue(agent);
+        let held = maybe_drain_queue(agent, &mut app.pending_image_notices);
         assert!(held.effects.is_empty(), "a held queue must not drain");
         assert_eq!(
             agent.session.pending_prompts.len(),
@@ -2169,7 +2190,7 @@ mod tests {
         );
 
         agent.release_hook_block_hold();
-        let drained = maybe_drain_queue(agent);
+        let drained = maybe_drain_queue(agent, &mut app.pending_image_notices);
         assert!(
             !drained.effects.is_empty(),
             "a released queue drains normally"
@@ -2599,6 +2620,7 @@ mod tests {
             Action::SendPromptNow {
                 text: "hurry".into(),
                 images: vec![],
+                image_notice: None,
             },
             &mut app,
         );
@@ -3011,7 +3033,7 @@ mod tests {
         );
 
         // A drain while loading_replay is true must be blocked
-        let effects = maybe_drain_queue(app.agents.get_mut(&id).unwrap()).effects;
+        let effects = maybe_drain_queue(app.agents.get_mut(&id).unwrap(), &mut Vec::new()).effects;
         assert!(
             effects.is_empty(),
             "drain must be blocked during loading_replay"
@@ -3026,7 +3048,7 @@ mod tests {
         app.agents.get_mut(&id).unwrap().session.loading_replay = false;
 
         // Drain again: it succeeds now
-        let effects = maybe_drain_queue(app.agents.get_mut(&id).unwrap()).effects;
+        let effects = maybe_drain_queue(app.agents.get_mut(&id).unwrap(), &mut Vec::new()).effects;
         assert_eq!(effects.len(), 1);
         assert!(
             matches!(&effects[0], Effect::SendPromptBlocks { .. }),

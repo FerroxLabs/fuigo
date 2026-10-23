@@ -264,10 +264,15 @@ impl AgentView {
                 if !ActionRegistry::interjection_possible(self.can_send_now(), !text.is_empty()) {
                     return None;
                 }
+                let image_notice = self.unbound_image_placeholder_notice();
                 let images = self.prompt.drain_images();
                 self.prompt.set_text("");
                 self.note_draft_consumed();
-                Some(Action::SendPromptNow { text, images })
+                Some(Action::SendPromptNow {
+                    text,
+                    images,
+                    image_notice,
+                })
             }
             AgentDeferredSend::SubmitFeedback => {
                 if !self
@@ -473,6 +478,12 @@ impl AgentView {
         mut pasted: crate::prompt_images::PastedImage,
     ) -> bool {
         if self.reject_shared_queue_image_edit(&pasted) {
+            return false;
+        }
+        // Refuse before the bytes are written into the session folder
+        if let Some(msg) = PromptWidget::oversized_image_message(&pasted) {
+            self.show_toast_ticks(&msg, 150);
+            crate::prompt_images::cleanup_temp_file(&pasted);
             return false;
         }
         let preparation = pasted.preview_preparation();
@@ -1066,7 +1077,11 @@ pub(super) mod paste_key_tests {
             agent.prompt.images.is_empty(),
             "an SSH session must not attach a dropped image"
         );
-        assert_eq!(agent.prompt.text(), url, "the URL must be inserted verbatim");
+        assert_eq!(
+            agent.prompt.text(),
+            url,
+            "the URL must be inserted verbatim"
+        );
     }
     /// Mirrors the strongest Cmd+V drop-path test, but exercises the `Event::Paste` (bracketed-paste) branch.
     /// That is the actual path a drag-from-Finder takes through the dispatcher.
@@ -1688,6 +1703,63 @@ pub(super) mod paste_key_tests {
             );
         }
     }
+    /// A `[Copy]` row under a code block or table is painted by the same painter and clicked through the same hit-test:
+    /// every button registers a rect that copies its own text verbatim, with no render dispatched.
+    #[test]
+    fn paints_copy_row_and_each_button_copies_its_own_text() {
+        let _theme = crate::theme::cache::pin_theme();
+        use crate::scrollback::blocks::mermaid_content::{
+            AffordanceKind, CopyButton, CopyRow, copy_row_button_cols,
+        };
+        use crate::scrollback::render::DiagramAffordancePlacement;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let theme = Theme::current();
+        let copy = CopyRow {
+            label: "table".to_string(),
+            buttons: vec![
+                CopyButton {
+                    label: "[Copy as Markdown]".to_string(),
+                    text: "| a |\n| --- |\n| 1 |".to_string(),
+                },
+                CopyButton {
+                    label: "[Copy as TSV]".to_string(),
+                    text: "a\n1".to_string(),
+                },
+            ],
+        };
+        let cols = copy_row_button_cols(&copy);
+        let mut agent = make_agent();
+        let rect = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(rect);
+        agent.paint_diagram_affordances(
+            &mut buf,
+            vec![DiagramAffordancePlacement {
+                screen_rect: rect,
+                source: String::new(),
+                copy: Some(copy),
+            }],
+            &theme,
+        );
+        let row: String = (0..80)
+            .filter_map(|x| buf.cell((x, 0)).map(|c| c.symbol()))
+            .collect();
+        assert!(row.contains("table"), "row = {row:?}");
+        assert!(row.contains("[Copy as Markdown]"), "row = {row:?}");
+        assert!(row.contains("[Copy as TSV]"), "row = {row:?}");
+        let hits = &agent.inline_media_hits.mermaid_buttons;
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|(_, kind, _)| *kind == AffordanceKind::CopyText));
+        assert_eq!(hits[0].0.x, cols[0]);
+        assert_eq!(hits[1].0.x, cols[1]);
+        let texts = &agent.inline_media_hits.mermaid_sources;
+        assert_eq!(texts[hits[0].2], "| a |\n| --- |\n| 1 |");
+        assert_eq!(texts[hits[1].2], "a\n1");
+        let out = agent.handle_inline_media_click(cols[1], 0);
+        assert!(matches!(out, Some(InputOutcome::Changed)));
+        assert!(agent.toast.is_some(), "the click reports the copy");
+        assert!(!agent.mermaid_needs_tick(), "a copy row dispatches no render");
+    }
     /// The real painter (`paint_diagram_affordances`) lays the row from the single layout source of truth.
     /// A leading dim `◇ mermaid` label comes first, then the three always-clickable buttons shifted right past the label.
     /// Each button registers a hit-rect carrying the source.
@@ -1710,6 +1782,7 @@ pub(super) mod paste_key_tests {
             vec![DiagramAffordancePlacement {
                 screen_rect: rect,
                 source: source.clone(),
+                copy: None,
             }],
             &theme,
         );
@@ -1759,6 +1832,7 @@ pub(super) mod paste_key_tests {
         let placement = |rect: Rect| DiagramAffordancePlacement {
             screen_rect: rect,
             source: "A-->B\n".to_string(),
+            copy: None,
         };
         let rect = Rect::new(0, 0, 80, 1);
         let modifier = |buf: &Buffer, x: u16| buf.cell((x, 0)).unwrap().modifier;
@@ -1816,6 +1890,7 @@ pub(super) mod paste_key_tests {
             vec![DiagramAffordancePlacement {
                 screen_rect: rect,
                 source: "A-->B\n".to_string(),
+                copy: None,
             }],
             &theme,
         );
@@ -1986,6 +2061,42 @@ pub(super) mod paste_key_tests {
             !second.contains("a=t"),
             "second frame must not re-transmit the bytes: {second:?}",
         );
+    }
+    /// A full clear (`ESC[2J`) drops Kitty image data in Ghostty, so the frame after it must re-transmit. A place-only frame would draw a blank card.
+    #[test]
+    fn tool_media_retransmits_after_forgetting_transmitted_media() {
+        use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
+        let _g = set_protocol_for_test(GraphicsProtocol::Kitty);
+        let path = std::path::PathBuf::from("/tmp/tool-media.png");
+        let placement = tool_media_placement(path.clone());
+        let mut agent = make_agent();
+        agent
+            .inline_media_cache
+            .insert(path.clone(), make_test_png(40, 20));
+        let mut child = make_agent();
+        child.inline_media_cache.insert(path, make_test_png(40, 20));
+        agent
+            .subagent_views
+            .insert("child-sid".into(), Box::new(child));
+        let paint_twice = |view: &mut AgentView| {
+            let first = view.build_inline_media_escapes(&placement).unwrap();
+            assert!(first.contains("a=t"), "first frame transmits: {first:?}");
+            let second = view.build_inline_media_escapes(&placement).unwrap();
+            assert!(!second.contains("a=t"), "then places only: {second:?}");
+        };
+        let paint_after_clear = |view: &mut AgentView| {
+            let after_clear = view.build_inline_media_escapes(&placement).unwrap();
+            assert!(
+                after_clear.contains("a=t"),
+                "the frame after a clear re-transmits: {after_clear:?}"
+            );
+            assert!(after_clear.contains("a=p"), "and places: {after_clear:?}");
+        };
+        paint_twice(&mut agent);
+        paint_twice(agent.subagent_views.get_mut("child-sid").unwrap());
+        agent.forget_transmitted_inline_media();
+        paint_after_clear(&mut agent);
+        paint_after_clear(agent.subagent_views.get_mut("child-sid").unwrap());
     }
     fn tool_media_placement(
         path: std::path::PathBuf,

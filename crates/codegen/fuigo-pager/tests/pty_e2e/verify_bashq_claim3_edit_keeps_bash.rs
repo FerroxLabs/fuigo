@@ -131,8 +131,8 @@ async fn verify_bashq_claim3_edit_keeps_bash() {
         harness.screen_contents()
     );
     harness
-        .wait_for_text("Run (user)", Duration::from_secs(15))
-        .expect("Run (user) chrome for the drained bash turn");
+        .wait_for_text("Ran (user)", Duration::from_secs(15))
+        .expect("Ran (user) chrome for the drained bash turn");
 
     assert!(
         !harness.contains_text("panicked"),

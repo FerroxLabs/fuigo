@@ -375,65 +375,78 @@ mod tests {
     }
 
     /// The thread gauge tracks live threads, not a plausible constant:
-    /// parking N new threads raises the sampled count by at least N.
-    /// Unrelated tests in this binary start and stop threads concurrently,
-    /// so one attempt can under-observe; the invariant must hold within a
-    /// few tries.
+    /// parking N new threads raises the sampled count by exactly N.
+    ///
+    /// The gauge counts every thread in the process, and the other tests in
+    /// this binary start and stop threads while this one samples, so an exact
+    /// count is not knowable in-process. The measurement therefore runs in a
+    /// child process that executes only this test: nothing else spawns or
+    /// retires a thread there, and the delta is exact, with no retries.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn thread_gauge_tracks_spawned_threads() {
+        const CHILD_ENV: &str = "FUIGO_THREAD_GAUGE_CHILD";
+        const SPAWNED: u64 = 4;
+
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "process_resources::tests::thread_gauge_tracks_spawned_threads",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .output()
+                .expect("run the thread-gauge test alone");
+            assert!(
+                output.status.success(),
+                "isolated thread-gauge measurement failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
         use std::sync::mpsc::channel;
 
-        const SPAWNED: u64 = 4;
-        let mut deltas = Vec::new();
-        for _ in 0..5 {
-            let before = sample_process_memory().threads.expect("threads");
+        let before = sample_process_memory().threads.expect("threads");
 
-            let (stop_tx, stop_rx) = channel::<()>();
-            let (ready_tx, ready_rx) = channel::<()>();
-            let stop_rx = std::sync::Arc::new(std::sync::Mutex::new(stop_rx));
-            let handles: Vec<_> = (0..SPAWNED)
-                .map(|_| {
-                    let ready = ready_tx.clone();
-                    let stop = stop_rx.clone();
-                    std::thread::spawn(move || {
-                        ready.send(()).ok();
-                        // Release the sender before parking: with the
-                        // parent's copy dropped too, a thread that dies
-                        // before signaling closes the channel and errors
-                        // the recv below instead of blocking it.
-                        drop(ready);
-                        // Park until released (the lock serializes the
-                        // recvs; each thread consumes one stop token).
-                        let guard = stop.lock().unwrap_or_else(|p| p.into_inner());
-                        guard.recv().ok();
-                    })
+        let (stop_tx, stop_rx) = channel::<()>();
+        let (ready_tx, ready_rx) = channel::<()>();
+        let stop_rx = std::sync::Arc::new(std::sync::Mutex::new(stop_rx));
+        let handles: Vec<_> = (0..SPAWNED)
+            .map(|_| {
+                let ready = ready_tx.clone();
+                let stop = stop_rx.clone();
+                std::thread::spawn(move || {
+                    ready.send(()).ok();
+                    drop(ready);
+                    // Park until released (the lock serializes the recvs;
+                    // each thread consumes one stop token).
+                    let guard = stop.lock().unwrap_or_else(|p| p.into_inner());
+                    guard.recv().ok();
                 })
-                .collect();
-            // The parent holds no sender past this point, so a thread dying
-            // before it signals errors the recv instead of blocking it.
-            drop(ready_tx);
-            for _ in 0..SPAWNED {
-                ready_rx.recv().expect("spawned thread ready");
-            }
-
-            let during = sample_process_memory().threads.expect("threads");
-
-            for _ in 0..SPAWNED {
-                stop_tx.send(()).ok();
-            }
-            for handle in handles {
-                let _ = handle.join();
-            }
-
-            if during >= before + SPAWNED {
-                return;
-            }
-            deltas.push(during as i64 - before as i64);
+            })
+            .collect();
+        drop(ready_tx);
+        for _ in 0..SPAWNED {
+            ready_rx.recv().expect("spawned thread ready");
         }
-        panic!(
-            "thread gauge never observed the {SPAWNED} parked threads \
-             (deltas across attempts: {deltas:?})"
+
+        let during = sample_process_memory().threads.expect("threads");
+
+        for _ in 0..SPAWNED {
+            stop_tx.send(()).ok();
+        }
+        for handle in handles {
+            handle.join().expect("parked thread exits cleanly");
+        }
+
+        assert_eq!(
+            during,
+            before + SPAWNED,
+            "gauge must count exactly the {SPAWNED} parked threads (before {before}, during {during})"
         );
     }
 }

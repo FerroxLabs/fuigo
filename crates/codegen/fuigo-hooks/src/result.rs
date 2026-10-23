@@ -14,6 +14,12 @@ pub enum HookDecision {
         hook_name: String,
         reason: String,
     },
+    /// The hook answered `continue: false`: the call is not made AND the turn ends (row 59.7).
+    /// `reason` is the hook's `stopReason`, or a default that names the hook.
+    Stop {
+        hook_name: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +73,8 @@ pub struct PostToolUseHookOutcome {
     pub block_reason: Option<String>,
     pub additional_context: Option<String>,
     pub output_replacement: Option<OutputReplacement>,
+    /// The hook answered `continue: false`: the turn ends after this tool call instead of going on.
+    pub force_stop: Option<StopOverride>,
 }
 
 impl PostToolUseHookOutcome {
@@ -74,6 +82,7 @@ impl PostToolUseHookOutcome {
         self.block_reason.is_none()
             && self.additional_context.is_none()
             && self.output_replacement.is_none()
+            && self.force_stop.is_none()
     }
 }
 

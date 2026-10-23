@@ -68,11 +68,29 @@ fn session_update_tag(params: &str) -> Option<String> {
 
 pub(crate) enum ExtEvent {
     None,
-    TaskBackgrounded { task_id: String, is_monitor: bool },
-    TaskCompleted { task_id: String },
-    SubagentSpawned { subagent_id: String },
-    SubagentFinished { subagent_id: String },
+    TaskBackgrounded {
+        task_id: String,
+        is_monitor: bool,
+    },
+    TaskCompleted {
+        task_id: String,
+    },
+    SubagentSpawned {
+        subagent_id: String,
+    },
+    SubagentFinished {
+        subagent_id: String,
+    },
     MonitorEvent,
+    /// A goal's status changed; `active` is true while the goal is still driving itself.
+    GoalStatus {
+        goal_id: String,
+        active: bool,
+        /// The wire status string (`active`, `user_paused`, `complete`, ...).
+        status: String,
+    },
+    /// A turn reached its terminal outcome (the durable end-of-turn signal).
+    TurnCompleted,
     Lifecycle(Lifecycle),
     Stream(Box<StreamEvent>),
     /// A configured MCP server failed to start (`fuigo/mcp/server_status`, `unavailable` + `handshake_failed`).
@@ -113,13 +131,18 @@ pub(crate) fn handle_ext_notification(
 /// The raw `detail` is never read here: the closed `failure_kind` is the only cause a headless run prints. A push without
 /// a kind (older sender) and a sign-in failure are both left out.
 fn decode_mcp_server_status(params: &str) -> ExtEvent {
-    use fuigo_shell::extensions::mcp::{McpServerStatus, McpServerStatusPayload, McpServerStatusReason};
+    use fuigo_shell::extensions::mcp::{
+        McpServerStatus, McpServerStatusPayload, McpServerStatusReason,
+    };
     match serde_json::from_str::<McpServerStatusPayload>(params) {
-        Ok(p) if p.status == McpServerStatus::Unavailable
-            && p.reason == McpServerStatusReason::HandshakeFailed =>
+        Ok(p)
+            if p.status == McpServerStatus::Unavailable
+                && p.reason == McpServerStatusReason::HandshakeFailed =>
         {
             match p.failure_kind {
-                None | Some(fuigo_shell::extensions::mcp::McpFailureKind::NeedsAuth) => ExtEvent::None,
+                None | Some(fuigo_shell::extensions::mcp::McpFailureKind::NeedsAuth) => {
+                    ExtEvent::None
+                }
                 Some(kind) => ExtEvent::McpStartFailed { name: p.name, kind },
             }
         }
@@ -253,6 +276,12 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         ConfigNotice {
             message: String,
         },
+        GoalUpdated {
+            goal_id: String,
+            #[serde(default)]
+            status: String,
+        },
+        TurnCompleted {},
         MemoryFlushStarted {},
         MemoryFlushCompleted {
             result: String,
@@ -354,6 +383,12 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         FuigoUpdate::MemoryFlushCompleted { result, path } => {
             ExtEvent::Lifecycle(Lifecycle::MemoryFlushCompleted { result, path })
         }
+        FuigoUpdate::GoalUpdated { goal_id, status } => ExtEvent::GoalStatus {
+            goal_id,
+            active: status == "active",
+            status,
+        },
+        FuigoUpdate::TurnCompleted {} => ExtEvent::TurnCompleted,
         FuigoUpdate::SubagentSpawned { subagent_id } => ExtEvent::SubagentSpawned { subagent_id },
         FuigoUpdate::SubagentFinished { subagent_id, .. } => {
             ExtEvent::SubagentFinished { subagent_id }

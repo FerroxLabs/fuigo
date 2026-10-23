@@ -339,7 +339,9 @@ fn copy_dir_all(src: &Path, dst: &Path) {
 /// replaced, and every test that clears the registry, holds this lock, so a clear can never land in between.
 pub(crate) fn sent_credentials_lock() -> std::sync::MutexGuard<'static, ()> {
     static REGISTRY: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    REGISTRY.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    REGISTRY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -358,8 +360,15 @@ mod own_process_tests {
             let _fixture = FuigoHomeFixture::new();
             std::env::var_os("FUIGO_HOME")
         };
-        assert_ne!(during, before, "the fixture must redirect FUIGO_HOME while alive");
-        assert_eq!(std::env::var_os("FUIGO_HOME"), before, "and put it back on drop");
+        assert_ne!(
+            during, before,
+            "the fixture must redirect FUIGO_HOME while alive"
+        );
+        assert_eq!(
+            std::env::var_os("FUIGO_HOME"),
+            before,
+            "and put it back on drop"
+        );
     }
 
     /// The guard that makes the class impossible to reintroduce: a write to a process-wide variable from the shared test process is refused.
@@ -373,6 +382,10 @@ mod own_process_tests {
             let _guard = EnvVarGuard::set("FUIGO_HOME", "/nonexistent-p21");
         });
         assert!(refused.is_err(), "the shared-process write must panic");
-        assert_eq!(std::env::var_os("FUIGO_HOME"), before, "and must not have changed the variable");
+        assert_eq!(
+            std::env::var_os("FUIGO_HOME"),
+            before,
+            "and must not have changed the variable"
+        );
     }
 }

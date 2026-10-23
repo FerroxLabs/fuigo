@@ -503,10 +503,19 @@ mod tests {
         use crate::theme::ThemeKind;
         let night = ((ThemeKind::FuigoNight, false), 7);
         assert_eq!(stable_under(night, night, Some(1)), Some(1));
-        assert_eq!(stable_under(night, ((ThemeKind::FuigoNight, true), 8), Some(1)), None);
-        assert_eq!(stable_under(night, ((ThemeKind::FuigoDay, false), 8), Some(1)), None);
+        assert_eq!(
+            stable_under(night, ((ThemeKind::FuigoNight, true), 8), Some(1)),
+            None
+        );
+        assert_eq!(
+            stable_under(night, ((ThemeKind::FuigoDay, false), 8), Some(1)),
+            None
+        );
         // A -> B -> A: same key at both ends, but palette writes happened in between
-        assert_eq!(stable_under(night, ((ThemeKind::FuigoNight, false), 9), Some(1)), None);
+        assert_eq!(
+            stable_under(night, ((ThemeKind::FuigoNight, false), 9), Some(1)),
+            None
+        );
     }
 
     #[test]

@@ -909,7 +909,7 @@ pub struct FetchModelsResult {
     pub models: Vec<crate::agent::config::ModelEntryConfig>,
     pub etag: Option<String>,
 }
-/// Parse a single model entry from the /models-v2 response.
+/// Parse a single model entry from a /v1/models response.
 /// Used by both initial model fetch and session-resume metadata refresh.
 pub(crate) fn parse_remote_model_value(
     value: &serde_json::Value,
@@ -971,6 +971,9 @@ pub(crate) fn parse_remote_model_value(
         context_window,
         // Local sources only: a remote catalog does not supply the selectable windows
         context_windows: Vec::new(),
+        max_request_bytes: get_u64(obj, "maxRequestBytes")
+            .or_else(|| get_u64(obj, "max_request_bytes"))
+            .and_then(std::num::NonZeroU64::new),
         notice: None,
         auto_compact_threshold_percent: get_u64(obj, "autoCompactThresholdPercent")
             .or_else(|| get_u64(obj, "auto_compact_threshold_percent"))
@@ -1075,6 +1078,10 @@ pub(crate) fn parse_remote_model_value(
             .or_else(|| meta.and_then(|m| m.get("showModelFingerprint")))
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        price: parse_price(
+            obj.get("pricing")
+                .or_else(|| meta.and_then(|m| m.get("pricing"))),
+        ),
         stream_tool_calls: obj
             .get("streamToolCalls")
             .or_else(|| obj.get("stream_tool_calls"))
@@ -1097,6 +1104,22 @@ pub(crate) fn parse_remote_model_value(
             .unwrap_or_default(),
         rate_limit_retry_threshold: None,
         reasoning_summary: None,
+    })
+}
+/// The catalogue's optional `pricing` object: dollars per million input and output tokens
+/// (`inputPerMillion` / `outputPerMillion`, or the snake-case spellings). Anything else, or a
+/// negative or non-finite number, is no price: a wrong figure is worse than none.
+fn parse_price(v: Option<&serde_json::Value>) -> Option<crate::agent::config::ModelPrice> {
+    let obj = v?.as_object()?;
+    let num = |camel: &str, snake: &str| {
+        obj.get(camel)
+            .or_else(|| obj.get(snake))
+            .and_then(|x| x.as_f64())
+            .filter(|n| n.is_finite() && *n >= 0.0)
+    };
+    Some(crate::agent::config::ModelPrice {
+        input_per_million: num("inputPerMillion", "input_per_million")?,
+        output_per_million: num("outputPerMillion", "output_per_million")?,
     })
 }
 fn get_string(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {

@@ -79,6 +79,7 @@ fn sampling(base_url: &str, model: &str) -> fuigo_sampling_types::SamplingConfig
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: std::num::NonZeroU64::new(256_000).unwrap(),
+        max_request_bytes: None,
         reasoning_effort: None,
         stream_tool_calls: None,
         mtls_cert_dir: None,
@@ -379,10 +380,10 @@ fn p42_wire_aux_fallback_bearer_respects_the_destination() {
     });
 }
 
-/// The idle `/models-v2` metadata refresh sends the session to the model's own base URL.
+/// The idle `/models` metadata refresh sends the session to the model's own base URL.
 #[test]
-fn p42_wire_models_v2_refresh_does_not_send_the_session_to_loopback() {
-    if !child("p42_wire_models_v2_refresh_does_not_send_the_session_to_loopback") {
+fn p42_wire_models_refresh_does_not_send_the_session_to_loopback() {
+    if !child("p42_wire_models_refresh_does_not_send_the_session_to_loopback") {
         return;
     }
     run(async {
@@ -396,7 +397,7 @@ fn p42_wire_models_v2_refresh_does_not_send_the_session_to_loopback() {
         );
         actor.maybe_refresh_model_metadata_on_resume().await;
         let seen = wire.observed().await;
-        assert!(!token_arrived(&seen, TOKEN), "/models-v2 at loopback: {seen:?}");
+        assert!(!token_arrived(&seen, TOKEN), "/models at loopback: {seen:?}");
     });
 }
 

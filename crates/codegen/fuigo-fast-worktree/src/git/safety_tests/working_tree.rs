@@ -456,3 +456,49 @@ fn write_cache_tag(directory: &Path) {
     )
     .unwrap();
 }
+
+/// A repository whose HEAD carries a submodule that was never initialised: the
+/// index holds the gitlink and the checkout has an empty directory (or none).
+fn source_with_uninitialised_submodule(fixture: &Fixture) {
+    run_git(
+        &fixture.source,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,1111111111111111111111111111111111111111,libs/sub",
+        ],
+    );
+    std::fs::write(
+        fixture.source.join(".gitmodules"),
+        "[submodule \"libs/sub\"]\n\tpath = libs/sub\n\turl = https://example.invalid/sub.git\n",
+    )
+    .unwrap();
+    run_git(&fixture.source, &["add", ".gitmodules"]);
+    run_git(
+        &fixture.source,
+        &["commit", "-m", "add an uninitialised submodule"],
+    );
+    publish(&fixture.source, "main");
+}
+
+#[test]
+fn clean_worktree_with_an_uninitialised_submodule_is_deleted() {
+    let fixture = Fixture::new("");
+    source_with_uninitialised_submodule(&fixture);
+    let worktree = fixture.linked_worktree("uninit-submodule-clean");
+    assert_eq!(reclaim(&worktree), Safety::Delete);
+}
+
+#[test]
+fn captured_worktree_with_an_uninitialised_submodule_is_deleted() {
+    let fixture = Fixture::new("");
+    source_with_uninitialised_submodule(&fixture);
+    let worktree = fixture.linked_worktree("uninit-submodule-captured");
+    std::fs::write(worktree.join("tracked.txt"), "edited\n").unwrap();
+    std::fs::write(worktree.join("fresh.txt"), "new\n").unwrap();
+    assert_eq!(
+        reclaim_after_snapshot(&worktree, &fixture.source, "refs/fuigo/uninit-submodule"),
+        Safety::Delete
+    );
+}

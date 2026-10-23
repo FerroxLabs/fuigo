@@ -59,8 +59,8 @@ async fn bash_queued_mid_turn_drains_as_bash() {
         .wait_for_text("QBASH_MIDTURN_OK", Duration::from_secs(30))
         .expect("queued bash command executed now (send-now)");
     harness
-        .wait_for_text("Run (user)", Duration::from_secs(15))
-        .expect("Run (user) chrome for the promoted bash turn");
+        .wait_for_text("Ran (user)", Duration::from_secs(15))
+        .expect("Ran (user) chrome for the promoted bash turn");
 
     // Bash rows never render a user-prompt block (the execute block IS the visual entry)
     // A "❯ !printf…" block would mean the row went to the model as text instead of executing

@@ -144,6 +144,8 @@ use tool_calls::BridgeToolSuccess;
 mod hooks_plugins;
 #[path = "acp_session_impl/mcp.rs"]
 mod mcp;
+#[path = "acp_session_impl/mcp_argument_coercion.rs"]
+mod mcp_argument_coercion;
 #[path = "acp_session_impl/mcp_failed_reminder.rs"]
 mod mcp_failed_reminder;
 #[path = "acp_session_impl/model_switch.rs"]
@@ -192,6 +194,8 @@ mod background_tasks;
 mod cancel;
 #[path = "acp_session_impl/reminders.rs"]
 mod reminders;
+#[path = "acp_session_impl/subagent_handoff.rs"]
+mod subagent_handoff;
 use reminders::*;
 pub use reminders::{CollectedTodoGateInput, TodoGateInput, evaluate_todo_gate};
 #[path = "acp_session_impl/laziness_classifier.rs"]
@@ -323,6 +327,12 @@ pub(super) const GOAL_CONTINUATION_DIRECTIVE_TEMPLATE: &str =
     include_str!("templates/goal_continuation_directive.md");
 pub(super) const GOAL_CONTINUATION_DIRECTIVE_TEMPLATE_LEGACY: &str =
     include_str!("templates/goal_continuation_directive_legacy.md");
+/// Compact can run mid-turn (`run_compact_only` / CompactAndResubmit); those
+/// callers must not inherit TurnEnd drain, `rounds_since_verify++`, or budget stop.
+enum GoalContinuationPurpose {
+    TurnEnd,
+    Compaction,
+}
 /// Built continuation directive plus the optional premature-stop pattern that the caller emits when it actually continues.
 /// Produced by [`SessionActor::prepare_goal_continuation`].
 struct GoalContinuationPlan {
@@ -682,6 +692,8 @@ pub(crate) struct PreparedToolCall {
     /// Read-only per `ToolKind`; decides whether the call takes the per-file lock.
     is_read_only: bool,
     rewriting_hook: Option<String>,
+    /// Reminder describing an MCP argument coercion applied to this call, appended to its result or failure message.
+    coercion_note: Option<String>,
     additional_context: Vec<fuigo_hooks::dispatcher::AdditionalContext>,
     /// The files the permission check judged for a `read_file` call (P174): each as spelled in the request, with the
     /// file the reader opens for it; `None` for every other tool. Read-dedupe may only drop entries from a call, and
@@ -1888,6 +1900,9 @@ mod project_instructions_idempotence_tests;
 #[path = "acp_session_tests/mcp_progress_order_tests.rs"]
 mod mcp_progress_order_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/mcp_argument_coercion_tests.rs"]
+mod mcp_argument_coercion_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/prompt_gate_tests.rs"]
 mod prompt_gate_tests;
 #[cfg(test)]
@@ -2347,6 +2362,9 @@ mod p42_session_delivery_wire_tests;
 #[path = "acp_session_tests/parallel_dispatch_tests.rs"]
 mod parallel_dispatch_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/shell_batch_isolation_tests.rs"]
+mod shell_batch_isolation_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/park_tests.rs"]
 mod park_tests;
 #[cfg(test)]
@@ -2587,8 +2605,20 @@ mod managed_gateway_tool_tests {
     }
 }
 #[cfg(test)]
+#[path = "acp_session_tests/subagent_handoff_tests.rs"]
+mod subagent_handoff_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/goal/goal_compaction_reseed_tests.rs"]
+mod goal_compaction_reseed_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/background_subagent_approval_tests.rs"]
+mod background_subagent_approval_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/goal/goal_planner_e2e_tests.rs"]
 mod goal_planner_e2e_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/goal/goal_idle_pause_tests.rs"]
+mod goal_idle_pause_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/interjection_tests.rs"]
 mod interjection_tests;

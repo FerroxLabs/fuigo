@@ -23,6 +23,7 @@ fn eligible_or_record_skip(
     match_value: Option<&str>,
     results: &mut Vec<HookRunResult>,
     disabled: &crate::trust::DisabledHooks,
+    session_id: &str,
 ) -> bool {
     match disabled.skip_reason(spec) {
         Some(reason) => {
@@ -49,7 +50,19 @@ fn eligible_or_record_skip(
         }
         None => {}
     }
-    crate::matcher::matcher_allows(spec.matcher.as_ref(), match_value)
+    if !crate::matcher::matcher_allows(spec.matcher.as_ref(), match_value) {
+        return false;
+    }
+    // A hook that can never start (CONFIG failure) was reported once, when it first failed or at the startup check:
+    // from then on the session skips it silently instead of failing again on every prompt and tool call.
+    if crate::health::config_failure_for(session_id, &spec.name).is_some() {
+        tracing::debug!(hook_name = %spec.name, "hook skipped (cannot run in this session; reported once)");
+        results.push(HookRunResult::Skipped {
+            hook_name: spec.name.clone(),
+        });
+        return false;
+    }
+    true
 }
 
 pub struct InputRewrite {
@@ -74,6 +87,8 @@ pub struct PreToolUseResult {
 struct GateBlock {
     hook_name: String,
     reason: String,
+    /// The hook answered `continue: false`, so the turn ends as well as the call.
+    ends_turn: bool,
 }
 
 struct SequentialGateOutcome {
@@ -117,7 +132,7 @@ async fn dispatch_sequential_gate(
         let disabled = crate::trust::DisabledHooks::load();
 
         for spec in hooks {
-            if !eligible_or_record_skip(spec, match_value.as_deref(), &mut run_results, &disabled) {
+            if !eligible_or_record_skip(spec, match_value.as_deref(), &mut run_results, &disabled, ctx.session_id) {
                 continue;
             }
 
@@ -154,6 +169,35 @@ async fn dispatch_sequential_gate(
                         block: Some(GateBlock {
                             hook_name: spec.name.clone(),
                             reason,
+                            ends_turn: false,
+                        }),
+                        pending_ask: None,
+                        deferring_hook: None,
+                        updated_input: None,
+                        additional_context: Vec::new(),
+                        results: run_results,
+                    };
+                }
+                HookRunnerResult::GateStop { reason, .. } => {
+                    tracing::info!(
+                        hook_name = %spec.name,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        reason = %reason,
+                        "gate hook stopped the turn (continue: false)"
+                    );
+                    run_results.push(HookRunResult::Blocked {
+                        hook_name: spec.name.clone(),
+                        detail: format!("{block_verb} and stopped the turn: {reason}"),
+                        elapsed,
+                        http_info,
+                        system_message,
+                    });
+                    record_dispatch_counts(&span, &run_results);
+                    return SequentialGateOutcome {
+                        block: Some(GateBlock {
+                            hook_name: spec.name.clone(),
+                            reason,
+                            ends_turn: true,
                         }),
                         pending_ask: None,
                         deferring_hook: None,
@@ -330,7 +374,12 @@ pub async fn dispatch_pre_tool_use(
     )
     .await;
     let decision = match outcome.block {
-        Some(GateBlock { hook_name, reason }) => HookDecision::Deny { reason, hook_name },
+        Some(GateBlock {
+            hook_name,
+            reason,
+            ends_turn: true,
+        }) => HookDecision::Stop { reason, hook_name },
+        Some(GateBlock { hook_name, reason, .. }) => HookDecision::Deny { reason, hook_name },
         None => match (outcome.pending_ask, outcome.deferring_hook) {
             (Some(ask), _) => HookDecision::Ask {
                 hook_name: ask.hook_name,
@@ -369,7 +418,7 @@ pub async fn dispatch_prompt_gate(
     .await;
     PromptGateResult {
         decision: match outcome.block {
-            Some(GateBlock { hook_name, reason }) => PromptDecision::Block { reason, hook_name },
+            Some(GateBlock { hook_name, reason, .. }) => PromptDecision::Block { reason, hook_name },
             None => PromptDecision::Allow,
         },
         results: outcome.results,
@@ -472,7 +521,7 @@ pub async fn dispatch_stop(
         let disabled = crate::trust::DisabledHooks::load();
 
         for spec in hooks {
-            if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results, &disabled) {
+            if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results, &disabled, ctx.session_id) {
                 continue;
             }
 
@@ -550,6 +599,7 @@ pub async fn dispatch_stop(
                 | HookRunnerResult::Defer
                 | HookRunnerResult::Deny { .. }
                 | HookRunnerResult::Block { .. }
+                | HookRunnerResult::GateStop { .. }
                 | HookRunnerResult::PostToolUse { .. } => {
                     out.results.push(HookRunResult::Success {
                         hook_name: spec.name.clone(),
@@ -582,12 +632,36 @@ pub struct SelectedReplacement {
     pub run_index: usize,
 }
 
+/// A replacement the tool's kind refuses, with the hook run that wrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedReplacement {
+    pub hook_name: String,
+    pub run_index: usize,
+    pub reason: String,
+}
+
+/// The replacement a tool's output takes, and the one it refuses (if any).
+#[derive(Debug, PartialEq)]
+pub struct ReplacementChoice {
+    pub chosen: Option<SelectedReplacement>,
+    pub rejected: Option<RejectedReplacement>,
+}
+
+/// A `PostToolUse` hook answered `continue: false`: the turn ends after this tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostToolUseStop {
+    pub hook_name: String,
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Default)]
 pub struct PostToolUseResult {
     pub blocks: Vec<PostToolUseBlock>,
     pub additional_context: Vec<AdditionalContext>,
     pub builtin_replacement: Option<SelectedReplacement>,
     pub mcp_replacement: Option<SelectedReplacement>,
+    /// The first hook that asked to stop wins.
+    pub force_stop: Option<PostToolUseStop>,
     pub results: Vec<HookRunResult>,
 }
 
@@ -602,7 +676,16 @@ impl PostToolUseResult {
             block_reason,
             additional_context,
             output_replacement,
+            force_stop,
         } = outcome;
+        if let Some(stop) = force_stop
+            && self.force_stop.is_none()
+        {
+            self.force_stop = Some(PostToolUseStop {
+                hook_name: hook_name.to_string(),
+                reason: stop.reason,
+            });
+        }
         if let Some(reason) = block_reason {
             self.blocks.push(PostToolUseBlock {
                 hook_name: hook_name.to_string(),
@@ -620,14 +703,50 @@ impl PostToolUseResult {
         }
     }
 
+    /// An MCP tool takes either kind of replacement, and the later hook run wins.
+    /// A built-in tool rejects an MCP replacement.
+    #[must_use]
+    pub fn take_replacement(&mut self, tool_kind: ReplacementKind) -> ReplacementChoice {
+        let builtin = self.builtin_replacement.take();
+        let mcp = self.mcp_replacement.take();
+        match tool_kind {
+            ReplacementKind::Mcp => ReplacementChoice {
+                chosen: match (builtin, mcp) {
+                    (Some(builtin), Some(mcp)) => Some(if mcp.run_index > builtin.run_index {
+                        mcp
+                    } else {
+                        builtin
+                    }),
+                    (builtin, mcp) => builtin.or(mcp),
+                },
+                rejected: None,
+            },
+            ReplacementKind::Builtin => ReplacementChoice {
+                chosen: builtin,
+                rejected: mcp.map(|mcp| RejectedReplacement {
+                    reason: format!(
+                        "{} does not match the tool's kind",
+                        mcp.replacement.wire_field()
+                    ),
+                    hook_name: mcp.replacement.hook_name,
+                    run_index: mcp.run_index,
+                }),
+            },
+        }
+    }
+
     pub fn merge(&mut self, other: PostToolUseResult) {
         let PostToolUseResult {
             blocks,
             additional_context,
             builtin_replacement,
             mcp_replacement,
+            force_stop,
             results,
         } = other;
+        if self.force_stop.is_none() {
+            self.force_stop = force_stop;
+        }
         debug_assert!(
             builtin_replacement.is_none() && mcp_replacement.is_none(),
             "client results carry no output replacement"
@@ -680,7 +799,7 @@ pub async fn dispatch_post_tool_use(
         let disabled = crate::trust::DisabledHooks::load();
 
         for spec in hooks {
-            if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results, &disabled) {
+            if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results, &disabled, ctx.session_id) {
                 continue;
             }
 
@@ -705,6 +824,7 @@ pub async fn dispatch_post_tool_use(
                         block = outcome.block_reason.is_some(),
                         additional_context = outcome.additional_context.is_some(),
                         output_replacement = outcome.output_replacement.is_some(),
+                        prevent_continuation = outcome.force_stop.is_some(),
                         "post_tool_use hook completed"
                     );
                     out.results.push(match failure {
@@ -746,6 +866,7 @@ pub async fn dispatch_post_tool_use(
                 | HookRunnerResult::Defer
                 | HookRunnerResult::Deny { .. }
                 | HookRunnerResult::Block { .. }
+                | HookRunnerResult::GateStop { .. }
                 | HookRunnerResult::Stop(_) => {
                     out.results.push(HookRunResult::Success {
                         hook_name: spec.name.clone(),
@@ -791,7 +912,7 @@ pub async fn dispatch_post_tool_use_failure(
         let disabled = crate::trust::DisabledHooks::load();
 
         for spec in hooks {
-            if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results, &disabled) {
+            if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results, &disabled, ctx.session_id) {
                 continue;
             }
 
@@ -853,6 +974,7 @@ pub async fn dispatch_post_tool_use_failure(
                 | HookRunnerResult::Defer
                 | HookRunnerResult::Deny { .. }
                 | HookRunnerResult::Block { .. }
+                | HookRunnerResult::GateStop { .. }
                 | HookRunnerResult::Stop(_) => {
                     out.results.push(HookRunResult::Success {
                         hook_name: spec.name.clone(),
@@ -893,7 +1015,7 @@ pub async fn dispatch_non_blocking(
         let disabled = crate::trust::DisabledHooks::load();
 
         for spec in hooks {
-            if !eligible_or_record_skip(spec, match_value.as_deref(), &mut results, &disabled) {
+            if !eligible_or_record_skip(spec, match_value.as_deref(), &mut results, &disabled, ctx.session_id) {
                 continue;
             }
 
@@ -943,7 +1065,8 @@ pub async fn dispatch_non_blocking(
                 | HookRunnerResult::Ask { .. }
                 | HookRunnerResult::Defer
                 | HookRunnerResult::Deny { .. }
-                | HookRunnerResult::Block { .. } => {
+                | HookRunnerResult::Block { .. }
+                | HookRunnerResult::GateStop { .. } => {
                     tracing::info!(
                         hook_name = %spec.name,
                         elapsed_ms = elapsed.as_millis() as u64,
@@ -1012,6 +1135,55 @@ pub fn hub_hook_kind(event: HookEventName) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tool_kind_decides_which_replacement_its_output_takes() {
+        let replacement = |kind: ReplacementKind, run_index: usize| SelectedReplacement {
+            replacement: OutputReplacement {
+                kind,
+                hook_name: format!("{kind:?}"),
+                value: serde_json::json!("replaced"),
+            },
+            run_index,
+        };
+        let rejected = RejectedReplacement {
+            hook_name: "Mcp".to_owned(),
+            run_index: 1,
+            reason: "updatedMCPToolOutput does not match the tool's kind".to_owned(),
+        };
+        let cases = [
+            (
+                ReplacementKind::Mcp,
+                0,
+                ReplacementChoice { chosen: Some(replacement(ReplacementKind::Mcp, 1)), rejected: None },
+            ),
+            (
+                ReplacementKind::Mcp,
+                2,
+                ReplacementChoice { chosen: Some(replacement(ReplacementKind::Builtin, 2)), rejected: None },
+            ),
+            (
+                ReplacementKind::Builtin,
+                0,
+                ReplacementChoice {
+                    chosen: Some(replacement(ReplacementKind::Builtin, 0)),
+                    rejected: Some(rejected),
+                },
+            ),
+        ];
+        for (tool_kind, builtin_run, expected) in cases {
+            let mut result = PostToolUseResult {
+                builtin_replacement: Some(replacement(ReplacementKind::Builtin, builtin_run)),
+                mcp_replacement: Some(replacement(ReplacementKind::Mcp, 1)),
+                ..PostToolUseResult::default()
+            };
+            assert_eq!(
+                expected,
+                result.take_replacement(tool_kind),
+                "{tool_kind:?} with the built-in replacement from run {builtin_run}"
+            );
+        }
+    }
+
     use super::*;
     use crate::config::HookSpec;
     use crate::event::{HookEventEnvelope, HookEventName, HookPayload};
@@ -1084,6 +1256,8 @@ mod tests {
             enabled,
             command: Some(PathBuf::from(script)),
             command_raw: Some(script.to_string()),
+            args: None,
+            shell: None,
             url: None,
             url_raw: None,
             timeout_ms: 5000,
@@ -2115,6 +2289,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn post_tool_use_continue_false_is_captured_first_hook_wins() {
+        let registry = registry_from_specs(vec![
+            post_tool_use_spec("quiet", "echo ok"),
+            post_tool_use_spec("stopper", "echo '{\"continue\":false,\"stopReason\":\"enough\"}'"),
+            post_tool_use_spec("later", "echo '{\"continue\":false,\"stopReason\":\"too late\"}'"),
+        ]);
+        let result = dispatch_post_tool_use(&registry, &post_tool_use_envelope("Bash"), &run_ctx()).await;
+        assert_eq!(
+            result.force_stop,
+            Some(PostToolUseStop {
+                hook_name: "stopper".to_string(),
+                reason: Some("enough".to_string())
+            })
+        );
+        assert_eq!(result.results.len(), 3, "every hook still ran");
+
+        let registry = registry_from_specs(vec![post_tool_use_spec("go-on", "echo '{\"continue\":true}'")]);
+        let result = dispatch_post_tool_use(&registry, &post_tool_use_envelope("Bash"), &run_ctx()).await;
+        assert!(result.force_stop.is_none());
+    }
+
+    fn pre_tool_use_spec(name: &str, script: &str) -> HookSpec {
+        let mut spec = make_command_spec(name, None, true, script);
+        spec.event = HookEventName::PreToolUse;
+        spec
+    }
+
+    /// Row 59.7: a PreToolUse hook's `continue: false` is a `Stop` decision (the call is refused and the turn ends),
+    /// distinct from a plain deny, and it wins over a later allow.
+    #[tokio::test]
+    async fn pre_tool_use_continue_false_decides_stop_not_deny() {
+        let registry = registry_from_specs(vec![
+            pre_tool_use_spec("stopper", r#"echo '{"continue":false,"stopReason":"enough"}'"#),
+            pre_tool_use_spec("later", r#"echo '{"decision":"allow"}'"#),
+        ]);
+        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        assert_eq!(
+            result.decision,
+            HookDecision::Stop {
+                hook_name: "stopper".to_string(),
+                reason: "enough".to_string()
+            }
+        );
+        assert_eq!(result.results.len(), 1, "a stop ends the gate chain like a deny");
+
+        let registry = registry_from_specs(vec![pre_tool_use_spec(
+            "denier",
+            r#"echo '{"decision":"deny","reason":"no"}'"#,
+        )]);
+        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        assert!(matches!(result.decision, HookDecision::Deny { .. }), "a plain deny does not end the turn");
+
+        let registry = registry_from_specs(vec![pre_tool_use_spec("go-on", r#"echo '{"continue":true}'"#)]);
+        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        assert_eq!(result.decision, HookDecision::Allow);
+    }
+
+    #[tokio::test]
     async fn post_tool_use_same_kind_write_takes_the_last_writer() {
         let first = post_tool_use_spec(
             "first",
@@ -2207,14 +2439,14 @@ mod tests {
         );
         managed.layer = crate::config::HookProvenance::Requirements;
         assert!(
-            eligible_or_record_skip(&managed, None, &mut results, &disabled),
+            eligible_or_record_skip(&managed, None, &mut results, &disabled, ""),
             "managed-policy hook must remain eligible despite a disabled-hooks entry"
         );
         assert!(results.is_empty());
 
         let user = make_command_spec("global/user-hook", None, true, "echo ok");
         assert!(
-            !eligible_or_record_skip(&user, None, &mut results, &disabled),
+            !eligible_or_record_skip(&user, None, &mut results, &disabled, ""),
             "a user hook with the same disabled-hooks treatment must be filtered"
         );
         assert!(matches!(results[0], HookRunResult::Skipped { .. }));
@@ -2247,7 +2479,7 @@ mod tests {
             let mut spec = make_command_spec(name, None, true, "echo ok");
             spec.layer = layer;
             assert_eq!(pinned.skip_reason(&spec), Some(HookSkipReason::ManagedOnly), "{name}");
-            assert!(!eligible_or_record_skip(&spec, None, &mut results, &pinned), "{name}");
+            assert!(!eligible_or_record_skip(&spec, None, &mut results, &pinned, ""), "{name}");
             assert!(crate::trust::hook_disabled_for_display_with(&spec, &pinned), "{name}");
         }
         assert_eq!(results.len(), 5);
@@ -2256,7 +2488,7 @@ mod tests {
             let mut managed = make_command_spec("requirements/system:x[0].hooks[0]", None, false, "echo ok");
             managed.layer = layer;
             assert_eq!(pinned.skip_reason(&managed), None, "{layer:?}");
-            assert!(eligible_or_record_skip(&managed, None, &mut results, &pinned), "{layer:?}");
+            assert!(eligible_or_record_skip(&managed, None, &mut results, &pinned, ""), "{layer:?}");
             assert!(!crate::trust::hook_disabled_for_display_with(&managed, &pinned));
         }
         // Without the pin the user's own disable state decides, as before.

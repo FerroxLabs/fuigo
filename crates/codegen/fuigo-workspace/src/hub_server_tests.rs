@@ -528,7 +528,7 @@ async fn tasks_snapshot_excludes_foreground_and_completed_processes() {
         serde_json::from_value(value).expect("decode response")
     }
     let backend = session.terminal_backend().clone();
-    let fg_req = terminal_run_request("sleep 30", out_dir.path(), "snap-fg-task");
+    let fg_req = terminal_run_request("sleep 600", out_dir.path(), "snap-fg-task");
     let fg_join = tokio::spawn(async move { backend.run(fg_req).await });
     let poll_deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -637,6 +637,76 @@ async fn tasks_snapshot_excludes_foreground_and_completed_processes() {
     session.terminal_backend().kill_task(&bg.task_id).await;
     session.terminal_backend().kill_task("snap-fg-task").await;
     let _ = fg_join.await;
+}
+/// The limit on a `run_background` task is its request timeout, and a task that reaches it leaves the snapshot.
+///
+/// This is the behaviour behind the one way `tasks_snapshot_excludes_foreground_and_completed_processes` could once
+/// find only its `run_background` task missing: the helper's request timeout was 60 s, and a run stretched past that
+/// by a loaded host had the task stopped (the task that moved from the foreground has its limit reset, so it
+/// survived). Registration itself cannot be late: the terminal actor inserts the task before it replies to
+/// `run_background`, and `list_tasks` is served by the same actor, so a started task is always listed. The wait here
+/// is for the task to be reported completed, not for a time to pass.
+#[tokio::test]
+async fn a_background_task_that_outlives_its_request_timeout_leaves_the_snapshot() {
+    use crate::handle::tests::terminal_run_request;
+    use std::time::{Duration, Instant};
+    let handle = make_handle();
+    let cfg = background_capable_cfg();
+    let session = handle
+        .create_session_with_config(
+            "snap-timeout-rpc",
+            None,
+            Some(cfg.clone()),
+            CapabilityMode::All,
+            None,
+            false,
+        )
+        .expect("create background-capable session");
+    session.set_bind_tool_config_fingerprint(serde_json::to_value(&cfg).ok());
+    let out_dir = tempfile::tempdir().expect("temp dir");
+    let handler = WorkspaceRpcHandler::new(handle.clone());
+    let mut request = terminal_run_request("sleep 600", out_dir.path(), "snap-expiring-task");
+    request.timeout = Duration::from_secs(1);
+    let task = session
+        .terminal_backend()
+        .run_background(request)
+        .await
+        .expect("start background task");
+    // Registered the moment run_background returned: nothing to wait for.
+    let listed = session.terminal_backend().list_tasks().await;
+    assert!(
+        listed.iter().any(|t| t.task_id == task.task_id),
+        "a started task must be listed at once: {listed:?}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let listed = session.terminal_backend().list_tasks().await;
+        if listed
+            .iter()
+            .any(|t| t.task_id == task.task_id && t.completed)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the task never reached its request timeout: {listed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let value = handler
+        .dispatch(
+            "workspace.tasks_snapshot",
+            serde_json::json!({"session_id": "snap-timeout-rpc"}),
+            Some("snap-timeout-rpc"),
+        )
+        .await
+        .expect("tasks_snapshot rpc");
+    let snap: TasksSnapshotResponse = serde_json::from_value(value).expect("decode response");
+    assert!(
+        snap.background_tasks.is_empty(),
+        "an expired task must leave the snapshot: {:?}",
+        snap.background_tasks
+    );
 }
 #[tokio::test]
 async fn handle_evict_keeps_queue_when_other_sessions_live() {

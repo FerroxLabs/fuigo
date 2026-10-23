@@ -687,6 +687,21 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                 }
                 self.style_inline_code_span(&code, &range);
             }
+            Event::InlineMath(math)
+                if self
+                    .text
+                    .as_bytes()
+                    .get(range.end)
+                    .is_some_and(u8::is_ascii_digit) =>
+            {
+                // A closing `$` right before a digit is an amount in running text (`$5/$10`), not the end of a math span
+                // Show the source as plain text, delimiters included
+                if let Some(ref mut state) = self.table_state {
+                    state.push_text(&self.text[range.clone()]);
+                }
+                let _ = math;
+                self.push_highlight(None, &range);
+            }
             Event::InlineMath(math) => {
                 // `$...$` inline math: render the TeX to Unicode and swap it in via a pretty-mode transform
                 // Falls back to inline-code presentation when conversion declines (oversized input) or produces nothing visible
@@ -771,12 +786,10 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                 } else if let Some(ref mut state) = self.table_state {
                     state.push_text(&html);
                     self.push_highlight(Some(self.ms.text), &range);
-                } else if let Some(highlighted) = syntax_highlight_raw(self.syntect, "html", &html)
-                {
-                    self.buffers.replaces.push(Replace {
-                        highlighted,
-                        range: range.clone(),
-                    });
+                } else {
+                    // An inline tag is part of its paragraph. A `Replace` is block-shaped: it ends the row it sits on,
+                    // so `<kbd>Ctrl</kbd>` would be cut into three rows. Style the tag in place as text instead
+                    self.push_highlight(Some(self.ms.text), &range);
                 }
             }
             Event::DisplayMath(math) => {
@@ -1155,6 +1168,15 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                         style: Some(self.ms.link_outer),
                         range: range.end - 1..range.end,
                     });
+                    if open_bracket > 0 {
+                        // An image's leading `!` is markup like its `[`: pretty mode drops both, so `![alt](src)` reads
+                        // `alt (src)` and not `!alt (src)`
+                        self.buffers.transforms.push(Transform {
+                            range: range.start..range.start + 1,
+                            to: "".to_string(),
+                            force: false,
+                        });
+                    }
                     self.buffers.transforms.push(Transform {
                         range: range.start + open_bracket..range.start + open_bracket + 1,
                         to: "".to_string(),

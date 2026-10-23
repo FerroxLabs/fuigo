@@ -171,6 +171,17 @@ pub(crate) fn test_app() -> AppView {
         login_label: None,
         detected_keys: Vec::new(),
         detected_env_vars: Vec::new(),
+        sign_in_status: fuigo_shell::auth::provider_status::ProviderStatus::collect(
+            std::path::Path::new("/nonexistent-fuigo-home"),
+            |_| None,
+            false,
+        ),
+        picker_modal: false,
+        picker_page: crate::app::pending_menu::PickerPage::Main,
+        pick_make_default: false,
+        session_only_model: None,
+        subscription_signin: None,
+        sign_in_notice: None,
         login_method_id: None,
         auth_start_mode: AuthMode::Pending,
         auth_code_input: LineEditor::default(),
@@ -193,6 +204,7 @@ pub(crate) fn test_app() -> AppView {
         show_tips: None,
         auto_update: None,
         ask_user_question_timeout_enabled: None,
+        subagent_model_inheritance: Default::default(),
         zdr_access_enabled: false,
         usage_billing_redirect_url: None,
         announcement_cta_impressions_logged: Default::default(),
@@ -235,6 +247,8 @@ pub(crate) fn test_app() -> AppView {
         welcome_privacy_banner_terms_rect: None,
         welcome_privacy_banner_policy_rect: None,
         welcome_toast: None,
+        dispatch_depth: 0,
+        pending_image_notices: Vec::new(),
         trust_error: None,
         welcome_on_privacy_banner: false,
         welcome_on_upgrade_cta: false,
@@ -839,10 +853,39 @@ fn tick_demand_dashboard_fast_while_background_work_runs() {
 fn tick_demand_welcome_is_slow_unless_loading() {
     let mut app = test_app();
     assert_eq!(app.active_view, ActiveView::Welcome);
-    assert_eq!(app.tick_demand(), TickDemand::Slow);
-    assert!(app.needs_animation(), "slow still counts as animating");
+    // Unit tests never spin the mark, so this welcome screen is at rest: a heartbeat, not the shimmer cadence
+    assert_eq!(app.tick_demand(), TickDemand::Rest);
+    assert!(app.needs_animation(), "a heartbeat still counts as ticking");
+    app.welcome_toast = Some(("hi".into(), std::time::Instant::now() + std::time::Duration::from_secs(2)));
+    assert_eq!(app.tick_demand(), TickDemand::Slow, "a toast on screen ticks at the shimmer cadence");
+    app.welcome_toast = None;
     app.session_picker_content_loading = true;
     assert_eq!(app.tick_demand(), TickDemand::Fast);
+}
+/// 54.7: a resting welcome screen (the mark has settled, nothing else animates) wakes the event loop a couple of times a
+/// second and repaints nothing. Counted as scheduled wakeups per second and redraws over a minute of simulated ticks,
+/// not wall time, so it holds under load.
+#[test]
+fn resting_welcome_screen_wakes_the_loop_rarely_and_repaints_nothing() {
+    let mut app = test_app();
+    assert_eq!(app.active_view, ActiveView::Welcome);
+    let mut tick_at = None;
+    crate::app::event_loop::schedule_tick(&mut tick_at, &app, std::time::Duration::from_millis(33));
+    let delay = tick_at.expect("a welcome screen still ticks").saturating_duration_since(tokio::time::Instant::now());
+    let wakeups_per_second = 1000.0 / delay.as_millis().max(1) as f64;
+    eprintln!("idle welcome wakeups/s: {wakeups_per_second:.1} (interval {delay:?})");
+    assert!(wakeups_per_second <= 2.5, "a resting welcome screen wakes {wakeups_per_second:.1} times a second");
+    // The first tick may repaint once to settle on the resting frame; after that nothing changes
+    let _ = app.tick_with_input(false);
+    let mut redraws = 0;
+    for _ in 0..(60.0 * wakeups_per_second.max(12.0)) as usize {
+        if app.tick_with_input(false) {
+            redraws += 1;
+        }
+    }
+    assert_eq!(redraws, 0, "a resting welcome screen repaints nothing");
+    // The wake-up must stay inside the spin-replay gap, or every tick would look like a return to the screen.
+    assert!(delay < std::time::Duration::from_secs(1));
 }
 /// An open modal session picker that is still fetching keeps fast ticks alive on an otherwise-idle agent (its loading spinner must animate).
 /// That holds even after the fast foreign scan lands rows the default Fuigo filter hides; once the native list settles the demand parks again.
@@ -3046,6 +3089,35 @@ fn ctrl_c_running_cancels_turn() {
     let outcome = app.handle_input(&ctrl_c());
     assert!(matches!(outcome, InputOutcome::Action(Action::CancelTurn)));
 }
+/// A permission, question or MCP prompt card in front must not swallow Ctrl+C: it still cancels the running turn.
+#[test]
+fn ctrl_c_running_cancels_turn_even_with_a_question_card_open() {
+    use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        let stashed = agent.prompt.stash();
+        agent.question_view = Some(crate::views::question_view::QuestionViewState::new(
+            "card-1".to_string(),
+            vec![Question {
+                question: "Proceed?".into(),
+                id: None,
+                options: vec![QuestionOption {
+                    label: "Yes".into(),
+                    description: "go".into(),
+                    preview: None,
+                    id: None,
+                }],
+                multi_select: Some(false),
+            }],
+            stashed,
+        ));
+    }
+    let outcome = app.handle_input(&ctrl_c());
+    assert!(matches!(outcome, InputOutcome::Action(Action::CancelTurn)), "got {outcome:?}");
+}
 #[test]
 fn ctrl_c_cancelling_escalates_to_quit_pending() {
     let mut app = test_app_with_agent();
@@ -4772,6 +4844,24 @@ fn dashboard_stale_clears_skip_attached_popup_agent() {
     assert_eq!(agent.inline_media_ids.len(), 1);
 }
 #[test]
+fn full_clear_forgets_transmitted_media_for_every_agent() {
+    use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
+    let _g = set_protocol_for_test(GraphicsProtocol::Kitty);
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .inline_media_ids
+            .insert(std::path::PathBuf::from("/tmp/media.png"), 5);
+        agent.last_placed_ids.insert(5);
+    }
+    app.forget_transmitted_inline_media();
+    let agent = app.agents.get(&id).unwrap();
+    assert!(agent.inline_media_ids.is_empty());
+    assert!(agent.last_placed_ids.is_empty());
+}
+#[test]
 fn dashboard_too_small_popup_clears_shared_overlay_slot() {
     let _theme = crate::theme::cache::pin_theme();
     use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
@@ -5954,39 +6044,42 @@ fn overlay_agents_modal_owns_esc_from_scrollback() {
     );
 }
 /// The graduated plan/Q&A back-out also defers to an open modal.
-/// With a single-question Q&A overlay at its back-out top AND a modal open, both `overlay_esc_backs_out` and `overlay_left_backs_out` return false.
+/// With a single-question Q&A overlay at its back-out top AND a modal open, both `overlay_esc_backs_out` (once the question is parked on
+/// the scrollback) and `overlay_left_backs_out` return false.
 /// (A modal and a question view can coexist when the ACP handler installs the overlay without closing the modal.)
 #[test]
 fn graduated_back_out_defers_to_open_modal() {
+    use crate::app::agent_view::AgentPane;
     let (mut app, id) = neutral_overlay_app();
     install_question_overlay(&mut app, id, 1);
+    // `Left` backs out from the question; `Esc` first parks the keyboard on the scrollback and only the next press backs out
     {
         let a = app.agents.get(&id).unwrap();
         assert!(
-            a.overlay_esc_backs_out() && a.overlay_left_backs_out(),
-            "fixture must be a back-out-top state without a modal",
+            a.overlay_left_backs_out() && !a.overlay_esc_backs_out(),
+            "fixture: Left is the back-out, the first Esc parks",
         );
     }
+    let suppressed = |app: &mut AppView, why: &str| {
+        let a = app.agents.get_mut(&id).unwrap();
+        a.active_pane = AgentPane::Prompt;
+        assert!(!a.overlay_left_backs_out(), "{why}");
+        a.active_pane = AgentPane::Scrollback;
+        assert!(!a.overlay_esc_backs_out(), "{why}");
+    };
+    app.agents.get_mut(&id).unwrap().active_pane = AgentPane::Scrollback;
+    assert!(
+        app.agents.get(&id).unwrap().overlay_esc_backs_out(),
+        "fixture: a parked question backs out on Esc without a modal",
+    );
     app.agents.get_mut(&id).unwrap().extensions_modal =
         Some(crate::views::extensions_modal::ExtensionsModalState::new(
             crate::views::extensions_modal::ExtensionsTab::Plugins,
         ));
-    {
-        let a = app.agents.get(&id).unwrap();
-        assert!(
-            !a.overlay_esc_backs_out() && !a.overlay_left_backs_out(),
-            "an open extensions modal must suppress the graduated back-out",
-        );
-    }
+    suppressed(&mut app, "an open extensions modal must suppress the graduated back-out");
     app.agents.get_mut(&id).unwrap().extensions_modal = None;
     app.agents.get_mut(&id).unwrap().agents_modal = Some(open_agents_modal());
-    {
-        let a = app.agents.get(&id).unwrap();
-        assert!(
-            !a.overlay_esc_backs_out() && !a.overlay_left_backs_out(),
-            "an open agents modal must suppress the graduated back-out",
-        );
-    }
+    suppressed(&mut app, "an open agents modal must suppress the graduated back-out");
     app.agents.get_mut(&id).unwrap().agents_modal = None;
     app.agents.get_mut(&id).unwrap().active_modal =
         Some(crate::views::modal::ActiveModal::CommandPalette {
@@ -5994,13 +6087,7 @@ fn graduated_back_out_defers_to_open_modal() {
             state: crate::views::picker::PickerState::default(),
             window: crate::views::modal_window::ModalWindowState::new(),
         });
-    {
-        let a = app.agents.get(&id).unwrap();
-        assert!(
-            !a.overlay_esc_backs_out() && !a.overlay_left_backs_out(),
-            "an open active_modal must suppress the graduated back-out",
-        );
-    }
+    suppressed(&mut app, "an open active_modal must suppress the graduated back-out");
 }
 /// Install a plan-approval overlay on the agent and put it in the "focused dashboard overlay, prompt pane" state the graduated back-out cares about.
 fn install_plan_overlay(app: &mut AppView, id: super::super::agent::AgentId) {
@@ -6086,16 +6173,26 @@ fn overlay_esc_does_not_exit_with_plan_draft() {
         "Esc with a plan feedback draft must NOT back out, got {outcome:?}",
     );
 }
-/// Graduated back-out: in the Q&A Navigation surface with nothing selected, a bare Esc backs out to the dashboard instead of dead-ending.
-/// (Its only job there is to unselect.)
+/// Graduated back-out: in the Q&A Navigation surface with nothing selected, the first Esc focuses the scrollback (the context behind the
+/// question can be read) and the next Esc backs out to the dashboard instead of dead-ending.
 #[test]
 fn overlay_esc_exits_when_question_nav_unselected() {
     let (mut app, id) = neutral_overlay_app();
     install_question_overlay(&mut app, id, 1);
+    let first = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        !matches!(first, InputOutcome::Action(Action::DashboardOverlayExit)),
+        "the first Esc focuses the scrollback, got {first:?}",
+    );
+    assert_eq!(
+        app.agents.get(&id).unwrap().active_pane,
+        crate::app::agent_view::AgentPane::Scrollback,
+        "the first Esc moves the keyboard to the scrollback",
+    );
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
-        "Esc with nothing selected must back out, got {outcome:?}",
+        "the next Esc must back out, got {outcome:?}",
     );
     assert!(
         app.agents.get(&id).unwrap().question_view.is_some(),
@@ -6133,15 +6230,25 @@ fn overlay_esc_does_not_exit_on_later_multi_question() {
         "Esc on question 2+ of a multi-question Q&A must stay in-flow, got {outcome:?}",
     );
 }
-/// ...but from question 1 (the top of a multi-question flow) with nothing selected, a bare `Esc` still backs out, leaving the Q&A pending.
+/// ...and from question 1 (the top of a multi-question flow) with nothing selected, the first `Esc` focuses the scrollback and the next one
+/// backs out, leaving the Q&A pending.
 #[test]
 fn overlay_esc_exits_at_first_multi_question() {
     let (mut app, id) = neutral_overlay_app();
     install_question_overlay(&mut app, id, 2);
+    let first = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        !matches!(first, InputOutcome::Action(Action::DashboardOverlayExit)),
+        "the first Esc at question 1 focuses the scrollback, got {first:?}",
+    );
+    assert_eq!(
+        app.agents.get(&id).unwrap().active_pane,
+        crate::app::agent_view::AgentPane::Scrollback,
+    );
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
-        "Esc at question 1 of a multi-question Q&A must back out, got {outcome:?}",
+        "the next Esc at question 1 of a multi-question Q&A must back out, got {outcome:?}",
     );
     assert!(
         app.agents.get(&id).unwrap().question_view.is_some(),
@@ -6968,4 +7075,304 @@ fn first_spinner_frame_arms_the_tick_only_after_the_paint() {
         tick_at.is_some(),
         "the loop-bottom re-check after the paint must arm the spinner's next tick"
     );
+}
+// ---- /stoke easter egg ----
+
+fn draw_stoke_agent(app: &mut AppView, w: u16, h: u16) -> Vec<String> {
+    let reg = crate::actions::ActionRegistry::defaults();
+    let area = ratatui::layout::Rect::new(0, 0, w, h);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    let mut scratch = crate::scrollback::render::ScratchBuffer::new();
+    app.agents
+        .get_mut(&super::super::agent::AgentId(0))
+        .unwrap()
+        .draw(
+            area,
+            &mut buf,
+            &reg,
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+    (0..h)
+        .map(|y| {
+            (0..w)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+/// `/stoke` opens a full-screen overlay; `q` closes it and the session is exactly as it was: no message, same draft, same state.
+#[test]
+fn stoke_opens_and_q_closes_with_the_session_unchanged() {
+    let (mut app, id) = neutral_overlay_app();
+    app.agents.get_mut(&id).unwrap().active_pane = crate::app::agent_view::AgentPane::Prompt;
+    let (before_len, before_idle) = {
+        let a = &app.agents[&id];
+        (a.scrollback.len(), a.session.state.is_idle())
+    };
+    let effects = crate::app::dispatch::dispatch(Action::OpenStoke, &mut app);
+    assert!(
+        effects.is_empty(),
+        "opening the fire emits no effects (nothing reaches the model)"
+    );
+    assert!(app.agents[&id].stoke.is_some(), "overlay opened");
+    // Typing does not reach the prompt while the fire is up.
+    let x = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert!(!matches!(x, InputOutcome::Action(_)), "{x:?}");
+    assert!(app.agents[&id].stoke.is_some() && app.agents[&id].prompt.text().is_empty());
+    // Left/Esc-as-back-out of the dashboard overlay must not steal the keys.
+    let q = app.handle_input(&key_event(KeyCode::Char('q'), KeyModifiers::NONE));
+    assert!(
+        !matches!(q, InputOutcome::Action(Action::DashboardOverlayExit)),
+        "{q:?}"
+    );
+    let a = &app.agents[&id];
+    assert!(a.stoke.is_none(), "q closes the fire");
+    assert_eq!(
+        a.scrollback.len(),
+        before_len,
+        "no message added to the history"
+    );
+    assert_eq!(a.session.state.is_idle(), before_idle);
+    assert!(a.prompt.text().is_empty());
+}
+
+#[test]
+fn stoke_closes_on_esc_and_ctrl_c() {
+    for (code, mods) in [
+        (KeyCode::Esc, KeyModifiers::NONE),
+        (KeyCode::Char('c'), KeyModifiers::CONTROL),
+    ] {
+        let (mut app, id) = neutral_overlay_app();
+        app.agents.get_mut(&id).unwrap().active_pane = crate::app::agent_view::AgentPane::Prompt;
+        crate::app::dispatch::dispatch(Action::OpenStoke, &mut app);
+        assert!(app.agents[&id].stoke.is_some());
+        let out = app.handle_input(&key_event(code, mods));
+        assert!(
+            !matches!(out, InputOutcome::Action(Action::DashboardOverlayExit)),
+            "{out:?}"
+        );
+        assert!(
+            app.agents[&id].stoke.is_none(),
+            "{code:?} {mods:?} closes the fire"
+        );
+    }
+}
+
+/// The frame shows the fire and the label while open, and the normal view returns untouched afterwards.
+#[test]
+fn stoke_paints_the_whole_frame_then_hands_back() {
+    let (mut app, id) = neutral_overlay_app();
+    let normal = draw_stoke_agent(&mut app, 100, 40);
+    crate::app::dispatch::dispatch(Action::OpenStoke, &mut app);
+    let first = draw_stoke_agent(&mut app, 100, 40);
+    assert!(first[39].contains("fuigo  ·  q to quit"), "{:?}", first[39]);
+    // Warm the fire: ticks at least one frame interval apart advance it.
+    for _ in 0..60 {
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .stoke
+            .as_mut()
+            .unwrap()
+            .tick_at(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        let s = app.agents.get_mut(&id).unwrap().stoke.as_mut().unwrap();
+        s.tick_at(std::time::Instant::now() + std::time::Duration::from_secs(7200));
+    }
+    let lit = draw_stoke_agent(&mut app, 100, 40);
+    assert!(
+        lit.iter()
+            .any(|r| r.contains('@') || r.contains('#') || r.contains('$')),
+        "flames are drawn"
+    );
+    app.agents.get_mut(&id).unwrap().stoke = None;
+    assert_eq!(
+        draw_stoke_agent(&mut app, 100, 40),
+        normal,
+        "closing restores the exact previous frame"
+    );
+}
+
+/// The 30 fps tick is demanded only while the fire is open.
+#[test]
+fn stoke_ticks_only_while_open() {
+    let (mut app, id) = neutral_overlay_app();
+    assert!(app.tick_interval_ceiling().is_none());
+    crate::app::dispatch::dispatch(Action::OpenStoke, &mut app);
+    let ceiling = app
+        .tick_interval_ceiling()
+        .expect("fire asks for a cadence");
+    assert!(ceiling <= std::time::Duration::from_millis(66));
+    assert!(matches!(app.tick_demand(), TickDemand::Fast));
+    app.agents.get_mut(&id).unwrap().stoke = None;
+    assert!(app.tick_interval_ceiling().is_none());
+}
+
+// ---- the sign-in picker's keys and clicks run the row that was painted ----
+
+fn picker_input_app() -> AppView {
+    let mut app = test_app();
+    app.auth_state = AuthState::Pending { error: None };
+    app.welcome_prompt_focused = false;
+    // Nothing configured, whatever the machine running the test has.
+    app.sign_in_status = fuigo_shell::auth::provider_status::ProviderStatus::collect(
+        std::path::Path::new("/nonexistent-fuigo-home"),
+        |_| None,
+        false,
+    );
+    app
+}
+
+fn press(app: &mut AppView, c: char) -> InputOutcome {
+    app.handle_input(&key_event(KeyCode::Char(c), KeyModifiers::NONE))
+}
+
+#[test]
+fn picker_digits_run_the_row_they_number() {
+    use fuigo_shell::auth::subscription::SubscriptionProvider;
+    let mut app = picker_input_app();
+    assert!(matches!(press(&mut app, '1'), InputOutcome::Action(Action::EnterApiKey)));
+    assert!(matches!(
+        press(&mut app, '2'),
+        InputOutcome::Action(Action::SignInSubscription(SubscriptionProvider::Chatgpt))
+    ));
+    assert!(matches!(
+        press(&mut app, '3'),
+        InputOutcome::Action(Action::SignInSubscription(SubscriptionProvider::Xai))
+    ));
+    assert!(matches!(press(&mut app, '4'), InputOutcome::Action(Action::ProviderKeysPage)));
+    assert!(matches!(press(&mut app, '9'), InputOutcome::Unchanged));
+}
+
+#[test]
+fn picker_enter_takes_the_first_row_which_is_flux() {
+    let mut app = picker_input_app();
+    let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(outcome, InputOutcome::Action(Action::EnterApiKey)));
+}
+
+#[test]
+fn a_flux_key_in_the_environment_makes_row_one_apply_it_by_name() {
+    let mut app = picker_input_app();
+    app.sign_in_status = fuigo_shell::auth::provider_status::ProviderStatus::collect(
+        std::path::Path::new("/nonexistent-fuigo-home"),
+        |name| (name == "FLUX_API_KEY").then(|| "sk-flux-abcdefgh-1234".to_string()),
+        false,
+    );
+    match press(&mut app, '1') {
+        InputOutcome::Action(Action::UseDetectedKey(var)) => assert_eq!(var, "FLUX_API_KEY"),
+        other => panic!("expected UseDetectedKey, got {other:?}"),
+    }
+}
+
+#[test]
+fn picker_q_quits_first_run_and_cancels_the_login_modal() {
+    let mut app = picker_input_app();
+    let first_run = press(&mut app, 'q');
+    assert!(matches!(first_run, InputOutcome::Action(Action::Quit)), "{first_run:?}");
+    app.picker_modal = true;
+    assert!(matches!(press(&mut app, 'q'), InputOutcome::Action(Action::CancelPicker)));
+    let esc = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(esc, InputOutcome::Action(Action::CancelPicker)));
+    // In the modal the last row is Cancel, and it is numbered like any other row.
+    assert!(matches!(press(&mut app, '5'), InputOutcome::Action(Action::CancelPicker)));
+}
+
+#[test]
+fn esc_during_a_subscription_sign_in_steps_back_instead_of_quitting() {
+    let mut app = picker_input_app();
+    app.subscription_signin = Some(fuigo_shell::auth::subscription::SubscriptionProvider::Xai);
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 1,
+        handle: None,
+        auth_url: Some("https://auth.example/authorize".into()),
+        mode: AuthMode::Loopback,
+    };
+    let esc = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(esc, InputOutcome::Action(Action::CancelSignIn)));
+}
+
+#[test]
+fn the_provider_key_page_is_navigable_by_digit_and_by_b() {
+    let mut app = picker_input_app();
+    app.picker_page = crate::app::pending_menu::PickerPage::ProviderKeys;
+    assert!(matches!(press(&mut app, 'b'), InputOutcome::Action(Action::PickerBack)));
+    match press(&mut app, '1') {
+        InputOutcome::Action(Action::ProviderKeyInfo(id)) => assert!(!id.is_empty()),
+        other => panic!("expected ProviderKeyInfo, got {other:?}"),
+    }
+}
+
+/// The key screen is part of the picker: Esc steps back to it instead of quitting the whole app.
+#[test]
+fn esc_on_the_key_screen_steps_back_to_the_picker() {
+    let mut app = picker_input_app();
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 1,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::ApiKey,
+    };
+    let esc = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(esc, InputOutcome::Action(Action::CancelSignIn)), "{esc:?}");
+}
+
+fn active_run(status: &str) -> crate::views::workflows::WorkflowRunSnapshot {
+    crate::views::workflows::WorkflowRunSnapshot {
+        run_id: "wf_1".into(),
+        name: "deep-research".into(),
+        objective: "obj".into(),
+        status: status.into(),
+        management_available: true,
+        builtin: false,
+        phases: Vec::new(),
+        current_phase: None,
+        agents: Vec::new(),
+        agent_budget: None,
+        agents_used: 0,
+        agents_reserved: 0,
+        agents_remaining: None,
+        agent_usage_incomplete: false,
+        active_agents: 0,
+        elapsed_ms: 1_000,
+        received_at: std::time::Instant::now(),
+        pause_message: None,
+        result_summary: None,
+    }
+}
+#[test]
+fn quit_warns_when_it_would_stop_a_running_workflow() {
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    app.agents.get_mut(&id).unwrap().workflow_runs = vec![active_run("active")];
+    let outcome = app.handle_input(&ctrl_q());
+    assert!(matches!(outcome, InputOutcome::Changed));
+    assert_eq!(
+        app.pending_action.as_ref().unwrap().label,
+        Some(crate::app::app_view::QUIT_STOPS_WORKFLOWS_LABEL),
+        "the first quit names the workflow it would stop"
+    );
+    let outcome = app.handle_input(&ctrl_q());
+    assert!(
+        matches!(outcome, InputOutcome::Action(Action::Quit)),
+        "the second quit confirms"
+    );
+}
+#[test]
+fn quit_label_is_plain_when_no_workflow_is_running() {
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    app.agents.get_mut(&id).unwrap().workflow_runs =
+        vec![active_run("complete"), active_run("user_paused")];
+    let outcome = app.handle_input(&ctrl_q());
+    assert!(matches!(outcome, InputOutcome::Changed));
+    assert_eq!(app.pending_action.as_ref().unwrap().label, Some("quit"));
 }

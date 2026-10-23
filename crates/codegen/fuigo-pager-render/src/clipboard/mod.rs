@@ -534,6 +534,44 @@ pub fn write_text_to_copy_file(
     Ok(expanded)
 }
 
+/// Write `text` to a file the user named, which must not exist yet (tilde-expand, create parent dirs).
+/// An existing file, a symlink included, is never replaced: the error is [`std::io::ErrorKind::AlreadyExists`] and the file is untouched.
+/// Returns the expanded path on success.
+///
+/// `owner_only` creates the file `0600` on unix (copied text can be sensitive); otherwise it gets the default mode.
+/// If the write fails after the file was created, the half-written file is removed again.
+/// This is for `/export <file>`, `grok export <id> <file>` and `/copy <n> <file>`; the always-written
+/// backup file ([`write_copy_fallback`]) is a fixed path that is rewritten on every copy and keeps overwriting.
+pub fn write_text_to_new_file(
+    text: &str,
+    path: &std::path::Path,
+    owner_only: bool,
+) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    let expanded = std::path::PathBuf::from(shellexpand::tilde(&path.to_string_lossy()).as_ref());
+    if let Some(parent) = expanded.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if owner_only {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = owner_only;
+    let mut file = options.open(&expanded)?;
+    if let Err(error) = file.write_all(text.as_bytes()).and_then(|()| file.flush()) {
+        drop(file);
+        let _ = std::fs::remove_file(&expanded);
+        return Err(error);
+    }
+    Ok(expanded)
+}
+
 /// Write `text` to `path`, owner-readable only (`0600`) on unix.
 ///
 /// A pre-existing file (e.g. a `last-copy.txt` created `0644` by an older fuigo) is tightened via `set_permissions`.
@@ -2124,6 +2162,47 @@ mod tests {
                 "message_lead must prefix message for {feedback:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_named_file_is_never_overwritten() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested").join("notes.md");
+        let written = write_text_to_new_file("first", &path, false).expect("a new file is written");
+        assert_eq!(written, path);
+        let error = write_text_to_new_file("second", &path, false).expect_err("must refuse");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        let error = write_text_to_new_file("third", &path, true).expect_err("must refuse");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "first");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_file_is_not_written_through_a_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("precious.txt");
+        std::fs::write(&target, "keep me").expect("seed");
+        let link = dir.path().join("out.md");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let error = write_text_to_new_file("overwrite", &link, false).expect_err("must refuse");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&target).expect("read"), "keep me");
+        let dangling = dir.path().join("dangling.md");
+        std::os::unix::fs::symlink(dir.path().join("missing.txt"), &dangling).expect("symlink");
+        write_text_to_new_file("x", &dangling, false).expect_err("a dangling link is not a free name");
+        assert!(!dir.path().join("missing.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_copy_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("copy.txt");
+        write_text_to_new_file("secret", &path, true).expect("write");
+        let mode = std::fs::metadata(&path).expect("metadata").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]

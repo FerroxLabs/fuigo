@@ -412,8 +412,163 @@ fn write_worktree_tree(worktree_path: &Path, seed: IndexSeed) -> Result<String> 
             std::fs::copy(Path::new(&git_dir).join("index"), &scratch.path)?;
         }
     }
+    let mut gitlinks = scratch_gitlinks(worktree_path, &index_env)?;
+    if matches!(seed, IndexSeed::Head) {
+        // HEAD still carries a gitlink the user `git rm`'d without committing; only
+        // those the worktree's own index still holds may be put back.
+        let staged: std::collections::HashSet<String> = scratch_gitlinks(worktree_path, &[])?
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect();
+        gitlinks.retain(|(_, path)| staged.contains(path));
+    }
     snapshot_git(worktree_path, &["add", "-A"], &index_env)?;
+    restore_uninitialised_gitlinks(worktree_path, &index_env, &gitlinks)?;
     snapshot_git(worktree_path, &["write-tree"], &index_env)
+}
+
+/// The submodule entries (`mode 160000`) of the scratch index, as
+/// `(commit, path)`.
+fn scratch_gitlinks(
+    worktree_path: &Path,
+    index_env: &[(&str, &OsStr)],
+) -> Result<Vec<(String, String)>> {
+    let listing = snapshot_git(worktree_path, &["ls-files", "-s", "-z"], index_env)?;
+    Ok(parse_gitlinks(&listing))
+}
+
+/// The `(commit, path)` of every gitlink in `git ls-files -s -z` output.
+pub fn parse_gitlinks(listing: &str) -> Vec<(String, String)> {
+    listing
+        .split('\0')
+        .filter_map(|record| {
+            let (meta, path) = record.split_once('\t')?;
+            let mut fields = meta.split_whitespace();
+            (fields.next()? == "160000").then(|| {
+                (
+                    fields.next().unwrap_or_default().to_owned(),
+                    path.to_owned(),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Which gitlinks a staged-everything step (`add -A`) dropped that it should not
+/// have: those in `before` that are gone from `after`, whose path under
+/// `worktree_path` is absent or an empty directory, and whose submodule is
+/// genuinely uninitialised (see `submodule_is_initialised`). An initialised
+/// submodule whose directory was removed is a deletion the user made, and git's
+/// staging of it stands. A gitlink already gone from the index (`git rm`) is not
+/// in `before`, so is never restored. Callers put each `(commit, path)` back with
+/// `git update-index --add --cacheinfo 160000,<commit>,<path>`.
+pub fn dropped_uninitialised_gitlinks(
+    worktree_path: &Path,
+    before: &[(String, String)],
+    after: &[(String, String)],
+) -> Vec<(String, String)> {
+    let kept: std::collections::HashSet<&str> =
+        after.iter().map(|(_, path)| path.as_str()).collect();
+    before
+        .iter()
+        .filter(|(_, path)| !kept.contains(path.as_str()))
+        .filter(|(_, path)| match std::fs::read_dir(worktree_path.join(path)) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        })
+        .filter(|(_, path)| !submodule_is_initialised(worktree_path, path))
+        .cloned()
+        .collect()
+}
+
+/// Whether the submodule at `path` has been initialised, from git's own state.
+/// The name comes from `.gitmodules` (the path when there is no entry). In the
+/// main worktree it is initialised if `<git-dir>/modules/<name>` exists or
+/// `submodule.<name>.url` is set in the repository config. In a linked worktree
+/// the config and the common git dir are shared with every other worktree, so
+/// one that initialised the submodule would make all of them look initialised;
+/// there only the worktree's own `<git-dir>/modules/<name>` counts. Any git
+/// failure reads as uninitialised, which keeps the gitlink.
+fn submodule_is_initialised(worktree_path: &Path, path: &str) -> bool {
+    let git = |args: &[&str]| {
+        snapshot_git(worktree_path, args, &[])
+            .ok()
+            .map(|out| out.trim().to_owned())
+            .filter(|out| !out.is_empty())
+    };
+    let absolute = |dir: String| {
+        let dir = PathBuf::from(dir);
+        if dir.is_absolute() {
+            dir
+        } else {
+            worktree_path.join(dir)
+        }
+    };
+    let name = git(&[
+        "config",
+        "-f",
+        ".gitmodules",
+        "--get-regexp",
+        r"^submodule\..*\.path$",
+    ])
+    .and_then(|listing| {
+        listing.lines().find_map(|line| {
+            let (key, value) = line.split_once(' ')?;
+            if value != path {
+                return None;
+            }
+            key.strip_prefix("submodule.")?
+                .strip_suffix(".path")
+                .map(str::to_owned)
+        })
+    })
+    .unwrap_or_else(|| path.to_owned());
+    let (Some(git_dir_raw), Some(common_dir_raw)) = (
+        git(&["rev-parse", "--git-dir"]),
+        git(&["rev-parse", "--git-common-dir"]),
+    ) else {
+        return false;
+    };
+    let git_dir = absolute(git_dir_raw.clone());
+    let common_dir = absolute(common_dir_raw.clone());
+    if git_dir.join("modules").join(&name).exists() {
+        return true;
+    }
+    // In the main worktree git prints the same string for both; a linked worktree's
+    // git dir is its own `worktrees/<id>` directory.
+    let linked = git_dir_raw != common_dir_raw;
+    !linked
+        && (common_dir.join("modules").join(&name).exists()
+            || git(&["config", "--get", &format!("submodule.{name}.url")]).is_some())
+}
+
+/// `add -A` reads a submodule path with no checkout behind it as a deletion and
+/// drops the gitlink, so a snapshot of a repository with an uninitialised
+/// submodule would silently lose it. Put back every gitlink the index began with
+/// whose path is absent or an empty directory: that is an uninitialised
+/// submodule, not a change.
+fn restore_uninitialised_gitlinks(
+    worktree_path: &Path,
+    index_env: &[(&str, &OsStr)],
+    gitlinks: &[(String, String)],
+) -> Result<()> {
+    if gitlinks.is_empty() {
+        return Ok(());
+    }
+    let after = scratch_gitlinks(worktree_path, index_env)?;
+    for (commit, path) in dropped_uninitialised_gitlinks(worktree_path, gitlinks, &after) {
+        snapshot_git(
+            worktree_path,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{commit},{path}"),
+            ],
+            index_env,
+        )?;
+    }
+    Ok(())
 }
 
 /// Whether the working state is still the one `snapshot` holds. A caller that
@@ -776,6 +931,183 @@ mod tests {
             .create()
             .unwrap();
         (repo_path, wt)
+    }
+
+    /// A repo whose HEAD carries a submodule that was never initialised, plus a
+    /// worktree of it.
+    fn repo_with_uninitialised_submodule(temp: &TempDir) -> (PathBuf, PathBuf) {
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        std::fs::write(repo_path.join("tracked.txt"), "original").unwrap();
+        std::fs::write(
+            repo_path.join(".gitmodules"),
+            "[submodule \"libs/sub\"]\n\tpath = libs/sub\n\turl = https://example.invalid/sub.git\n",
+        )
+        .unwrap();
+        git_capture_in(
+            &repo_path,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000,1111111111111111111111111111111111111111,libs/sub",
+            ],
+            &[],
+        )
+        .unwrap();
+        // Not `git_commit_all`: its `add -A` would drop the gitlink too.
+        git_capture_in(&repo_path, &["add", ".gitmodules", "tracked.txt"], &[]).unwrap();
+        git_capture_in(
+            &repo_path,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "commit",
+                "-m",
+                "initial with an uninitialised submodule",
+            ],
+            &[],
+        )
+        .unwrap();
+        let wt = temp.path().join("wt");
+        crate::WorktreeBuilder::new(&repo_path, &wt)
+            .create()
+            .unwrap();
+        (repo_path, wt)
+    }
+
+    #[test]
+    fn test_snapshot_round_trips_with_an_uninitialised_submodule() {
+        fuigo_test_utils::require_git!();
+        let temp = TempDir::new().unwrap();
+        let (repo_path, wt) = repo_with_uninitialised_submodule(&temp);
+        std::fs::write(wt.join("tracked.txt"), "edited").unwrap();
+        std::fs::write(wt.join("untracked.txt"), "brand new").unwrap();
+
+        let snap =
+            snapshot_worktree_to_ref(&wt, "refs/fuigo/snapshots/uninit-sub", "uninit").unwrap();
+        let listing = git_capture_in(&wt, &["ls-tree", "-r", snap.as_str()], &[]).unwrap();
+        assert!(
+            listing.contains("160000 commit 1111111111111111111111111111111111111111\tlibs/sub"),
+            "{listing}"
+        );
+        assert!(worktree_matches_snapshot(&wt, &snap).unwrap());
+
+        crate::remove_worktree(&wt).unwrap();
+        assert!(!wt.exists());
+        rehydrate_worktree_from_ref(&wt, &repo_path, &snap, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(wt.join("tracked.txt")).unwrap(),
+            "edited"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("untracked.txt")).unwrap(),
+            "brand new"
+        );
+    }
+
+    const GIT_ID: [&str; 4] = ["-c", "user.name=t", "-c", "user.email=t@example.com"];
+
+    fn git_t(dir: &Path, args: &[&str]) -> String {
+        let mut full: Vec<&str> = GIT_ID.to_vec();
+        full.extend(["-c", "protocol.file.allow=always"]);
+        full.extend(args);
+        git_capture_in(dir, &full, &[]).unwrap()
+    }
+
+    /// A repo with a real submodule `libs/sub` added and committed, so the submodule
+    /// is initialised in it (`.git/modules/libs/sub`, `submodule.libs/sub.url`).
+    fn repo_with_initialised_submodule(temp: &TempDir) -> PathBuf {
+        let sub = temp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        init_git_repo(&sub);
+        git_t(&sub, &["commit", "--allow-empty", "-m", "sub"]);
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join("tracked.txt"), "original").unwrap();
+        git_t(&repo, &["add", "tracked.txt"]);
+        git_t(&repo, &["submodule", "add", sub.to_str().unwrap(), "libs/sub"]);
+        git_t(&repo, &["commit", "-m", "initial with a submodule"]);
+        repo
+    }
+
+    /// A linked worktree of `repo`, with the submodule initialised in it.
+    fn linked_worktree_with_initialised_submodule(temp: &TempDir, repo: &Path) -> PathBuf {
+        let wt = temp.path().join("linked");
+        git_t(repo, &["worktree", "add", "--detach", wt.to_str().unwrap()]);
+        git_t(&wt, &["submodule", "update", "--init"]);
+        wt
+    }
+
+    fn snapshot_has_gitlink(dir: &Path, name: &str) -> bool {
+        let snap =
+            snapshot_worktree_to_ref(dir, &format!("refs/fuigo/snapshots/{name}"), name).unwrap();
+        git_capture_in(dir, &["ls-tree", "-r", snap.as_str()], &[])
+            .unwrap()
+            .contains("160000 commit")
+    }
+
+    #[test]
+    fn test_snapshot_records_deletion_of_an_initialised_submodule() {
+        fuigo_test_utils::require_git!();
+        let temp = TempDir::new().unwrap();
+        let repo = repo_with_initialised_submodule(&temp);
+        assert!(snapshot_has_gitlink(&repo, "before"));
+        std::fs::remove_dir_all(repo.join("libs/sub")).unwrap();
+        assert!(!snapshot_has_gitlink(&repo, "after-absent"));
+        // An empty directory is not a deletion to git itself: `add -A` leaves the gitlink.
+        std::fs::create_dir(repo.join("libs/sub")).unwrap();
+        assert!(snapshot_has_gitlink(&repo, "after-empty"));
+    }
+
+    #[test]
+    fn test_snapshot_records_deletion_of_an_initialised_submodule_in_a_linked_worktree() {
+        fuigo_test_utils::require_git!();
+        let temp = TempDir::new().unwrap();
+        let repo = repo_with_initialised_submodule(&temp);
+        let wt = linked_worktree_with_initialised_submodule(&temp, &repo);
+        assert!(snapshot_has_gitlink(&wt, "before"));
+        std::fs::remove_dir_all(wt.join("libs/sub")).unwrap();
+        assert!(!snapshot_has_gitlink(&wt, "after"));
+    }
+
+    #[test]
+    fn test_snapshot_keeps_a_submodule_only_the_main_worktree_initialised() {
+        fuigo_test_utils::require_git!();
+        let temp = TempDir::new().unwrap();
+        let repo = repo_with_initialised_submodule(&temp);
+        let wt = temp.path().join("linked");
+        git_t(&repo, &["worktree", "add", "--detach", wt.to_str().unwrap()]);
+        // The shared config says initialised, but this worktree never checked it out.
+        assert!(snapshot_has_gitlink(&wt, "linked-uninit"));
+    }
+
+    #[test]
+    fn test_snapshot_does_not_restore_a_git_rm_submodule() {
+        fuigo_test_utils::require_git!();
+        let temp = TempDir::new().unwrap();
+        let repo = repo_with_initialised_submodule(&temp);
+        git_t(&repo, &["rm", "-f", "libs/sub"]);
+        assert!(!snapshot_has_gitlink(&repo, "main-rm"));
+        let other = TempDir::new().unwrap();
+        let repo2 = repo_with_initialised_submodule(&other);
+        let wt = linked_worktree_with_initialised_submodule(&other, &repo2);
+        git_t(&wt, &["rm", "-f", "libs/sub"]);
+        assert!(!snapshot_has_gitlink(&wt, "linked-rm"));
+    }
+
+    #[test]
+    fn test_snapshot_does_not_restore_a_git_rm_uninitialised_submodule() {
+        fuigo_test_utils::require_git!();
+        let temp = TempDir::new().unwrap();
+        let (_repo_path, wt) = repo_with_uninitialised_submodule(&temp);
+        assert!(snapshot_has_gitlink(&wt, "uninit-before"));
+        git_t(&wt, &["rm", "-f", "libs/sub"]);
+        assert!(!snapshot_has_gitlink(&wt, "uninit-rm"));
     }
 
     #[test]

@@ -241,7 +241,8 @@ pub(crate) fn commit_feedback(
     // that is refused (feedback disabled) or fails is reported once, with its reason, never thanked for first.
     if displaced {
         agent.scrollback.push_block(RenderBlock::system(
-            "Another question interrupted /feedback. Your report will be sent without a trace.".to_string(),
+            "Another question interrupted /feedback. Your report will be sent without a trace."
+                .to_string(),
         ));
     }
 
@@ -490,7 +491,9 @@ fn send_remember_note(app: &mut AppView, text: String, record_in_history: bool) 
     }
 
     if memory_hint_says_off(agent) {
-        agent.scrollback.push_block(RenderBlock::system(memory_hint_notice()));
+        agent
+            .scrollback
+            .push_block(RenderBlock::system(memory_hint_notice()));
     }
 
     agent.note_draft_consumed();
@@ -688,15 +691,36 @@ pub(super) fn dispatch_send_btw(
     mut images: Vec<crate::prompt_images::PastedImage>,
 ) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
-        crate::prompt_images::drain_and_cleanup(&mut images);
+        drop_btw_images(app, &mut images);
         return vec![];
     };
     let minimal = app.screen_mode.is_minimal();
     let Some(agent) = app.agents.get_mut(&id) else {
-        crate::prompt_images::drain_and_cleanup(&mut images);
+        drop_btw_images(app, &mut images);
         return vec![];
     };
     start_side_question(agent, id, minimal, question, images)
+}
+
+/// A side question with no agent view to ask in: its images go, and the user is told.
+fn drop_btw_images(app: &mut AppView, images: &mut Vec<crate::prompt_images::PastedImage>) {
+    if !images.is_empty() {
+        app.pending_image_notices
+            .push(format!("{NO_SESSION_NOTICE} (attached image(s) were not sent)"));
+        app.flush_image_notices_if_root();
+    }
+    crate::prompt_images::drain_and_cleanup(images);
+}
+
+/// Tell the user in the surface the mode has: a toast, or a transcript line in minimal mode (which renders no toasts).
+fn notify_btw(agent: &mut crate::app::agent_view::AgentView, minimal: bool, message: &str) {
+    if minimal {
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::system(message.to_string()));
+    } else {
+        agent.show_toast(message);
+    }
 }
 
 /// Start a side question on `agent`: paints the loading state and returns the `SendBtw` effect.
@@ -711,15 +735,12 @@ pub(super) fn start_side_question(
 ) -> Vec<Effect> {
     let (session_id, minimal_request_id, blocks) = {
         let Some(session_id) = agent.session.session_id.clone() else {
-            if minimal {
-                agent
-                    .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(
-                        NO_SESSION_NOTICE,
-                    ));
+            let notice = if images.is_empty() {
+                NO_SESSION_NOTICE.to_string()
             } else {
-                agent.show_toast(NO_SESSION_NOTICE);
-            }
+                format!("{NO_SESSION_NOTICE} (attached image(s) were not sent)")
+            };
+            notify_btw(agent, minimal, &notice);
             crate::prompt_images::drain_and_cleanup(&mut images);
             return vec![];
         };
@@ -734,6 +755,9 @@ pub(super) fn start_side_question(
                 kept,
                 Some(std::path::Path::new(&agent.session.cwd)),
             );
+            if omitted > 0 {
+                notify_btw(agent, minimal, &btw_image_omit_notice(omitted));
+            }
             if omitted > 0
                 && let Some(acp::ContentBlock::Text(text)) = blocks
                     .iter_mut()

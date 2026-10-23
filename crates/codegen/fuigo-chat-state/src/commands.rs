@@ -1,6 +1,6 @@
 //! Commands sent to the ChatStateActor.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use tokio::sync::oneshot;
 use fuigo_sampling_types::{
@@ -156,7 +156,7 @@ pub enum ChatStateCommand {
     IncrementPromptIndex,
 
     /// Update the sampling config (e.g., model switch).
-    UpdateSamplingConfig { config: SamplingConfig },
+    UpdateSamplingConfig { config: Box<SamplingConfig> },
 
     /// Track that the agent edited a file path.
     RecordAgentEditedPath { path: String },
@@ -252,8 +252,12 @@ pub enum ChatStateCommand {
     /// after each verifier panel). No-op when nothing was recorded.
     FlushHarnessTraceTurn,
 
-    /// Repair dangling tool calls after a harness-initiated halt.
-    RepairDanglingAfterHarnessHalt { class: &'static str },
+    /// Repair dangling tool calls after a harness-initiated halt. `answers` (tool call id to result text) are
+    /// written only for ids still dangling; the rest are dropped.
+    RepairDanglingAfterHarnessHalt {
+        class: &'static str,
+        answers: HashMap<String, String>,
+    },
 
     /// Drop a trailing continue reminder whose continuation will never
     /// sample (the turn is completing truncated after a failed
@@ -476,7 +480,7 @@ mod tests {
         let _ = ChatStateCommand::RecordTokenUsage { total_tokens: 100 };
         let _ = ChatStateCommand::IncrementPromptIndex;
         let _ = ChatStateCommand::UpdateSamplingConfig {
-            config: SamplingConfig {
+            config: Box::new(SamplingConfig {
                 base_url: String::new(),
                 model: String::new(),
                 max_completion_tokens: None,
@@ -488,12 +492,13 @@ mod tests {
                 query_params: Default::default(),
                 env_http_headers: Default::default(),
                 context_window: std::num::NonZeroU64::new(128_000).unwrap(),
+                max_request_bytes: None,
                 reasoning_effort: None,
                 stream_tool_calls: None,
                 mtls_cert_dir: None,
                 rate_limit_retry_threshold: None,
                 reasoning_summary: None,
-            },
+            }),
         };
         let _ = ChatStateCommand::RecordAgentEditedPath {
             path: "src/main.rs".to_string(),

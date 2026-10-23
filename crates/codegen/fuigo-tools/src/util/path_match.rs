@@ -217,6 +217,21 @@ pub fn physical_alias_pattern_string_bounded(prefix: &str, rest: &str, limit: st
     bounded_alias(prefix, rest, limit, &ALIAS_STUCK, physical_alias_pattern_string)
 }
 
+/// How a bounded alias resolution ended. `Unresolved` is the one a caller must not mistake for `NoAlias`: the
+/// resolver did not answer in time (or another one is still parked), so whether the rule has a physical spelling is
+/// UNKNOWN, and treating that as "no alias" would let a Read-deny rule written through a symlink miss the physical path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AliasResolution {
+    Alias(String),
+    NoAlias,
+    Unresolved,
+}
+
+/// [`physical_alias_pattern_string_bounded`] that says "unknown" instead of folding it into "no alias".
+pub fn physical_alias_resolution_bounded(prefix: &str, rest: &str, limit: std::time::Duration) -> AliasResolution {
+    bounded_alias_resolution(prefix, rest, limit, &ALIAS_STUCK, physical_alias_pattern_string)
+}
+
 /// How many resolver threads were given up on (timed out) and have not returned yet. While it is non-zero (a hung
 /// mount) no new resolver is spawned and calls return `None` at once, so at most one thread is ever parked behind it.
 /// Resolvers that finish within their budget never count, so concurrent searches do not affect each other.
@@ -246,9 +261,22 @@ fn bounded_alias(
     stuck: &'static std::sync::atomic::AtomicUsize,
     resolve: impl FnOnce(&str, &str) -> Option<String> + Send + 'static,
 ) -> Option<String> {
+    match bounded_alias_resolution(prefix, rest, limit, stuck, resolve) {
+        AliasResolution::Alias(alias) => Some(alias),
+        AliasResolution::NoAlias | AliasResolution::Unresolved => None,
+    }
+}
+
+fn bounded_alias_resolution(
+    prefix: &str,
+    rest: &str,
+    limit: std::time::Duration,
+    stuck: &'static std::sync::atomic::AtomicUsize,
+    resolve: impl FnOnce(&str, &str) -> Option<String> + Send + 'static,
+) -> AliasResolution {
     use std::sync::atomic::{AtomicU8, Ordering};
     if stuck.load(Ordering::SeqCst) > 0 {
-        return None;
+        return AliasResolution::Unresolved;
     }
     let (tx, rx) = std::sync::mpsc::channel();
     let (prefix, rest) = (prefix.to_owned(), rest.to_owned());
@@ -261,10 +289,10 @@ fn bounded_alias(
         let _ = tx.send(out);
     });
     if spawned.is_err() {
-        return None;
+        return AliasResolution::Unresolved;
     }
     if let Ok(out) = rx.recv_timeout(limit) {
-        return out;
+        return out.map_or(AliasResolution::NoAlias, AliasResolution::Alias);
     }
     // Timed out (or the thread died): count first, then claim; if the thread finishes in between, it releases the
     // count itself, and if it had already finished the claim fails and the count is returned here.
@@ -272,7 +300,7 @@ fn bounded_alias(
     if state.compare_exchange(RUNNING, ABANDONED, Ordering::SeqCst, Ordering::SeqCst).is_err() {
         stuck.fetch_sub(1, Ordering::SeqCst);
     }
-    None
+    AliasResolution::Unresolved
 }
 
 /// The options the policy matches path rules with: `*` does not cross a `/`.
@@ -369,6 +397,25 @@ mod bounded_alias_tests {
         assert_eq!(runs.load(Ordering::SeqCst), 1, "a second resolver ran while the first was stuck");
         let _ = release_tx.send(());
         wait_idle();
+    }
+
+    #[test]
+    fn running_out_of_time_is_unresolved_not_no_alias() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        wait_idle();
+        let slow = bounded_alias_resolution("/x", "/**", Duration::from_millis(50), &TEST_STUCK, |_, _| {
+            std::thread::sleep(Duration::from_millis(400));
+            Some("/late".to_owned())
+        });
+        assert_eq!(slow, AliasResolution::Unresolved, "a resolver that missed its limit is unknown");
+        // While it is still parked a second call is unknown too, not "no alias".
+        let parked = bounded_alias_resolution("/y", "/**", Duration::from_millis(50), &TEST_STUCK, |_, _| None);
+        assert_eq!(parked, AliasResolution::Unresolved, "behind a parked resolver");
+        wait_idle();
+        let none = bounded_alias_resolution("/y", "/**", Duration::from_secs(30), &TEST_STUCK, |_, _| None);
+        assert_eq!(none, AliasResolution::NoAlias, "a resolver that answered nothing is a known no");
+        let alias = bounded_alias_resolution("/y", "/**", Duration::from_secs(30), &TEST_STUCK, |_, _| Some("/a".to_owned()));
+        assert_eq!(alias, AliasResolution::Alias("/a".to_owned()));
     }
 
     #[test]

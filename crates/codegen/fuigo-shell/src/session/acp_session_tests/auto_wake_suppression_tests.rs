@@ -1284,6 +1284,7 @@ async fn handle_bridge_tool_success_runs_consumed_completion_sweep() {
                     effective_tool_name: "get_task_output",
                     drained: DrainedToolSuccess::new(result),
                     concatenated_json_count: 0,
+                    coercion_note: None,
                     model_id: "test-model",
                     tool_parsed_args: &parsed_args,
                     model_output_override: None,

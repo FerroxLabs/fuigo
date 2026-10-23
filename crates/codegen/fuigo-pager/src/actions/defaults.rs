@@ -15,7 +15,10 @@ use super::{ActionDef, ActionId, Category, When};
 /// Driven by [`crate::terminal::TerminalContext::ctrl_dot_unreliable`] (any KKP skip: brand, tmux `extended-keys off`, screen, unknown host).
 /// Host-OS signals add to it: native Windows on a non-branded console, or a Linux binary inside Win32's console pipeline (WSL).
 pub fn ctrl_dot_unreliable() -> bool {
-    terminal_context().ctrl_dot_unreliable() || cfg!(target_os = "windows") || crate::host::is_wsl()
+    terminal_context().ctrl_dot_unreliable()
+        || crate::terminal::kitty_probe_unsupported()
+        || cfg!(target_os = "windows")
+        || crate::host::is_wsl()
 }
 
 /// Choose the one agent-screen action that owns Ctrl+G for this mode.
@@ -438,7 +441,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Rewinds the conversation to an earlier turn, discarding later turns. File changes made after that turn are left as-is.\nPick a turn from the list; a running turn is offered for cancel first. When Confirm before rewind is on (default), each pick asks Yes / Yes, and don't ask again / No. Picking \"Yes, and don't ask again\" turns the setting off in /settings.\nDestructive: later turns are dropped.\nAlso reachable idle with an empty prompt via Esc Esc (within 800ms), same as `/rewind`.",
+                "Rewinds the conversation to an earlier turn, discarding later turns, and restores the files Fuigo's file tools changed after that turn (shell-command and outside edits are not tracked).\nPick a turn from the list; a running turn is offered for cancel first. When Confirm before rewind is on (default), each pick asks Yes (conversation and files) / Yes, conversation only / Yes, files only / Yes, and don't ask again / No. Files you changed since Fuigo's edit are listed and never overwritten unless you choose to. Picking \"Yes, and don't ask again\" turns the setting off in /settings.\nDestructive: later turns are dropped.\nAlso reachable idle with an empty prompt via Esc Esc (within 800ms), same as `/rewind`.",
             ),
         },
         ActionDef {
@@ -709,7 +712,7 @@ pub(super) fn default_actions(
         ActionDef {
             id: ActionId::StashPrompt,
             label: "stash",
-            description: "Stash / pop prompt draft",
+            description: "Stash / pop prompt",
             default_key: key!('s', CONTROL),
             // The escape hatch for terminals that swallow Ctrl+S as XOFF.
             alt_keys: vec![key!('s', ALT)],
@@ -719,7 +722,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Stash your current prompt as a draft.\nCtrl+S sets the draft aside and clears the composer. Ctrl+S on an empty composer restores it. The draft also restores by itself after you send your next prompt. Use Alt+S if your terminal swallows Ctrl+S.\nOne draft at a time: a new stash replaces the old one.",
+                "Stash your current prompt as a draft.\nCtrl+S sets the draft aside and clears the composer. Ctrl+S on an empty composer pops the draft back (unstash). The draft also restores by itself after you send your next prompt. Use Alt+S if your terminal swallows Ctrl+S.\nOne draft at a time: a new stash replaces the old one.",
             ),
         },
         ActionDef {

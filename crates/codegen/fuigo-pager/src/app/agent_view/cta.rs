@@ -996,7 +996,10 @@ mod plugin_cta_notify_tests {
         use crate::app::agent_view::CtaPhase;
         use ratatui::style::Modifier;
         let theme = crate::theme::Theme::terminal();
-        assert!(theme.is_bandless(), "the fixture must be the bandless palette");
+        assert!(
+            theme.is_bandless(),
+            "the fixture must be the bandless palette"
+        );
 
         let mut agent = make_agent();
         agent.plugin_cta.phase = CtaPhase::Matched {

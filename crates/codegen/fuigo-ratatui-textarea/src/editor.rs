@@ -930,14 +930,84 @@ fn byte_is_inside_atomic_range(byte: usize, atomic_byte_ranges: &[Range<usize>])
         .any(|range| byte >= range.start && byte < range.end)
 }
 
+/// The three boundary queries below look only at the text around `byte` (a grapheme cursor reads a bounded neighbourhood),
+/// so an edit in a large buffer costs the edit, not a scan from the start of the buffer. The `_scan` twins walk every
+/// grapheme from the start; they are the reference the tests hold the fast path to and the fallback if the cursor
+/// asks for context it was not given.
+/// Counts walks from the start of the buffer, which the tests require to be zero on the typing path.
+#[cfg(test)]
+pub(crate) mod scan_counter {
+    thread_local! {
+        pub static SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+}
+
 fn is_grapheme_boundary(text: &str, byte: usize) -> bool {
+    if byte == text.len() {
+        return true;
+    }
+    if byte > text.len() || !text.is_char_boundary(byte) {
+        return false;
+    }
+    match GraphemeCursor::new(byte, text.len(), true).is_boundary(text, 0) {
+        Ok(is_boundary) => is_boundary,
+        Err(_) => is_grapheme_boundary_scan(text, byte),
+    }
+}
+
+fn floor_grapheme_boundary(text: &str, byte: usize) -> usize {
+    let mut byte = byte.min(text.len());
+    if byte == text.len() {
+        return byte;
+    }
+    while !text.is_char_boundary(byte) {
+        byte -= 1;
+    }
+    let mut cursor = GraphemeCursor::new(byte, text.len(), true);
+    match cursor.is_boundary(text, 0) {
+        Ok(true) => byte,
+        Ok(false) => match cursor.prev_boundary(text, 0) {
+            Ok(boundary) => boundary.unwrap_or(0),
+            Err(_) => floor_grapheme_boundary_scan(text, byte),
+        },
+        Err(_) => floor_grapheme_boundary_scan(text, byte),
+    }
+}
+
+fn ceil_grapheme_boundary(text: &str, byte: usize) -> usize {
+    let mut byte = byte.min(text.len());
+    if byte == text.len() {
+        return byte;
+    }
+    while !text.is_char_boundary(byte) {
+        byte += 1;
+    }
+    if byte == text.len() {
+        return byte;
+    }
+    let mut cursor = GraphemeCursor::new(byte, text.len(), true);
+    match cursor.is_boundary(text, 0) {
+        Ok(true) => byte,
+        Ok(false) => match cursor.next_boundary(text, 0) {
+            Ok(boundary) => boundary.unwrap_or(text.len()),
+            Err(_) => ceil_grapheme_boundary_scan(text, byte),
+        },
+        Err(_) => ceil_grapheme_boundary_scan(text, byte),
+    }
+}
+
+fn is_grapheme_boundary_scan(text: &str, byte: usize) -> bool {
+    #[cfg(test)]
+    scan_counter::SCANS.with(|c| c.set(c.get() + 1));
     byte == text.len()
         || text
             .grapheme_indices(true)
             .any(|(boundary, _)| boundary == byte)
 }
 
-fn floor_grapheme_boundary(text: &str, byte: usize) -> usize {
+fn floor_grapheme_boundary_scan(text: &str, byte: usize) -> usize {
+    #[cfg(test)]
+    scan_counter::SCANS.with(|c| c.set(c.get() + 1));
     let byte = byte.min(text.len());
     if byte == text.len() {
         return byte;
@@ -949,7 +1019,9 @@ fn floor_grapheme_boundary(text: &str, byte: usize) -> usize {
         .unwrap_or(0)
 }
 
-fn ceil_grapheme_boundary(text: &str, byte: usize) -> usize {
+fn ceil_grapheme_boundary_scan(text: &str, byte: usize) -> usize {
+    #[cfg(test)]
+    scan_counter::SCANS.with(|c| c.set(c.get() + 1));
     let byte = byte.min(text.len());
     if byte == text.len() {
         return byte;

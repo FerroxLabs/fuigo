@@ -163,6 +163,8 @@ pub enum Action {
     },
     /// Open the session picker overlay (from within an active session via /resume).
     ShowSessionPicker,
+    /// `/resume <id or name>`: open the one session it names, else show the picker filtered by the text.
+    ResumeByQuery(String),
     /// The session picker overlay was dismissed without a pick.
     /// Invalidate any in-flight list/search/foreign scan so a late response can't fall through to the welcome picker fields.
     SessionPickerClosed,
@@ -228,6 +230,9 @@ pub enum Action {
         text: String,
         /// Pasted images riding along with the prompt.
         images: Vec<crate::prompt_images::PastedImage>,
+        /// Notice raised when the composer was read, shown when this dispatch ends.
+        /// `None` for producers that carry no composer text (a queue row).
+        image_notice: Option<String>,
     },
     /// Enable session voice mode and start recording (the Ctrl+Space hold-to-talk key-press, on terminals that report key releases).
     /// Start-only, never stops; use [`Self::VoiceStop`], [`Self::VoiceToggle`], or Esc to stop.
@@ -521,6 +526,8 @@ pub enum Action {
     SetRememberToolApprovals(bool),
     /// Toggle the ask_user_question timeout. SHELL-owned; persisted to `[toolset.ask_user_question].timeout_enabled`. Applies to new sessions.
     SetAskUserQuestionTimeoutEnabled(bool),
+    /// `/settings` row for `[features] subagent_model_inheritance`.
+    SetSubagentModelInheritance(bool),
     /// SHELL-owned `keep_text_selection` (`flash` | `hold`); cache and persist.
     SetKeepTextSelection(crate::appearance::TextSelection),
     /// Set the mouse-wheel scroll speed multiplier (1-100).
@@ -553,6 +560,9 @@ pub enum Action {
     SetDefaultSelectedPermission(String),
     /// Set the hunk-tracker mode. Payload is the registry canonical string.
     SetHunkTrackerMode(String),
+    /// Set the persisted startup tool-call density (`compact` | `detailed`) from the settings dialog.
+    /// Unlike `SetToolDensity` (`/density`, session only) this is written to `[ui].tool_density`.
+    SetToolDensityDefault(String),
     /// Set default screen mode (`fullscreen` | `minimal`); restart-required.
     SetScreenMode(String),
     /// Enable/disable the Ctrl+Space / F8 voice-dictation shortcut. SHELL-owned; persisted to `[ui].voice_keybind_enabled`.
@@ -568,6 +578,8 @@ pub enum Action {
     ToggleTimestamps,
     /// Toggle compact mode (reduce user message padding).
     ToggleCompactMode,
+    /// Set tool-call density for this session (`/density`): `Some(true)` compact, `Some(false)` detailed, `None` toggles.
+    SetToolDensity(Option<bool>),
     /// Set compact mode (reduce user message padding).
     SetCompactMode(bool),
     /// Set timestamp display on messages.
@@ -685,6 +697,26 @@ pub enum Action {
     CancelLogin,
     /// User submitted a manually-pasted auth token (loopback mode).
     SubmitAuthCode(String),
+    /// Open the sign-in picker (`/login`): the same rows as the first-run welcome screen.
+    OpenSignInPicker,
+    /// Close the picker without changing anything (`Cancel`, Esc or `q` in the `/login` picker).
+    CancelPicker,
+    /// Start the browser sign-in for a ChatGPT or Grok subscription.
+    SignInSubscription(fuigo_shell::auth::subscription::SubscriptionProvider),
+    /// Abandon a sign-in in progress and return to the picker.
+    CancelSignIn,
+    /// Remove a signed-in subscription from this machine (`/login`). Tokens are deleted locally, not revoked.
+    SignOutSubscription(fuigo_shell::auth::subscription::SubscriptionProvider),
+    /// Show the provider-API-key page of the picker.
+    ProviderKeysPage,
+    /// Return from the provider-API-key page to the main picker.
+    PickerBack,
+    /// Use the Nth model of the welcome "Pick a model:" page for this session.
+    PickWelcomeModel(usize),
+    /// Flip "make my pick the default model" on the "Pick a model:" page.
+    ToggleMakeDefault,
+    /// Say how to use the named provider API key (`other` = a custom endpoint).
+    ProviderKeyInfo(String),
     /// Open the API-key entry screen from the first-run welcome menu.
     EnterApiKey,
     /// User submitted an API key typed or pasted into that screen.
@@ -1002,6 +1034,8 @@ pub enum Action {
     OpenMemoryModal,
     /// Open the hidden `/gboom` easter egg (DOOM-style raycaster modal).
     OpenGboom,
+    /// Open the hidden `/stoke` easter egg (full-screen fire overlay).
+    OpenStoke,
     /// Suspend the TUI and open a configuration file in `$EDITOR`.
     SuspendForEditor {
         path: std::path::PathBuf,
@@ -1019,11 +1053,13 @@ pub enum Action {
     RewindConfirm(usize),
     /// Confirm rewind and turn off `confirm_before_rewind` for future rewinds.
     RewindConfirmNeverAsk(usize),
+    /// Confirm a rewind with an explicit scope (conversation only / files only).
+    RewindConfirmScoped(usize, crate::views::rewind::RewindScope),
+    /// The user's answer to "files changed outside Fuigo since the checkpoint".
+    RewindConflict(crate::views::rewind::ConflictChoice),
     RewindCancelOffer,
     RewindDismiss,
     RewindDismissError,
-    /// Submit an inline edit: conversation-only rewind to that prompt, then resubmit the edited text (state lives on `AgentView::inline_edit`).
-    InlineEditSubmit,
     /// Open the `/jump` turn picker.
     JumpShowPicker,
     /// Jump to a turn by its prompt's stable id and close the picker.
@@ -1852,6 +1888,21 @@ pub enum Effect {
     PollAuthUrl { request_seq: u64 },
     /// Submit a manually-pasted auth code (ext request).
     SubmitAuthCode { request_seq: u64, code: String },
+    /// Sign in to a subscription in the background: bind the callback listener, publish the URL
+    /// for [`Effect::PollSubscriptionUrl`], wait for the browser (or a pasted code), then rebuild
+    /// the model list and authenticate. Aborting the task cancels the attempt.
+    SubscriptionSignIn {
+        request_seq: u64,
+        provider: fuigo_shell::auth::subscription::SubscriptionProvider,
+    },
+    /// Delete a subscription's stored accounts and rebuild the agent's model list.
+    SubscriptionSignOut {
+        provider: fuigo_shell::auth::subscription::SubscriptionProvider,
+    },
+    /// Read the URL [`Effect::SubscriptionSignIn`] published.
+    PollSubscriptionUrl { request_seq: u64 },
+    /// Hand a pasted xAI code to the sign-in in progress.
+    SubscriptionCode { request_seq: u64, code: SecretKey },
     /// Persist an API key through the agent (`fuigo/setApiKey`).
     /// The agent owns `auth.json`, so the key is never written from the TUI
     /// process — in leader mode they are not even the same process.
@@ -2202,6 +2253,9 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
         target_prompt_index: usize,
+        mode: crate::views::rewind::RewindScope,
+        /// `false` is a dry run: the engine reports files and conflicts and changes nothing.
+        force: bool,
     },
     /// Fetch billing/credit usage from the agent's `fuigo/billing` extension.
     /// When `silent` is true the result updates `credit_balance` without pushing a system message into scrollback.
@@ -2698,6 +2752,11 @@ pub enum TaskResult {
     AuthComplete {
         request_seq: u64,
         meta: Option<serde_json::Value>,
+    },
+    /// A subscription's accounts were removed from this machine (or the removal failed).
+    SubscriptionSignedOut {
+        provider: fuigo_shell::auth::subscription::SubscriptionProvider,
+        error: Option<String>,
     },
     /// Authentication failed.
     AuthFailed {

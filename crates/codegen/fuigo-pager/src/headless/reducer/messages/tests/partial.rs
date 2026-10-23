@@ -467,8 +467,13 @@ fn p188_discarded_attempts_never_reach_a_frame() {
             stop_sequence: None,
         }));
         out.extend(r.finish(&end_turn()));
-        let frames: Vec<&serde_json::Value> = out.iter().filter(|l| l["type"] == "assistant").collect();
-        assert_eq!(frames.len(), 1, "partials={partials}: one assistant frame: {out:#?}");
+        let frames: Vec<&serde_json::Value> =
+            out.iter().filter(|l| l["type"] == "assistant").collect();
+        assert_eq!(
+            frames.len(),
+            1,
+            "partials={partials}: one assistant frame: {out:#?}"
+        );
         assert_eq!(
             frames[0]["message"]["content"],
             serde_json::json!([{"type": "text", "text": "A3"}]),
@@ -485,10 +490,20 @@ fn p188_discarded_attempts_never_reach_a_frame() {
                 .iter()
                 .filter(|l| l["event"]["type"] == "message_delta")
                 .collect();
-            assert_eq!(stops.len(), 3, "each dead partial message is closed, then the live one: {out:#?}");
-            assert!(stops[0]["event"]["delta"]["stop_reason"].is_null(), "a void message has no stop reason");
+            assert_eq!(
+                stops.len(),
+                3,
+                "each dead partial message is closed, then the live one: {out:#?}"
+            );
+            assert!(
+                stops[0]["event"]["delta"]["stop_reason"].is_null(),
+                "a void message has no stop reason"
+            );
         } else {
-            assert!(discarded.is_empty(), "nothing streamed, nothing to void: {out:#?}");
+            assert!(
+                discarded.is_empty(),
+                "nothing streamed, nothing to void: {out:#?}"
+            );
             let all = serde_json::to_string(&out).unwrap();
             assert!(!all.contains("A1") && !all.contains("A2"), "{all}");
         }
@@ -525,7 +540,10 @@ fn p188_a_dead_attempts_hosted_call_goes_with_it() {
     out.extend(r.finish(&end_turn()));
     let frames: Vec<&serde_json::Value> = out.iter().filter(|l| l["type"] == "assistant").collect();
     assert_eq!(frames.len(), 1, "{out:#?}");
-    assert_eq!(frames[0]["message"]["content"], serde_json::json!([{"type": "text", "text": "A2"}]));
+    assert_eq!(
+        frames[0]["message"]["content"],
+        serde_json::json!([{"type": "text", "text": "A2"}])
+    );
     assert!(
         !out.iter().any(|l| l["type"] == "user"),
         "no tool_result for the dead call: {out:#?}"
@@ -579,12 +597,18 @@ fn p201_a_failed_attempts_hosted_row_never_reaches_the_transcript() {
             json!([{"type": "text", "text": "A2"}]),
             "{tag}: only the accepted attempt"
         );
-        assert!(!out.iter().any(|l| l["type"] == "user"), "{tag}: no tool_result: {out:#?}");
+        assert!(
+            !out.iter().any(|l| l["type"] == "user"),
+            "{tag}: no tool_result: {out:#?}"
+        );
         // With partials the dead attempt's live `stream_event`s were already sent (and are marked void by
         // `response_discarded`); what must hold in every mode is that no committed line carries the row
         let committed: Vec<&Value> = out.iter().filter(|l| l["type"] != "stream_event").collect();
         let committed = serde_json::to_string(&committed).unwrap();
-        assert!(!committed.contains("h1"), "{tag}: nothing committed of the dead row: {committed}");
+        assert!(
+            !committed.contains("h1"),
+            "{tag}: nothing committed of the dead row: {committed}"
+        );
     }
 }
 
@@ -593,7 +617,12 @@ fn p201_a_failed_attempts_hosted_row_never_reaches_the_transcript() {
 fn p201_a_genuine_hosted_failure_is_still_committed() {
     let mut r = messages(false);
     let mut out = Vec::new();
-    out.extend(r.reduce(StreamEvent::ToolCall(ToolCallEvent::hosted_for_test("h1", "code_interpreter"))));
+    out.extend(
+        r.reduce(StreamEvent::ToolCall(ToolCallEvent::hosted_for_test(
+            "h1",
+            "code_interpreter",
+        ))),
+    );
     out.extend(r.reduce(StreamEvent::ToolCallUpdate(ToolCallUpdateEvent {
         tool_call_id: "h1".into(),
         status: Some(acp::ToolCallStatus::Failed),
@@ -603,5 +632,8 @@ fn p201_a_genuine_hosted_failure_is_still_committed() {
     })));
     out.extend(r.finish(&end_turn()));
     let all = serde_json::to_string(&out).unwrap();
-    assert!(all.contains("tool_use") && all.contains("tool_result"), "{all}");
+    assert!(
+        all.contains("tool_use") && all.contains("tool_result"),
+        "{all}"
+    );
 }

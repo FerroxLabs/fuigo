@@ -1,0 +1,20 @@
+[package]
+license = "Apache-2.0"
+name = "fuigo-egress-proxy"
+version = "0.1.0"
+edition.workspace = true
+description = "Hidden exact-origin local HTTP and CONNECT proxy for Fuigo"
+
+[dependencies]
+async-trait = { workspace = true }
+base64 = { workspace = true }
+httparse = { workspace = true }
+rand = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+fuigo-sandbox = { path = "../fuigo-sandbox", default-features = false }
+fuigo-extra-ca = { path = "../fuigo-extra-ca" }
+
+[lints]
+workspace = true

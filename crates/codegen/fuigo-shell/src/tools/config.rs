@@ -222,6 +222,7 @@ impl ShellToolsetConfig {
             query_params: indexmap::IndexMap::new(),
             env_http_headers: indexmap::IndexMap::new(),
             context_window: 256_000,
+            max_request_bytes: None,
             client_version: None,
             reasoning_effort: None,
             force_http1: false,

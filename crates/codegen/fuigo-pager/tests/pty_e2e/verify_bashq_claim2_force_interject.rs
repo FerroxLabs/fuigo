@@ -69,8 +69,8 @@ async fn verify_bashq_claim2_force_interject() {
         .wait_for_text("CLAIMTWO_FS_OK", Duration::from_secs(30))
         .expect("queued bash executed via send-now");
     harness
-        .wait_for_text("Run (user)", Duration::from_secs(15))
-        .expect("Run (user) chrome for the promoted bash turn");
+        .wait_for_text("Ran (user)", Duration::from_secs(15))
+        .expect("Ran (user) chrome for the promoted bash turn");
 
     let users = all_user_message_blobs(&content);
     assert!(

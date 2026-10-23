@@ -4,6 +4,7 @@
 // CLI printer: stdout goes through `fuigo_tty_utils::cli_println!` (a raw `println!` aborts the
 // process when stdout's reader is gone, R060).
 #![deny(clippy::print_stdout)]
+pub mod catalog;
 mod flow;
 pub(crate) mod inference;
 mod manual;
@@ -12,7 +13,7 @@ mod storage;
 mod tests;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-pub use flow::{LoginAttempt, cli_login};
+pub use flow::{LoginAttempt, cli_login, sign_in_for_tui};
 pub use inference::cli_models;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -20,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub use storage::SubscriptionStore;
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, clap::ValueEnum,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum SubscriptionProvider {
@@ -207,6 +208,26 @@ impl SubscriptionAccess {
         self
     }
 }
+/// The display name from the most recent sign-in, held in memory only (never written to disk) so
+/// the closing "Signed in to ..." line can use it once.
+static SIGNIN_IDENTITY: std::sync::Mutex<Option<(SubscriptionProvider, String)>> =
+    std::sync::Mutex::new(None);
+pub(super) fn remember_signin_identity(provider: SubscriptionProvider, identity: Option<String>) {
+    if let Ok(mut slot) = SIGNIN_IDENTITY.lock() {
+        *slot = identity.map(|name| (provider, name));
+    }
+}
+/// Take (and forget) the display name the last sign-in of `provider` carried, if any.
+pub fn take_signin_identity(provider: SubscriptionProvider) -> Option<String> {
+    let mut slot = SIGNIN_IDENTITY.lock().ok()?;
+    match slot.take() {
+        Some((p, name)) if p == provider => Some(name),
+        other => {
+            *slot = other;
+            None
+        }
+    }
+}
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -247,6 +268,20 @@ impl Credential {
             token: self.access_token.clone(),
             unpersisted: false,
         })
+    }
+}
+
+/// Read one secret line from the controlling terminal with echo off (a Flux key at `fuigo login`).
+/// No terminal is an error; the secret never touches argv, the environment or a log.
+pub async fn prompt_secret() -> Result<String> {
+    #[cfg(unix)]
+    {
+        let file = manual::open_terminal().map_err(|_| SubscriptionError::Terminal)?;
+        manual::read_from(file).await
+    }
+    #[cfg(not(unix))]
+    {
+        Err(SubscriptionError::Terminal)
     }
 }
 

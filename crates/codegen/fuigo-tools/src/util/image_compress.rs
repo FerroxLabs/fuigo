@@ -103,12 +103,18 @@ pub fn re_encode_under_limit(
         };
 
         // --- JPEG candidate (best quality that fits) -------------------------
-        let jpeg_candidate = params.quality_steps.iter().find_map(|&quality| {
-            let mut buf = Vec::new();
-            let mut enc = JpegEncoder::new_with_quality(&mut buf, quality);
-            enc.encode_image(img).ok()?;
-            (buf.len() <= params.max_bytes).then_some(buf)
-        });
+        // A JPEG cannot carry transparency: an image with see-through pixels stays a PNG (shrunk further when it
+        // must be) instead of being flattened.
+        let jpeg_candidate = if has_transparency(img) {
+            None
+        } else {
+            params.quality_steps.iter().find_map(|&quality| {
+                let mut buf = Vec::new();
+                let mut enc = JpegEncoder::new_with_quality(&mut buf, quality);
+                enc.encode_image(img).ok()?;
+                (buf.len() <= params.max_bytes).then_some(buf)
+            })
+        };
 
         // --- Pick the smaller candidate --------------------------------------
         match (png_candidate, jpeg_candidate) {
@@ -132,6 +138,39 @@ pub fn re_encode_under_limit(
         }
         max_side = max_side * 3 / 4;
     }
+}
+
+/// Whether any pixel of `img` is not fully opaque. An alpha channel that is opaque everywhere carries nothing a JPEG would lose.
+fn has_transparency(img: &DynamicImage) -> bool {
+    if !img.color().has_alpha() {
+        return false;
+    }
+    img.to_rgba8().pixels().any(|p| p.0[3] != u8::MAX)
+}
+
+/// The EXIF orientation a decoder reports for `bytes`; no transform when there is none or it cannot be read.
+pub fn exif_orientation(bytes: &[u8]) -> image::metadata::Orientation {
+    use image::ImageDecoder;
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_decoder().ok())
+        .and_then(|mut decoder| decoder.orientation().ok())
+        .unwrap_or(image::metadata::Orientation::NoTransforms)
+}
+
+/// Decode `bytes` with the EXIF orientation applied, so the pixels are upright without the tag.
+pub fn decode_oriented(bytes: &[u8]) -> image::ImageResult<DynamicImage> {
+    use image::ImageDecoder;
+    let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()?
+        .into_decoder()?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = DynamicImage::from_decoder(decoder)?;
+    img.apply_orientation(orientation);
+    Ok(img)
 }
 
 /// Largest target long side whose resize output area stays within `max_pixels`.
@@ -187,6 +226,26 @@ mod tests {
             quality_steps: &[88, 72, 56, 40, 24],
             filter: FilterType::CatmullRom,
         }
+    }
+
+    /// 50.12: noise with a see-through region. A JPEG of it would be smaller than the PNG but cannot carry the
+    /// transparency, so the output has to stay a PNG, shrunk further if it must be.
+    #[test]
+    fn transparent_image_stays_png_when_a_jpeg_would_be_smaller() {
+        let mut rgba = image::RgbaImage::new(800, 800);
+        let mut s: u32 = 0x9e37_79b9;
+        for (x, y, p) in rgba.enumerate_pixels_mut() {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let alpha = if x < 400 && y < 400 { 0 } else { 255 };
+            *p = image::Rgba([(s >> 16) as u8, (s >> 8) as u8, s as u8, alpha]);
+        }
+        let img = DynamicImage::ImageRgba8(rgba);
+        let (bytes, _w, _h, mime) =
+            re_encode_under_limit(&img, &params(700_000, 1568, u64::MAX)).unwrap();
+        assert_eq!(mime, "image/png", "transparency must not be flattened into a JPEG");
+        assert!(bytes.len() <= 700_000);
+        let out = image::load_from_memory(&bytes).unwrap();
+        assert!(out.color().has_alpha(), "the alpha channel must survive");
     }
 
     #[test]

@@ -48,7 +48,7 @@ pub struct Config {
     pub consent: super::consent::ConsentConfig,
     /// `[telemetry]`: only the key the pager persists round-trips.
     pub telemetry: TelemetryPersistConfig,
-    /// `[features]`: only the key the pager persists round-trips.
+    /// `[features]`: only the keys the pager persists round-trip.
     pub features: FeaturesPersistConfig,
 }
 
@@ -107,6 +107,9 @@ pub struct TelemetryPersistConfig {
 pub struct FeaturesPersistConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback_trace_card: Option<bool>,
+    /// `[features] subagent_model_inheritance`: subagents run on the parent's model only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_model_inheritance: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -439,6 +442,48 @@ pub(crate) fn load_mcp_json_servers(cwd: &std::path::Path) -> Vec<acp::McpServer
     }
 
     result
+}
+
+/// Where each config.toml MCP server is defined, for `fuigo inspect` and `fuigo mcp doctor`: the `config.toml` that declares
+/// it, which is a project `.fuigo/config.toml` when one does (the nearest wins, as in the merge), else the user's own.
+pub(crate) fn toml_mcp_server_origins(
+    cwd: &std::path::Path,
+) -> HashMap<String, fuigo_tools::types::config_source::ConfigSource> {
+    use fuigo_tools::types::config_source::ConfigSource;
+    let mut origins = HashMap::new();
+    let global_config = crate::config::load_effective_config()
+        .unwrap_or_else(|_| TomlValue::Table(toml::map::Map::new()));
+    let user_config = fuigo_tools::util::fuigo_home::fuigo_home().join("config.toml");
+    for name in parse_mcp_servers_from_toml(&global_config).into_keys() {
+        origins.insert(name, ConfigSource::ConfigToml { path: user_config.clone() });
+    }
+    // `find_project_configs` is repo-root-first, so a nearer file overwrites.
+    for config_path in crate::config::find_project_configs(cwd) {
+        if let Ok(root) = crate::config::load_config_file(&config_path) {
+            for name in parse_mcp_servers_from_toml(&root).into_keys() {
+                origins.insert(name, ConfigSource::ConfigToml { path: config_path.clone() });
+            }
+        }
+    }
+    origins
+}
+
+/// The `.mcp.json` file each server comes from, from the repository root down to `cwd` (the closest file wins a name).
+pub(crate) fn mcp_json_server_origins(cwd: &std::path::Path) -> HashMap<String, PathBuf> {
+    let mut origins = HashMap::new();
+    // Same order as `load_mcp_json_servers`: closest first, first seen wins.
+    for path in find_mcp_json_files(cwd).iter().rev() {
+        for server in load_mcp_json_file(path) {
+            let name = match &server {
+                acp::McpServer::Http(acp::McpServerHttp { name, .. })
+                | acp::McpServer::Sse(acp::McpServerSse { name, .. })
+                | acp::McpServer::Stdio(acp::McpServerStdio { name, .. }) => name.clone(),
+                _ => continue,
+            };
+            origins.entry(name).or_insert_with(|| path.clone());
+        }
+    }
+    origins
 }
 
 /// All server names from config.toml (including `enabled = false`).

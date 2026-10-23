@@ -4,11 +4,17 @@ use super::*;
 // GC integration tests (`gc/integration_tests.rs`) can share them.
 use crate::test_support::{expire_now, expire_now_forced};
 
-#[test]
-fn a_candidate_the_pass_has_no_time_for_is_kept_and_named() {
+/// Runs a pass whose gate has no time at all over one expiring worktree (plus `strays` other expiring ones sharing
+/// the database) and returns that worktree's path with the report.
+fn pass_with_no_time_for_the_gate(
+    strays: usize,
+) -> (crate::db::FuigoHomeFixture, PathBuf, GcReport) {
     let fx = crate::db::FuigoHomeFixture::new();
     let db = WorktreeDb::open(&fx.home).unwrap();
     let path = expiring_worktree(&db, &fx, "no-time");
+    for n in 0..strays {
+        let _ = expiring_worktree(&db, &fx, &format!("stray-{n}"));
+    }
 
     let report = run_pass(
         &db,
@@ -21,10 +27,48 @@ fn a_candidate_the_pass_has_no_time_for_is_kept_and_named() {
         None,
     )
     .unwrap();
+    // The fixture goes back too: dropping it would delete the worktree before the caller can check it survived.
+    (fx, path, report)
+}
 
-    assert_eq!(report.kept_reasons.get("gate-timed-out"), Some(&1));
+/// The pass names the worktree it had no time for: exactly one `kept` entry for its path, with the gate-timeout
+/// reason. Judged per path, not by a pass-wide total: another expiring record that lands in the same database
+/// (a concurrent writer under host load) is judged by the same pass and would also be kept, which says nothing
+/// about whether THIS worktree was counted once or twice.
+fn assert_kept_once_as_timed_out(path: &Path, report: &GcReport) {
+    let ours: Vec<&KeptWorktree> = report
+        .kept
+        .iter()
+        .filter(|kept| kept.path == path.display().to_string())
+        .collect();
+    assert_eq!(ours.len(), 1, "one worktree, one entry: {:?}", report.kept);
+    assert_eq!(ours[0].reason, KeepReason::GateTimedOut.to_string());
+}
+
+#[test]
+fn a_candidate_the_pass_has_no_time_for_is_kept_and_named() {
+    let (_fx, path, report) = pass_with_no_time_for_the_gate(0);
+
+    assert_kept_once_as_timed_out(&path, &report);
     assert_eq!(report.expired_removed, 0);
     assert!(path.is_dir(), "a worktree nobody judged is still there");
+}
+
+/// The same pass with other expiring candidates in the database: each is kept and counted once, and ours is still
+/// named exactly once. A pass-wide `== 1` fails here as left 2, right 1, which is what a stray record under host load
+/// did to the original assertion.
+#[test]
+fn a_stray_candidate_does_not_change_how_ours_is_kept_and_named() {
+    let (_fx, path, report) = pass_with_no_time_for_the_gate(1);
+
+    assert_kept_once_as_timed_out(&path, &report);
+    assert_eq!(report.expired_removed, 0);
+    assert!(path.is_dir(), "a worktree nobody judged is still there");
+    // Every candidate is counted exactly once: the tally equals the number of named entries, and covers both ours
+    // and the stray (a further unexpected candidate would raise both sides together).
+    let counted = report.kept_reasons.get("gate-timed-out").copied().unwrap_or(0);
+    assert_eq!(counted, report.kept.len() as u64, "{:?}", report.kept);
+    assert!(counted >= 2, "ours and the stray: {:?}", report.kept);
 }
 
 #[test]
@@ -134,6 +178,40 @@ fn expiring_worktree(db: &WorktreeDb, fx: &crate::db::FuigoHomeFixture, name: &s
     ))
     .unwrap();
     path
+}
+
+/// A worktree folder deleted by hand leaves a dead record AND a registration in the source repository. A gc pass that
+/// drops the record must drop the registration too, or the path and branch stay claimed.
+#[test]
+fn gc_of_a_hand_deleted_worktree_also_drops_its_git_registration() {
+    let fx = crate::db::FuigoHomeFixture::new();
+    let db = WorktreeDb::open(&fx.home).unwrap();
+    let path = expiring_worktree(&db, &fx, "hand-deleted");
+    let registrations = fx.home.join("gate-source").join(".git").join("worktrees");
+    assert!(registrations.is_dir() && registrations.read_dir().unwrap().count() == 1, "fixture: one registration");
+
+    std::fs::remove_dir_all(&path).unwrap();
+    let report = gc_worktrees(&db, &GcOptions { dry_run: false, ..Default::default() }).unwrap();
+
+    assert_eq!(report.dead_removed, 1);
+    assert!(db.get("hand-deleted-1").unwrap().is_none(), "the record is gone");
+    let left = registrations.read_dir().map(|d| d.count()).unwrap_or(0);
+    assert_eq!(left, 0, "git must not keep a registration for a folder that no longer exists");
+}
+
+/// 51.11: a worktree whose only untracked content is empty folders holds no work, so an expired one is reclaimed.
+#[test]
+fn gc_reclaims_an_expired_worktree_whose_only_extra_content_is_empty_folders() {
+    let fx = crate::db::FuigoHomeFixture::new();
+    let db = WorktreeDb::open(&fx.home).unwrap();
+    let path = expiring_worktree(&db, &fx, "empty-dirs");
+    std::fs::create_dir_all(path.join("build").join("out").join("deep")).unwrap();
+    std::fs::create_dir_all(path.join("empty")).unwrap();
+
+    let report = gc_worktrees(&db, &expire_now()).unwrap();
+
+    assert_eq!(report.expired_removed, 1, "{report:?}");
+    assert!(!path.exists());
 }
 
 #[test]
@@ -393,12 +471,12 @@ fn effective_max_age_precedence() {
     );
 }
 
-#[test]
-fn run_pass_prunes_orphan_grove_pins_after_grace() {
-    fuigo_test_utils::require_git!();
+/// Seed an aged orphan pin (`refs/fuigo/worktrees/wt-orphan` in a fixture repo,
+/// recorded in the grove's `pin_gc_orphans.json` and `daemon.db`). Returns the
+/// repo path.
+fn seed_aged_orphan_pin(fx: &mut crate::db::FuigoHomeFixture) -> std::path::PathBuf {
     use fuigo_test_utils::git::{git_commit_all, init_git_repo};
 
-    let mut fx = crate::db::FuigoHomeFixture::new();
     let grove = fx.isolate_xdg_grove_data();
     let repo = fx.home.join("src-repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -460,6 +538,15 @@ fn run_pass_prunes_orphan_grove_pins_after_grace() {
     )
     .unwrap();
 
+    repo
+}
+
+#[test]
+fn run_pass_prunes_orphan_grove_pins_after_grace() {
+    fuigo_test_utils::require_git!();
+    let mut fx = crate::db::FuigoHomeFixture::new();
+    let repo = seed_aged_orphan_pin(&mut fx);
+    let pin = "refs/fuigo/worktrees/wt-orphan";
     let db = WorktreeDb::open(&fx.home).unwrap();
     let report = run_pass(&db, &GcOptions::default(), Pass::default(), None, None).unwrap();
     assert!(
@@ -475,4 +562,45 @@ fn run_pass_prunes_orphan_grove_pins_after_grace() {
         .status()
         .unwrap();
     assert!(!shown.success(), "aged orphan pin must be deleted");
+}
+
+/// Regression: the pin sweep reads process-global env (`GROVE_DATA_DIR`,
+/// `XDG_DATA_HOME`, `HOME`). A GC pass on a thread that does NOT hold the grove
+/// env lock used to sweep whatever grove the fixture-owning test had
+/// installed, pruning its orphan pin first; the owner's own pass then examined
+/// an orphan whose pin was already gone and the failure showed up as
+/// `examined 1, pruned 0` (intermittent, only when the passes interleaved).
+#[test]
+fn unfenced_gc_pass_cannot_sweep_a_fixture_owners_grove() {
+    fuigo_test_utils::require_git!();
+    let mut fx = crate::db::FuigoHomeFixture::new();
+    let repo = seed_aged_orphan_pin(&mut fx);
+    let pin = "refs/fuigo/worktrees/wt-orphan";
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let intruder = std::thread::spawn(move || {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = WorktreeDb::open(tmp.path()).unwrap();
+        tx.send(()).unwrap();
+        crate::api::gc::gc_worktrees(&db, &GcOptions::default()).unwrap()
+    });
+    rx.recv().unwrap();
+    // Give the intruder ample time to sweep if nothing stops it.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let db = WorktreeDb::open(&fx.home).unwrap();
+    let report = run_pass(&db, &GcOptions::default(), Pass::default(), None, None).unwrap();
+    assert_eq!(report.pin_gc_pruned, 1, "owner's pass must do the prune: {report:?}");
+    let mut show = std::process::Command::new("git");
+    fuigo_tty_utils::detach_std_command(&mut show);
+    assert!(
+        !show
+            .current_dir(&repo)
+            .args(["show-ref", "--verify", pin])
+            .status()
+            .unwrap()
+            .success()
+    );
+    drop(fx);
+    let _ = intruder.join().unwrap();
 }

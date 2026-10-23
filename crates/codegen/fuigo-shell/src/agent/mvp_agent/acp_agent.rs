@@ -286,6 +286,10 @@ impl acp::Agent for MvpAgent {
             self.cfg.borrow().fuigo_com_config.api_key_auth_disabled(),
         ) {
             tracing::info!("auth: loaded API key from auth.json (fuigo::api_key scope)");
+            // The key arrived after the catalogue's fetch credential was chosen (at bootstrap): fetch the live
+            // catalogue with it now, in the background, so a saved key lists the same models as `FUIGO_API_KEY`.
+            let models_manager = self.models_manager.clone();
+            tokio::task::spawn_local(async move { models_manager.refresh_if_fetch_credential_changed().await });
             fuigo_telemetry::unified_log::info(
                 "auth: loaded API key from auth.json (fuigo::api_key scope)",
                 None,
@@ -681,6 +685,9 @@ impl acp::Agent for MvpAgent {
                     // account: invalidate and refetch exactly as any other identity change does.
                     self.models_manager.note_successful_sign_in();
                     self.models_manager.on_auth_changed().await;
+                } else {
+                    // A saved key adopted here was not there when the catalogue's fetch credential was chosen.
+                    self.models_manager.refresh_if_fetch_credential_changed().await;
                 }
                 self.ensure_telemetry_client();
                 if crate::agent::chat_modes::process_chat_mode_enabled() {

@@ -1119,46 +1119,13 @@ pub(crate) async fn run_shell_child(
             }
         }
     }
-    let agent_mcp_servers: Vec<_> = if definition.mcp_servers.is_empty() {
-        vec![]
-    } else if is_plugin_agent {
-        tracing::warn!(
-            agent = %definition.name,
-            plugin = ?definition.plugin_name,
-            "ignoring mcpServers on plugin agent (not supported for security)"
-        );
-        vec![]
-    } else if !crate::agent::folder_trust::agent_inline_hooks_allowed(definition.scope, || {
-        crate::agent::folder_trust::project_scope_allowed(&ctx.parent_cwd)
-    }) {
-        tracing::warn!(
-            agent = %definition.name,
-            "ignoring mcpServers on untrusted project agent (folder not trusted; re-run with --trust)"
-        );
-        vec![]
-    } else {
-        definition
-                .mcp_servers
-                .iter()
-                .filter_map(|entry| match entry {
-                    fuigo_agent::config::McpServerRef::Named(name) => {
-                        ctx.parent_mcp_configs
-                            .iter()
-                            .find(|s| {
-                                crate::session::mcp_servers::mcp_server_name(s) == name
-                            })
-                            .cloned()
-                            .or_else(|| {
-                                tracing::warn!(agent = %definition.name, server = name, "mcpServers: named ref not found in parent");
-                                None
-                            })
-                    }
-                    fuigo_agent::config::McpServerRef::Inline { name, config } => {
-                        notice_scope.run(|| inline_agent_mcp_server(&definition.name, name, config))
-                    }
-                })
-                .collect()
-    };
+    // Resolved against the parent's merge; the kill switch and managed policy are judged at the parent's cwd.
+    let agent_mcp_servers = crate::session::agent_mcp::materialize_agent_mcp_servers(
+        &definition,
+        &ctx.parent_mcp_configs,
+        &ctx.parent_cwd,
+        notice_scope,
+    );
     let notices = notice_scope.notes();
     if !notices.is_empty() {
         fuigo_telemetry::unified_log::warn(
@@ -1283,6 +1250,7 @@ pub(crate) async fn run_shell_child(
             parent_session_id: Some(ctx.parent_session_id.clone()),
             subagent_type: Some(request.subagent_type.clone()),
             preserve_inherited_system: verbatim_mirror_fork,
+            parent_cwd: Some(ctx.parent_cwd.clone()),
             ..Default::default()
         },
         fuigo_workspace::permission::ClientType::Generic,
@@ -1362,6 +1330,8 @@ pub(crate) async fn run_shell_child(
         ctx.app_builder_deployer_config.clone(),
         ctx.write_file_enabled,
         false,
+        // A child that may itself spawn keeps the parent's model lock.
+        ctx.resolve_subagent_model_inheritance_enabled(),
         ctx.goal_enabled,
         ctx.background_workflows_enabled,
         true,
@@ -2125,33 +2095,4 @@ pub(crate) async fn dispose_worktree_after_completion(
     }
 }
 
-/// An MCP server an agent definition declares inline (`mcpServers: {name: {...}}`), as the child session would spawn it.
-/// A definition is a file a repository (or any user) wrote, not a source that may name the saved API key, so every
-/// reference to the key is removed from the server (P133); `None` when it cannot be parsed.
-pub(crate) fn inline_agent_mcp_server(
-    agent: &str,
-    name: &str,
-    config: &serde_json::Value,
-) -> Option<agent_client_protocol::McpServer> {
-    let parse = |obj: &serde_json::Map<String, serde_json::Value>| {
-        let mut flat = obj.clone();
-        flat.insert("name".to_string(), serde_json::Value::String(name.to_owned()));
-        serde_json::from_value::<agent_client_protocol::McpServer>(serde_json::Value::Object(flat)).ok()
-    };
-    let origin = format!("defined inline by agent `{agent}`");
-    if let serde_json::Value::Object(obj) = config
-        && obj.contains_key("type")
-    {
-        if let Some(server) = parse(obj) {
-            return crate::session::managed_mcp::refuse_saved_key_in_server(server, &origin);
-        }
-        tracing::debug!(agent = %agent, server = name, "ACP wire format parse failed, trying map-keyed");
-    }
-    if let Some(inner_obj) = config.as_object()
-        && let Some(server) = parse(inner_obj)
-    {
-        return crate::session::managed_mcp::refuse_saved_key_in_server(server, &origin);
-    }
-    tracing::warn!(agent = %agent, server = name, "mcpServers: inline config could not be parsed");
-    None
-}
+pub(crate) use crate::session::agent_mcp::inline_agent_mcp_server;

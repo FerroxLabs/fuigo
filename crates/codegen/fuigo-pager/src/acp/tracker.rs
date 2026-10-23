@@ -57,9 +57,7 @@ pub enum WaitingReason {
     /// This covers the gap before the first token after the prompt is sent, and the gap after a tool completes before the next inference step begins.
     Model,
     /// Blocked on a running foreground subagent (`task` / `spawn_subagent`).
-    /// `display` is the fully composed spinner phrase (`Subagent (<desc>): <activity>` / `<N> subagents: …`), already cut to the length budget.
-    /// Unlike `TaskOutput.subject`, it is not a bare subject for `label()` to decorate.
-    /// The view fills it in; the tracker always leaves it `None`.
+    /// Only the view sets `display`, to `Waiting for subagent` or `Waiting for N subagents`.
     Subagent { display: Option<String> },
     /// Blocked polling/awaiting a background task's output (`get_command_or_subagent_output` / `get_task_output`).
     ///
@@ -104,6 +102,15 @@ pub fn format_waiting_for_subject(subject: &str) -> String {
         format!("{clamped}…")
     }
 }
+/// `n == 0` is treated as 1: a `Subagent` wait means at least one child.
+pub fn waiting_on_subagents_subject(n: usize) -> String {
+    let n = n.max(1);
+    if n == 1 {
+        "Waiting for subagent".to_string()
+    } else {
+        format!("Waiting for {n} subagents")
+    }
+}
 impl WaitingReason {
     /// Unit constructor for a task-output wait with no known ids/subject yet.
     /// A known-blocking task-output wait (the only kind `activity()` shows).
@@ -121,10 +128,14 @@ impl WaitingReason {
     pub fn label(&self) -> String {
         match self {
             Self::Model => "Waiting for response…".to_string(),
-            Self::Subagent { display } => match display.as_deref().map(clamp_activity_subject) {
-                Some(display) if !display.is_empty() => format!("{display}…"),
-                _ => "Waiting on subagent…".to_string(),
-            },
+            Self::Subagent { display } => {
+                let subject = display
+                    .as_deref()
+                    .map(clamp_activity_subject)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| waiting_on_subagents_subject(1));
+                format!("{subject}…")
+            }
             Self::TaskOutput {
                 subject: Some(subject),
                 ..
@@ -1652,7 +1663,10 @@ impl AcpUpdateTracker {
             return true;
         }
         // Packet 12: a delivered peer message is ONE preview row (flag on only), never a user prompt row.
-        if meta.prompt_id.as_deref().is_some_and(|p| p.starts_with("peer-message-"))
+        if meta
+            .prompt_id
+            .as_deref()
+            .is_some_and(|p| p.starts_with("peer-message-"))
             && let Some(row) = crate::peer_ui::preview_row_for_wrapped(&text)
         {
             let entry_id = scrollback.push_block(RenderBlock::system_single_line(row));
@@ -1923,6 +1937,24 @@ fn execute_command_from_tool_call(tc: &acp::ToolCall) -> String {
     }
     String::new()
 }
+/// The error line for a command that ended on `signal`.
+/// A cancelled command names itself (first line, cut short), so the line still says which command stopped when the header shows only a description.
+fn execute_signal_message(signal: &str, command: &str) -> String {
+    if signal != "cancelled" {
+        return signal.to_string();
+    }
+    const MAX_CHARS: usize = 60;
+    let first_line = command.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return signal.to_string();
+    }
+    let mut shown: String = first_line.chars().take(MAX_CHARS).collect();
+    if first_line.chars().count() > MAX_CHARS {
+        shown.push('\u{2026}');
+    }
+    format!("{signal}: {shown}")
+}
+
 /// Convert an ACP ToolCall to a RenderBlock.
 ///
 /// Parses `tool_call.kind` to create the appropriate block type, extracting fields from `raw_input` JSON when available.
@@ -1950,7 +1982,7 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
                 }
                 if !success || bash.exit_code != 0 {
                     let error_msg = if let Some(sig) = &bash.signal {
-                        sig.clone()
+                        execute_signal_message(sig, &block.command)
                     } else if bash.exit_code != 0 {
                         format!("exit code {}", bash.exit_code)
                     } else {
@@ -2330,7 +2362,7 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
                     }
                     if !success || bash.exit_code != 0 {
                         let error_msg = if let Some(sig) = &bash.signal {
-                            sig.clone()
+                            execute_signal_message(sig, &block.command)
                         } else if bash.exit_code != 0 {
                             format!("exit code {}", bash.exit_code)
                         } else {

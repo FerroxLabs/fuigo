@@ -129,7 +129,10 @@ mod tests {
     /// P181: tag characters, soft hyphens and line separators must not reach an OSC notification.
     #[test]
     fn notification_text_drops_hidden_characters() {
-        assert_eq!(sanitize_osc_text("a\u{e0041}b\u{00ad}c\u{2028}d\x07"), "abcd");
+        assert_eq!(
+            sanitize_osc_text("a\u{e0041}b\u{00ad}c\u{2028}d\x07"),
+            "abcd"
+        );
         let seq = notification_sequence(
             NotificationProtocol::Osc777,
             "t\u{e0041}",
@@ -144,7 +147,10 @@ mod tests {
             "body",
         )
         .expect("a sequence");
-        assert_eq!(seq.as_ref(), "\x1b]9;body \u{b7} \u{1f468}\u{200d}\u{1f469}\x07");
+        assert_eq!(
+            seq.as_ref(),
+            "\x1b]9;body \u{b7} \u{1f468}\u{200d}\u{1f469}\x07"
+        );
     }
     use crate::terminal::{MultiplexerKind, TerminalContext, TerminalName};
 

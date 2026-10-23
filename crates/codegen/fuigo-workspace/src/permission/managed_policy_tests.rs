@@ -1028,17 +1028,27 @@ fn plugin_load_restriction_judges_the_checkout_origin_not_the_provenance_string(
     assert!(load_ids(&allowed_ab(), &registry).is_empty());
 }
 
-/// Round 7 (LOW, normaliser): the origin check uses the policy's normaliser, so a differently-cased origin of the same
-/// repository is the same repository (it was a false reject).
+/// Round 7 (LOW, normaliser): the origin check uses the policy's normaliser, so an origin whose scheme and host are
+/// spelled in another case is the same repository (it was a false reject). The path is identity: an origin whose
+/// path differs in case is another repository and earns no grant.
 #[test]
 fn plugin_origin_check_uses_the_policy_normaliser() {
     let tmp = tempfile::tempdir().unwrap();
     let mut registry = restricted_registry(tmp.path());
     let repo = installed(tmp.path(), "ok", "https://github.com/a/b.git", "demo");
-    write_origin(&repo.path, "HTTPS://GitHub.com/A/B.git");
+    write_origin(&repo.path, "HTTPS://GitHub.COM/a/b.git");
     let id = repo.plugin_id("demo").unwrap();
     registry.insert("ok".into(), repo);
     assert_eq!(load_ids(&allowed_ab(), &registry), vec![id]);
+
+    let mut registry = restricted_registry(tmp.path());
+    let repo = installed(tmp.path(), "cased", "https://github.com/a/b.git", "demo");
+    write_origin(&repo.path, "HTTPS://GitHub.com/A/B.git");
+    registry.insert("cased".into(), repo);
+    assert!(
+        load_ids(&allowed_ab(), &registry).is_empty(),
+        "a path differing in case is a different repository"
+    );
 }
 
 /// Round 7 (grok-p169-r6.md MEDIUM 2): a plugin `subdir` that is a symlink out of the install dir. The canonical

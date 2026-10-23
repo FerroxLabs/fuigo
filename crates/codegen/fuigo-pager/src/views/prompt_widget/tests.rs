@@ -2,6 +2,13 @@
     use super::*;
     use crate::input::key::key;
 
+    fn at<'a, T>(xs: &'a [T], i: usize) -> &'a T {
+        match xs.get(i) {
+            Some(v) => v,
+            None => panic!("index {i} out of {}", xs.len()),
+        }
+    }
+
     #[test]
     fn submit_via_try_send() {
         let mut pw = PromptWidget::new();
@@ -901,6 +908,25 @@
         let line = paste_chip_display_bytes(PASTE_CHIP_DISPLAY_BYTES + 1);
         let label: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(label, "[Pasted: 10 KB]");
+    }
+
+    /// 51.9: a multi-megabyte paste is one small chip on screen, yet the whole text is what the prompt carries, so the
+    /// session can offload it to a file instead of losing any of it or sending it inline.
+    #[test]
+    fn a_multi_megabyte_paste_is_one_chip_that_carries_the_whole_text() {
+        let mut pw = PromptWidget::new();
+        let text = "lorem ipsum dolor sit amet\n".repeat(120_000); // ~3.2 MB
+        assert!(text.len() > 3_000_000);
+        assert_eq!(pw.handle_paste(&text), PromptEvent::Edited);
+        assert_eq!(pw.textarea.elements().len(), 1);
+        assert_eq!(pw.textarea.text().len(), text.len(), "nothing is trimmed from the paste");
+        assert_eq!(pw.textarea.text(), text);
+        // Typing after it still works and the chip stays one atomic element
+        for ch in "and then my question".chars() {
+            pw.textarea.insert_str(&ch.to_string());
+        }
+        assert_eq!(pw.textarea.elements().len(), 1);
+        assert!(pw.textarea.text().ends_with("and then my question"));
     }
 
     #[test]
@@ -2060,6 +2086,23 @@
     }
 
     #[test]
+    fn insert_image_over_50_mb_is_rejected_with_a_message() {
+        let mut pw = PromptWidget::new();
+        let mut huge = test_image();
+        huge.byte_len = 50_000_001;
+        let msg = pw
+            .insert_image(huge)
+            .expect_err("an image over the 50 MB send limit must not become a chip");
+        assert!(msg.contains("50 MB"), "the message names the limit: {msg}");
+        assert!(pw.images.is_empty());
+        assert!(pw.textarea.text().is_empty(), "no placeholder text is left behind");
+
+        let mut at_limit = test_image();
+        at_limit.byte_len = 50_000_000;
+        assert!(pw.insert_image(at_limit).is_ok(), "exactly 50 MB still attaches");
+    }
+
+    #[test]
     fn text_without_image_chips_strips_only_images() {
         let mut pw = PromptWidget::new();
         pw.set_text("hello world");
@@ -2181,16 +2224,15 @@
         pw.textarea.set_cursor(len);
         pw.insert_image(test_image()).unwrap();
 
-        // Delete the first element via textarea (simulates backspace)
-        pw.textarea.set_cursor(0);
-        let first_id = pw.textarea.elements()[0].id;
-        pw.textarea.inline_element(first_id);
+        // Delete the first chip's text via textarea (simulates backspace)
+        let first_range = at(pw.textarea.elements(), 0).range.clone();
+        pw.textarea.replace_range(first_range, "");
         // Now there's one image element left, but images vec still has 2
 
         let drained = pw.drain_images();
         // Reconciliation should have removed the stale entry
         assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].display_number, 2);
+        assert_eq!(at(&drained, 0).display_number, 2);
         assert!(pw.images.is_empty());
     }
 
@@ -2233,10 +2275,8 @@
         assert_eq!(pw.images.len(), 2);
 
         // Delete the higher-numbered chip (#2). After deletion live==[#1] but the counter must remain 2 so the next insert lands at #3.
-        let second_id = pw.textarea.elements()[1].id;
-        let second_range_start = pw.textarea.elements()[1].range.start;
-        pw.textarea.set_cursor(second_range_start);
-        pw.textarea.inline_element(second_id);
+        let second_range = at(pw.textarea.elements(), 1).range.clone();
+        pw.textarea.replace_range(second_range, "");
 
         // Force the reconciliation that `handle_key` runs after every text edit
         pw.sync_images_with_textarea();
@@ -2249,7 +2289,7 @@
         );
         // Only `#1` survived.
         assert_eq!(pw.images.len(), 1);
-        assert_eq!(pw.images[0].display_number, 1);
+        assert_eq!(at(&pw.images, 0).display_number, 1);
 
         // Next insert lands at #3, NOT a reused #2.
         pw.insert_image(test_image()).unwrap();
@@ -2302,11 +2342,11 @@
         pw.insert_image(test_image()).unwrap(); // #2
 
         // Transient delete of `[Image #2]` mid-prompt.
-        let id2 = pw.textarea.elements()[1].id;
-        let r2_start = pw.textarea.elements()[1].range.start;
-        pw.textarea.set_cursor(r2_start);
-        pw.textarea.inline_element(id2);
+        let r2 = at(pw.textarea.elements(), 1).range.clone();
+        pw.textarea.replace_range(r2, "");
         pw.sync_images_with_textarea();
+        let len = pw.textarea.text().len();
+        pw.textarea.set_cursor(len);
 
         pw.insert_image(test_image()).unwrap(); // MUST be #3
 
@@ -2317,13 +2357,18 @@
             "after a transient #2 delete, the next drop must issue \
              #3 (not reuse #2). Got {numbers:?}",
         );
-        // `inline_element` leaves the deleted chip's text behind as plain characters, so count chip ELEMENTS not text matches
         let live_image_numbers: Vec<usize> = pw
             .textarea
             .elements()
             .iter()
             .filter(|e| e.kind == KIND_IMAGE)
-            .map(|e| parse_image_display_number(&pw.textarea.text()[e.range.clone()]).unwrap_or(0))
+            .map(|e| {
+                pw.textarea
+                    .text()
+                    .get(e.range.clone())
+                    .and_then(parse_image_display_number)
+                    .unwrap_or(0)
+            })
             .collect();
         assert_eq!(
             live_image_numbers,
@@ -3249,10 +3294,9 @@
         pw.insert_image(test_image()).unwrap();
         assert_eq!(pw.images.len(), 2);
 
-        // Delete first element by inlining (simulates backspace removal path).
-        pw.textarea.set_cursor(0);
-        let first_id = pw.textarea.elements()[0].id;
-        pw.textarea.inline_element(first_id);
+        // Delete the first chip's text (simulates backspace removal path).
+        let first_range = at(pw.textarea.elements(), 0).range.clone();
+        pw.textarea.replace_range(first_range, "");
 
         // Drain and build content blocks.
         let images = pw.drain_images();
@@ -4694,4 +4738,435 @@
         assert_eq!(event, PromptEvent::Edited);
         assert_eq!(pw.textarea.text(), "\n beta");
         assert_eq!(pw.textarea.selection_range(), None);
+    }
+
+    /// Inlining a chip leaves its `[Image #N]` text behind; the drain re-chips that text to the record
+    /// that still names it instead of discarding the record.
+    #[test]
+    fn inlined_image_placeholder_is_rechipped_and_drained() {
+        let mut pw = PromptWidget::new();
+        pw.insert_image(test_image()).unwrap();
+        let len = pw.textarea.text().len();
+        pw.textarea.set_cursor(len);
+        pw.insert_image(test_image()).unwrap();
+
+        let first_id = at(pw.textarea.elements(), 0).id;
+        pw.textarea.inline_element(first_id);
+        assert_eq!(pw.textarea.elements().len(), 1);
+
+        pw.rebind_image_placeholders();
+        assert_eq!(
+            pw.textarea
+                .elements()
+                .iter()
+                .filter(|e| e.kind == KIND_IMAGE)
+                .count(),
+            2,
+            "the inlined placeholder must be a chip again"
+        );
+        assert!(pw.unbound_image_placeholders().is_empty());
+
+        let drained = pw.drain_images();
+        assert_eq!(
+            drained.iter().map(|img| img.display_number).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    /// Ctrl+K kills the chip into the kill buffer as plain text; Ctrl+Y yanks it back as text.
+    /// The yanked placeholder re-binds to the retained record, so the send still carries the image.
+    #[test]
+    fn kill_yank_rebinds_image_chip() {
+        let mut pw = PromptWidget::new();
+        pw.insert_image(test_image()).unwrap();
+        pw.textarea.insert_str("what is this");
+        let identity = at(&pw.images, 0).preview.identity();
+
+        pw.handle_key(&key!(Home).to_key_event());
+        pw.handle_key(&key!('k', CONTROL).to_key_event());
+        assert!(pw.textarea.elements().is_empty(), "kill removes the chip");
+        assert!(pw.images.is_empty(), "killed chip parks its record in the undo stash");
+        assert_eq!(pw.image_undo_stash.len(), 1);
+
+        pw.handle_key(&key!('y', CONTROL).to_key_event());
+        assert_eq!(pw.textarea.text(), "[Image #1] what is this");
+        let chips: Vec<_> = pw
+            .textarea
+            .elements()
+            .iter()
+            .filter(|e| e.kind == KIND_IMAGE)
+            .collect();
+        assert_eq!(chips.len(), 1, "yanked placeholder must render as a chip again");
+        assert_eq!(pw.images.len(), 1);
+        assert_eq!(at(&pw.images, 0).element_id, at(&chips, 0).id);
+        assert_eq!(at(&pw.images, 0).preview.identity(), identity);
+        assert!(pw.image_undo_stash.is_empty());
+
+        let drained = pw.drain_images();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(at(&drained, 0).display_number, 1);
+    }
+
+    /// A typed placeholder syncs against the undo stash: the record moves back to `images`.
+    #[test]
+    fn sync_with_placeholder_pulls_record_from_undo_stash() {
+        let mut pw = PromptWidget::new();
+        let mut stashed = test_image();
+        stashed.display_number = 1;
+        pw.push_image_undo_stash_for_test(stashed);
+        pw.textarea.insert_str("look at [Image #1] please");
+
+        pw.sync_images_with_textarea();
+
+        assert!(pw.image_undo_stash.is_empty(), "stash record must bind");
+        assert_eq!(pw.images.len(), 1);
+        let chip = pw
+            .textarea
+            .elements()
+            .iter()
+            .find(|e| e.kind == KIND_IMAGE)
+            .unwrap_or_else(|| panic!("expected a re-chipped image element"));
+        assert_eq!(chip.range, 8..18);
+        assert_eq!(at(&pw.images, 0).element_id, chip.id);
+        assert_eq!(pw.image_counter, 1);
+        assert_eq!(pw.textarea.text(), "look at [Image #1] please");
+    }
+
+    /// `set_images` after `set_text` with a stale chip range (no element restored) binds by text.
+    #[test]
+    fn set_images_rechips_when_stored_range_is_stale() {
+        use crate::app::agent::ChipElement;
+
+        let mut pw = PromptWidget::new();
+        pw.set_text("see [Image #1] now");
+        // Range from an older draft that no longer slices the buffer: `restore_elements` skips it.
+        pw.restore_chip_elements(&[ChipElement {
+            range: 40..50,
+            kind: KIND_IMAGE,
+            display: None,
+        }]);
+        assert!(pw.textarea.elements().is_empty());
+
+        let mut img = test_image();
+        img.display_number = 1;
+        pw.set_images(vec![img]);
+
+        let chip = pw
+            .textarea
+            .elements()
+            .iter()
+            .find(|e| e.kind == KIND_IMAGE)
+            .unwrap_or_else(|| panic!("set_images must re-chip the placeholder"));
+        assert_eq!(chip.range, 4..14);
+        assert_eq!(pw.images.len(), 1);
+        assert_eq!(at(&pw.images, 0).element_id, chip.id);
+        assert!(pw.has_live_image());
+    }
+
+    /// `stash()` re-binds before snapshotting, so `chip_elements` and `images` agree for the queue row.
+    #[test]
+    fn stash_rebinds_before_snapshotting_chip_elements() {
+        let mut pw = PromptWidget::new();
+        let mut stashed = test_image();
+        stashed.display_number = 1;
+        pw.push_image_undo_stash_for_test(stashed);
+        // Plain paste path: no sync runs, so the placeholder is orphan text until the stash.
+        pw.textarea.insert_str("[Image #1] describe");
+
+        let stash = pw.stash();
+
+        assert_eq!(stash.images.len(), 1);
+        assert_eq!(at(&stash.images, 0).display_number, 1);
+        assert_eq!(stash.chip_elements.len(), 1);
+        assert_eq!(at(&stash.chip_elements, 0).range, 0..10);
+        assert_eq!(at(&stash.chip_elements, 0).kind, KIND_IMAGE);
+        assert_eq!(stash.text_without_image_chips(), " describe");
+        assert!(stash.image_undo_stash.is_empty());
+    }
+
+    /// A placeholder no record backs stays plain text and is reported as unbound, never chipped.
+    #[test]
+    fn placeholder_without_record_stays_plain_and_is_unbound() {
+        let mut pw = PromptWidget::new();
+        pw.textarea.insert_str("recall [Image #1] and [Image #3]");
+
+        pw.sync_images_with_textarea();
+
+        assert!(pw.textarea.elements().is_empty());
+        assert!(pw.images.is_empty());
+        assert_eq!(pw.unbound_image_placeholders(), vec![1, 3]);
+        assert_eq!(pw.textarea.text(), "recall [Image #1] and [Image #3]");
+        assert!(pw.drain_images().is_empty());
+    }
+
+    /// Re-chip binds up to `IMAGE_CAP`; a placeholder past the cap stays plain and unbound.
+    #[test]
+    fn rechip_respects_image_cap() {
+        let mut pw = PromptWidget::new();
+        for _ in 0..PromptWidget::IMAGE_CAP {
+            pw.insert_image(test_image()).unwrap();
+        }
+        let extra_number = PromptWidget::IMAGE_CAP + 1;
+        let mut extra = test_image();
+        extra.display_number = extra_number;
+        pw.push_image_undo_stash_for_test(extra);
+        pw.textarea
+            .insert_str(&crate::prompt_images::display_text(extra_number));
+
+        pw.sync_images_with_textarea();
+
+        assert_eq!(pw.images.len(), PromptWidget::IMAGE_CAP);
+        assert_eq!(
+            pw.textarea
+                .elements()
+                .iter()
+                .filter(|e| e.kind == KIND_IMAGE)
+                .count(),
+            PromptWidget::IMAGE_CAP
+        );
+        assert_eq!(pw.image_undo_stash.len(), 1, "the record past the cap stays stashed");
+        assert_eq!(pw.unbound_image_placeholders(), vec![extra_number]);
+
+        // Kill the line, then undo: the ten chips come back before their records re-bind, so the
+        // extra placeholder must not grab the budget they still need.
+        pw.handle_key(&key!(Home).to_key_event());
+        pw.handle_key(&key!('k', CONTROL).to_key_event());
+        assert!(pw.images.is_empty());
+        assert_eq!(pw.image_undo_stash.len(), PromptWidget::IMAGE_CAP + 1);
+        pw.handle_key(&key!('z', CONTROL).to_key_event());
+        assert_eq!(
+            pw.textarea
+                .elements()
+                .iter()
+                .filter(|e| e.kind == KIND_IMAGE)
+                .count(),
+            PromptWidget::IMAGE_CAP
+        );
+        assert_eq!(pw.images.len(), PromptWidget::IMAGE_CAP);
+        assert_eq!(pw.unbound_image_placeholders(), vec![extra_number]);
+
+        let drained = pw.drain_images();
+        assert_eq!(drained.len(), PromptWidget::IMAGE_CAP);
+        let mut numbers: Vec<usize> = drained.iter().map(|img| img.display_number).collect();
+        numbers.sort_unstable();
+        assert_eq!(numbers, (1..=PromptWidget::IMAGE_CAP).collect::<Vec<_>>());
+    }
+
+    /// `[Image #N]` inside a paste chip is that chip's content: neither re-chipped nor reported.
+    #[test]
+    fn rechip_skips_placeholder_inside_paste_chip() {
+        let mut pw = PromptWidget::new();
+        let mut stashed = test_image();
+        stashed.display_number = 1;
+        pw.push_image_undo_stash_for_test(stashed);
+        pw.textarea.insert_element(
+            "line one\n[Image #1]\nline three\nline four",
+            KIND_PASTE,
+            None,
+        );
+
+        pw.sync_images_with_textarea();
+
+        assert_eq!(pw.textarea.elements().len(), 1);
+        assert_eq!(at(pw.textarea.elements(), 0).kind, KIND_PASTE);
+        assert!(pw.images.is_empty());
+        assert_eq!(pw.image_undo_stash.len(), 1);
+        assert!(pw.unbound_image_placeholders().is_empty());
+    }
+
+    /// A restored range an element of the same kind already covers is skipped, never doubled.
+    #[test]
+    fn restore_chip_elements_skips_already_covered_range() {
+        use crate::app::agent::ChipElement;
+
+        let mut pw = PromptWidget::new();
+        pw.set_text("[Image #1] and more");
+        pw.restore_chip_elements(&[ChipElement {
+            range: 0..10,
+            kind: KIND_IMAGE,
+            display: None,
+        }]);
+        let first_id = at(pw.textarea.elements(), 0).id;
+
+        pw.restore_chip_elements(&[
+            ChipElement {
+                range: 0..10,
+                kind: KIND_IMAGE,
+                display: None,
+            },
+            ChipElement {
+                range: 11..14,
+                kind: KIND_FILE_REF,
+                display: None,
+            },
+        ]);
+
+        let elements: Vec<_> = pw
+            .textarea
+            .elements()
+            .iter()
+            .map(|e| (e.kind, e.range.clone()))
+            .collect();
+        assert_eq!(elements, vec![(KIND_IMAGE, 0..10), (KIND_FILE_REF, 11..14)]);
+        assert_eq!(at(pw.textarea.elements(), 0).id, first_id);
+    }
+
+    /// External restore sequence (`set_text` → `restore_chip_elements` → `set_images`) into a composer
+    /// whose undo stash holds a stale record with the same number: the restored record binds once,
+    /// no second element appears, and the stash record is not silently dropped.
+    #[test]
+    fn rewind_restore_with_stale_undo_stash_binds_stashed_image_once() {
+        use crate::app::agent::ChipElement;
+
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("stale.png");
+        std::fs::write(&staged, b"stale").unwrap();
+        let mut stale = test_image();
+        stale.staged_temp_path = Some(staged.clone());
+
+        let mut pw = PromptWidget::new();
+        pw.insert_image(stale).unwrap();
+        // Backspace twice: the separator, then the chip; the record parks in the undo stash.
+        pw.handle_key(&key!(Backspace).to_key_event());
+        pw.handle_key(&key!(Backspace).to_key_event());
+        assert!(pw.text().is_empty());
+        assert!(pw.images.is_empty());
+        assert_eq!(pw.image_undo_stash.len(), 1);
+        let stale_identity = at(&pw.image_undo_stash, 0).preview.identity();
+
+        let mut restored = test_image();
+        restored.display_number = 1;
+        restored.encoded_bytes = Some(vec![7u8; 16].into());
+        let restored_identity = restored.preview.identity();
+        pw.set_text("look [Image #1] ");
+        pw.restore_chip_elements(&[ChipElement {
+            range: 5..15,
+            kind: KIND_IMAGE,
+            display: None,
+        }]);
+        pw.set_images(vec![restored]);
+
+        let chips: Vec<_> = pw
+            .textarea
+            .elements()
+            .iter()
+            .filter(|e| e.kind == KIND_IMAGE)
+            .collect();
+        assert_eq!(chips.len(), 1, "exactly one chip element over the placeholder");
+        assert_eq!(at(&chips, 0).range, 5..15);
+        assert_eq!(pw.images.len(), 1);
+        assert_eq!(at(&pw.images, 0).element_id, at(&chips, 0).id);
+        assert_eq!(at(&pw.images, 0).preview.identity(), restored_identity);
+        assert_eq!(pw.image_undo_stash.len(), 1, "the stale stash record survives");
+        assert_eq!(at(&pw.image_undo_stash, 0).preview.identity(), stale_identity);
+
+        // A duplicate placeholder names a number a live chip already carries: it stays plain and
+        // must not pull the stale stash record.
+        pw.append_text("[Image #1]");
+        pw.rebind_image_placeholders();
+        assert_eq!(image_chip_count(&pw), 1, "the duplicate placeholder stays plain text");
+        assert_eq!(pw.images.len(), 1);
+        assert_eq!(pw.image_undo_stash.len(), 1, "the stale stash record stays stashed");
+
+        // Kill the line and undo: the chip comes back before its record re-binds, and the duplicate
+        // still must not claim a record. The drain sends the restored image exactly once.
+        pw.handle_key(&key!(Home).to_key_event());
+        pw.handle_key(&key!('k', CONTROL).to_key_event());
+        assert!(pw.images.is_empty());
+        assert_eq!(pw.image_undo_stash.len(), 2, "both records wait in the stash");
+        pw.handle_key(&key!('z', CONTROL).to_key_event());
+        assert_eq!(pw.textarea.text(), "look [Image #1] [Image #1]");
+        assert_eq!(image_chip_count(&pw), 1, "the duplicate placeholder stays plain text");
+        assert_eq!(pw.images.len(), 1);
+        assert_eq!(at(&pw.images, 0).preview.identity(), restored_identity);
+        // The same-number stale record is no redo target, but it still owns its staged file.
+        assert_eq!(pw.image_undo_stash.len(), 1, "the stale record survives the resync");
+        assert_eq!(at(&pw.image_undo_stash, 0).preview.identity(), stale_identity);
+        assert!(staged.exists(), "a stashed record's staged file must not leak or vanish");
+
+        let drained = pw.drain_images();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(at(&drained, 0).preview.identity(), restored_identity);
+        assert_eq!(pw.image_undo_stash.len(), 1);
+        assert!(staged.exists());
+    }
+
+    fn image_chip_count(pw: &PromptWidget) -> usize {
+        pw.textarea
+            .elements()
+            .iter()
+            .filter(|e| e.kind == KIND_IMAGE)
+            .count()
+    }
+
+    /// Ctrl+C releases the records; undo restores the chip element without one. That chip is
+    /// reported as unbound instead of silently sending as text.
+    #[test]
+    fn undo_after_clear_restores_recordless_chip_which_is_unbound() {
+        let mut pw = PromptWidget::new();
+        pw.insert_image(test_image()).unwrap();
+        pw.handle_key(&key!('c', CONTROL).to_key_event());
+        assert!(pw.text().is_empty());
+        assert!(pw.images.is_empty());
+        assert!(pw.image_undo_stash.is_empty());
+
+        pw.handle_key(&key!('z', CONTROL).to_key_event());
+
+        assert_eq!(pw.textarea.text(), "[Image #1] ");
+        assert_eq!(pw.textarea.elements().len(), 1);
+        assert!(pw.images.is_empty(), "no record can back the restored chip");
+        assert_eq!(pw.unbound_image_placeholders(), vec![1]);
+        assert!(pw.drain_images().is_empty());
+    }
+
+    /// A plain `[Image #1]` next to the bound chip `[Image #1]` is a duplicate of an image that is
+    /// on the wire once, so it is not reported as unbound; a number no record backs still is.
+    #[test]
+    fn duplicate_placeholder_of_attached_chip_is_not_reported_unbound() {
+        let mut pw = PromptWidget::new();
+        pw.insert_image(test_image()).unwrap();
+        pw.append_text("and [Image #1] again");
+        assert_eq!(pw.textarea.text(), "[Image #1] and [Image #1] again");
+        assert_eq!(image_chip_count(&pw), 1);
+
+        assert!(pw.unbound_image_placeholders().is_empty());
+
+        pw.rebind_image_placeholders();
+        assert_eq!(image_chip_count(&pw), 1, "the duplicate stays plain text");
+        assert_eq!(pw.images.len(), 1);
+        assert!(pw.unbound_image_placeholders().is_empty());
+
+        // A number with no record behind it is still reported, once per number.
+        pw.append_text(" [Image #2] [Image #2]");
+        assert_eq!(pw.unbound_image_placeholders(), vec![2]);
+    }
+
+    /// A recalled history line names another send's images. A `[Image #1]` in it must not pick up
+    /// the record the current draft (or its undo stash) still holds under that number.
+    #[test]
+    fn set_text_discarding_images_releases_draft_and_stash_records() {
+        let mut pw = PromptWidget::new();
+        pw.insert_image(test_image()).unwrap();
+        let mut stashed = test_image();
+        stashed.display_number = 2;
+        pw.push_image_undo_stash_for_test(stashed);
+        assert_eq!(pw.textarea.text(), "[Image #1] ");
+        assert_eq!(pw.images.len(), 1);
+        assert_eq!(pw.image_undo_stash_len(), 1);
+
+        pw.set_text_discarding_images("[Image #1] older prompt");
+
+        assert_eq!(pw.textarea.text(), "[Image #1] older prompt");
+        assert_eq!(image_chip_count(&pw), 0, "the recalled placeholder is plain text");
+        assert!(pw.images.is_empty());
+        assert_eq!(pw.image_undo_stash_len(), 0);
+        assert_eq!(pw.image_counter, 0);
+        assert_eq!(pw.unbound_image_placeholders(), vec![1]);
+
+        // The send-time re-bind has no record left to pull; the placeholder stays unbound.
+        pw.rebind_image_placeholders();
+        assert_eq!(image_chip_count(&pw), 0);
+        assert!(pw.images.is_empty());
+        assert_eq!(pw.unbound_image_placeholders(), vec![1]);
+        assert!(pw.drain_images().is_empty());
     }

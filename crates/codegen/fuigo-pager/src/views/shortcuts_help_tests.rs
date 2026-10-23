@@ -169,6 +169,35 @@ fn filter_matches_against_key_display() {
     );
 }
 
+/// Each query word matches on its own against every field, including the long help.
+#[test]
+fn filter_finds_stash_by_natural_queries() {
+    let registry = crate::actions::ActionRegistry::defaults();
+    let entries = build_entries(&[When::PromptFocused], &registry, false);
+    let stash_row = |filtered: &[usize]| {
+        filtered.iter().any(|&i| {
+            matches!(
+                entries.get(i),
+                Some(ShortcutsHelpEntry::Hint {
+                    action_id: Some(ActionId::StashPrompt),
+                    ..
+                })
+            )
+        })
+    };
+
+    for query in ["pop stash", "stash pop", "pop a stash", "unstash"] {
+        let filtered = filter_entries(&entries, query, false, &no_collapsed());
+        assert!(stash_row(&filtered), "{query:?} must find the stash row");
+    }
+
+    let filtered = filter_entries(&entries, "stash zzz", false, &no_collapsed());
+    assert!(
+        !stash_row(&filtered),
+        "a word matching nothing must exclude the row",
+    );
+}
+
 #[test]
 fn filter_keeps_both_headers_when_both_sections_match() {
     let entries = vec![
@@ -885,8 +914,6 @@ fn initial_state_selects_first_hint_not_header() {
     let state = build_initial_picker_state(&entries);
     assert_eq!(state.selected, 1, "selected should land on first Hint");
 }
-
-// ── handle_input tests ───────────────────────────────────────
 
 fn make_key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
     crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
@@ -1665,8 +1692,6 @@ fn vim_i_enters_search_and_printables_type_afterward() {
     assert_eq!(type_j, ShortcutsHelpOutcome::Changed);
     assert_eq!(state.query(), "j", "printables must type in active search");
 }
-
-// ── vim_mode tests ───────────────────────────────────────────
 
 #[test]
 fn vim_mode_jk_navigate_without_starting_search() {

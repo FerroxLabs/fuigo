@@ -1096,3 +1096,46 @@ async fn session_end_cancels_in_flight_start_hook() {
     })
     .await;
 }
+
+/// Ctrl+C on a running goal pauses it, so its timers stop and `/goal resume` continues it.
+#[tokio::test(flavor = "current_thread")]
+async fn ctrl_c_pauses_the_active_goal() {
+    run(async {
+        let mut h = Harness::new().await;
+        h.start_turn("p1").await;
+        set_goal_harness_for_tests(&h.actor);
+        h.actor.goal_tracker.lock().create_goal(
+            "goal".into(),
+            "objective".into(),
+            None,
+            0,
+            "2026-01-01T00:00:00Z".into(),
+            None,
+        );
+        assert_eq!(
+            h.actor.goal_tracker.lock().status(),
+            Some(crate::session::goal_tracker::GoalStatus::Active)
+        );
+        let (cmd, _fired) = h.spawn_loop().await;
+
+        cmd.send(SessionCommand::Cancel(crate::session::CancelOptions {
+            cancel_subagents: true,
+            trigger: Some(CancelTrigger::CtrlC),
+            user_initiated: true,
+            ..Default::default()
+        }))
+        .expect("the loop is running");
+
+        let tracker = h.actor.goal_tracker.clone();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while tracker.lock().status()
+                != Some(crate::session::goal_tracker::GoalStatus::UserPaused)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Ctrl+C must pause the active goal");
+    })
+    .await;
+}

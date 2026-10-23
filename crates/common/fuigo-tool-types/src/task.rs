@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 
 /// Input for the `task` tool — launches a subagent to handle a task
 /// autonomously.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+///
+/// Serde is manual (see [`TaskToolInputDe`]): a missing `subagent_type` key is an omitted type, which hosts may
+/// replace with an implicit type and which replays without gaining a key.
+#[derive(Debug, Clone, JsonSchema)]
 pub struct TaskToolInput {
     /// The full task prompt for the subagent to execute.
     #[schemars(description = "The full task prompt for the subagent to execute.")]
@@ -27,6 +30,12 @@ pub struct TaskToolInput {
     )]
     #[serde(default = "default_subagent_type")]
     pub subagent_type: String,
+
+    /// True when the JSON key was present with a real value. In-process constructors leave this false, so a default
+    /// `general-purpose` string is still an omitted type.
+    #[schemars(skip)]
+    #[serde(default, skip_serializing)]
+    pub subagent_type_specified: bool,
 
     /// Whether to run the subagent in the background.
     ///
@@ -117,6 +126,103 @@ pub struct TaskToolInput {
 /// Default `subagent_type` for [`TaskToolInput`] when the caller omits it.
 pub fn default_subagent_type() -> String {
     "general-purpose".to_string()
+}
+
+/// Wire shape for [`TaskToolInput`]. A missing or placeholder `subagent_type` is omitted; a present value, including
+/// `general-purpose`, is explicit.
+#[derive(Deserialize)]
+struct TaskToolInputDe {
+    prompt: String,
+    description: String,
+    #[serde(default)]
+    subagent_type: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_lenient::deserialize_lenient_bool"
+    )]
+    run_in_background: bool,
+    #[serde(default)]
+    isolation: Option<SubagentIsolationMode>,
+    #[serde(default)]
+    resume_from: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    task_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TaskToolInputSer<'a> {
+    prompt: &'a str,
+    description: &'a str,
+    // An omitted type must not gain a `subagent_type` key when the input is replayed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subagent_type: Option<&'a str>,
+    run_in_background: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    isolation: Option<&'a SubagentIsolationMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resume_from: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cwd: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a str>,
+    task_id: Option<&'a str>,
+}
+
+impl Serialize for TaskToolInput {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        TaskToolInputSer {
+            prompt: &self.prompt,
+            description: &self.description,
+            subagent_type: self
+                .subagent_type_specified
+                .then_some(self.subagent_type.as_str()),
+            run_in_background: self.run_in_background,
+            isolation: self.isolation.as_ref(),
+            resume_from: self.resume_from.as_deref(),
+            cwd: self.cwd.as_deref(),
+            model: self.model.as_deref(),
+            task_id: self.task_id.as_deref(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskToolInput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        TaskToolInputDe::deserialize(deserializer).map(Self::from)
+    }
+}
+
+impl From<TaskToolInputDe> for TaskToolInput {
+    fn from(raw: TaskToolInputDe) -> Self {
+        let specified = raw.subagent_type.as_deref().is_some_and(is_not_sentinel);
+        Self {
+            prompt: raw.prompt,
+            description: raw.description,
+            subagent_type: raw
+                .subagent_type
+                .filter(|value| is_not_sentinel(value))
+                .unwrap_or_else(default_subagent_type),
+            subagent_type_specified: specified,
+            run_in_background: raw.run_in_background,
+            capability_mode: None,
+            isolation: raw.isolation,
+            resume_from: raw.resume_from,
+            cwd: raw.cwd,
+            model: raw.model,
+            task_id: raw.task_id,
+        }
+    }
 }
 
 /// True when `s` is not a model-emitted placeholder (`""`, `"null"`, `"none"`,
@@ -468,6 +574,94 @@ pub fn format_subagent_auto_backgrounded(
         text.push_str(BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK);
     }
     text
+}
+
+/// What ended the turn a foreground `task` call was blocked in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForegroundSpawnInterrupt {
+    /// A send-now message cancelled the turn to run next.
+    UserSentMessage,
+    /// The user stopped the turn.
+    UserStoppedTurn,
+}
+
+impl ForegroundSpawnInterrupt {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UserSentMessage => "user_sent_message",
+            Self::UserStoppedTurn => "user_stopped_turn",
+        }
+    }
+}
+
+/// Where a foreground child stood when its turn ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandedOffSubagentState {
+    Running,
+    Queued,
+    Finished,
+    Cancelled,
+}
+
+impl HandedOffSubagentState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Queued => "queued",
+            Self::Finished => "finished",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// The result a foreground `task` call gets when its turn ended before the child did: the child was moved to the
+/// background (or had already finished), and the model is told so instead of reading that the call never ran.
+///
+/// `notified_on_completion` gates the notification promise, as in [`format_subagent_auto_backgrounded`].
+pub fn format_subagent_backgrounded_on_turn_end(
+    subagent_id: &str,
+    subagent_type: &str,
+    description: &str,
+    naming: &BackgroundNoticeNaming,
+    interrupt: ForegroundSpawnInterrupt,
+    state: HandedOffSubagentState,
+    notified_on_completion: bool,
+) -> String {
+    let cause = match interrupt {
+        ForegroundSpawnInterrupt::UserSentMessage => "the user's message ended this turn",
+        ForegroundSpawnInterrupt::UserStoppedTurn => "the user stopped this turn",
+    };
+    let notify_clause = if notified_on_completion {
+        " — you will be notified when it completes"
+    } else {
+        ""
+    };
+    let headline = match state {
+        HandedOffSubagentState::Running => format!(
+            "Subagent was moved to the background because {cause}. It was not cancelled and \
+             is still running{notify_clause} — do not spawn it again."
+        ),
+        HandedOffSubagentState::Queued => format!(
+            "Subagent was moved to the background because {cause}. It was not cancelled and \
+             is queued to start when a subagent slot frees{notify_clause} — do not spawn it \
+             again."
+        ),
+        HandedOffSubagentState::Finished => format!(
+            "Subagent finished, but {cause} before its result was delivered here — do not \
+             spawn it again."
+        ),
+        HandedOffSubagentState::Cancelled => {
+            "Subagent was cancelled before its result was delivered here.".to_owned()
+        }
+    };
+    let result_line = background_result_line(subagent_id, naming);
+    format!(
+        "{headline}\n\
+         subagent_id: {subagent_id}\n\
+         type: {subagent_type}\n\
+         description: {description}\n\n\
+         {result_line}"
+    )
 }
 
 /// Render the full model-facing completion block for a finished subagent:
@@ -1146,7 +1340,7 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          - When the agent is done, it returns a single message with its agent ID. Use that ID to resume the agent later for follow-up work.\n\
          - {run_in_background_param}: defaults to false. The subagent runs to completion and its final report is returned in this same call, so no follow-up call is needed; several {task_tool} calls in one response still run in parallel. Set {run_in_background_param}=true only for work you do not need before your next step: the call then returns a subagent_id immediately; continue your own work, and when you need the report fetch it once with {background_retrieval_tool} with timeout_ms omitted (it waits for completion). Never poll.\n\
          - Subagents receive a compacted version of project instructions (AGENTS.md). If the task requires detailed conventions (e.g., build rules, testing patterns), include the relevant rules directly in the prompt.\n\
-         - When using the {task_tool} tool, you must specify a {subagent_type_param} parameter to select which agent type to use.\n\
+         - The {subagent_type_param} parameter is optional: omit it for a general-purpose agent, or set it to one of the agent types above when the task fits that agent better.\n\
          - When launching independent subagents, you MUST incorporate the results into the task based on requirements BEFORE concluding.\n\n\
          Resuming a previous agent (resume_from):\n\
          - Use {resume_from_param} to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior {task_tool} call. A resumed agent keeps its full transcript and tool state, so you only need to describe what changed since the last run — don't re-explain the original task.\n\
@@ -1447,6 +1641,7 @@ mod tests {
             prompt: "p".into(),
             description: "d".into(),
             subagent_type: default_subagent_type(),
+            subagent_type_specified: false,
             run_in_background: false,
             capability_mode: None,
             isolation: None,
@@ -1458,6 +1653,54 @@ mod tests {
         let value = serde_json::to_value(&input).unwrap();
         assert!(value.get("model").is_none());
         assert!(value.get("capability_mode").is_none());
+    }
+
+    /// A missing `subagent_type` key is an omitted type: it defaults to general-purpose, is not marked specified,
+    /// and replays without gaining the key.
+    #[test]
+    fn omitted_subagent_type_is_unspecified_and_replays_without_the_key() {
+        let input: TaskToolInput =
+            serde_json::from_str(r#"{"description":"d","prompt":"p"}"#).unwrap();
+        assert_eq!(input.subagent_type, "general-purpose");
+        assert!(!input.subagent_type_specified);
+        let replay = serde_json::to_value(&input).unwrap();
+        assert!(replay.get("subagent_type").is_none(), "{replay}");
+        let again: TaskToolInput = serde_json::from_value(replay).unwrap();
+        assert!(!again.subagent_type_specified);
+    }
+
+    /// Model placeholders (`""`, `"null"`, `"none"`) in the type slot are an omitted type, not a type named "null".
+    #[test]
+    fn placeholder_subagent_type_is_an_omitted_type() {
+        for placeholder in ["", "  ", "null", "None", "undefined"] {
+            let json = serde_json::json!({"description": "d", "prompt": "p", "subagent_type": placeholder});
+            let input: TaskToolInput = serde_json::from_value(json).unwrap();
+            assert_eq!(input.subagent_type, "general-purpose", "{placeholder:?}");
+            assert!(!input.subagent_type_specified, "{placeholder:?}");
+        }
+    }
+
+    /// A present key is kept: an explicit `general-purpose` stays explicit and an explicit `explore` replays.
+    #[test]
+    fn present_subagent_type_is_specified_and_replays() {
+        for name in ["general-purpose", "explore", "my-custom-agent"] {
+            let json = serde_json::json!({"description": "d", "prompt": "p", "subagent_type": name});
+            let input: TaskToolInput = serde_json::from_value(json).unwrap();
+            assert_eq!(input.subagent_type, name);
+            assert!(input.subagent_type_specified, "{name}");
+            let replay = serde_json::to_value(&input).unwrap();
+            assert_eq!(replay["subagent_type"], name);
+        }
+    }
+
+    /// `subagent_type` is optional on the model-facing schema, and the in-process flag is not advertised.
+    #[test]
+    fn task_schema_leaves_subagent_type_optional_and_hides_the_flag() {
+        let schema = serde_json::to_value(schemars::schema_for!(TaskToolInput)).unwrap();
+        assert!(schema["properties"].get("subagent_type").is_some());
+        assert!(schema["properties"].get("subagent_type_specified").is_none());
+        let required = schema["required"].as_array().cloned().unwrap_or_default();
+        assert!(!required.iter().any(|name| name == "subagent_type"), "{required:?}");
     }
 
     #[test]
@@ -1571,7 +1814,8 @@ mod tests {
             !desc.contains("one long timeout_ms") && !desc.contains("short polls"),
             "background retrieval must be a single fetch with timeout_ms omitted, never a long poll: {desc}"
         );
-        assert!(desc.contains("you must specify a subagent_type parameter"));
+        assert!(desc.contains("The subagent_type parameter is optional: omit it for a general-purpose agent"));
+        assert!(!desc.contains("you must specify"));
         assert!(desc.contains(
             "When launching independent subagents, you MUST incorporate the results into the task based on requirements BEFORE concluding."
         ));
@@ -1763,7 +2007,8 @@ mod tests {
                 isolation_param: "${{ params.task.isolation }}",
             },
         );
-        assert!(desc.contains("When using the ${{ tools.by_kind.task }} tool"));
+        assert!(desc.contains("The ${{ params.task.subagent_type }} parameter is optional"));
+        assert!(desc.contains("several ${{ tools.by_kind.task }} calls in one response"));
         assert!(desc.contains("${{ tools.by_kind.read }}"));
         assert!(desc.contains(
             "${{ params.task.run_in_background }}: defaults to false. The subagent runs to completion and its final report is returned in this same call"
@@ -2092,6 +2337,63 @@ mod tests {
             !quiet.contains("you will be notified"),
             "no notification promise without system reminders: {quiet}"
         );
+    }
+
+    #[test]
+    fn turn_end_handoff_notice_says_what_became_of_the_child() {
+        let naming = BackgroundNoticeNaming::CANONICAL;
+        let notice = |interrupt, state, notified| {
+            format_subagent_backgrounded_on_turn_end(
+                "sa-1", "explore", "scan src", &naming, interrupt, state, notified,
+            )
+        };
+        let running = notice(
+            ForegroundSpawnInterrupt::UserStoppedTurn,
+            HandedOffSubagentState::Running,
+            true,
+        );
+        assert!(
+            running.contains("moved to the background because the user stopped this turn")
+                && running.contains("not cancelled")
+                && running.contains("you will be notified when it completes")
+                && running.contains("do not spawn it again")
+                && running.contains("subagent_id: sa-1")
+                && running.contains("get_task_output once with task_ids=[\"sa-1\"]"),
+            "{running}"
+        );
+        assert!(
+            !running.contains("never executed") && !running.contains("not executed"),
+            "must not claim the call never ran: {running}"
+        );
+        let sent = notice(
+            ForegroundSpawnInterrupt::UserSentMessage,
+            HandedOffSubagentState::Queued,
+            false,
+        );
+        assert!(
+            sent.contains("because the user's message ended this turn")
+                && sent.contains("queued to start when a subagent slot frees")
+                && !sent.contains("you will be notified"),
+            "{sent}"
+        );
+        let finished = notice(
+            ForegroundSpawnInterrupt::UserStoppedTurn,
+            HandedOffSubagentState::Finished,
+            true,
+        );
+        assert!(
+            finished.contains("finished, but the user stopped this turn")
+                && !finished.contains("moved to the background"),
+            "{finished}"
+        );
+        let cancelled = notice(
+            ForegroundSpawnInterrupt::UserStoppedTurn,
+            HandedOffSubagentState::Cancelled,
+            true,
+        );
+        assert!(cancelled.contains("was cancelled before its result"), "{cancelled}");
+        assert_eq!("user_sent_message", ForegroundSpawnInterrupt::UserSentMessage.as_str());
+        assert_eq!("queued", HandedOffSubagentState::Queued.as_str());
     }
 
     #[test]

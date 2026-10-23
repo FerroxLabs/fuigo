@@ -131,6 +131,7 @@ fn features_merge_writes_feedback_trace_card_without_splatting_section() {
     let mut root = root_val.as_table().unwrap().clone();
     let features = super::super::mcp::FeaturesPersistConfig {
         feedback_trace_card: Some(false),
+        subagent_model_inheritance: None,
     };
     merge_section(&mut root, "features", &features);
     let section = root.get("features").and_then(|v| v.as_table()).unwrap();
@@ -1305,4 +1306,32 @@ async fn update_config_as_user_records_the_written_hash_and_update_config_does_n
     let on_disk = std::fs::read(home.path().join("config.toml")).expect("config.toml");
     let h = super::super::sha256_hex(&on_disk);
     assert!(super::super::newest_matching_since(seq0, &h).is_some(), "the ledger holds the hash of the file on disk");
+}
+
+/// The `[features]` write also carries `subagent_model_inheritance`, next to hand-written siblings and without touching them.
+#[test]
+fn features_merge_writes_subagent_model_inheritance_without_splatting_section() {
+    let root_val: TomlValue =
+        toml::from_str("[features]\nweb_fetch = true\nfeedback_trace_card = false\n").unwrap();
+    let mut root = root_val.as_table().unwrap().clone();
+    let features = super::super::mcp::FeaturesPersistConfig {
+        feedback_trace_card: None,
+        subagent_model_inheritance: Some(true),
+    };
+    merge_section(&mut root, "features", &features);
+    let section = root.get("features").and_then(|v| v.as_table()).unwrap();
+    assert_eq!(
+        section
+            .get("subagent_model_inheritance")
+            .and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(section.get("web_fetch").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        section.get("feedback_trace_card").and_then(|v| v.as_bool()),
+        Some(false),
+        "a key the write leaves unset keeps its on-disk value"
+    );
+    let reparsed = load_config_from_toml(&TomlValue::Table(root.clone()));
+    assert_eq!(reparsed.features.subagent_model_inheritance, Some(true));
 }

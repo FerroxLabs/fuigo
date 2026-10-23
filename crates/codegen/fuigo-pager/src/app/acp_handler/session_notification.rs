@@ -1,6 +1,7 @@
 use super::*;
 use fuigo_shell::sampling::error::format_rate_limited_user_message_with;
-/// The one scrollback line a failed run gets; success gets none and a deny is already annotated by the shell.
+/// The one scrollback line a failed run of a NON-plugin hook gets; success gets none and a deny is already annotated by the shell.
+/// A plugin hook's failure is a RUNTIME failure shown in the hooks chip only (see [`apply_hook_execution`]).
 /// "ignored" is literal (fail-open); a config-tier source has no name worth showing, so its line names only the event.
 pub(super) fn failed_hook_line(
     event_name: &str,
@@ -34,8 +35,11 @@ fn is_plugin_hook_run(run: &fuigo_shell::extensions::notification::HookRunEntryD
 
 /// Apply one `HookExecution` batch to a view (the root agent or a subagent's child view), live or replayed.
 ///
-/// Every source keeps F045: success and skip leave no trace, a non-blocking failure gets its one "failed, ignored" line, and a
-/// deny is left to the shell's own annotation. Plugin-origin runs (except denies) are additionally shown as a badge: on their
+/// Success and skip leave no trace; a deny is left to the shell's own annotation (it stays inline). A non-blocking failure of
+/// a user's own hook gets its one "failed, ignored" line (F045), since such a hook has no chip. A failure of a PLUGIN hook is a
+/// RUNTIME failure and gets no line of its own: it is counted in the hooks chip, with the full error behind expand and in
+/// `/hooks`, so a plugin that fails on every prompt cannot flood the transcript. A hook that cannot start at all (CONFIG
+/// failure) never reaches here as a failure: the shell tells the user once. Plugin-origin runs (except denies) are shown as a badge: on their
 /// tool call's row for `pre_tool_use` / `post_tool_use` / `post_tool_use_failure` (found by the batch's `tool_call_id`, never
 /// by position), or on a lifecycle row of their own for every other event. A tool batch without a `tool_call_id` (an older
 /// shell) gets no badge rather than a guessed row.
@@ -53,7 +57,11 @@ pub(crate) fn apply_hook_execution(
         return false;
     }
     let mut redraw = false;
-    for line in runs.iter().filter_map(|r| failed_hook_line(event_name, r)) {
+    for line in runs
+        .iter()
+        .filter(|r| !is_plugin_hook_run(r))
+        .filter_map(|r| failed_hook_line(event_name, r))
+    {
         scrollback.push_block(RenderBlock::session_event(SessionEvent::HookOutcome {
             message: line,
         }));
@@ -266,7 +274,8 @@ pub(super) fn handle_peer_event(params: &str, app: &mut AppView) -> Option<bool>
     }
     let v: serde_json::Value = serde_json::from_str(params).ok()?;
     let sid = crate::peer_ui_state::peer_update_session_id(&v)?;
-    let Some(SessionMatch::Root(agent_id)) = find_session_match(app, &acp::SessionId::new(sid)) else {
+    let Some(SessionMatch::Root(agent_id)) = find_session_match(app, &acp::SessionId::new(sid))
+    else {
         return Some(false);
     };
     let Some(event) = v.get("update").and_then(crate::peer_ui_state::parse_event) else {
@@ -1174,6 +1183,7 @@ pub(super) fn handle_session_notification_with_origin(
             model_id,
             reasoning_effort,
             context_window_selection,
+            route,
         } => {
             if agent.session.model_switch_pending {
                 tracing::debug!(
@@ -1192,20 +1202,24 @@ pub(super) fn handle_session_notification_with_origin(
             }
             use fuigo_shell::sampling::types::ReasoningEffort;
             let new_model_id = acp::ModelId::new(model_id.clone());
+            // The engine IS on this model, whether or not this client's catalog lists it (the catalog
+            // fetch can fail, and a model from the user's own config or a signed-in subscription may
+            // never be in it). Ignoring the change left the status line on the default model's name
+            // while the engine ran another. Name the model as the engine did, with the route it chose.
             if !agent.session.models.available.contains_key(&new_model_id) {
-                if fuigo_shell::agent::chat_modes::process_chat_mode_enabled() {
-                    agent.session.models.available.insert(
-                        new_model_id.clone(),
-                        acp::ModelInfo::new(new_model_id.clone(), model_id.clone()),
+                let mut info = acp::ModelInfo::new(new_model_id.clone(), model_id.clone());
+                // Marked as made up here, so a missing route stays unnamed (an older agent said nothing) instead of
+                // reading as the unmarked Flux Router route a catalogued model has.
+                let mut meta = serde_json::Map::new();
+                meta.insert(crate::acp::model_state::OUTSIDE_CATALOG_META_KEY.to_owned(), serde_json::json!(true));
+                if let Some(route) = route.as_deref() {
+                    meta.insert(
+                        fuigo_shell::agent::config::ROUTE_META_KEY.to_owned(),
+                        serde_json::json!({ "label": route }),
                     );
-                } else {
-                    tracing::warn!(
-                        session_id = session_notif.session_id.0.as_ref(),
-                        model_id = %model_id,
-                        "ignoring ModelChanged broadcast — model not in local catalog"
-                    );
-                    return false;
                 }
+                info = info.meta(Some(meta));
+                agent.session.models.available.insert(new_model_id.clone(), info);
             }
             let effort = reasoning_effort
                 .as_deref()

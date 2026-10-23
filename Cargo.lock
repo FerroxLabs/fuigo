@@ -3937,6 +3937,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shellexpand",
+ "strum 0.27.2",
  "tempfile",
  "thiserror 2.0.18",
  "toml",
@@ -3956,6 +3957,7 @@ dependencies = [
  "fuigo-announcements",
  "fuigo-config",
  "fuigo-mcp",
+ "fuigo-sandbox",
  "fuigo-tools",
  "indexmap",
  "serde",
@@ -4016,11 +4018,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuigo-egress-proxy"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "fuigo-extra-ca",
+ "fuigo-sandbox",
+ "httparse",
+ "rand 0.9.5",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "fuigo-env"
 version = "0.1.0"
 dependencies = [
  "tracing",
  "url",
+]
+
+[[package]]
+name = "fuigo-external-agent-migration"
+version = "0.1.0"
+dependencies = [
+ "dunce",
+ "fuigo-config-types",
+ "fuigo-dirs",
+ "git2",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -4071,6 +4103,17 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "fuigo-file-lock"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "libc",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -4613,6 +4656,7 @@ dependencies = [
  "dunce",
  "fuigo-test-support",
  "fuigo-tty-utils",
+ "fuigo-version",
  "image",
  "libc",
  "portable-pty",
@@ -4838,8 +4882,10 @@ dependencies = [
  "anyhow",
  "chrono",
  "dunce",
+ "fs2",
  "fuigo-config",
  "fuigo-dirs",
+ "fuigo-file-lock",
  "fuigo-tty-utils",
  "globset",
  "ignore",
@@ -4850,10 +4896,12 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sha2 0.10.9",
+ "strum 0.27.2",
  "thiserror 2.0.18",
  "tokio",
  "toml",
  "tracing",
+ "unicode-normalization",
  "url",
 ]
 
@@ -4974,6 +5022,7 @@ dependencies = [
  "fuigo-config",
  "fuigo-config-types",
  "fuigo-dirs",
+ "fuigo-external-agent-migration",
  "fuigo-extra-ca",
  "fuigo-fast-worktree",
  "fuigo-file-utils",
@@ -5540,7 +5589,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.31"
+version = "1.0.32"
 dependencies = [
  "semver",
 ]
@@ -5619,6 +5668,7 @@ dependencies = [
  "fuigo-config-types",
  "fuigo-diag-server",
  "fuigo-dirs",
+ "fuigo-egress-proxy",
  "fuigo-env",
  "fuigo-extra-ca",
  "fuigo-fast-worktree",
@@ -5669,6 +5719,7 @@ dependencies = [
  "sha1",
  "sha2 0.10.9",
  "smallvec",
+ "strum 0.27.2",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
@@ -5676,6 +5727,7 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "toml",
+ "toml_edit 0.22.27",
  "tonic",
  "tracing",
  "tracing-subscriber",

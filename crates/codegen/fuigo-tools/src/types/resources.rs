@@ -16,6 +16,9 @@
 //!   RPCs.
 use crate::computer::types::{AsyncFileSystem, TerminalBackend};
 use crate::notification::types::ToolNotificationHandle;
+/// The per-command sandbox hook, injected by the daemon like [`Terminal`] and [`FileSystem`];
+/// spawn sites that read `Resources` look it up here.
+pub use crate::sandbox_launch::SandboxLaunchHook;
 use serde::Serialize;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;

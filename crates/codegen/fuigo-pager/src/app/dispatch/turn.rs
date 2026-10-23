@@ -1,7 +1,7 @@
 //! Turn cancellation, task and subagent kills, and overdue turn reconciliation.
 
 use super::ctx::{active_subagent_view_mut, find_agent_by_session_id};
-use super::permissions::drain_permission_queue;
+use super::permissions::{drain_permission_queue, drain_permission_queue_at_turn_end};
 use super::queue::{apply_turn_start_shim, maybe_drain_queue, note_peek_page_flip};
 use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
@@ -500,7 +500,9 @@ pub(crate) fn reconcile_overdue_cancels(app: &mut AppView) -> Option<Vec<Effect>
 /// Read-only twin of [`reconcile_overdue_cancels`]: whether any pane would re-send a cancel right now.
 /// The event loop uses it to let already-buffered ACP messages (a `prompt_complete` that would confirm the cancel) land first.
 pub(crate) fn cancel_resend_due(app: &AppView) -> bool {
-    stale_request_keys(app).iter().any(|k| k.kind == StaleKind::CancelResend)
+    stale_request_keys(app)
+        .iter()
+        .any(|k| k.kind == StaleKind::CancelResend)
 }
 
 /// Which stale-state handler a [`StaleRequestKey`] guards.
@@ -544,7 +546,12 @@ pub(crate) fn stale_request_keys(app: &AppView) -> Vec<StaleRequestKey> {
     let mut keys = Vec::new();
     for (id, a) in &app.agents {
         if let Some(at) = overdue_cancel_at(a) {
-            keys.push(StaleRequestKey { kind: StaleKind::CancelResend, agent: id.0, subagent: None, at });
+            keys.push(StaleRequestKey {
+                kind: StaleKind::CancelResend,
+                agent: id.0,
+                subagent: None,
+                at,
+            });
         }
         for (sub, c) in &a.subagent_views {
             if let Some(at) = overdue_cancel_at(c) {
@@ -559,7 +566,12 @@ pub(crate) fn stale_request_keys(app: &AppView) -> Vec<StaleRequestKey> {
         if let Some(p) = a.pending_turn_end_reconcile.as_ref()
             && p.received_at.elapsed() >= TURN_END_RECONCILE_GRACE
         {
-            keys.push(StaleRequestKey { kind: StaleKind::TurnEnd, agent: id.0, subagent: None, at: p.received_at });
+            keys.push(StaleRequestKey {
+                kind: StaleKind::TurnEnd,
+                agent: id.0,
+                subagent: None,
+                at: p.received_at,
+            });
         }
     }
     keys
@@ -727,7 +739,7 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         agent.mark_turn_finished(TurnEnd::Completed);
         agent.activity_started_at = None;
         agent.last_activity = None;
-        drain_permission_queue(agent);
+        drain_permission_queue_at_turn_end(agent);
         agent.cancel_turn_view = None;
         agent.cancel_turn_buttons.clear();
         if agent.bash_turn {
@@ -749,7 +761,7 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         } else {
             None
         };
-        let drain = maybe_drain_queue(agent);
+        let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         effects.extend(drain.effects);
         drained_ids.push((id, adopted_page_flip.or(drain.page_flip_entry)));
     }

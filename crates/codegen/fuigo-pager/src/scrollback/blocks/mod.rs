@@ -3,6 +3,7 @@ mod bg_task;
 mod btw;
 mod cancel_cause;
 mod context_info;
+pub(crate) mod copy_rows;
 pub mod markdown_content;
 pub mod mermaid_content;
 mod quote_bar;

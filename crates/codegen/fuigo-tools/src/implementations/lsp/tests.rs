@@ -35,18 +35,24 @@ async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
 }
 
 /// A file is held for this long in tests that are about letting go of one.
-/// Long enough not to race a mock server's own latency, short enough that a
-/// test can wait it out.
-const BRIEF_VERDICT_TTL: std::time::Duration = std::time::Duration::from_millis(150);
+/// Far longer than any test (or any scheduling stall on a loaded host) can take, so a file is never let go
+/// early; a test that wants the deadline behind it moves the manager's test clock past it with [`pass_deadline`].
+/// Sleeping a few hundred milliseconds instead put the deadline inside the stall a busy machine inserts between
+/// two statements, and the assertions on either side of it flipped.
+const BRIEF_VERDICT_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
-/// The production rules, on a timescale a test can sit through. The real
-/// durations are unit-tested against an injected clock in `pending.rs`; this is
-/// for exercising the drain that consults them.
+/// The production rules with the deadlines out of reach of real time. The real durations are unit-tested against
+/// an injected clock in `pending.rs`; this is for exercising the drain that consults them.
 fn brief_policy() -> super::pending::PendingPolicy {
     super::pending::PendingPolicy {
         verdict_ttl: BRIEF_VERDICT_TTL,
-        server_patience: std::time::Duration::from_millis(80),
+        server_patience: BRIEF_VERDICT_TTL,
     }
+}
+
+/// Move the pending-edit clock past every deadline [`brief_policy`] set so far.
+async fn pass_deadline(mgr: &tokio::sync::Mutex<LspManager>) {
+    mgr.lock().await.clock_advance += BRIEF_VERDICT_TTL * 2;
 }
 
 /// Drain until a summary mentioning `needle` appears, or give up.
@@ -1338,7 +1344,7 @@ async fn drain_gives_up_on_a_server_that_never_reports() {
     assert!(mgr.lock().await.has_pending_diagnostics());
 
     // Past it, and the file is let go rather than carried for the session.
-    tokio::time::sleep(BRIEF_VERDICT_TTL).await;
+    pass_deadline(&mgr).await;
     assert!(drain_lsp_diagnostics(&mgr, timeout).await.is_none());
     assert!(
         !mgr.lock().await.has_pending_diagnostics(),
@@ -1353,12 +1359,12 @@ async fn drain_gives_up_on_a_server_that_never_reports() {
         .notify_file_changed(&test_file, "const y = 2;\n");
     let started = std::time::Instant::now();
     assert!(
-        drain_lsp_diagnostics(&mgr, std::time::Duration::from_secs(5))
+        drain_lsp_diagnostics(&mgr, std::time::Duration::from_secs(120))
             .await
             .is_none()
     );
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(1),
+        started.elapsed() < std::time::Duration::from_secs(60),
         "drain should not block on a server that has said nothing, took {:?}",
         started.elapsed()
     );
@@ -1388,7 +1394,7 @@ async fn a_silent_server_does_not_accumulate_pending_files() {
         let _ = drain_lsp_diagnostics(&mgr, timeout).await;
     }
 
-    tokio::time::sleep(BRIEF_VERDICT_TTL).await;
+    pass_deadline(&mgr).await;
     let _ = drain_lsp_diagnostics(&mgr, timeout).await;
 
     assert_eq!(
@@ -1414,7 +1420,9 @@ async fn a_productive_server_still_lets_go_of_a_file_it_never_answers_for() {
     let mut mgr = single_server_manager(&script_path, &workspace).await;
     mgr.pending_policy = brief_policy();
     let mgr = tokio::sync::Mutex::new(mgr);
-    let generous = std::time::Duration::from_secs(2);
+    // Only a ceiling: the drain returns as soon as the loud file is answered. Python start-up alone can take
+    // seconds on a loaded host.
+    let generous = std::time::Duration::from_secs(120);
 
     let quiet = workspace.path().join("quiet.ts");
     std::fs::write(&quiet, "const y = 1;\n").unwrap();
@@ -1434,7 +1442,7 @@ async fn a_productive_server_still_lets_go_of_a_file_it_never_answers_for() {
             summary.is_some_and(|s| s.text.contains("loud problem")),
             "the server is answering for the loud files"
         );
-        tokio::time::sleep(BRIEF_VERDICT_TTL).await;
+        pass_deadline(&mgr).await;
     }
 
     assert!(
@@ -1767,26 +1775,46 @@ async fn a_refresh_we_cannot_act_on_does_not_discard_what_we_know() {
 async fn an_edit_during_the_confirmation_does_not_cost_us_the_errors() {
     let (_dir, script_path) = write_clean_then_silent_server();
     let (workspace, mut client) = start_client_with(&script_path).await;
+    // The confirmation wait is driven by events, not by the clock: see `ConfirmGate`.
+    let gate = client.pull.install_confirm_gate();
+    // Only ceilings. A loaded host can take many seconds to start the mock server or to schedule a task.
+    let ceiling = std::time::Duration::from_secs(120);
 
     let file = workspace.path().join("racing.ts");
     std::fs::write(&file, "const y = 1;\n").unwrap();
     client.notify_file_change(&file, "const y = 1;\n", "typescript");
-    assert_eq!(
-        wait_for_message(&client, &file, |m| m == "the real problem").await,
-        Some("the real problem".to_string()),
-        "the server reports the problem to begin with"
-    );
+    let deadline = tokio::time::Instant::now() + ceiling;
+    while client
+        .get_diagnostics(&file)
+        .first()
+        .is_none_or(|d| d.message != "the real problem")
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the server never reported the problem to begin with"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 
-    // Second edit: the answer is clean, so the pull waits to be sure.
+    // Second edit: the answer is clean, so the pull waits to be sure. Wait for the pull to say it is waiting, so
+    // the revision it asked about is certainly the second edit's.
     client.notify_file_change(&file, "const y = 2;\n", "typescript");
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    tokio::time::timeout(ceiling, gate.entered.acquire())
+        .await
+        .expect("the pull never reached its confirmation wait")
+        .unwrap()
+        .forget();
     // Third edit, while that wait is still running. The confirmation the pull
     // is about to receive is about the second edit's text, not this one's.
     client.notify_file_change(&file, "const y = 3;\n", "typescript");
 
-    // Long enough for the confirmation to come back and be acted on, and for
-    // the re-pull it queued to run into the server's silence.
-    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    // Let the wait end, then wait for the confirmation to come back and be acted on.
+    gate.release.add_permits(1);
+    tokio::time::timeout(ceiling, gate.settled.acquire())
+        .await
+        .expect("the confirmation was never acted on")
+        .unwrap()
+        .forget();
     let held = client.get_diagnostics(&file);
     assert_eq!(
         held.len(),
@@ -1795,6 +1823,9 @@ async fn an_edit_during_the_confirmation_does_not_cost_us_the_errors() {
     );
     assert_eq!(held[0].message, "the real problem");
 
+    // The re-pull queued by the third edit has to reach the server, which is silent from here on, and still
+    // leave the errors alone. Release any further confirmation wait so it cannot hold the shutdown.
+    gate.release.add_permits(8);
     client.shutdown().await;
 }
 

@@ -315,6 +315,8 @@ pub fn try_open_url(url: &str, filter: SchemeFilter) -> OpenUrlResult {
 mod tests {
     use super::*;
 
+    /// `build_open_path_command` is the non-Windows opener; Windows reveals in Explorer instead.
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn open_path_command_passes_path_as_a_single_arg() {
         // Path with spaces must be one argument, never shell-interpolated.

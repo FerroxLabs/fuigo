@@ -728,6 +728,7 @@ impl SessionActor {
                 query_params: Default::default(),
                 env_http_headers: Default::default(),
                 context_window: std::num::NonZeroU64::new(256_000).unwrap(),
+                max_request_bytes: None,
                 reasoning_effort: None,
                 stream_tool_calls: None,
                 mtls_cert_dir: None,
@@ -826,6 +827,7 @@ impl SessionActor {
             query_params: cfg.query_params.clone(),
             env_http_headers: cfg.env_http_headers.clone(),
             context_window: cfg.context_window.get(),
+            max_request_bytes: cfg.max_request_bytes,
             client_version: creds.client_version,
             reasoning_effort: cfg.reasoning_effort,
             force_http1: false,
@@ -1558,14 +1560,16 @@ impl SessionActor {
         // Never compact mid-salvage: the rewrite would drop the continue reminder and split the joined report
         // Genuine overflows already completed truncated in the quiet arm above
         // The remaining mid-salvage kinds (rate limit) take their terminal arms below
-        if !mid_salvage_continuation && self.should_compact_on_error(&error).await {
-            // SAFETY: `should_compact_on_error` returned true only when `model_metadata.context_window` was Some(>0)
-            let cw = error
-                .model_metadata
-                .as_ref()
-                .and_then(|m| m.context_window)
-                .expect("should_compact_on_error guarantees context_window");
+        let overflow_window = if mid_salvage_continuation {
+            None
+        } else {
+            self.overflow_compaction_window(&error).await
+        };
+        if let Some(cw) = overflow_window {
             {
+                self.compaction.overflow_compactions_since_response.set(
+                    self.compaction.overflow_compactions_since_response.get() + 1,
+                );
                 let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
                 let percentage = fuigo_token_estimation::usage_percentage_u8(total_tokens, cw);
 

@@ -137,7 +137,7 @@ Alias: `/title`. `/rename --auto` clears a manual title and re-enables auto-titl
 
 ## The /rewind Command
 
-`/rewind` (alias `/undo`) rewinds the conversation to an earlier turn, dropping later turns. File changes made after that turn are left as-is on disk.
+`/rewind` (alias `/undo`) rewinds to an earlier turn, dropping later turns. The confirm step offers conversation and files (the default), conversation only, or files only. Files are restored from Fuigo's checkpoints, which cover edits made by its file tools; changes made by shell commands, or by you outside Fuigo, are not tracked. If you changed a file since Fuigo's edit, the file is listed and left alone unless you choose to overwrite it. The result lists the files that were restored.
 
 ```
 /rewind
@@ -293,6 +293,8 @@ Worktree sessions are managed internally through the `fuigo/git/worktree/*` exte
 
 Resume a session in a fresh worktree with `fuigo -w -r <session-id>`.
 
+`fuigo worktree create [NAME] [--ref REF]` makes the same worktree as `fuigo -w` without starting a session and prints only its directory on stdout, so `cd "$(fuigo worktree create)"` works. Without `--ref` the worktree is HEAD plus your uncommitted changes; with it, a clean checkout of that branch, tag or commit.
+
 ### Checking Disk Usage
 
 `fuigo du` (alias: `fuigo disk-usage`) reports what the fuigo home (`~/.fuigo`) uses on disk. It lists each top-level directory, largest first, then each worktree with its size, type, age, label, and path. Worktrees the registry does not track appear as `untracked`. Pass `--json` for the same report as machine-readable output.
@@ -375,6 +377,6 @@ Session history (`updates.jsonl`, `chat_history.jsonl`) dominates disk usage in 
 
 - Use `/new` to start fresh when your current context is no longer relevant.
 - Use `/compact` proactively in long sessions to keep the context window effective.
-- Use `/rewind` to undo mistakes; it rewinds the conversation to an earlier turn (file changes from removed turns are left as-is).
+- Use `/rewind` to undo mistakes; it rewinds to an earlier turn and, by default, restores the files Fuigo edited after it (you are asked first about files you changed yourself).
 - In headless mode, capture the `sessionId` from JSON output and pass it to `-r` to build multi-step automations that maintain context.
 - Check `/session-info` to see how much of your context window has been used.

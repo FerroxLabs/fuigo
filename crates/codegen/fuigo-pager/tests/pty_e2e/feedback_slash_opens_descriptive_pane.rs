@@ -81,11 +81,7 @@ async fn feedback_slash_opens_descriptive_pane() {
         "empty Enter must keep the feedback pane open\nscreen:\n{}",
         harness.screen_contents()
     );
-    assert_eq!(
-        thanks_count(&harness),
-        0,
-        "empty Enter must not send"
-    );
+    assert_eq!(thanks_count(&harness), 0, "empty Enter must not send");
 
     // Type freeform feedback and submit (pane starts in InputMode).
     harness

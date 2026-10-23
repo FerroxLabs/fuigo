@@ -40,6 +40,11 @@ pub enum HookRunnerResult {
         hook_name: String,
     },
     Stop(StopHookOutcome),
+    /// A tool gate answered `continue: false`: the call is refused and the turn ends.
+    GateStop {
+        reason: String,
+        hook_name: String,
+    },
     PostToolUse {
         outcome: PostToolUseHookOutcome,
         failure: Option<String>,
@@ -150,8 +155,6 @@ impl GateHookJson {
             .flat_map(|output| output.rest.keys())
             .filter(|key| !SILENTLY_IGNORED_NESTED_KEYS.contains(&key.as_str()))
             .map(|key| format!("hookSpecificOutput.{key}"));
-        let stop_request = (self.rest.get("continue") == Some(&serde_json::Value::Bool(false)))
-            .then(|| "continue: false".to_string());
         let unread_reason = (matches!(decision, DecisionToken::Allow | DecisionToken::Defer)
             && (non_empty(self.reason.as_deref()).is_some()
                 || non_empty(self.permission_decision_reason()).is_some()))
@@ -168,7 +171,6 @@ impl GateHookJson {
         let unread_context = (bad_context || unread_valid_context)
             .then(|| "hookSpecificOutput.additionalContext".to_string());
         top.chain(nested)
-            .chain(stop_request)
             .chain(unread_reason)
             .chain(deferred_rewrite)
             .chain(unread_context)
@@ -187,7 +189,8 @@ impl GateHookJson {
     }
 }
 
-const SILENTLY_IGNORED_TOP_LEVEL_KEYS: &[&str] = &["hookEventName", "continue", "systemMessage"];
+const SILENTLY_IGNORED_TOP_LEVEL_KEYS: &[&str] =
+    &["hookEventName", "continue", "stopReason", "systemMessage"];
 const SILENTLY_IGNORED_NESTED_KEYS: &[&str] = &["hookEventName"];
 
 fn non_empty(text: Option<&str>) -> Option<&str> {
@@ -262,6 +265,8 @@ pub(crate) enum GateOutcome {
     },
     Defer,
     Deny(String),
+    /// `continue: false`: the call is refused and the turn ends; the string is what the user is shown.
+    Stop(String),
     Failed(String),
 }
 
@@ -284,6 +289,14 @@ pub(crate) fn gate_outcome(
     health: HookHealth,
 ) -> GateOutcome {
     let GateDecision { token, reason } = json.resolve_decision();
+    // `continue: false` ends the run; at a tool gate the call is not made, and the stop reason is what the model is told
+    let stop_requested = json.rest.get("continue") == Some(&serde_json::Value::Bool(false));
+    let stop_reason = json
+        .rest
+        .get("stopReason")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|text| non_empty(Some(text)))
+        .map(clip_reason);
     let mut ignored = json.ignored_parts(&token);
     let additional_context = json.additional_context();
     let updated_input = resolve_rewrite(json, hook_name, health, &mut ignored);
@@ -293,6 +306,17 @@ pub(crate) fn gate_outcome(
             hook_name,
             ignored = %ignored.join(", "),
             "ignoring parts of a gate hook document"
+        );
+    }
+
+    if stop_requested && !matches!(token, DecisionToken::Unknown { .. }) {
+        let denial = matches!(token, DecisionToken::Deny)
+            .then(|| reason.as_deref().and_then(|text| non_empty(Some(text))).map(clip_reason))
+            .flatten();
+        return GateOutcome::Stop(
+            stop_reason
+                .or(denial)
+                .unwrap_or_else(|| format!("stopped by hook '{hook_name}' (continue: false)")),
         );
     }
 
@@ -365,6 +389,11 @@ pub(crate) struct PromptHookJson {
     pub decision: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
+    /// `false` stops the prompt from running, as a block does.
+    #[serde(default, rename = "continue")]
+    pub continue_: Option<bool>,
+    #[serde(default, rename = "stopReason")]
+    pub stop_reason: Option<String>,
 }
 
 pub(crate) fn prompt_json_to_block(
@@ -380,7 +409,15 @@ pub(crate) fn prompt_json_to_block(
                 .or_else(|| fallback_reason.map(str::to_string))
                 .unwrap_or_else(|| format!("Prompt blocked by hook '{hook_name}'")),
         )),
-        None | Some("approve") => Ok(None),
+        None | Some("approve") => Ok(
+            (json.continue_ == Some(false)).then(|| {
+                non_empty(json.stop_reason.as_deref())
+                    .or_else(|| non_empty(json.reason.as_deref()))
+                    .or_else(|| non_empty(fallback_reason))
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("Prompt stopped by hook '{hook_name}' (continue: false)"))
+            }),
+        ),
         Some(other) => Err(format!(
             "unknown decision value '{other}' from hook '{hook_name}'"
         )),
@@ -443,6 +480,10 @@ pub(crate) struct PostToolUseHookJson {
     pub decision: Option<String>,
     pub reason: Option<String>,
     pub hook_specific_output: Option<PostToolUseHookSpecificOutputJson>,
+    /// `false` ends the turn after this tool call.
+    #[serde(rename = "continue")]
+    pub continue_: Option<bool>,
+    pub stop_reason: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -466,6 +507,13 @@ pub(crate) fn post_tool_use_json_to_outcome(
     health: HookHealth,
 ) -> PostToolUseParse {
     let mut failure = None;
+    let force_stop = (json.continue_ == Some(false)).then(|| crate::result::StopOverride {
+        reason: json
+            .stop_reason
+            .as_deref()
+            .and_then(|text| non_empty(Some(text)))
+            .map(|text| clip_text(text, MAX_HOOK_FEEDBACK_CHARS)),
+    });
     let block_reason = match json.decision.as_deref() {
         Some("block") => Some(
             json.reason
@@ -533,6 +581,7 @@ pub(crate) fn post_tool_use_json_to_outcome(
                 health,
             ),
             output_replacement,
+            force_stop,
         },
         failure,
     }
@@ -546,14 +595,18 @@ pub async fn run_hook(
     ctx: &RunContext<'_>,
     mode: GateKind,
 ) -> HookRunOutput {
-    match spec.handler_type {
+    let output = match spec.handler_type {
         crate::config::HandlerType::Command => {
             let (result, elapsed, system_message) =
                 command::run_command_hook(spec, envelope, ctx, mode).await;
             (result, elapsed, None, system_message)
         }
         crate::config::HandlerType::Http => http::run_http_hook(spec, envelope, ctx, mode).await,
-    }
+    };
+    // Remember what this run proved about the hook: a CONFIG failure means skip it from now on (and say so once), and the
+    // last RUNTIME error is what `/hooks` lists. A blocking denial is a successful run, not a failure.
+    crate::health::note_result(ctx.session_id, &spec.name, &output.0);
+    output
 }
 
 #[cfg(test)]
@@ -583,10 +636,7 @@ mod tests {
                 r#"{"permissionDecision":"deny"}"#,
                 vec!["permissionDecision"],
             ),
-            (
-                r#"{"decision":"allow","continue":false}"#,
-                vec!["continue: false"],
-            ),
+            (r#"{"decision":"allow","continue":false}"#, vec![]),
             (
                 r#"{"decision":"allow","reason":"why"}"#,
                 vec!["reason (only a deny or an ask has one)"],
@@ -608,6 +658,44 @@ mod tests {
             let decision = document.resolve_decision().token;
             assert_eq!(document.ignored_parts(&decision), expected, "for {json}");
         }
+    }
+
+    fn gate(json: &str) -> GateOutcome {
+        let document: GateHookJson = serde_json::from_str(json).expect("valid gate JSON");
+        gate_outcome(document, "stopper", None, HookHealth::Healthy)
+    }
+
+    #[test]
+    fn continue_false_at_a_tool_gate_stops_the_call_with_the_stop_reason() {
+        for json in [
+            r#"{"continue":false,"stopReason":"enough"}"#,
+            r#"{"decision":"allow","continue":false,"stopReason":"enough"}"#,
+            r#"{"hookSpecificOutput":{"permissionDecision":"ask"},"continue":false,"stopReason":"enough"}"#,
+        ] {
+            assert!(matches!(gate(json), GateOutcome::Stop(ref reason) if reason == "enough"), "for {json}");
+        }
+        assert!(
+            matches!(gate(r#"{"continue":false}"#), GateOutcome::Stop(ref reason) if reason.contains("continue: false")),
+            "without a stop reason the hook is named"
+        );
+        assert!(matches!(gate(r#"{"continue":true,"stopReason":"enough"}"#), GateOutcome::Allow { .. }));
+        assert!(matches!(gate(r#"{"decision":"allow"}"#), GateOutcome::Allow { .. }));
+    }
+
+    #[test]
+    fn continue_false_stops_a_prompt_and_a_post_tool_call() {
+        let prompt: PromptHookJson =
+            serde_json::from_str(r#"{"continue":false,"stopReason":"not today"}"#).unwrap();
+        assert_eq!(prompt_json_to_block(&prompt, "h", None), Ok(Some("not today".to_string())));
+        let prompt: PromptHookJson = serde_json::from_str(r#"{"continue":true}"#).unwrap();
+        assert_eq!(prompt_json_to_block(&prompt, "h", None), Ok(None));
+
+        let post: PostToolUseHookJson =
+            serde_json::from_str(r#"{"continue":false,"stopReason":"enough"}"#).unwrap();
+        let parsed = post_tool_use_json_to_outcome(post, "h", HookHealth::Healthy);
+        assert_eq!(parsed.outcome.force_stop.and_then(|stop| stop.reason).as_deref(), Some("enough"));
+        let post: PostToolUseHookJson = serde_json::from_str(r#"{"continue":true}"#).unwrap();
+        assert!(post_tool_use_json_to_outcome(post, "h", HookHealth::Healthy).outcome.force_stop.is_none());
     }
 
     #[test]
@@ -716,6 +804,7 @@ mod tests {
                 }
                 GateOutcome::Defer => "defer",
                 GateOutcome::Deny(_) => "deny",
+                GateOutcome::Stop(_) => "stop",
                 GateOutcome::Allow { .. } => "allow",
                 GateOutcome::Failed(_) => "failed",
             };

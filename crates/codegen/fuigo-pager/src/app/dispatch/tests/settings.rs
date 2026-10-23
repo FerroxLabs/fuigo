@@ -1591,6 +1591,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "toolset.ask_user_question.timeout_enabled" => {
             let _ = dispatch(Action::SetAskUserQuestionTimeoutEnabled(false), app);
         }
+        "features.subagent_model_inheritance" => {
+            let _ = dispatch(Action::SetSubagentModelInheritance(true), app);
+        }
         "keep_text_selection" => {
             let _ = dispatch(
                 Action::SetKeepTextSelection(crate::appearance::TextSelection::Hold),
@@ -1640,6 +1643,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         }
         "screen_mode" => {
             let _ = dispatch(Action::SetScreenMode("minimal".to_string()), app);
+        }
+        "tool_density" => {
+            let _ = dispatch(Action::SetToolDensityDefault("compact".to_string()), app);
         }
         "voice_keybind_enabled" => {
             let _ = dispatch(Action::SetVoiceKeybindEnabled(false), app);
@@ -3617,9 +3623,13 @@ fn p152_default_selected_permission_rollback_is_the_safe_default() {
         &mut app,
     );
     assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::PersistSetting { key: "default_selected_permission", .. })),
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::PersistSetting {
+                key: "default_selected_permission",
+                ..
+            }
+        )),
         "choosing always-approve from the unset default must persist, got {effects:?}"
     );
     let mut app = test_app();
@@ -3632,4 +3642,149 @@ fn p152_default_selected_permission_rollback_is_the_safe_default() {
         .is_empty(),
         "allow once is already the effective default"
     );
+}
+
+/// The `[features] subagent_model_inheritance` row persists the config layer with the prior value as rollback and mirrors
+/// the write so the open modal shows it.
+#[test]
+fn set_subagent_model_inheritance_persists_and_mirrors_the_config_layer() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    app.subagent_model_inheritance = crate::settings::FeatureTiers::default();
+    let effects = dispatch(Action::SetSubagentModelInheritance(true), &mut app);
+    match effects.as_slice() {
+        [Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        }] => {
+            assert_eq!(*key, "features.subagent_model_inheritance");
+            assert_eq!(value, &SettingValue::Bool(true));
+            assert_eq!(rollback_value, &SettingValue::Bool(false));
+        }
+        other => panic!("expected one PersistSetting, got {other:?}"),
+    }
+    assert_eq!(app.subagent_model_inheritance.config, Some(true));
+    // Failure path: the rollback to the feature default clears the mirror again
+    let companions = apply_setting_rollback(
+        &mut app,
+        "features.subagent_model_inheritance",
+        &SettingValue::Bool(false),
+    );
+    assert!(companions.is_empty());
+    assert_eq!(app.subagent_model_inheritance.config, None);
+}
+
+/// A tier that outranks the config file wins whatever the row writes, so the row writes nothing and names the tier.
+#[test]
+fn set_subagent_model_inheritance_names_an_overriding_tier_and_writes_nothing() {
+    let mut app = test_app_with_agent();
+    app.subagent_model_inheritance = crate::settings::FeatureTiers {
+        pin: None,
+        env: Some(false),
+        config: None,
+    };
+    let effects = dispatch(Action::SetSubagentModelInheritance(true), &mut app);
+    assert!(effects.is_empty(), "nothing is persisted under an override: {effects:?}");
+    assert_eq!(app.subagent_model_inheritance.config, None, "the mirror is untouched");
+    let toast = read_toast(&app);
+    assert!(
+        toast.contains("FUIGO_SUBAGENT_MODEL_INHERITANCE"),
+        "the toast names the overriding variable, got {toast:?}"
+    );
+    app.subagent_model_inheritance = crate::settings::FeatureTiers {
+        pin: Some(true),
+        env: None,
+        config: None,
+    };
+    assert!(dispatch(Action::SetSubagentModelInheritance(false), &mut app).is_empty());
+    assert!(read_toast(&app).contains("requirements.toml"), "{:?}", read_toast(&app));
+}
+
+/// The row reads the value in force: pin over environment over config over the default.
+#[test]
+fn feature_tiers_resolve_with_the_registry_precedence() {
+    use crate::settings::FeatureTiers;
+    use fuigo_shell::agent::config::Feature;
+    let f = Feature::SubagentModelInheritance;
+    assert!(!FeatureTiers::default().effective(f), "default is off");
+    let t = |pin, env, config| FeatureTiers { pin, env, config };
+    assert!(t(None, None, Some(true)).effective(f), "config turns it on");
+    assert!(!t(None, Some(false), Some(true)).effective(f), "env outranks config");
+    assert!(t(Some(true), Some(false), Some(false)).effective(f), "a pin outranks both");
+    assert_eq!(t(None, None, Some(true)).override_label(f), None, "config is not an override");
+    assert!(
+        t(None, Some(true), None)
+            .override_label(f)
+            .is_some_and(|l| l.contains("FUIGO_SUBAGENT_MODEL_INHERITANCE"))
+    );
+    assert!(
+        t(Some(true), None, None)
+            .override_label(f)
+            .is_some_and(|l| l.contains("requirements.toml"))
+    );
+}
+
+/// 51.7: the persisted `[ui].tool_density` is the density a new session starts with.
+/// Unset leaves each tool call on its own fold; `/density` then overrides it for that session only and never writes the setting.
+mod tool_density_default {
+    use super::*;
+    use crate::scrollback::DisplayMode;
+
+    #[test]
+    fn the_persisted_value_applies_to_a_new_session_at_startup() {
+        let mut app = test_app();
+        assert_eq!(app.new_scrollback().tool_density(), None, "unset keeps per-call folds");
+        app.current_ui.tool_density = Some("compact".to_string());
+        assert_eq!(app.new_scrollback().tool_density(), Some(DisplayMode::Collapsed));
+        app.current_ui.tool_density = Some("detailed".to_string());
+        assert_eq!(app.new_scrollback().tool_density(), Some(DisplayMode::Expanded));
+    }
+
+    #[test]
+    fn density_command_overrides_for_the_session_without_writing_the_setting() {
+        let mut app = test_app_with_agent();
+        app.current_ui.tool_density = Some("compact".to_string());
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().scrollback = app.new_scrollback();
+        assert_eq!(
+            app.agents[&id].scrollback.tool_density(),
+            Some(DisplayMode::Collapsed)
+        );
+        let effects = dispatch(Action::SetToolDensity(Some(false)), &mut app);
+        assert!(effects.is_empty(), "/density must not persist anything: {effects:?}");
+        assert_eq!(
+            app.agents[&id].scrollback.tool_density(),
+            Some(DisplayMode::Expanded),
+            "the session follows /density"
+        );
+        assert_eq!(
+            app.current_ui.tool_density.as_deref(),
+            Some("compact"),
+            "the persisted default is untouched"
+        );
+        assert_eq!(
+            app.new_scrollback().tool_density(),
+            Some(DisplayMode::Collapsed),
+            "the next session starts from the setting again"
+        );
+    }
+
+    #[test]
+    fn the_settings_dialog_persists_the_default() {
+        let mut app = test_app_with_agent();
+        let effects = dispatch(Action::SetToolDensityDefault("compact".to_string()), &mut app);
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [Effect::PersistSetting {
+                    key: "tool_density",
+                    value: crate::settings::SettingValue::Enum("compact"),
+                    ..
+                }]
+            ),
+            "{effects:?}"
+        );
+        assert_eq!(app.current_ui.tool_density.as_deref(), Some("compact"));
+    }
 }

@@ -567,3 +567,16 @@ fn anthropic_origin_reasoning_still_replays_to_messages() {
     let json = serde_json::to_value(build_messages_request(&req)).unwrap();
     assert!(json.to_string().contains("anthropic-sig"), "{json:#}");
 }
+
+#[test]
+fn tool_guidance_description_reaches_anthropic_messages_wire() {
+    let req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
+        .with_tools(vec![ToolSpec {
+        name: "read_file".to_string(),
+        description: Some("stock text\n\nGUIDE-WIRE".to_string()),
+        parameters: serde_json::json!({"type": "object"}),
+        freeform: None,
+    }]);
+    let wire = serde_json::to_value(build_messages_request(&req)).unwrap();
+    assert_eq!(wire["tools"][0]["description"], "stock text\n\nGUIDE-WIRE");
+}

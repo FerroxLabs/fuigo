@@ -190,6 +190,7 @@ fn send_prompt_now_clears_credit_limit_stash() {
         Action::SendPromptNow {
             text: "steer it".into(),
             images: Vec::new(),
+            image_notice: None,
         },
         &mut app,
     );
@@ -1357,7 +1358,10 @@ fn turn_end_error_decides_on_the_shells_verdicts_not_on_scrubbed_text() {
         }),
         &mut app,
     );
-    assert!(app.agents[&id].question_view.is_some(), "paywall modal must open");
+    assert!(
+        app.agents[&id].question_view.is_some(),
+        "paywall modal must open"
+    );
 
     // Disk full: the dedicated disk-full block is shown although the text was scrubbed.
     let mut app = test_app_with_agent();
@@ -1470,7 +1474,10 @@ fn restricted_command_submit_opens_single_option_billing_notice() {
         Some(crate::views::question_view::LocalQuestionKind::FreeUsageUpsell)
     ));
     let q = &qv.questions[0];
-    assert_eq!(q.question, "This command is not available for your account.");
+    assert_eq!(
+        q.question,
+        "This command is not available for your account."
+    );
     assert_eq!(q.options.len(), 1);
     assert_eq!(q.options[0].label, "Open billing");
     assert_eq!(q.options[0].id.as_deref(), Some(UPSELL_URL_UPGRADE));

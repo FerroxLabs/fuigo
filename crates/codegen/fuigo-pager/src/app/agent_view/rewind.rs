@@ -37,7 +37,9 @@ impl AgentView {
         match &rw.phase {
             crate::views::rewind::RewindPhase::Picker { .. }
             | crate::views::rewind::RewindPhase::Confirm { .. }
-            | crate::views::rewind::RewindPhase::Executing { .. } => Some(rw.anchor_entry_idx),
+            | crate::views::rewind::RewindPhase::Executing { .. }
+            | crate::views::rewind::RewindPhase::Previewing { .. }
+            | crate::views::rewind::RewindPhase::Conflicts { .. } => Some(rw.anchor_entry_idx),
             crate::views::rewind::RewindPhase::Loading
             | crate::views::rewind::RewindPhase::CancelOffer { .. }
             | crate::views::rewind::RewindPhase::Error { .. } => None,
@@ -117,6 +119,10 @@ impl AgentView {
             RewindInput::CancelTurnThenProceed => InputOutcome::Action(Action::RewindCancelOffer),
             RewindInput::DismissError => InputOutcome::Action(Action::RewindDismissError),
             RewindInput::Confirm(target) => InputOutcome::Action(Action::RewindConfirm(target)),
+            RewindInput::ConfirmScoped(target, scope) => {
+                InputOutcome::Action(Action::RewindConfirmScoped(target, scope))
+            }
+            RewindInput::Conflict(choice) => InputOutcome::Action(Action::RewindConflict(choice)),
             RewindInput::ConfirmNeverAsk(target) => {
                 InputOutcome::Action(Action::RewindConfirmNeverAsk(target))
             }

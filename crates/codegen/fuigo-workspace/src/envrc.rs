@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use fuigo_tools::sandbox_launch::{CallId, SandboxLaunch};
+
 const ENVRC_LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 const ENVRC_TIMEOUT_ENV: &str = "FUIGO_ENVRC_TIMEOUT_SECS"; // seconds; 0 disables
 const MAX_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -41,6 +43,17 @@ pub struct EnvrcLoad {
 }
 
 pub fn spawn_envrc_load(cwd: std::path::PathBuf, trusted: bool) -> EnvrcLoad {
+    spawn_envrc_load_sandboxed(cwd, trusted, None)
+}
+
+/// [`spawn_envrc_load`] with the folder's per-command sandbox hook: the `direnv` / bash evaluator
+/// is the eighth shell spawn site and runs under the workspace policy like a tool's command
+/// (call id `shell-init:envrc-…`, so no denial is decoded from it).
+pub fn spawn_envrc_load_sandboxed(
+    cwd: std::path::PathBuf,
+    trusted: bool,
+    sandbox: Option<Arc<dyn SandboxLaunch>>,
+) -> EnvrcLoad {
     let deadline = tokio::time::Instant::now() + loader_budget();
     if !trusted {
         return EnvrcLoad { rx: None, deadline };
@@ -49,7 +62,10 @@ pub fn spawn_envrc_load(cwd: std::path::PathBuf, trusted: bool) -> EnvrcLoad {
     let spawned = std::thread::Builder::new()
         .name("envrc-load".into())
         .spawn(move || {
-            let _ = tx.send(load_envrc_or_empty(&cwd));
+            let _ = tx.send(
+                load_envrc_with_timeout(&cwd, effective_timeout(), sandbox.as_deref())
+                    .unwrap_or_default(),
+            );
         });
     match spawned {
         Ok(_) => EnvrcLoad {
@@ -129,14 +145,18 @@ watch_file() { :; }
 "#;
 
 pub fn load_envrc(dir: &Path) -> Option<HashMap<String, String>> {
-    load_envrc_with_timeout(dir, effective_timeout())
+    load_envrc_with_timeout(dir, effective_timeout(), None)
 }
 
 pub fn load_envrc_or_empty(dir: &Path) -> HashMap<String, String> {
     load_envrc(dir).unwrap_or_default()
 }
 
-fn load_envrc_with_timeout(dir: &Path, timeout: Duration) -> Option<HashMap<String, String>> {
+fn load_envrc_with_timeout(
+    dir: &Path,
+    timeout: Duration,
+    sandbox: Option<&dyn SandboxLaunch>,
+) -> Option<HashMap<String, String>> {
     if timeout.is_zero() {
         tracing::info!(".envrc evaluation disabled by zero {ENVRC_TIMEOUT_ENV}");
         return None;
@@ -161,11 +181,11 @@ fn load_envrc_with_timeout(dir: &Path, timeout: Duration) -> Option<HashMap<Stri
         return None;
     }
 
-    match try_direnv_export(dir, deadline) {
+    match try_direnv_export(dir, deadline, sandbox) {
         DirenvExport::Env(env) => Some(env),
         DirenvExport::TimedOut => None,
         DirenvExport::SideEffectsRan => None,
-        DirenvExport::Unavailable => load_envrc_via_bash(dir, deadline),
+        DirenvExport::Unavailable => load_envrc_via_bash(dir, deadline, sandbox),
     }
 }
 
@@ -179,13 +199,18 @@ enum DirenvExport {
     Unavailable,
 }
 
-fn try_direnv_export(dir: &Path, deadline: Instant) -> DirenvExport {
+fn try_direnv_export(
+    dir: &Path,
+    deadline: Instant,
+    sandbox: Option<&dyn SandboxLaunch>,
+) -> DirenvExport {
     let mut cmd = Command::new("direnv");
     cmd.args(["export", "json"]).current_dir(dir);
-    let output = match run_with_deadline(cmd, deadline, "direnv") {
+    let output = match run_with_deadline(cmd, deadline, "direnv", sandbox) {
         RunOutcome::Completed {
             output,
             truncated: false,
+            ..
         } => output,
         RunOutcome::Completed {
             truncated: true, ..
@@ -242,7 +267,11 @@ fn try_direnv_export(dir: &Path, deadline: Instant) -> DirenvExport {
 }
 
 /// This is the fallback when direnv is not installed.
-fn load_envrc_via_bash(dir: &Path, deadline: Instant) -> Option<HashMap<String, String>> {
+fn load_envrc_via_bash(
+    dir: &Path,
+    deadline: Instant,
+    sandbox: Option<&dyn SandboxLaunch>,
+) -> Option<HashMap<String, String>> {
     if Instant::now() >= deadline {
         return None;
     }
@@ -265,18 +294,26 @@ printf '%s' '{sentinel}'
         envrc = envrc_path.display(),
     );
 
-    let baseline: HashMap<String, String> = std::env::vars().collect();
+    let mut baseline: HashMap<String, String> = std::env::vars().collect();
 
     // Run the script and capture output
     let mut bash_cmd = Command::new("/bin/bash");
     bash_cmd.arg("-c").arg(&script).current_dir(dir);
-    let output = match run_with_deadline(bash_cmd, deadline, "bash") {
+    let output = match run_with_deadline(bash_cmd, deadline, "bash", sandbox) {
         // `truncated` is ignored here: the sentinel below is strictly stronger evidence of completeness
         RunOutcome::Completed { output, .. } if !output.status.success() => {
             tracing::warn!(?envrc_path, "Failed to execute .envrc via bash");
             return None;
         }
-        RunOutcome::Completed { output, .. } => output,
+        RunOutcome::Completed {
+            output,
+            started_env,
+            ..
+        } => {
+            // What the evaluator was started with (the sandbox's proxy pointers) is not the .envrc's
+            baseline.extend(started_env);
+            output
+        }
         RunOutcome::TimedOut => return None,
         RunOutcome::Failed => {
             tracing::warn!(?envrc_path, "Failed to run bash for .envrc");
@@ -349,19 +386,50 @@ printf '%s' '{sentinel}'
 }
 
 enum RunOutcome {
-    Completed { output: Output, truncated: bool },
+    Completed {
+        output: Output,
+        truncated: bool,
+        /// The variables set on the evaluator's command itself (the launch hook's included).
+        started_env: HashMap<String, String>,
+    },
     TimedOut,
     Failed,
 }
 
 /// Run an evaluator until `deadline`, killing its process group on expiry.
-fn run_with_deadline(mut cmd: Command, deadline: Instant, label: &str) -> RunOutcome {
+fn run_with_deadline(
+    mut cmd: Command,
+    deadline: Instant,
+    label: &str,
+    sandbox: Option<&dyn SandboxLaunch>,
+) -> RunOutcome {
     let budget = deadline.saturating_duration_since(Instant::now());
+    // `.envrc` is user code: it never sees Fuigo's secrets (P120). What it exports itself is still imported.
+    // Removed before the sandbox hook sees the command, so a wrapper carries the removals over.
+    fuigo_tty_utils::remove_fuigo_owned_secrets(&mut cmd);
+    // The sandbox hook rewrites the command before stdio, detach and the child-network filter
+    // (`fuigo_tools::sandbox_launch` module docs); a refusal means the evaluator must not run
+    let mut cmd = match sandbox {
+        Some(hook) => {
+            let mut wrapped = tokio::process::Command::from(cmd);
+            let call = CallId::shell_init(format!("envrc-{label}"));
+            if let Err(reason) =
+                fuigo_tools::sandbox_launch::prepare(Some(hook), &mut wrapped, &call)
+            {
+                tracing::warn!(label, %reason, "the sandbox refused the .envrc evaluator");
+                return RunOutcome::Failed;
+            }
+            wrapped.into_std()
+        }
+        None => cmd,
+    };
+    let started_env: HashMap<String, String> = cmd
+        .get_envs()
+        .filter_map(|(key, value)| Some((key.to_str()?.to_owned(), value?.to_str()?.to_owned())))
+        .collect();
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // `.envrc` is user code: it never sees Fuigo's secrets (P120). What it exports itself is still imported.
-    fuigo_tty_utils::remove_fuigo_owned_secrets(&mut cmd);
     fuigo_tools::util::detach_std_command(&mut cmd);
     fuigo_sandbox::child_net::restrict_child_network_std(&mut cmd);
     #[allow(clippy::disallowed_methods)] // best-effort enrolled in the global ProcessScope below
@@ -400,8 +468,9 @@ fn run_with_deadline(mut cmd: Command, deadline: Instant, label: &str) -> RunOut
         kill_and_reap(&mut child);
         return RunOutcome::Failed;
     };
-    let stdout = PipeDrain::start(stdout);
-    let stderr = PipeDrain::start(stderr);
+    let wake = Arc::new(Wake::default());
+    let stdout = PipeDrain::start(stdout, Arc::clone(&wake));
+    let stderr = PipeDrain::start(stderr, wake);
 
     let remaining = deadline.saturating_duration_since(Instant::now());
     let status = match wait_timeout::ChildExt::wait_timeout(&mut child, remaining) {
@@ -427,8 +496,7 @@ fn run_with_deadline(mut cmd: Command, deadline: Instant, label: &str) -> RunOut
     drop(group);
 
     let cap = Instant::now() + PIPE_DRAIN_CAP;
-    let (stdout, stdout_cut) = stdout.finish(cap);
-    let (stderr, _) = stderr.finish(cap);
+    let ((stdout, stdout_cut), (stderr, _)) = PipeDrain::finish_pair(stdout, stderr, cap);
     RunOutcome::Completed {
         output: Output {
             status,
@@ -436,6 +504,7 @@ fn run_with_deadline(mut cmd: Command, deadline: Instant, label: &str) -> RunOut
             stderr,
         },
         truncated: stdout_cut,
+        started_env,
     }
 }
 
@@ -445,12 +514,21 @@ struct PipeDrain {
     buf: Arc<Mutex<Vec<u8>>>,
     done: Arc<AtomicBool>,
     truncated: Arc<AtomicBool>,
+    exited: Arc<AtomicBool>,
+    wake: Arc<Wake>,
     reader: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Rung when a drain thread ends, so the waiter sleeps on the pipes instead of polling them.
+#[derive(Default)]
+struct Wake {
+    lock: Mutex<()>,
+    cv: std::sync::Condvar,
 }
 
 impl PipeDrain {
     #[cfg(unix)]
-    fn start(mut pipe: impl std::io::Read + std::os::fd::AsRawFd + Send + 'static) -> Self {
+    fn start(mut pipe: impl std::io::Read + std::os::fd::AsRawFd + Send + 'static, wake: Arc<Wake>) -> Self {
         let fd = pipe.as_raw_fd();
         // Our read end only; the child's write end stays blocking.
         unsafe {
@@ -507,11 +585,11 @@ impl PipeDrain {
                     Err(_) => break,
                 }
             }
-        })
+        }, wake)
     }
 
     #[cfg(not(unix))]
-    fn start(mut pipe: impl std::io::Read + Send + 'static) -> Self {
+    fn start(mut pipe: impl std::io::Read + Send + 'static, wake: Arc<Wake>) -> Self {
         Self::spawn_reader(move |stop, sink, cut| {
             let mut chunk = [0u8; 8192];
             loop {
@@ -531,11 +609,12 @@ impl PipeDrain {
                     }
                 }
             }
-        })
+        }, wake)
     }
 
     fn spawn_reader(
         read_loop: impl FnOnce(Arc<AtomicBool>, Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>) + Send + 'static,
+        wake: Arc<Wake>,
     ) -> Self {
         let buf = Arc::new(Mutex::new(Vec::new()));
         let done = Arc::new(AtomicBool::new(false));
@@ -543,36 +622,84 @@ impl PipeDrain {
         let stop = Arc::clone(&done);
         let sink = Arc::clone(&buf);
         let cut = Arc::clone(&truncated);
+        let exited = Arc::new(AtomicBool::new(false));
+        let (gone, bell) = (Arc::clone(&exited), Arc::clone(&wake));
         let reader = std::thread::Builder::new()
             .name("envrc-pipe".into())
-            .spawn(move || read_loop(stop, sink, cut))
+            .spawn(move || {
+                read_loop(stop, sink, cut);
+                gone.store(true, Ordering::SeqCst);
+                let _held = bell.lock.lock();
+                bell.cv.notify_all();
+            })
             .ok();
         Self {
             buf,
             done,
             truncated,
+            exited,
+            wake,
             reader,
         }
     }
 
-    /// Take what arrived by EOF, `cap`, or [`PIPE_DRAIN_GRACE`] of silence; missing EOF alone is not truncation.
-    fn finish(mut self, cap: Instant) -> (Vec<u8>, bool) {
-        let spawned = self.reader.is_some();
-        if let Some(reader) = &self.reader {
-            let mut quiet_since = Instant::now();
-            let mut last_len = lock_ignore_poison(&self.buf).len();
-            while !reader.is_finished()
-                && Instant::now() < cap
-                && quiet_since.elapsed() < PIPE_DRAIN_GRACE
-            {
-                std::thread::sleep(POLL_INTERVAL);
-                let len = lock_ignore_poison(&self.buf).len();
-                if len != last_len {
-                    last_len = len;
-                    quiet_since = Instant::now();
-                }
+    fn len(&self) -> usize {
+        lock_ignore_poison(&self.buf).len()
+    }
+
+    fn open(&self) -> bool {
+        self.reader.is_some() && !self.exited.load(Ordering::SeqCst)
+    }
+
+    /// Collect both pipes together. Each is taken at EOF, at `cap`, or after a quiet spell of [`PIPE_DRAIN_GRACE`] in which
+    /// no pipe still open grew; missing EOF alone is not truncation. The wait is one shared window sleeping on the
+    /// drain threads' exit, so a normal evaluator costs no waiting and a held-open pipe costs one window, not one per pipe.
+    fn finish_pair(a: Self, b: Self, cap: Instant) -> ((Vec<u8>, bool), (Vec<u8>, bool)) {
+        let wake = Arc::clone(&a.wake);
+        let mut last = (a.len(), b.len());
+        loop {
+            if !a.open() && !b.open() {
+                break;
             }
+            let now = Instant::now();
+            if now >= cap {
+                break;
+            }
+            let window = PIPE_DRAIN_GRACE.min(cap - now);
+            let mut guard = lock_ignore_poison_unit(&wake.lock);
+            // A thread that ended between the check above and taking the lock rang an empty room
+            if !a.open() && !b.open() {
+                break;
+            }
+            let quiet = loop {
+                let (g, res) = wake
+                    .cv
+                    .wait_timeout(guard, window)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                guard = g;
+                if res.timed_out() {
+                    break true;
+                }
+                // Woken by an exit: stop if nothing is left to wait for
+                if !a.open() && !b.open() {
+                    break false;
+                }
+                // One pipe closed, the other still open: keep sleeping out the same window
+            };
+            drop(guard);
+            let now_len = (a.len(), b.len());
+            if quiet && now_len == last {
+                #[cfg(test)]
+                test_counters::GRACE_WAITS.with(|c| c.set(c.get() + 1));
+                break;
+            }
+            last = now_len;
         }
+        (a.take(), b.take())
+    }
+
+    fn take(mut self) -> (Vec<u8>, bool) {
+        let spawned = self.reader.is_some();
         self.done.store(true, Ordering::Relaxed);
         #[cfg(unix)]
         if let Some(reader) = self.reader.take() {
@@ -602,9 +729,21 @@ fn reap_with_timeout(child: &mut std::process::Child, label: &str) {
     }
 }
 
+fn lock_ignore_poison_unit(lock: &Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
+    lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn lock_ignore_poison(buf: &Mutex<Vec<u8>>) -> std::sync::MutexGuard<'_, Vec<u8>> {
     buf.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+pub(crate) mod test_counters {
+    thread_local! {
+        /// Pipe drains that gave up on a still-open pipe after a quiet spell (each costs a full grace window).
+        pub static GRACE_WAITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
 }
 
 #[cfg(test)]
@@ -621,14 +760,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join(".envrc"), "export FOO=bar\n").unwrap();
 
-        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET).unwrap();
+        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET, None).unwrap();
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
     }
 
     #[test]
     fn test_no_envrc() {
         let dir = TempDir::new().unwrap();
-        assert!(load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).is_none());
+        assert!(load_envrc_with_timeout(dir.path(), Duration::from_secs(10), None).is_none());
     }
 
     #[test]
@@ -636,7 +775,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join(".envrc"), "PATH_add bin\n").unwrap();
 
-        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET).unwrap();
+        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET, None).unwrap();
         let path = env.get("PATH").unwrap();
         assert!(path.contains(&format!("{}/bin", dir.path().display())));
     }
@@ -648,7 +787,7 @@ mod tests {
         fs::write(dir.path().join(".envrc"), "sleep 300\n").unwrap();
 
         let started = Instant::now();
-        assert!(load_envrc_with_timeout(dir.path(), Duration::from_millis(500)).is_none());
+        assert!(load_envrc_with_timeout(dir.path(), Duration::from_millis(500), None).is_none());
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
@@ -658,7 +797,7 @@ mod tests {
         fs::write(dir.path().join(".envrc"), "export FOO=bar\n").unwrap();
 
         let started = Instant::now();
-        assert!(load_envrc_with_timeout(dir.path(), Duration::ZERO).is_none());
+        assert!(load_envrc_with_timeout(dir.path(), Duration::ZERO, None).is_none());
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
@@ -680,8 +819,32 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join(".envrc"), "export FOO=bar\nsleep 5 &\n").unwrap();
 
-        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET).unwrap();
+        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET, None).unwrap();
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
+    }
+
+    /// 47.4: the quiet-spell wait for pipes a background descendant holds open is paid once for both pipes, and a plain
+    /// `.envrc` pays none. Counted as grace waits, not wall time, so it holds under load.
+    #[cfg(unix)]
+    #[test]
+    fn drain_wait_is_shared_and_absent_on_the_plain_path() {
+        let waits = || test_counters::GRACE_WAITS.with(|c| c.get());
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join(".envrc"), "export FOO=bar\n").unwrap();
+        let before = waits();
+        let t = Instant::now();
+        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET, None).unwrap();
+        eprintln!("envrc plain load: {:?} grace_waits={}", t.elapsed(), waits() - before);
+        assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
+        assert_eq!(waits() - before, 0, "a plain .envrc must not wait out a grace window");
+
+        fs::write(dir.path().join(".envrc"), "export FOO=bar\nsleep 5 &\n").unwrap();
+        let before = waits();
+        let t = Instant::now();
+        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET, None).unwrap();
+        eprintln!("envrc held-pipe load: {:?} grace_waits={}", t.elapsed(), waits() - before);
+        assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
+        assert_eq!(waits() - before, 1, "stdout and stderr share one grace window");
     }
 
     /// Descendant output after the sentinel must be ignored, not treated as an incomplete capture.
@@ -696,7 +859,7 @@ mod tests {
         )
         .unwrap();
 
-        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET).unwrap();
+        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET, None).unwrap();
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
     }
 
@@ -711,7 +874,7 @@ mod tests {
         )
         .unwrap();
 
-        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET).unwrap();
+        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET, None).unwrap();
         assert_eq!(
             env.get("__FUIGO_ENVRC_COMPLETE__"),
             Some(&"decoy".to_string())
@@ -733,7 +896,7 @@ mod tests {
         );
 
         let started = Instant::now();
-        assert!(load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).is_none());
+        assert!(load_envrc_with_timeout(dir.path(), Duration::from_secs(10), None).is_none());
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

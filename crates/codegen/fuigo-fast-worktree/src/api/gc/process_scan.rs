@@ -45,6 +45,7 @@ pub(crate) fn usable_cwds(scan: &LiveCwdScan, force: bool) -> Option<&[PathBuf]>
     }
 }
 
+#[cfg(test)]
 fn scan_contains_cwd(cwds: &[PathBuf], path: &Path) -> bool {
     let path_canon = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     cwds.iter().any(|c| {
@@ -54,29 +55,44 @@ fn scan_contains_cwd(cwds: &[PathBuf], path: &Path) -> bool {
     })
 }
 
-fn validate_cwd_scan(cwds: Vec<PathBuf>) -> LiveCwdScan {
-    match std::env::current_dir() {
-        Ok(cwd) if scan_contains_cwd(&cwds, &cwd) => LiveCwdScan::Ok(cwds),
-        Ok(_) => LiveCwdScan::Failed,
-        Err(_) => LiveCwdScan::Failed,
+/// A scan that never read this process's own working directory cannot be trusted to have read anyone else's (a
+/// `/proc` that hides or refuses `cwd` links), so it fails closed. "Read" is judged inside the scan itself: comparing
+/// it with `std::env::current_dir()` afterwards is a race, because another thread can chdir in between and a good
+/// scan would then read as `Failed`.
+fn validate_cwd_scan(cwds: Vec<PathBuf>, saw_own_cwd: bool) -> LiveCwdScan {
+    if saw_own_cwd {
+        LiveCwdScan::Ok(cwds)
+    } else {
+        LiveCwdScan::Failed
     }
 }
 
 #[cfg(target_os = "linux")]
 pub(crate) fn live_process_cwds() -> LiveCwdScan {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
+    scan_proc_dir(Path::new("/proc"), std::process::id())
+}
+
+#[cfg(target_os = "linux")]
+fn scan_proc_dir(proc_root: &Path, own_pid: u32) -> LiveCwdScan {
+    let Ok(entries) = std::fs::read_dir(proc_root) else {
         return LiveCwdScan::Failed;
     };
-    let cwds: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .is_some_and(|n| n.parse::<u32>().is_ok())
-        })
-        .filter_map(|e| std::fs::read_link(e.path().join("cwd")).ok())
-        .collect();
-    validate_cwd_scan(cwds)
+    let mut saw_own_cwd = false;
+    let mut cwds = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if let Ok(cwd) = std::fs::read_link(entry.path().join("cwd")) {
+            saw_own_cwd |= pid == own_pid;
+            cwds.push(cwd);
+        }
+    }
+    validate_cwd_scan(cwds, saw_own_cwd)
 }
 
 #[cfg(target_os = "macos")]
@@ -119,6 +135,8 @@ fn macos_live_process_cwds() -> LiveCwdScan {
     let Ok(expected) = i32::try_from(std::mem::size_of::<libc::proc_vnodepathinfo>()) else {
         return LiveCwdScan::Failed;
     };
+    let own_pid = i32::try_from(std::process::id()).unwrap_or(-1);
+    let mut saw_own_cwd = false;
     let mut out = Vec::with_capacity(pids.len());
     for pid in pids {
         if pid <= 0 {
@@ -142,10 +160,11 @@ fn macos_live_process_cwds() -> LiveCwdScan {
             continue;
         }
         if let Some(p) = vip_path_to_pathbuf(&info.pvi_cdir.vip_path) {
+            saw_own_cwd |= pid == own_pid;
             out.push(p);
         }
     }
-    validate_cwd_scan(out)
+    validate_cwd_scan(out, saw_own_cwd)
 }
 
 #[cfg(target_os = "macos")]
@@ -279,27 +298,69 @@ mod tests {
         }
     }
 
+    /// The scan is judged on what it read, not against `std::env::current_dir()` afterwards: another thread can
+    /// chdir in between, which made a good scan `Failed` and the age pass skip every worktree
+    /// (`per_kind_age_expiry_reclaims_listed_kinds_and_keeps_the_rest` saw `expired_removed` 0 instead of 1). A fake
+    /// `/proc` pins this without touching the real process cwd (a test that chdir'd in a loop would itself break the
+    /// tests that read `current_dir()` unlocked).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scan_is_judged_on_its_own_pid_entry_not_on_current_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let proc_root = tmp.path();
+        for (pid, cwd) in [
+            ("101", "/elsewhere/a"),
+            ("202", "/elsewhere/own"),
+            ("303", "/elsewhere/b"),
+        ] {
+            let dir = proc_root.join(pid);
+            std::fs::create_dir(&dir).unwrap();
+            std::os::unix::fs::symlink(cwd, dir.join("cwd")).unwrap();
+        }
+        std::fs::create_dir(proc_root.join("sys")).unwrap();
+        // The process's real cwd is nowhere in this fake /proc, and the scan is still good.
+        let LiveCwdScan::Ok(mut cwds) = scan_proc_dir(proc_root, 202) else {
+            panic!("a scan that read its own pid's cwd must be usable");
+        };
+        cwds.sort();
+        assert_eq!(
+            cwds,
+            [
+                PathBuf::from("/elsewhere/a"),
+                PathBuf::from("/elsewhere/b"),
+                PathBuf::from("/elsewhere/own")
+            ]
+        );
+        assert_eq!(
+            scan_proc_dir(proc_root, 404),
+            LiveCwdScan::Failed,
+            "no entry for the scanner's own pid => the scan cannot be trusted"
+        );
+        std::fs::remove_file(proc_root.join("202").join("cwd")).unwrap();
+        assert_eq!(
+            scan_proc_dir(proc_root, 202),
+            LiveCwdScan::Failed,
+            "own pid listed but its cwd unreadable => fail closed"
+        );
+    }
+
     #[test]
     fn validate_cwd_scan_fails_closed_when_self_missing() {
-        let _cwd_lock = crate::api::cwd_test_guard();
         assert!(
-            matches!(validate_cwd_scan(Vec::new()), LiveCwdScan::Failed),
+            matches!(validate_cwd_scan(Vec::new(), false), LiveCwdScan::Failed),
             "empty scan cannot observe self CWD"
         );
         assert!(
             matches!(
-                validate_cwd_scan(vec![PathBuf::from("/no/such/unrelated/cwd")]),
+                validate_cwd_scan(vec![PathBuf::from("/no/such/unrelated/cwd")], false),
                 LiveCwdScan::Failed
             ),
-            "unrelated paths only ⇒ unusable scan"
+            "other processes' paths only, own cwd never read => unusable scan"
         );
-        let cwd = std::env::current_dir().unwrap();
-        match validate_cwd_scan(vec![cwd.clone()]) {
-            LiveCwdScan::Ok(v) => {
-                assert_eq!(v.len(), 1);
-                assert_eq!(v[0], cwd);
-            }
-            other => panic!("self path must validate: {other:?}"),
+        let own = PathBuf::from("/some/own/cwd");
+        match validate_cwd_scan(vec![own.clone()], true) {
+            LiveCwdScan::Ok(v) => assert_eq!(v, vec![own]),
+            other => panic!("a scan that read its own cwd must validate: {other:?}"),
         }
     }
 

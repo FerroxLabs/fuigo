@@ -23,6 +23,7 @@ fn minimal_never_uses_ris_rerender_or_emit_to_scrollback() {
         ("overlay.rs", include_str!("overlay.rs")),
         ("panel.rs", include_str!("panel.rs")),
         ("plan.rs", include_str!("plan.rs")),
+        ("reprint.rs", include_str!("reprint.rs")),
         ("todo.rs", include_str!("todo.rs")),
         ("welcome.rs", include_str!("welcome.rs")),
     ];

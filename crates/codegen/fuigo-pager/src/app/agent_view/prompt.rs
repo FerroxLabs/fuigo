@@ -182,6 +182,13 @@ impl AgentView {
                 self.prompt.slash_preview_current_selection();
                 return InputOutcome::Changed;
             }
+            // Right-arrow or Tab on a `/model` row with other routes opens them.
+            if matches!(key.code, KeyCode::Right | KeyCode::Tab)
+                && key.modifiers.is_empty()
+                && self.prompt.slash_open_model_routes(&self.session.models)
+            {
+                return InputOutcome::Changed;
+            }
             match key.code {
                 // Up / Ctrl-P: move selection up.
                 KeyCode::Up => {
@@ -230,13 +237,24 @@ impl AgentView {
                         self.prompt.slash_close();
                         slash_accepted_send = true;
                     } else {
-                        let chains = snap
-                            .selection()
-                            .is_some_and(|row| row.insert_text.ends_with(' '));
+                        // A row that still wants an argument keeps the menu open for it; a command whose argument is optional runs
+                        let chains = snap.selection().is_some_and(|row| {
+                            row.insert_text.ends_with(' ')
+                                && !crate::slash::is_command_complete(
+                                    row.insert_text.trim(),
+                                    self.prompt.slash_controller.registry(),
+                                )
+                        });
                         self.prompt.slash_commit_preview();
                         self.prompt.accept_slash_completion(&self.session.models);
                         if chains {
                             return InputOutcome::Changed;
+                        }
+                        // The completion of a command that runs without arguments ends in the space that would open its argument menu: drop it
+                        let trimmed = self.prompt.text().trim_end().to_string();
+                        if trimmed.len() != self.prompt.text().len() {
+                            self.prompt.set_text(&trimmed);
+                            self.prompt.set_cursor(trimmed.len());
                         }
                         self.prompt.slash_close();
                         slash_accepted_send = true;
@@ -596,6 +614,16 @@ impl AgentView {
                     // 3) Idle / nothing to send: promote to ToggleYolo when that chord matches (Apple Terminal Ctrl+O opens YOLO / free-tier CTA)
                     let text = self.prompt.text().trim().to_string();
                     let can_send_now = self.can_send_now();
+                    // A pager slash command is a command, not an interjection: run it (or queue it behind the running turn) as Enter would
+                    if self.prompt_input_mode == PromptInputMode::Normal
+                        && crate::slash::is_complete_builtin_invocation(
+                            &text,
+                            self.prompt.slash_controller.registry(),
+                        )
+                        && let Some(text) = self.prompt.try_send()
+                    {
+                        return InputOutcome::Action(self.prompt_input_mode.send_action(text));
+                    }
                     if !text.is_empty() {
                         if can_send_now {
                             // Paste-then-immediate-send: an image probe is still off-thread
@@ -604,11 +632,16 @@ impl AgentView {
                                 self.deferred_send = Some(AgentDeferredSend::Interject);
                                 return InputOutcome::Changed;
                             }
-                            // Drain images BEFORE set_text("") wipes the chip elements.
+                            // Read the placeholders and drain images BEFORE set_text("") wipes the chip elements.
+                            let image_notice = self.unbound_image_placeholder_notice();
                             let images = self.prompt.drain_images();
                             self.prompt.set_text("");
                             self.note_draft_consumed();
-                            return InputOutcome::Action(Action::SendPromptNow { text, images });
+                            return InputOutcome::Action(Action::SendPromptNow {
+                                text,
+                                images,
+                                image_notice,
+                            });
                         }
                     } else if let Some(outcome) = self.try_send_now_queued_from_prompt() {
                         return outcome;
@@ -916,10 +949,10 @@ impl AgentView {
     fn populate_prompt_from_history(&mut self, text: &str) {
         if let Some(cmd) = text.strip_prefix("! ") {
             self.prompt_input_mode = PromptInputMode::Bash;
-            self.prompt.set_text(cmd);
+            self.prompt.set_text_discarding_images(cmd);
         } else {
             self.prompt_input_mode = PromptInputMode::Normal;
-            self.prompt.set_text(text);
+            self.prompt.set_text_discarding_images(text);
         }
         let len = self.prompt.textarea.text().len();
         self.prompt.textarea.set_cursor(len);
@@ -948,12 +981,12 @@ impl AgentView {
             && let Some(cmd) = text.strip_prefix("! ")
         {
             self.prompt_input_mode = PromptInputMode::Bash;
-            self.prompt.set_text(cmd);
+            self.prompt.set_text_discarding_images(cmd);
         } else if self.prompt_input_mode == PromptInputMode::Bash {
             self.prompt_input_mode = PromptInputMode::Normal;
-            self.prompt.set_text(text);
+            self.prompt.set_text_discarding_images(text);
         } else {
-            self.prompt.set_text(text);
+            self.prompt.set_text_discarding_images(text);
         }
 
         let len = self.prompt.textarea.text().len();
@@ -1208,6 +1241,19 @@ mod slash_menu_enter_tests {
         let outcome = agent.handle_prompt_key_for_test(&enter());
         assert!(
             matches!(outcome, InputOutcome::Action(Action::SendPrompt(ref text)) if text == "/login"),
+            "got {outcome:?}; prompt={:?}",
+            agent.prompt.text()
+        );
+    }
+
+    /// Enter on a highlighted command whose arguments are optional runs it; it does not just fill in `/doctor ` and wait.
+    #[test]
+    fn enter_runs_highlighted_command_with_optional_args() {
+        let mut agent = agent_with_slash("/doc");
+        select_display(&mut agent, "/doctor");
+        let outcome = agent.handle_prompt_key_for_test(&enter());
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::SendPrompt(ref text)) if text == "/doctor"),
             "got {outcome:?}; prompt={:?}",
             agent.prompt.text()
         );
@@ -1951,6 +1997,31 @@ mod apple_terminal_ctrl_o_upgrade_cta_tests {
             ),
             "running + payload: interject must win over CTA, got {outcome:?}"
         );
+    }
+
+    /// Ctrl+Enter on a slash command runs it as a command, like Enter; it is not a cancel-and-send of the text.
+    #[test]
+    fn ctrl_enter_on_a_slash_command_runs_it_as_a_command() {
+        let ctrl_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL);
+        let registry = ActionRegistry::non_vscode_for_test();
+        for running in [false, true] {
+            let mut agent = super::test_fixtures::make_agent();
+            if running {
+                agent.session.state = AgentState::TurnRunning;
+            }
+            agent.prompt.set_text("/doctor");
+            let outcome = agent.handle_prompt_key_with_registry_for_test(&ctrl_enter, &registry);
+            assert!(
+                matches!(outcome, InputOutcome::Action(Action::SendPrompt(ref text)) if text == "/doctor"),
+                "running={running}: got {outcome:?}"
+            );
+        }
+        // Plain text is still a mid-turn interjection
+        let mut agent = super::test_fixtures::make_agent();
+        agent.session.state = AgentState::TurnRunning;
+        agent.prompt.set_text("steer mid-turn");
+        let outcome = agent.handle_prompt_key_with_registry_for_test(&ctrl_enter, &registry);
+        assert!(matches!(outcome, InputOutcome::Action(Action::SendPromptNow { .. })), "got {outcome:?}");
     }
 
     #[test]

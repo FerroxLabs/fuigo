@@ -148,6 +148,8 @@ pub struct BlockViewerPane {
     pub copy_meta_pending: bool,
     /// Set by handle_key when 'y' is pressed on edit blocks. Caller should copy patch.
     pub copy_content_pending: bool,
+    /// Set by handle_key when 'Y' is pressed in a markdown viewer. Caller should copy the code block under the cursor.
+    pub copy_code_pending: bool,
     /// Per-item diff metadata for edit viewer (parallel to `items`).
     /// `None` entries are separator lines between hunks.
     diff_meta: Vec<Option<DiffLineMeta>>,
@@ -281,6 +283,7 @@ impl BlockViewerPane {
             raw_toggle_pending: false,
             copy_meta_pending: false,
             copy_content_pending: false,
+            copy_code_pending: false,
             diff_meta: Vec::new(),
             last_generation: generation,
             was_running: entry.is_running,
@@ -335,6 +338,7 @@ impl BlockViewerPane {
             raw_toggle_pending: false,
             copy_meta_pending: false,
             copy_content_pending: false,
+            copy_code_pending: false,
             diff_meta: Vec::new(),
             last_generation: last_output_len as u64, // reuse generation field for output length
             was_running: entry.is_running,
@@ -388,6 +392,7 @@ impl BlockViewerPane {
             raw_toggle_pending: false,
             copy_meta_pending: false,
             copy_content_pending: false,
+            copy_code_pending: false,
             diff_meta: Vec::new(),
             last_generation: 0,
             was_running: false,
@@ -707,6 +712,7 @@ impl BlockViewerPane {
             raw_toggle_pending: false,
             copy_meta_pending: false,
             copy_content_pending: false,
+            copy_code_pending: false,
             diff_meta: Vec::new(),
             last_generation: stdout.len() as u64,
             was_running: is_running,
@@ -776,6 +782,7 @@ impl BlockViewerPane {
             raw_toggle_pending: false,
             copy_meta_pending: false,
             copy_content_pending: false,
+            copy_code_pending: false,
             diff_meta: Vec::new(),
             last_generation: 0,
             was_running: false,
@@ -875,6 +882,7 @@ impl BlockViewerPane {
             raw_toggle_pending: false,
             copy_meta_pending: false,
             copy_content_pending: false,
+            copy_code_pending: false,
             diff_meta,
             last_generation: 0,
             was_running: false,
@@ -1143,6 +1151,16 @@ impl BlockViewerPane {
             return true;
         }
 
+        // Y in a markdown viewer: copy the fenced code block under the cursor; handled by caller
+        if self.kind == ViewerKind::Markdown
+            && key.code == KeyCode::Char('Y')
+            && key.modifiers == KeyModifiers::SHIFT
+            && self.list_state.input_mode().is_none()
+        {
+            self.copy_code_pending = true;
+            return true;
+        }
+
         // y: copy patch format (edit blocks); intercept before ListPane
         // Non-visual: copies full patch (same as scrollback `y`).
         // Visual: copies patch for the selected range.
@@ -1236,6 +1254,30 @@ impl BlockViewerPane {
         Some(out)
     }
 
+    /// The body of the fenced code block the cursor is on, or `None` when the cursor is on prose (or nothing).
+    /// In follow mode, with no cursor, the last visible line stands in for it.
+    fn code_block_under_cursor(&self, entry: &ScrollbackEntry) -> Option<String> {
+        let line = match self.list_state.selected_id() {
+            Some(id) => id as usize,
+            None => {
+                let vi = self.list_state.visible_range().next_back()?;
+                self.list_state.to_physical(vi).checked_sub(self.prepend_items.len())?
+            }
+        };
+        let index = entry.block.with_code_blocks(|blocks| {
+            blocks
+                .iter()
+                .position(|b| b.output_line_range.contains(&line))
+        })?;
+        // The body as written, tabs included
+        entry
+            .block
+            .code_block_texts()
+            .into_iter()
+            .nth(index)
+            .filter(|body| !body.is_empty())
+    }
+
     /// Process pending actions (copy meta, copy content) and return text to copy.
     ///
     /// Call after `handle_key` or `handle_mouse`.
@@ -1246,6 +1288,12 @@ impl BlockViewerPane {
         if self.copy_meta_pending {
             self.copy_meta_pending = false;
             return entry.block.copy_meta().filter(|t| !t.is_empty());
+        }
+
+        // Y (markdown): the body of the fenced code block under the cursor
+        if self.copy_code_pending {
+            self.copy_code_pending = false;
+            return self.code_block_under_cursor(entry);
         }
 
         // y: copy content (edit blocks: patch format; others: block content)

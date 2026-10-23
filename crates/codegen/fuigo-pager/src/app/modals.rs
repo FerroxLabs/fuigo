@@ -17,6 +17,18 @@ use super::app_view::InputOutcome;
 use crate::theme::Theme;
 use crate::views::modal::{self, ActiveModal};
 
+/// Right-arrow or Tab, pressed plain.
+fn is_open_routes_key(ev: &crossterm::event::Event) -> bool {
+    use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+    matches!(
+        ev,
+        Event::Key(k)
+            if k.kind != KeyEventKind::Release
+                && k.modifiers == KeyModifiers::NONE
+                && matches!(k.code, KeyCode::Right | KeyCode::Tab)
+    )
+}
+
 impl AgentView {
     /// `suggest_args` falls back to model rows when the query is not in effort phase.
     /// Model-phase reasoning rows use a trailing space in `insert_text`; effort rows do not.
@@ -572,6 +584,36 @@ impl AgentView {
         }
     }
 
+    /// Replace the `/model` list with the selected model's other routes. `false` when the model has
+    /// only one route (nothing to open).
+    fn open_model_routes(&mut self) -> bool {
+        let Some(ActiveModal::ArgPicker { items, state, .. }) = self.active_modal.as_ref() else {
+            return false;
+        };
+        let Some(selected) = items.get(state.selected) else {
+            return false;
+        };
+        let name = selected.match_text.clone();
+        let Some(route_items) = crate::slash::commands::model::route_items_for(&self.session.models, &name)
+        else {
+            return false;
+        };
+        if let Some(ActiveModal::ArgPicker {
+            args_query,
+            items,
+            original_items,
+            state,
+            ..
+        }) = self.active_modal.as_mut()
+        {
+            *args_query = format!("{name} via ");
+            *items = route_items.clone();
+            *original_items = route_items;
+            *state = crate::views::picker::PickerState::input_active();
+        }
+        true
+    }
+
     /// Arg picker input, separate from the command palette to avoid borrow conflicts.
     /// Stepping back from the model effort phase borrows both the slash registry and the session.
     fn handle_arg_picker_input(&mut self, ev: &crossterm::event::Event) -> InputOutcome {
@@ -592,6 +634,17 @@ impl AgentView {
             }) => (command.clone(), !args_query.is_empty(), items.len()),
             _ => return InputOutcome::Changed,
         };
+
+        // Right-arrow or Tab on a model row opens that model's other routes (the same rows as
+        // `/model <name> via `). Enter on one of them uses it. A row with a single route leaves
+        // the key to the picker.
+        if matches!(command_clone.as_str(), "model" | "m")
+            && !in_effort_phase
+            && is_open_routes_key(ev)
+            && self.open_model_routes()
+        {
+            return InputOutcome::Changed;
+        }
 
         let config = PickerConfig {
             title: None,
@@ -3333,5 +3386,156 @@ mod settings_memory_paste_routing_tests {
         };
         assert_eq!(state.query(), "a中b");
         assert_eq!(agent.prompt.text(), "hidden prompt");
+    }
+}
+
+/// Right-arrow or Tab on a `/model` row opens that model's other routes; Enter on one uses it.
+#[cfg(test)]
+mod model_routes_picker_tests {
+    use crate::actions::ActionRegistry;
+    use crate::app::agent_view::test_fixtures::make_agent;
+    use crate::app::app_view::InputOutcome;
+    use crate::app::actions::Action;
+    use crate::views::modal::ActiveModal;
+    use agent_client_protocol as acp;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn model(id: &str, name: &str, meta: serde_json::Value) -> (acp::ModelId, acp::ModelInfo) {
+        let id = acp::ModelId::new(std::sync::Arc::from(id));
+        let meta = meta.as_object().cloned();
+        (id.clone(), acp::ModelInfo::new(id, name.to_string()).meta(meta))
+    }
+
+    fn route(key: &str, word: &str, badge: &str, reason: &str) -> serde_json::Value {
+        serde_json::json!({ "key": key, "label": word, "badge": badge, "reason": reason, "word": word, "ready": true })
+    }
+
+    /// A model with three routes and one with one route.
+    fn load_models(agent: &mut crate::app::agent_view::AgentView) {
+        for (id, info) in [
+            model("grok-4.7", "Grok 4.7", serde_json::json!({ "routes": [
+                route("grok-4.7", "flux", "via Flux Router", "via Flux Router: $2.5 in / $10 out per 1M tokens"),
+                route("xai/grok-4.7", "grok", "included in your Grok subscription", "included in your Grok subscription: no per-token charge"),
+                route("xai-key/grok-4.7", "xai", "your xAI key", "billed to your xAI key"),
+            ]})),
+            model("xai/grok-4.7", "grok-4.7 (Grok subscription)", serde_json::json!({ "altRouteOf": "grok-4.7" })),
+            model("xai-key/grok-4.7", "grok-4.7 (xAI key)", serde_json::json!({ "altRouteOf": "grok-4.7" })),
+            model("solo", "Solo", serde_json::json!({})),
+        ] {
+            agent.session.models.available.insert(id, info);
+        }
+        agent.session.models.current = Some(acp::ModelId::new(std::sync::Arc::from("grok-4.7")));
+    }
+
+    /// An agent whose `/model` picker is open on those models.
+    fn open_picker() -> (crate::app::agent_view::AgentView, ActionRegistry) {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        load_models(&mut agent);
+        let items = {
+            let ctx = agent.prompt.slash_controller.app_ctx(&agent.session.models);
+            agent.prompt.slash_controller.registry().get("model").unwrap().suggest_args(&ctx, "").unwrap()
+        };
+        agent.active_modal = Some(ActiveModal::ArgPicker {
+            command: "model".into(),
+            args_query: String::new(),
+            items: items.clone(),
+            original_items: items,
+            state: crate::views::picker::PickerState::input_active(),
+            previous_palette: None,
+            window: crate::views::modal_window::ModalWindowState::new(),
+        });
+        (agent, registry)
+    }
+
+    fn rows(agent: &crate::app::agent_view::AgentView) -> (String, Vec<(String, String)>) {
+        match agent.active_modal.as_ref() {
+            Some(ActiveModal::ArgPicker { args_query, items, .. }) => (
+                args_query.clone(),
+                items.iter().map(|i| (i.display.clone(), i.description.clone())).collect(),
+            ),
+            _ => panic!("the model picker is open"),
+        }
+    }
+
+    #[test]
+    fn right_arrow_and_tab_open_the_routes_each_with_a_reason() {
+        for code in [KeyCode::Right, KeyCode::Tab] {
+            let (mut agent, registry) = open_picker();
+            let (query, list) = rows(&agent);
+            assert_eq!(query, "");
+            assert!(list[0].0.starts_with("Grok 4.7"), "{list:?}");
+            let _ = agent.handle_input(&key(code), &registry);
+            let (query, list) = rows(&agent);
+            assert_eq!(query, "Grok 4.7 via ", "{code:?}");
+            assert_eq!(list.len(), 3, "{list:?}");
+            assert_eq!(list[0], ("via Flux Router".into(), "via Flux Router: $2.5 in / $10 out per 1M tokens".into()));
+            assert_eq!(list[1].1, "included in your Grok subscription: no per-token charge");
+            assert_eq!(list[2].0, "your xAI key");
+        }
+    }
+
+    #[test]
+    fn enter_on_an_alternate_uses_that_route_and_esc_returns_to_the_list() {
+        let (mut agent, registry) = open_picker();
+        let _ = agent.handle_input(&key(KeyCode::Right), &registry);
+        let _ = agent.handle_input(&key(KeyCode::Down), &registry);
+        let outcome = agent.handle_input(&key(KeyCode::Enter), &registry);
+        match outcome {
+            InputOutcome::Action(Action::SendSlashCommandPreservingDraft(cmd)) => {
+                assert_eq!(cmd, "/model Grok 4.7 via grok");
+            }
+            _ => panic!("Enter on the Grok subscription route sends the via command"),
+        }
+        // Esc steps back from the routes to the model list.
+        let (mut agent, registry) = open_picker();
+        let _ = agent.handle_input(&key(KeyCode::Tab), &registry);
+        let _ = agent.handle_input(&key(KeyCode::Esc), &registry);
+        let (query, list) = rows(&agent);
+        assert_eq!(query, "");
+        assert!(list[0].0.starts_with("Grok 4.7"), "{list:?}");
+    }
+
+    /// The same keys in the typed `/model ` dropdown: the row becomes `<model> via ` and the dropdown
+    /// lists the routes with their reasons.
+    #[test]
+    fn right_arrow_and_tab_in_the_typed_dropdown_open_the_routes() {
+        for code in [KeyCode::Right, KeyCode::Tab] {
+            let registry = ActionRegistry::defaults();
+            let mut agent = make_agent();
+            load_models(&mut agent);
+            agent.active_pane = crate::views::agent::ActivePane::Prompt;
+            agent.prompt.set_text("/model ");
+            agent.prompt.set_cursor("/model ".len());
+            agent.prompt.refresh_slash(&agent.session.models);
+            assert!(agent.prompt.slash_open());
+            let _ = registry;
+            let _ = agent.handle_prompt_key_for_test(&KeyEvent::new(code, KeyModifiers::NONE));
+            assert_eq!(agent.prompt.text(), "/model Grok 4.7 via ", "{code:?}");
+            let rows: Vec<(String, String)> = agent
+                .prompt
+                .slash_snapshot()
+                .matches
+                .iter()
+                .map(|r| (r.display.clone(), r.description.clone()))
+                .collect();
+            assert_eq!(rows.len(), 3, "{rows:?}");
+            assert_eq!(rows[0].1, "via Flux Router: $2.5 in / $10 out per 1M tokens");
+            assert_eq!(rows[1].1, "included in your Grok subscription: no per-token charge");
+        }
+    }
+
+    #[test]
+    fn a_model_with_one_route_has_nothing_to_open() {
+        let (mut agent, registry) = open_picker();
+        let _ = agent.handle_input(&key(KeyCode::Down), &registry);
+        let _ = agent.handle_input(&key(KeyCode::Right), &registry);
+        let (query, list) = rows(&agent);
+        assert_eq!(query, "", "still the model list");
+        assert_eq!(list.len(), 2);
     }
 }

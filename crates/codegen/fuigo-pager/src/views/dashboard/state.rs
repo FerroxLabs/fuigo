@@ -186,6 +186,14 @@ impl PersistedRowId {
 /// Also reused by the dashboard-overlay stop for its double-press close confirm.
 pub const CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long after a send an empty Enter still counts as an echo of that send.
+/// One second covers the default key auto-repeat delay on macOS (375 ms), Windows (500 ms), and GNOME (500 ms).
+const SEND_ECHO_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+pub(crate) fn send_echo_window_open(since_send: std::time::Duration) -> bool {
+    since_send < SEND_ECHO_WINDOW
+}
+
 /// Coarse state used for the dashboard grouping.
 ///
 /// See [`super::row::classify_top_level`] / [`super::row::classify_subagent`] for the mapping rules.
@@ -426,6 +434,9 @@ pub struct DashboardState {
     pub(crate) deferred_dispatch_send: Option<DeferredDispatchSend>,
     /// A peek-reply send deferred the same way; per-surface slots so stashing one surface can never overwrite the other's pending send.
     pub(crate) deferred_peek_send: Option<DeferredPeekSend>,
+    /// When the dispatch input last sent its text.
+    /// `AppView` clears it on any key other than Enter.
+    pub(crate) last_send_at: Option<Instant>,
     /// Peek panel state (Space toggles).
     pub peek: Option<PeekPanelState>,
     /// Session-scoped guest viewport for the live-tail peek (capture once on select; sticky while the same row is peeked; restore on leave).
@@ -442,6 +453,16 @@ pub struct DashboardState {
     /// Mirrors [`Self::dispatch_rect`]: consumed by mouse handling for click-to-focus and drag text selection.
     /// `None` while the peek is closed.
     pub peek_reply_rect: Option<Rect>,
+    /// Last frame's screen rect of the peek box's live tail, and a copy of its painted cells.
+    /// A drag over it selects text; the text is read back from the copy when the button is released (see `peek_select`).
+    pub(crate) peek_tail_rect: Option<Rect>,
+    pub(crate) peek_tail_cells: Vec<Vec<String>>,
+    /// The drag selection over the live tail, and whether the button is still down.
+    pub(crate) peek_tail_selection: Option<super::peek_select::PeekTailSelection>,
+    peek_tail_dragging: bool,
+    /// What the last release copied (tests only: the real path writes the clipboard).
+    #[cfg(test)]
+    pub(crate) peek_tail_last_copy: Option<String>,
     /// Directory the reply's `@` file-search daemon is currently rooted at.
     /// Tracked so [`Self::ensure_peek_reply_cwd`] can skip a `retarget` (which drops the daemon so the next @-use rebuilds it) when the peeked
     /// agent's cwd hasn't actually changed.
@@ -718,7 +739,8 @@ impl RenameDraft {
             .filter(|character| rename_wire_character_allowed(*character))
             .take(MAX_RENAME_SCALARS)
             .collect();
-        self.editor.set_text(fuigo_tty_utils::strip_loose_tags(&capped));
+        self.editor
+            .set_text(fuigo_tty_utils::strip_loose_tags(&capped));
     }
 }
 
@@ -1222,10 +1244,17 @@ impl DashboardState {
             paste_probe_in_flight: 0,
             deferred_dispatch_send: None,
             deferred_peek_send: None,
+            last_send_at: None,
             peek: None,
             peek_viewport: None,
             peek_reply,
             peek_reply_rect: None,
+            peek_tail_rect: None,
+            peek_tail_cells: Vec::new(),
+            peek_tail_selection: None,
+            peek_tail_dragging: false,
+            #[cfg(test)]
+            peek_tail_last_copy: None,
             peek_reply_cwd: None,
             peek_reply_target_cwd: None,
             rename: None,
@@ -1702,12 +1731,97 @@ impl DashboardState {
         if peek.is_none() {
             self.peek_close_rect = None;
             self.peek_reply_rect = None;
+            self.clear_peek_tail_selection();
         }
         let row_changed = peek.as_ref().map(|p| &p.row) != self.peek.as_ref().map(|p| &p.row);
         if row_changed {
+            // A reply waiting on a clipboard attachment probe belongs to the row it was typed for: moving the cursor or closing the panel
+            // (Esc) cancels it now, with a toast, instead of leaving it to fire or vanish silently when the probe returns
+            if self.deferred_peek_send.take().is_some() {
+                self.set_error_toast("Reply canceled: peek panel changed");
+            }
+            self.clear_peek_tail_selection();
             self.clear_peek_reply();
         }
         self.peek = peek;
+    }
+
+    /// Forget the live-tail drag selection and the tail geometry it was made against.
+    fn clear_peek_tail_selection(&mut self) {
+        self.peek_tail_rect = None;
+        self.peek_tail_cells.clear();
+        self.peek_tail_selection = None;
+        self.peek_tail_dragging = false;
+    }
+
+    /// Mouse handling for the peek box's live tail: a drag selects the painted text and the release copies it.
+    /// Returns `Some` when the event was part of a tail drag.
+    fn handle_peek_tail_mouse(
+        &mut self,
+        mouse: &crossterm::event::MouseEvent,
+    ) -> Option<InputOutcome> {
+        use super::peek_select::{PeekTailSelection, clamp_to, selected_text};
+        use crossterm::event::{MouseButton, MouseEventKind};
+        self.peek.as_ref()?;
+        let rect = self.peek_tail_rect?;
+        let inside = mouse.column >= rect.x
+            && mouse.column < rect.x + rect.width
+            && mouse.row >= rect.y
+            && mouse.row < rect.y + rect.height;
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.peek_tail_selection = None;
+                if inside {
+                    let at = (mouse.column, mouse.row);
+                    self.peek_tail_selection = Some(PeekTailSelection { anchor: at, head: at });
+                    self.peek_tail_dragging = true;
+                    return Some(InputOutcome::Changed);
+                }
+                // A click elsewhere clears the highlight and carries on as the click it is
+                self.peek_tail_dragging = false;
+                None
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.peek_tail_dragging => {
+                let head = clamp_to(rect, mouse.column, mouse.row);
+                if let Some(sel) = self.peek_tail_selection.as_mut() {
+                    sel.head = head;
+                }
+                Some(InputOutcome::Changed)
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.peek_tail_dragging => {
+                self.peek_tail_dragging = false;
+                let head = clamp_to(rect, mouse.column, mouse.row);
+                let Some(sel) = self.peek_tail_selection.as_mut() else {
+                    return Some(InputOutcome::Unchanged);
+                };
+                sel.head = head;
+                let sel = *sel;
+                if sel.is_empty() {
+                    // A plain click: nothing selected, nothing to keep highlighted
+                    self.peek_tail_selection = None;
+                    return Some(InputOutcome::Changed);
+                }
+                let text = selected_text(&self.peek_tail_cells, rect, &sel);
+                if !text.is_empty() {
+                    self.copy_peek_tail_text(&text);
+                }
+                Some(InputOutcome::Changed)
+            }
+            _ => None,
+        }
+    }
+
+    /// Copy released tail text. The feedback slot is the dashboard's only toast surface.
+    fn copy_peek_tail_text(&mut self, text: &str) {
+        #[cfg(test)]
+        {
+            self.peek_tail_last_copy = Some(text.to_string());
+        }
+        #[cfg(not(test))]
+        {
+            let delivery = crate::clipboard::copy_text_or_file(text);
+            self.error_toast = Some(delivery.toast_message().into_owned());
+        }
     }
 
     pub fn restore_peek_viewport(
@@ -2773,7 +2887,7 @@ impl DashboardState {
     /// "send and open" chord (`attach == true`, walk into the detail view).
     /// Empty-prompt fallbacks mirror the old Enter handler: open the selected row, or create from the `[+ New Agent]` button.
     /// A `/command` always routes to the slash dispatcher (there's no session to "open"), so `attach` only affects the plain-dispatch path.
-    fn dispatch_send_action(&self, attach: bool) -> InputOutcome {
+    fn dispatch_send_action(&mut self, attach: bool) -> InputOutcome {
         let text = self.dispatch.text().to_string();
         let trimmed = text.trim();
         if trimmed.is_empty() {
@@ -2785,10 +2899,20 @@ impl DashboardState {
             }
             return InputOutcome::Unchanged;
         }
+        self.last_send_at = Some(Instant::now());
         if trimmed.starts_with('/') {
             return InputOutcome::Action(Action::DashboardDispatchSlash { text });
         }
         InputOutcome::Action(Action::DashboardDispatch { text, attach })
+    }
+
+    /// Whether an empty Enter now is an echo of the last send.
+    /// Key auto-repeat in older terminals, a bouncing key switch, and a double tap all produce this echo.
+    fn empty_enter_echoes_send(&self) -> bool {
+        self.dispatch.text().trim().is_empty()
+            && self
+                .last_send_at
+                .is_some_and(|sent| send_echo_window_open(sent.elapsed()))
     }
 
     /// List-focused `y`/`n` confirm for an already-armed delete (arming is via `Ctrl+X` / `[✗]`, not `d`).
@@ -3012,6 +3136,14 @@ impl DashboardState {
         // through to dispatch; bypasses the multiline Enter-as-newline swap
         let mut slash_accepted_send = false;
         if self.dispatch.slash_open() && !self.search_mode {
+            // Right-arrow or Tab on a `/model` row with other routes opens them (the same code as the
+            // session prompt: `PromptWidget::slash_open_model_routes`).
+            if matches!(key.code, KeyCode::Right | KeyCode::Tab)
+                && key.modifiers.is_empty()
+                && self.dispatch.slash_open_model_routes(&self.models)
+            {
+                return InputOutcome::Changed;
+            }
             match key.code {
                 KeyCode::Up => {
                     self.dispatch.slash_move_selection(-1);
@@ -3185,6 +3317,9 @@ impl DashboardState {
         if matches!(key.code, KeyCode::Enter) {
             // Overview focused: attach / create (or send when the button is focused and a draft exists)
             if self.list_focused && key.modifiers.is_empty() {
+                if self.empty_enter_echoes_send() {
+                    return InputOutcome::Unchanged;
+                }
                 if let Some(id) = self.selected.clone() {
                     return InputOutcome::Action(Action::DashboardAttach(id));
                 }
@@ -3220,6 +3355,8 @@ impl DashboardState {
             }
             if enter_is_newline {
                 // fall through for newline
+            } else if self.empty_enter_echoes_send() {
+                return InputOutcome::Unchanged;
             } else {
                 return self.dispatch_send_action(false);
             }
@@ -3430,6 +3567,11 @@ impl DashboardState {
             // `set_peek(None)` enforces the peek/close-rect invariant atomically
             self.set_peek(None);
             return InputOutcome::Changed;
+        }
+
+        // Drag text selection over the peek box's live tail; the release copies the selected text
+        if let Some(outcome) = self.handle_peek_tail_mouse(mouse) {
+            return outcome;
         }
 
         // Peek reply input: mouse interaction with the `❯ reply` row (or the reject-feedback slot in question mode), mirroring the dispatch box's
@@ -4423,7 +4565,6 @@ fn persisted_dashboard_edit(
         value: (),
     }
 }
-
 
 fn config_path() -> Option<PathBuf> {
     let home = fuigo_shell::util::fuigo_home::fuigo_home();

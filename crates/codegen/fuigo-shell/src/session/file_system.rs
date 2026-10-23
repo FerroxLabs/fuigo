@@ -231,7 +231,12 @@ pub async fn write_file(abs_path: &Path, content: &str, create_dirs: bool) -> Re
         if create_dirs && let Some(parent) = abs_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&abs_path, content.as_bytes())
+        // A failed write leaves the previous contents in place instead of a truncated file
+        fuigo_config::write_through::replace_file_contents(
+            &abs_path,
+            content.as_bytes(),
+            fuigo_config::write_through::NewFileMode::Default,
+        )
     })
     .await??;
 

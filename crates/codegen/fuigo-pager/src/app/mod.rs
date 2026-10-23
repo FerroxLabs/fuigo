@@ -18,6 +18,7 @@ pub(crate) mod cancel_latency;
 pub mod cli;
 pub mod consent;
 /// The unauthenticated welcome menu, shared by renderer and dispatcher.
+pub mod default_check;
 pub mod pending_menu;
 pub use crate::link_opener;
 use fuigo_telemetry::region;
@@ -51,7 +52,6 @@ mod event_loop_stall;
 mod exit_timeout;
 pub(crate) mod external_editor;
 mod foreign_sessions;
-mod inline_edit;
 #[cfg(all(test, unix))]
 mod leader_cluster;
 pub(crate) mod leader_outage;
@@ -61,7 +61,12 @@ mod mouse;
 mod queue_edit;
 pub(crate) mod screen_mode_relaunch;
 mod session_load_barrier;
+mod reader_thread;
 pub mod signal_handler;
+mod teardown_fence;
+mod terminal_restore;
+use reader_thread::ReaderThread;
+use terminal_restore::{emit_terminal_teardown_sequences, set_panic_hook};
 mod startup_failure;
 mod turn_completion;
 pub(crate) mod workspace_sync;
@@ -782,7 +787,10 @@ pub async fn run(
         && let session_startup::MaterializedStartup::Resume { session_id, .. } = &materialized
         && fuigo_shell::session::session_writer_lock::session_open_elsewhere(session_id)
     {
-        anyhow::bail!("{}", fuigo_shell::session::session_writer_lock::HELD_ELSEWHERE);
+        anyhow::bail!(
+            "{}",
+            fuigo_shell::session::session_writer_lock::HELD_ELSEWHERE
+        );
     }
     if args.chat()
         && let session_startup::MaterializedStartup::Resume { session_id, .. } = &materialized
@@ -880,6 +888,8 @@ pub async fn run(
             &args.allow_rules,
             &args.deny_rules,
         ),
+        cli_tools: crate::headless::parse_comma_list(args.cli_tools.as_deref()),
+        cli_disallowed_tools: crate::headless::parse_comma_list(args.cli_disallowed_tools.as_deref()),
         default_yolo_mode: launch_yolo.yolo,
         default_auto_mode: launch_auto && !launch_yolo.yolo,
         status_line: false,
@@ -1061,7 +1071,12 @@ pub async fn run(
                 pending_startup.finish(f.outcome);
             }
             crate::unified_log::flush_blocking().await;
-            let _ = restore_terminal(terminal, writer_thread, screen_mode);
+            let _ = restore_terminal(
+                terminal,
+                writer_thread,
+                ReaderThread::detached(),
+                screen_mode,
+            );
             cancel.cancel();
             return Err(f.error);
         }
@@ -1084,6 +1099,7 @@ pub async fn run(
         initial_theme: crate::theme::cache::current_kind(),
         startup_typeahead,
     };
+    let mut reader_thread = ReaderThread::detached();
     let result = event_loop::run(
         &mut terminal,
         connection,
@@ -1097,6 +1113,7 @@ pub async fn run(
         materialized,
         bg_update_rx,
         writer_event_rx,
+        &mut reader_thread,
     )
     .await;
     signal_handler::clear_quit_notify();
@@ -1113,7 +1130,12 @@ pub async fn run(
     // Config writes the user made just before quitting (CTA dismissal, agents
     // modal, `/provider`) run off the input thread; let them land.
     let config_writes = crate::config_write_queue::drain(std::time::Duration::from_secs(3)).await;
-    let restore_result = restore_terminal(terminal, writer_thread, current_screen_mode());
+    let restore_result = restore_terminal(
+        terminal,
+        writer_thread,
+        reader_thread,
+        current_screen_mode(),
+    );
     // After the restore, so the user sees it on the normal screen.
     for line in config_writes.messages() {
         fuigo_tty_utils::cli_eprintln!("{line}");
@@ -1182,7 +1204,11 @@ fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write)
     if let Some(summary) = &info.summary {
         let _ = writeln!(w, "{}", truncate_str(&shown(&summary.title), max_width));
         if let Some(prompt) = summary.last_prompt.as_deref() {
-            let _ = writeln!(w, "> {}", truncate_str(&shown(prompt), max_width.saturating_sub(2)));
+            let _ = writeln!(
+                w,
+                "> {}",
+                truncate_str(&shown(prompt), max_width.saturating_sub(2))
+            );
         }
         if let Some(response) = summary.last_response.as_deref() {
             let _ = writeln!(
@@ -1217,15 +1243,6 @@ fn print_relaunch_failure_hint(
         "  {}",
         screen_mode_relaunch::screen_mode_relaunch_resume_hint(&session_id, want_minimal),
     );
-}
-/// Write raw CSI sequences to disable mouse tracking and bracketed paste.
-///
-/// Best-effort: failures are silently ignored since this runs on teardown and panic paths where stderr may already be broken.
-fn disable_mouse_paste_raw() {
-    fuigo_shell::util::with_locked_stderr(|stderr| {
-        let _ = stderr.write_all(fuigo_crash_handler::terminal::MOUSE_PASTE_RESET);
-        let _ = stderr.flush();
-    });
 }
 /// Set the console output code page to UTF-8 and enable `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on the stderr console handle.
 ///
@@ -1523,6 +1540,11 @@ fn init_terminal(
                     Ok(true) => None,
                     _ => Some("unsupported"),
                 });
+        // The static environment looked fine but the terminal (or tmux without modifyOtherKeys) gave no Kitty support:
+        // modified keys will not arrive, so the shortcut hints must fall back to the classic ones.
+        crate::terminal::set_kitty_probe_unsupported(
+            ctx.kitty_skip_reason().is_none() && skip_reason == Some("unsupported"),
+        );
         crate::terminal::da2::probe_at_startup();
         let flags = crate::terminal::negotiated_kitty_flags(
             skip_reason,
@@ -1640,122 +1662,6 @@ fn init_terminal(
         startup_typeahead,
     })
 }
-/// How long teardown waits for the writer thread to drain before detaching it.
-/// Same order as the panic hook's grace: a terminal that stopped reading must not turn `/quit` into a hang.
-const WRITER_JOIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
-/// Drop the terminal (closing the writer mpsc channel) and join the writer thread within
-/// [`WRITER_JOIN_GRACE`]. Every `EscapeWriter` clone is already gone here: they all live in
-/// `AppView`, which is local to `event_loop::run` and dropped when it returns.
-/// After a `Joined` return, subsequent direct stderr writes land strictly after every queued frame.
-/// A `TimedOut` join means the writer thread may still hold the stderr lock inside its tty write,
-/// so the caller must not take that lock unbounded.
-fn drain_writer_thread_before_teardown(
-    terminal: PagerTerminal,
-    writer_thread: crate::render::draw::WriterThread,
-) -> io::Result<crate::render::draw::WriterJoin> {
-    drop(terminal);
-    let join = writer_thread.join_within(WRITER_JOIN_GRACE)?;
-    if join == crate::render::draw::WriterJoin::TimedOut {
-        crate::unified_log::warn(
-            "term.writer.join_timeout",
-            None,
-            Some(serde_json::json!({ "grace_ms": WRITER_JOIN_GRACE.as_millis() as u64 })),
-        );
-    }
-    Ok(join)
-}
-/// Inline teardown escape sequences in the canonical order.
-/// Shared by `restore_terminal` and `set_panic_hook` so the on-wire byte order is defined exactly once.
-///
-/// Order: EndSynchronizedUpdate, reset_cursor_color, disable_mouse_paste_raw, DisableFocusChange, kitty pop (if pushed), mode-specific block.
-/// EndSynchronizedUpdate is emitted first so multiplexers (zellij/tmux) stop buffering before the resets arrive.
-/// Does NOT call `disable_raw_mode`.
-/// Callers should drain queued writer-thread frames first when possible; the panic hook can't (it would deadlock).
-fn emit_terminal_teardown_sequences(mode: ScreenMode, inline_cursor_row: Option<u16>) {
-    fuigo_shell::util::with_locked_stderr(|stderr| {
-        let _ = stderr.write_all(crate::notifications::progress::OSC_CLEAR.as_bytes());
-        let _ = stderr.flush();
-    });
-    fuigo_shell::util::with_locked_stderr(|stderr| {
-        let _ = execute!(stderr, crossterm::terminal::EndSynchronizedUpdate);
-    });
-    crate::theme::reset_cursor_color();
-    disable_mouse_paste_raw();
-    if MOUSE_CAPTURE_ENABLED.swap(false, Ordering::AcqRel) {
-        #[cfg(windows)]
-        fuigo_shell::util::with_locked_stderr(|stderr| {
-            let _ = execute!(stderr, event::DisableMouseCapture);
-        });
-    }
-    fuigo_shell::util::with_locked_stderr(|stderr| {
-        let _ = execute!(stderr, event::DisableFocusChange);
-    });
-    pop_gboom_keyboard_flags_inline();
-    if crate::terminal::take_kitty_flags_pushed() {
-        fuigo_shell::util::with_locked_stderr(|stderr| {
-            let _ = execute!(stderr, event::PopKeyboardEnhancementFlags);
-        });
-    }
-    let restore_style = CURSOR_STYLE_FORCED.load(Ordering::Acquire);
-    if mode.is_fullscreen() {
-        fuigo_shell::util::with_locked_stderr(|stderr| {
-            if restore_style {
-                let _ = execute!(stderr, SetCursorStyle::DefaultUserShape);
-            }
-            let _ = execute!(stderr, cursor::Show, LeaveAlternateScreen);
-        });
-    } else {
-        let rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(24);
-        let last = rows.saturating_sub(1);
-        let target = inline_cursor_row.unwrap_or(last).min(last);
-        fuigo_shell::util::with_locked_stderr(|stderr| {
-            if restore_style {
-                let _ = execute!(stderr, SetCursorStyle::DefaultUserShape);
-            }
-            let _ = execute!(stderr, cursor::MoveTo(0, target), cursor::Show);
-            let _ = writeln!(stderr);
-            let _ = stderr.flush();
-        });
-    }
-    #[cfg(windows)]
-    win_native_selection::restore_stdin_mode();
-}
-/// Consumes `terminal` and `writer_thread`: queues a final fullscreen clear, drains every accepted frame, then emits teardown sequences.
-/// Teardown still runs if draining fails, so terminal state is restored before returning that error.
-/// Draining first prevents a late frame after `LeaveAlternateScreen`.
-fn restore_terminal_with(
-    mut terminal: PagerTerminal,
-    writer_thread: crate::render::draw::WriterThread,
-    mode: ScreenMode,
-    drain: impl FnOnce(
-        PagerTerminal,
-        crate::render::draw::WriterThread,
-    ) -> io::Result<crate::render::draw::WriterJoin>,
-    teardown: impl FnOnce(ScreenMode, Option<u16>) + Send + 'static,
-) -> io::Result<crate::render::draw::WriterJoin> {
-    if mode.is_fullscreen() && !writer_thread.writer_sync().failed() {
-        let _ = terminal.clear();
-        {
-            use std::io::Write;
-            let _ = terminal.backend_mut().flush();
-        }
-    }
-    let inline_cursor_row = (!mode.is_fullscreen()).then(|| terminal.viewport_area().bottom());
-    let drain_result = drain(terminal, writer_thread);
-    if matches!(drain_result, Ok(crate::render::draw::WriterJoin::TimedOut)) {
-        // The writer thread is still parked in its tty write and may hold the stderr lock;
-        // an unbounded teardown would hang instead of exiting.
-        run_bounded_teardown(move || teardown(mode, inline_cursor_row), TEARDOWN_GRACE);
-    } else {
-        teardown(mode, inline_cursor_row);
-    }
-    let _ = event_loop::drain_pending_events(std::time::Duration::from_millis(10), |_| false);
-    let _ = terminal::disable_raw_mode();
-    signal_handler::mark_restored();
-    fuigo_crash_handler::disable_terminal_escape_restore();
-    fuigo_tty_utils::restore_native_stderr();
-    drain_result
-}
 /// P142: leader notices (`fuigo/leader/notice`) the TUI received but never showed, because no quiet session was on
 /// screen before it quit. The leader counts them as delivered, so the TUI prints them after the terminal is restored.
 static UNSHOWN_LEADER_NOTICES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
@@ -1779,22 +1685,20 @@ pub(crate) fn print_unshown_leader_notices(
 }
 /// P142: the leader notices to print after the restore, each once.
 pub(crate) fn take_unshown_leader_notices() -> Vec<String> {
-    UNSHOWN_LEADER_NOTICES.lock().map(|mut kept| std::mem::take(&mut *kept)).unwrap_or_default()
+    UNSHOWN_LEADER_NOTICES
+        .lock()
+        .map(|mut kept| std::mem::take(&mut *kept))
+        .unwrap_or_default()
 }
 /// The `WriterJoin` tells the caller whether the terminal is still reading: after a `TimedOut`
 /// join every further stderr write blocks until the exit watchdog fires.
 fn restore_terminal(
     terminal: PagerTerminal,
     writer_thread: crate::render::draw::WriterThread,
+    reader_thread: ReaderThread,
     mode: ScreenMode,
 ) -> io::Result<crate::render::draw::WriterJoin> {
-    let joined = restore_terminal_with(
-        terminal,
-        writer_thread,
-        mode,
-        drain_writer_thread_before_teardown,
-        emit_terminal_teardown_sequences,
-    );
+    let joined = terminal_restore::restore_terminal(terminal, writer_thread, reader_thread, mode);
     // P71: a "files were NOT uploaded" notice printed while the TUI owned the terminal went to the
     // redirected fd 2 (`redirect_native_stderr`, Unix) and was seen by nobody. fd 2 is the terminal
     // again now, so say it. (Elsewhere fd 2 was never redirected and the notice was already printed.)
@@ -1838,54 +1742,6 @@ fn terminal_title_string(title: &str) -> String {
         format!("{} - fuigo", truncated)
     }
 }
-/// Bound on teardown writes when the stderr lock may be wedged: the panic hook, and a restore
-/// whose writer thread is still parked in its tty write after a timed-out join.
-const TEARDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
-/// Run a best-effort teardown `f` on a helper thread, waiting at most `grace` for it.
-/// For paths where the stderr lock may be wedged (the panic hook; a restore whose writer thread
-/// is still parked in its tty write): an unbounded teardown would hang forever, never restoring
-/// raw mode. On timeout the helper is detached; the process is exiting anyway.
-/// Runs `f` inline if no thread can spawn.
-fn run_bounded_teardown(f: impl FnOnce() + Send + 'static, grace: std::time::Duration) {
-    let slot = std::sync::Arc::new(parking_lot::Mutex::new(Some(f)));
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-    let worker_slot = std::sync::Arc::clone(&slot);
-    let spawned = std::thread::Builder::new()
-        .name("bounded-teardown".into())
-        .spawn(move || {
-            if let Some(f) = worker_slot.lock().take() {
-                f();
-            }
-            let _ = done_tx.send(());
-        });
-    match spawned {
-        Ok(_) => {
-            let _ = done_rx.recv_timeout(grace);
-        }
-        Err(_) => {
-            if let Some(f) = slot.lock().take() {
-                f();
-            }
-        }
-    }
-}
-/// Reads [`current_screen_mode`] at panic time; never capture a mode here, or an in-process mode switch tears down the wrong screen.
-fn set_panic_hook() {
-    let hook = panic::take_hook();
-    panic::set_hook(Box::new(move |info| {
-        run_bounded_teardown(
-            || emit_terminal_teardown_sequences(current_screen_mode(), None),
-            TEARDOWN_GRACE,
-        );
-        let _ = terminal::disable_raw_mode();
-        signal_handler::mark_restored();
-        fuigo_crash_handler::disable_terminal_escape_restore();
-        fuigo_tty_utils::restore_native_stderr();
-        fuigo_tty_utils::global_process_scope().kill_all();
-        crate::memory_trace::record_crash_sample();
-        hook(info);
-    }));
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1896,7 +1752,9 @@ mod tests {
         use crate::render::draw::WriterJoin;
         assert!(terminal_still_reads(&Ok(WriterJoin::Joined)));
         assert!(!terminal_still_reads(&Ok(WriterJoin::TimedOut)));
-        assert!(!terminal_still_reads(&Err(io::Error::other("drain failed"))));
+        assert!(!terminal_still_reads(&Err(io::Error::other(
+            "drain failed"
+        ))));
     }
     /// The loop-top gboom keyboard-layer sync runs on the event-loop thread: its push/pop
     /// escapes must ride the writer queue, not an inline stderr write.
@@ -1920,91 +1778,6 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    fn test_terminal_and_writer_thread() -> (PagerTerminal, crate::render::draw::WriterThread) {
-        use ratatui::{TerminalOptions, Viewport};
-        let (tx, _rx) = std::sync::mpsc::channel::<crate::render::draw::WriterPayload>();
-        let sync = crate::render::draw::WriterSync::new();
-        let backend = CrosstermBackend::new(
-            crate::render::draw::TermWriter::new(tx, sync).expect("single test writer"),
-        );
-        let terminal = fuigo_ratatui_inline::Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 80, 24)),
-            },
-        )
-        .expect("test terminal");
-        let (writer_tx, _writer_sync, _events, writer_thread) =
-            crate::render::draw::spawn_writer_thread();
-        drop(writer_tx);
-        (terminal, writer_thread)
-    }
-    #[test]
-    fn restore_runs_teardown_even_when_writer_failed() {
-        let (terminal, writer_thread) = test_terminal_and_writer_thread();
-        let teardown_called = std::sync::Arc::new(AtomicBool::new(false));
-        let observed = std::sync::Arc::clone(&teardown_called);
-        let result = restore_terminal_with(
-            terminal,
-            writer_thread,
-            ScreenMode::Inline,
-            |terminal, writer_thread| {
-                drop(terminal);
-                drop(writer_thread);
-                Err(io::Error::other("injected drain failure"))
-            },
-            move |_, _| observed.store(true, Ordering::Release),
-        );
-        assert!(result.is_err());
-        assert!(teardown_called.load(Ordering::Acquire));
-    }
-
-    /// A timed-out writer join leaves the writer thread possibly parked on the stderr lock,
-    /// so the teardown that follows must be bounded: `/quit` returns even if teardown wedges.
-    #[test]
-    fn restore_bounds_teardown_after_a_timed_out_writer_join() {
-        let (terminal, writer_thread) = test_terminal_and_writer_thread();
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let started = std::time::Instant::now();
-        let result = restore_terminal_with(
-            terminal,
-            writer_thread,
-            ScreenMode::Inline,
-            |terminal, writer_thread| {
-                drop(terminal);
-                drop(writer_thread);
-                Ok(crate::render::draw::WriterJoin::TimedOut)
-            },
-            move |_, _| {
-                let _ = release_rx.recv();
-            },
-        );
-        assert!(matches!(
-            result,
-            Ok(crate::render::draw::WriterJoin::TimedOut)
-        ));
-        assert!(
-            started.elapsed() < TEARDOWN_GRACE + std::time::Duration::from_secs(5),
-            "restore must give up on a wedged teardown after TEARDOWN_GRACE"
-        );
-        let _ = release_tx.send(());
-    }
-
-    /// The panic hook's teardown writes stay bounded so a wedged stderr lock cannot
-    /// keep the hook from restoring raw mode and reaching the delegated hook/abort.
-    #[test]
-    fn panic_teardown_is_bounded_when_the_stderr_lock_is_wedged() {
-        fn takes_the_lock() {
-            let _guard = fuigo_shell::util::stderr_lock();
-        }
-        let _guard = fuigo_shell::util::stderr_lock();
-        let started = std::time::Instant::now();
-        run_bounded_teardown(takes_the_lock, std::time::Duration::from_millis(100));
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(10),
-            "a wedged stderr lock must not block the bounded teardown"
-        );
-    }
     /// `[ui].cursor_blink` tri-state maps to the startup cursor policy; the `None` default must be Inherit (emit nothing).
     #[test]
     fn cursor_blink_config_maps_to_policy() {
@@ -2035,7 +1808,10 @@ mod tests {
         let family = "\u{1f468}\u{200d}\u{1f469}";
         assert_eq!(terminal_title_string(family), format!("{family} - fuigo"));
         let scotland = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}";
-        assert_eq!(terminal_title_string(scotland), format!("{scotland} - fuigo"));
+        assert_eq!(
+            terminal_title_string(scotland),
+            format!("{scotland} - fuigo")
+        );
         // A cap that cuts through a flag must not leave its loose tags behind
         let cut = format!("{}{scotland}", "a".repeat(72));
         assert_eq!(
@@ -2654,10 +2430,15 @@ mod tests {
         assert!(body.starts_with("note: sandbox profile '"), "{text:?}");
         assert!(body.ends_with("to use the leader."), "{text:?}");
         assert!(
-            !body.chars().any(|c| c.is_control() || fuigo_tty_utils::is_unsafe_display_char(c)),
+            !body
+                .chars()
+                .any(|c| c.is_control() || fuigo_tty_utils::is_unsafe_display_char(c)),
             "no control byte in the note: {text:?}"
         );
-        assert!(body.contains("]52;c;c3RvbGVu") && body.contains("[2J"), "visible, inert: {text:?}");
+        assert!(
+            body.contains("]52;c;c3RvbGVu") && body.contains("[2J"),
+            "visible, inert: {text:?}"
+        );
     }
 
     /// P181 (S5, M1, d): the sandbox note's quoted profile cannot contain its own closing quote.
@@ -2666,7 +2447,12 @@ mod tests {
         let mut out = Vec::new();
         print_leader_disabled_by_sandbox("x' was requested, so forged '", &mut out);
         let text = String::from_utf8(out).expect("utf8");
-        assert!(text.starts_with("note: sandbox profile 'x\\' was requested, so forged \\'' was requested"), "{text:?}");
+        assert!(
+            text.starts_with(
+                "note: sandbox profile 'x\\' was requested, so forged \\'' was requested"
+            ),
+            "{text:?}"
+        );
     }
 
     /// P181 (sweep): the quit tail prints the session title and the last prompt and response, which are model and user
@@ -2685,10 +2471,16 @@ mod tests {
         };
         let mut buf = Vec::new();
         print_exit_resume_hint(&info, 80, &mut buf);
-        print_relaunch_failure_hint(&"bad\u{1b}]52;c;AAAA\u{7}\u{202e}err", &info.session_id, false, &mut buf);
+        print_relaunch_failure_hint(
+            &"bad\u{1b}]52;c;AAAA\u{7}\u{202e}err",
+            &info.session_id,
+            false,
+            &mut buf,
+        );
         let out = String::from_utf8(buf).unwrap();
         assert!(
-            !out.chars().any(|c| c != '\n' && fuigo_tty_utils::is_unsafe_display_char(c)),
+            !out.chars()
+                .any(|c| c != '\n' && fuigo_tty_utils::is_unsafe_display_char(c)),
             "{out:?}"
         );
         assert!(out.contains("ti ]0;owned tle\n"), "{out:?}");

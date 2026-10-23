@@ -12,6 +12,7 @@ use ratatui::{
     backend::{Backend, ClearType},
     buffer::{Buffer, Cell},
     layout::{Position, Rect, Size},
+    style::{Color, Modifier},
 };
 use unicode_width::UnicodeWidthStr as _;
 
@@ -28,6 +29,16 @@ pub struct LinkSpan {
     pub url: Arc<str>,
     /// Source grouping key (markdown / overlay id), not the emitted OSC 8 `id=`.
     pub id: Option<u32>,
+}
+
+/// How the host terminal treats rows already on screen when its width shrinks.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub enum WidthShrink {
+    /// Rows are cut at the new width and the cursor keeps its row.
+    #[default]
+    Truncates,
+    /// Rows wider than the new width re-wrap onto extra rows. The cursor moves down with its cell.
+    Rewraps,
 }
 
 /// Resolved hyperlink target stored in a frame's link table; `link_ids` entries
@@ -233,6 +244,8 @@ where
     /// Last known position of the cursor. Used to find the new area when the viewport is inlined
     /// and the terminal resized.
     last_known_cursor_pos: Position,
+    /// Decides where an inline resize finds the previous viewport top relative to the cursor.
+    width_shrink: WidthShrink,
     /// Number of frames rendered up until current time.
     frame_count: usize,
     /// Per-cell hyperlink id layer (`0` = no link), one per entry in `buffers`
@@ -320,6 +333,7 @@ where
             viewport_area,
             last_known_area: area,
             last_known_cursor_pos: cursor_pos,
+            width_shrink: WidthShrink::default(),
             frame_count: 0,
             link_ids: [vec![0; link_len], vec![0; link_len]],
             link_tables: [Vec::new(), Vec::new()],
@@ -501,14 +515,12 @@ where
             {
                 area
             }
-            Viewport::Inline(height) => {
-                let offset_in_previous_viewport = self
-                    .last_known_cursor_pos
-                    .y
-                    .saturating_sub(self.viewport_area.top());
+            Viewport::Inline(_) => {
+                let offset_in_previous_viewport = self.reflowed_cursor_offset(area.width);
+                // The stored `Inline` height lags `set_viewport_area`. A stale taller height makes the new area cover committed rows
                 compute_inline_size(
                     &mut self.backend,
-                    height,
+                    self.viewport_area.height,
                     area.as_size(),
                     offset_in_previous_viewport,
                 )?
@@ -1339,6 +1351,24 @@ fn emit_frame_with_links<B: Backend + Write>(
     Ok(())
 }
 
+/// Columns of row `y` a reflowing terminal keeps when re-wrapping. They run through the last glyph or visibly styled blank.
+fn row_extent(buf: &Buffer, y: u16) -> u16 {
+    let area = buf.area;
+    (area.left()..area.right())
+        .rev()
+        .find_map(|x| {
+            let cell = buf.cell((x, y))?;
+            let is_blank = cell.symbol().trim().is_empty()
+                && cell.bg == Color::Reset
+                && !cell
+                    .modifier
+                    .intersects(Modifier::REVERSED | Modifier::UNDERLINED);
+            let width = u16::try_from(cell.symbol().width()).unwrap_or(1).max(1);
+            (!is_blank).then(|| (x - area.left()).saturating_add(width))
+        })
+        .unwrap_or(0)
+}
+
 fn compute_inline_size<B: Backend>(
     backend: &mut B,
     height: u16,
@@ -1387,6 +1417,38 @@ impl<B: Backend> Terminal<B> {
     /// should read it here for consistency.
     pub fn last_known_area(&self) -> Rect {
         self.last_known_area
+    }
+
+    /// Record a cursor move the caller queued straight to the backend, bypassing [`Self::set_cursor_position`].
+    /// An inline resize anchors the viewport on this position.
+    pub fn record_cursor_position(&mut self, position: Position) {
+        self.last_known_cursor_pos = position;
+    }
+
+    /// Set how the host terminal treats on-screen rows when its width shrinks.
+    pub fn set_width_shrink(&mut self, width_shrink: WidthShrink) {
+        self.width_shrink = width_shrink;
+    }
+
+    /// Rows from the viewport top to the cursor once the terminal has applied a resize to `new_width`.
+    /// Trailing blanks do not count. An estimate that errs low leaves a stale row above the redraw and never clears a committed row.
+    fn reflowed_cursor_offset(&self, new_width: u16) -> u16 {
+        let top = self.viewport_area.top();
+        let cursor = self.last_known_cursor_pos;
+        let rows_above = cursor.y.saturating_sub(top);
+        if self.width_shrink == WidthShrink::Truncates
+            || new_width == 0
+            || new_width >= self.viewport_area.width
+        {
+            return rows_above;
+        }
+        let last_frame = &self.buffers[1 - self.current];
+        let spilled = (top..cursor.y)
+            .map(|y| row_extent(last_frame, y).saturating_sub(1) / new_width)
+            .fold(0, u16::saturating_add);
+        rows_above
+            .saturating_add(spilled)
+            .saturating_add(cursor.x / new_width)
     }
 
     /// Switch the viewport kind in place, keeping the backend alive.
@@ -1440,10 +1502,12 @@ impl<B: Backend> Terminal<B> {
 
 #[cfg(test)]
 mod inline_resize_tests {
-    use ratatui::backend::TestBackend;
-    use ratatui::{TerminalOptions, Viewport, layout::Rect};
+    use ratatui::backend::{Backend, TestBackend};
+    use ratatui::layout::{Position, Rect};
+    use ratatui::style::Style;
+    use ratatui::{TerminalOptions, Viewport};
 
-    use super::Terminal;
+    use super::{Terminal, WidthShrink};
 
     fn full_height_inline(width: u16, height: u16) -> Terminal<TestBackend> {
         Terminal::with_options(
@@ -1453,6 +1517,143 @@ mod inline_resize_tests {
             },
         )
         .unwrap()
+    }
+
+    /// A 4-row inline viewport at row 10 of an 80x24 screen whose last frame painted `rows` (absolute y, text).
+    fn painted_inline(rows: &[(u16, &str)]) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::with_options(
+            TestBackend::new(80, 24),
+            TerminalOptions {
+                viewport: Viewport::Inline(4),
+            },
+        )
+        .unwrap();
+        terminal.set_viewport_area(Rect::new(0, 10, 80, 4));
+        terminal.set_width_shrink(WidthShrink::Rewraps);
+        terminal
+            .draw(|f| {
+                for (y, text) in rows {
+                    f.buffer_mut().set_string(0, *y, text, Style::default());
+                }
+            })
+            .unwrap();
+        terminal
+    }
+
+    /// The pager moves the visible cursor after the cell diff. The resize anchors on that position, not on the last diffed cell.
+    #[test]
+    fn inline_resize_anchors_on_recorded_cursor_row() {
+        let mut terminal = painted_inline(&[(11, "status"), (12, "> draft"), (13, "info")]);
+        terminal.record_cursor_position(Position::new(7, 12));
+        terminal.backend_mut().resize(80, 20);
+        terminal
+            .backend_mut()
+            .set_cursor_position(Position::new(7, 12))
+            .unwrap();
+
+        terminal.autoresize().unwrap();
+
+        assert_eq!(Rect::new(0, 10, 80, 4), terminal.viewport_area());
+    }
+
+    /// A reflowing terminal splits a 70-column row onto two rows at 40 columns and moves the cursor down with it.
+    #[test]
+    fn inline_narrowing_counts_rows_rewrapped_above_cursor() {
+        let wide = "w".repeat(70);
+        let mut terminal = painted_inline(&[(10, &wide), (11, "status"), (12, "> draft")]);
+        terminal.record_cursor_position(Position::new(7, 12));
+        terminal.backend_mut().resize(40, 24);
+        terminal
+            .backend_mut()
+            .set_cursor_position(Position::new(7, 13))
+            .unwrap();
+
+        terminal.autoresize().unwrap();
+
+        assert_eq!(Rect::new(0, 10, 40, 4), terminal.viewport_area());
+    }
+
+    /// A cursor past the new width moves onto the re-wrapped part of its own row.
+    #[test]
+    fn inline_narrowing_counts_cursor_column_spill() {
+        let draft = format!("> {}", "d".repeat(50));
+        let mut terminal = painted_inline(&[(11, "status"), (12, &draft)]);
+        terminal.record_cursor_position(Position::new(52, 12));
+        terminal.backend_mut().resize(40, 24);
+        terminal
+            .backend_mut()
+            .set_cursor_position(Position::new(12, 13))
+            .unwrap();
+
+        terminal.autoresize().unwrap();
+
+        assert_eq!(Rect::new(0, 10, 40, 4), terminal.viewport_area());
+    }
+
+    /// `set_viewport_area` leaves the stored `Inline` height behind. A resize must size from the live viewport area.
+    #[test]
+    fn inline_resize_sizes_from_live_viewport_height() {
+        let mut terminal = Terminal::with_options(
+            TestBackend::new(80, 26),
+            TerminalOptions {
+                viewport: Viewport::Inline(15),
+            },
+        )
+        .unwrap();
+        terminal.set_viewport_area(Rect::new(0, 23, 80, 3));
+        terminal.record_cursor_position(Position::new(2, 24));
+        terminal.backend_mut().resize(80, 34);
+        terminal
+            .backend_mut()
+            .set_cursor_position(Position::new(2, 32))
+            .unwrap();
+
+        terminal.autoresize().unwrap();
+
+        assert_eq!(Rect::new(0, 31, 80, 3), terminal.viewport_area());
+    }
+
+    /// On a truncating terminal, wide rows above the cursor do not shift the anchor.
+    #[test]
+    fn inline_narrowing_on_truncating_terminal_keeps_row_offset() {
+        let wide = "w".repeat(70);
+        let mut terminal = painted_inline(&[(10, &wide), (11, "status"), (12, "> draft")]);
+        terminal.set_width_shrink(WidthShrink::Truncates);
+        terminal.record_cursor_position(Position::new(7, 12));
+        terminal.backend_mut().resize(40, 24);
+        terminal
+            .backend_mut()
+            .set_cursor_position(Position::new(7, 12))
+            .unwrap();
+
+        terminal.autoresize().unwrap();
+
+        assert_eq!(Rect::new(0, 10, 40, 4), terminal.viewport_area());
+    }
+
+    /// Unwritten trailing cells do not re-wrap. A widening never splits rows.
+    #[test]
+    fn inline_resize_ignores_trailing_blanks_and_widening() {
+        let mut narrowed = painted_inline(&[(10, "short"), (11, "status"), (12, "> draft")]);
+        narrowed.record_cursor_position(Position::new(7, 12));
+        narrowed.backend_mut().resize(40, 24);
+        narrowed
+            .backend_mut()
+            .set_cursor_position(Position::new(7, 12))
+            .unwrap();
+        narrowed.autoresize().unwrap();
+        assert_eq!(Rect::new(0, 10, 40, 4), narrowed.viewport_area());
+
+        let wide = "w".repeat(70);
+        let mut widened = painted_inline(&[(10, &wide), (11, "status"), (12, "> draft")]);
+        widened.record_cursor_position(Position::new(7, 12));
+        widened.backend_mut().resize(120, 24);
+        widened
+            .backend_mut()
+            .set_cursor_position(Position::new(7, 12))
+            .unwrap();
+        widened.autoresize().unwrap();
+        assert_eq!(Rect::new(0, 10, 120, 4), widened.viewport_area());
     }
 
     /// A full-height inline viewport (the alt-screen-unavailable case used under

@@ -7,8 +7,8 @@ use crate::remote::client::{BackendError, FetchModelsResult, parse_remote_model_
 use crate::remote::model_source::ModelSource;
 use serde::Deserialize;
 #[derive(Debug, Deserialize)]
-struct ModelsResponse {
-    data: Vec<serde_json::Value>,
+pub(crate) struct ModelsResponse {
+    pub(crate) data: Vec<serde_json::Value>,
 }
 /// Reads `/v1/models` from whichever host the endpoint config resolved to.
 pub(crate) struct OaiModelSource {
@@ -84,20 +84,29 @@ impl ModelSource for OaiModelSource {
             models_response.data.len(),
             self.endpoint.url
         );
-        let mut models = Vec::with_capacity(models_response.data.len());
-        for (idx, value) in models_response.data.into_iter().enumerate() {
-            match parse_remote_model_value(&value, &self.inference_base_url) {
-                Some(model) => models.push(model),
-                None => {
-                    tracing::warn!(
-                        "Skipping model at index {}: missing required field ('model' or 'context_window') or invalid types",
-                        idx
-                    )
-                }
-            }
-        }
+        let models = parse_models(models_response.data, &self.inference_base_url);
         Ok(FetchModelsResult { models, etag })
     }
+}
+/// Every model entry of a `/v1/models` body that parses; one that does not is skipped with a warning.
+/// The main catalog fetch and the idle-resume refresh both read the list through this.
+pub(crate) fn parse_models(
+    data: Vec<serde_json::Value>,
+    default_base_url: &str,
+) -> Vec<crate::agent::config::ModelEntryConfig> {
+    let mut models = Vec::with_capacity(data.len());
+    for (idx, value) in data.into_iter().enumerate() {
+        match parse_remote_model_value(&value, default_base_url) {
+            Some(model) => models.push(model),
+            None => {
+                tracing::warn!(
+                    "Skipping model at index {}: missing required field ('model' or 'context_window') or invalid types",
+                    idx
+                )
+            }
+        }
+    }
+    models
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EndpointAuth {

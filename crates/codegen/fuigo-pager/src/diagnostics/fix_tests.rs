@@ -1263,5 +1263,8 @@ fn preview_path_refuses_line_separators_and_bidi_controls() {
             "{hostile:?}"
         );
     }
-    assert_eq!(super::preview_path(std::path::Path::new("/tmp/ok")), "`/tmp/ok`");
+    assert_eq!(
+        super::preview_path(std::path::Path::new("/tmp/ok")),
+        "`/tmp/ok`"
+    );
 }

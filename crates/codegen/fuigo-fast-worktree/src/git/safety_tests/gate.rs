@@ -154,6 +154,7 @@ fn write_at(worktree: &Path, path: &str, bytes: &[u8]) {
     std::fs::write(at, bytes).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn reclaiming_a_worktree_runs_none_of_its_hooks() {
     use std::os::unix::fs::PermissionsExt;
@@ -200,6 +201,32 @@ fn gate_that_does_not_answer_keeps_the_worktree() {
         Safety::Keep(KeepReason::GateTimedOut),
         "a hang is reported apart from a check that failed cheaply: only this one \
          leaves a thread behind, and a soak has to be able to count it"
+    );
+}
+
+#[test]
+fn answer_queued_after_the_deadline_is_not_accepted() {
+    // A caller descheduled past the deadline finds the answer already queued.
+    // The answer was produced after the deadline, so the gate overran its budget.
+    use std::time::Instant;
+    let deadline = Instant::now();
+    let (sent, answered) = std::sync::mpsc::channel();
+    sent.send((Safety::Delete, deadline + Duration::from_secs(1)))
+        .unwrap();
+    assert_eq!(
+        await_answer(Path::new("/nonexistent"), Duration::ZERO, Some(deadline), &answered),
+        Safety::Keep(KeepReason::GateTimedOut),
+        "a verdict that arrived after the deadline must fail closed"
+    );
+
+    // Control: an answer produced in time is still accepted, even when read late.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let (sent, answered) = std::sync::mpsc::channel();
+    sent.send((Safety::Delete, deadline - Duration::from_secs(1)))
+        .unwrap();
+    assert_eq!(
+        await_answer(Path::new("/nonexistent"), Duration::from_secs(60), Some(deadline), &answered),
+        Safety::Delete
     );
 }
 

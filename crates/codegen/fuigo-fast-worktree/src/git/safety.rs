@@ -144,16 +144,37 @@ fn answer_within(
     if std::thread::Builder::new()
         .name("worktree-safety-gate".into())
         .spawn(move || {
-            let _ = sent.send(gate());
+            let answer = gate();
+            // Stamp the answer when it was produced, not when it is read.
+            let _ = sent.send((answer, std::time::Instant::now()));
         })
         .is_err()
     {
         tracing::warn!(path = %worktree.display(), "safety gate could not start; keeping worktree");
         return Safety::Keep(KeepReason::CheckFailed);
     }
-    match answered.recv_timeout(timeout) {
-        Ok(safety) => safety,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+    await_answer(worktree, timeout, std::time::Instant::now().checked_add(timeout), &answered)
+}
+
+/// Accept the gate's answer only if it was produced by `deadline`. An answer
+/// already queued when the deadline passed (the caller was descheduled past it)
+/// is a gate that overran its budget, so it is a keep, not a verdict.
+/// `deadline == None` (overflow) waits forever.
+fn await_answer(
+    worktree: &Path,
+    timeout: Duration,
+    deadline: Option<std::time::Instant>,
+    answered: &std::sync::mpsc::Receiver<(Safety, std::time::Instant)>,
+) -> Safety {
+    let received = match deadline {
+        Some(d) => answered.recv_timeout(d.saturating_duration_since(std::time::Instant::now())),
+        None => answered
+            .recv()
+            .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+    };
+    match received {
+        Ok((safety, at)) if deadline.is_none_or(|d| at <= d) => safety,
+        Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             tracing::warn!(
                 path = %worktree.display(),
                 ?timeout,

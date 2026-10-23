@@ -22,6 +22,10 @@ pub const EMPTY_RESPONSE_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 /// stable across a request; splitting it announced "(1/2)" and then "(2/3)".
 pub const EMPTY_RESPONSE_MAX_ATTEMPTS: u32 = 3;
 
+/// Attempt cap (the original plus the resend) for a model call that stalled: it is resent once.
+/// Each stall costs the whole idle window, so a longer ladder would only stretch the wait.
+pub const IDLE_TIMEOUT_MAX_ATTEMPTS: u32 = 2;
+
 /// The attempt budget [`classify_error`] applies to `err`.
 /// It is the configured `max_retries`, lowered to [`EMPTY_RESPONSE_MAX_ATTEMPTS`] for `SamplingError::EmptyResponse`.
 /// Like `max_retries` it counts attempts including the original, so `Retrying` events report `attempt/effective`.
@@ -29,6 +33,7 @@ pub const EMPTY_RESPONSE_MAX_ATTEMPTS: u32 = 3;
 pub fn effective_max_retries(err: &SamplingError, max_retries: u32) -> u32 {
     match err {
         SamplingError::EmptyResponse { .. } => max_retries.min(EMPTY_RESPONSE_MAX_ATTEMPTS),
+        SamplingError::IdleTimeout { .. } => max_retries.min(IDLE_TIMEOUT_MAX_ATTEMPTS),
         _ => max_retries,
     }
 }
@@ -179,6 +184,16 @@ pub fn classify_error(
         }
         return RetryDecision::Retry {
             backoff: EMPTY_RESPONSE_RETRY_BACKOFF,
+        };
+    }
+
+    // A call that stalled mid-stream is resent once on a rebuilt client (the connection that went quiet is not reused)
+    if matches!(err, SamplingError::IdleTimeout { .. }) {
+        if retry_count + 1 >= effective_max_retries(err, max_retries) {
+            return RetryDecision::Fatal(clone_error(err));
+        }
+        return RetryDecision::RetryWithClientRebuild {
+            backoff: jitter_backoff(TRANSPORT_REBUILD_BACKOFF),
         };
     }
 
@@ -890,13 +905,33 @@ mod tests {
         }
     }
 
+    /// 50.7: a model call that stalls is resent once, on a fresh connection, before the turn is failed.
+    /// The resend is capped at one (a stall costs minutes of waiting each), whatever `max_retries` allows.
     #[test]
-    fn classify_idle_timeout_is_fatal() {
+    fn classify_idle_timeout_retries_once_then_fails() {
         let err = SamplingError::IdleTimeout { elapsed_secs: 300 };
-        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
-            RetryDecision::Fatal(SamplingError::IdleTimeout { elapsed_secs: 300 }) => {}
-            other => panic!("expected Fatal(IdleTimeout), got {other:?}"),
+        match classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithClientRebuild { .. } => {}
+            other => panic!("expected the first stall to be resent on a rebuilt client, got {other:?}"),
         }
+        match classify_error(&err, 1, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Fatal(SamplingError::IdleTimeout { elapsed_secs: 300 }) => {}
+            other => panic!("expected Fatal(IdleTimeout) after the one resend, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn idle_timeout_retry_never_outruns_a_lowered_budget() {
+        let err = SamplingError::IdleTimeout { elapsed_secs: 300 };
+        assert!(matches!(
+            classify_error(&err, 0, 1, RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::Fatal(SamplingError::IdleTimeout { .. })
+        ));
+        assert!(matches!(
+            classify_error(&err, 0, 0, RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::Fatal(SamplingError::IdleTimeout { .. })
+        ));
+        assert_eq!(effective_max_retries(&err, 15), 2);
     }
 
     #[test]

@@ -426,16 +426,24 @@ fn the_overlay_owns_the_park_rung_and_the_bar_says_so() {
     open_question(&mut agent);
     agent.in_dashboard_overlay = true;
 
-    assert_eq!(agent.card_esc(), Some(EscStep::BackOutOverlay));
+    // Row 60.4: on the first question the first Esc focuses the scrollback; it does not throw the user out of the session
+    assert_eq!(agent.card_esc(), Some(EscStep::ParkFocus));
     assert!(
-        agent.overlay_esc_backs_out(),
-        "the overlay cascade and the ladder must agree"
+        !agent.overlay_esc_backs_out(),
+        "the first Esc parks on the scrollback before it leaves the overlay"
     );
     assert!(
-        hint_labels(&agent).contains(&"dashboard".to_string()),
+        hint_labels(&agent).contains(&"scrollback".to_string()),
         "the bar names where Esc actually goes, got {:?}",
         hint_labels(&agent)
     );
+    let _ = agent.handle_question_key_for_test(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(agent.active_pane, AgentPane::Scrollback);
+    assert!(
+        agent.overlay_esc_backs_out(),
+        "and the next press leaves for the dashboard"
+    );
+    agent.set_active_pane(AgentPane::Prompt, true);
 
     let _ =
         agent.handle_question_key_for_test(&KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));

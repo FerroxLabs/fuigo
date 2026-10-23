@@ -32,6 +32,13 @@ fn spawn_serving(
     content.server().set_settings(settings);
     seed_fake_oauth(content, oauth_user);
 
+    // Fuigo ships with no OAuth issuer: name the one the seeded entry belongs to, and reach the mock over the trusted
+    // HTTPS front that session auth requires (see `spawn_polling_session_with_env`)
+    let mut overrides = Vec::from(oauth_credential_ops());
+    overrides.extend(oauth_provider_ops());
+    let front_env = content.session_front_env();
+    overrides.extend(front_env.iter().map(|(key, value)| EnvOp::set(key, value)));
+
     let binary = pager_binary().expect("resolve pager binary");
     PtyHarness::spawn_with_content_env_ops_in_dir(
         &binary,
@@ -39,7 +46,7 @@ fn spawn_serving(
         DEFAULT_COLS,
         content,
         &[],
-        &oauth_credential_ops(),
+        &overrides,
         Some(content.home()),
     )
     .expect("spawn pager against the served settings")
@@ -167,6 +174,16 @@ async fn an_answered_notice_does_not_ask_again() {
     second.quit().expect("clean quit");
 
     // A new version is a new question.
+    // The client keeps the served settings for `SETTINGS_CACHE_TTL` (five minutes), and a relaunch inside that window is answered from the cache.
+    // The cached notice is still version 1, so the bump only reaches a launch that fetches fresh, as it does once the cache has expired.
+    // Expire the cache here; the notice itself is what this step is about.
+    let settings_cache = content.sandbox().fuigo_home().join("settings_cache.json");
+    assert!(
+        settings_cache.is_file(),
+        "the earlier launches should have cached the served settings at {}",
+        settings_cache.display()
+    );
+    std::fs::remove_file(&settings_cache).expect("expire the settings cache");
     let mut settings = consent_settings();
     settings["consent_gate"]["version"] = serde_json::json!(2);
     let mut third = spawn_serving(&content, "pty-consent-relaunch", settings);

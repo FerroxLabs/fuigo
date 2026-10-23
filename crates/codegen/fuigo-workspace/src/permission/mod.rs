@@ -1,5 +1,6 @@
 pub mod auto_mode;
 pub mod bash_command_splitting;
+mod bash_permission_script;
 mod branch_switch;
 pub mod claude_settings;
 pub(crate) mod exec_risk;
@@ -9,7 +10,13 @@ mod manager;
 pub mod peer_denials;
 pub mod peer_guard;
 mod policy;
+#[cfg(test)]
+mod policy_bash_recovery_tests;
 mod prompter;
+mod sandbox_card;
+mod sandbox_gate;
+mod sandbox_network;
+pub mod sandbox_wire;
 pub mod resolution;
 pub mod rules;
 mod shell_access;
@@ -87,6 +94,14 @@ pub use prompter::{
 pub use peer_denials::{
     CarriedStats, DenialCause, DenialKey, DenialLog, KeyBasis, LaunderingHit, MANY_TARGETS_HASH, MAX_KEYS_PER_DENIAL, cap_keys, records_denial, denial_key, denial_keys, denial_keys_for, match_keys, match_keys_for, laundering_refused_text, mono_secs};
 pub use peer_guard::{PeerInfluence, PeerPayloadNote, is_peer_protected_path, peer_guard_denial_text};
+pub(crate) use sandbox_card::{AskCause, SandboxCover, card_replaces};
+pub(crate) use sandbox_gate::{
+    SandboxPath, SettleContext, ViolationSettlement, refuse_mode_layer_write, settle_violation,
+};
+pub use sandbox_network::{
+    GrantView, HoldAnswer, SandboxNetworkDecider, SandboxNetworkDeciderConfig, ViolationSink,
+    WebFetchDomainFile, WebFetchDomains,
+};
 pub use shell_access::{ProtectedEditPermission, ProtectedEditReason};
 pub use state::PermissionState;
 pub use state::cleanup_stale_permission_state;

@@ -1,519 +1,120 @@
-// Scans Claude settings and generates TOML patches for .fuigo/config.toml.
+// Imports another agent's (Claude's) settings into Fuigo configuration.
 //
-// This module reuses the existing discovery and parsing functions from claude_compat.rs and util/config.rs
+// Planning and merging live in `fuigo-external-agent-migration`. This module is the shell's side of it: it reads
+// the source settings with the permission grammar and MCP loaders only the shell has, writes the result under the
+// destination's lock and owner-only (the files can carry imported credentials), and owns the opt-in marker the
+// runtime compat gates consult.
 // It does NOT modify the runtime Claude compat layer; that continues to work as before
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
 
+use fuigo_external_agent_migration::{
+    ClaudeSettingsSnapshot, marker_config_text, merge_hooks, merge_items_into_config,
+};
+pub use fuigo_external_agent_migration::{
+    ImportPatternMode, ImportPermission, ImportPlan, ImportResult, ImportRuleAction, ImportTool,
+    ImportableItem, MigrationError, PathKind, find_project_root, redacted_env_value,
+};
 use toml::Value as TomlValue;
-use toml::map::Map as TomlMap;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
-use crate::util::config::McpServerConfig;
 use fuigo_workspace::permission::claude_settings::{
     find_claude_settings_paths, load_claude_settings,
 };
 use fuigo_workspace::permission::rules::parse_permission_rule;
 use fuigo_workspace::permission::types::{PatternMode, PermissionRule, RuleAction, ToolFilter};
 
-// Types
-
-/// Scope for an import operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImportScope {
-    /// User-level: writes to `~/.fuigo/config.toml`.
-    Global,
-    /// Project-level: writes to `<repo>/.fuigo/config.toml`.
-    Project,
-}
-
-/// Which `[paths]` field a `PathEntry` populates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PathKind {
-    /// Maps to `[paths] extra_skill_dirs`.
-    Skill,
-    /// Maps to `[paths] extra_rule_dirs`.
-    Rule,
-}
-
-/// A single item that can be imported.
-#[derive(Clone)]
-pub enum ImportableItem {
-    /// A permission rule (allow/deny/ask).
-    Permission(PermissionRule),
-    /// An environment variable.
-    EnvVar { key: String, value: String },
-    /// An MCP server configuration.
-    McpServer {
-        name: String,
-        config: Box<McpServerConfig>,
-    },
-    /// A single hook (one event, matcher, and command, derived from a Claude `hooks` entry).
-    Hook {
-        event: String,
-        matcher: Option<String>,
-        command: String,
-        timeout: Option<u64>,
-    },
-    /// A path entry to add to `[paths] extra_skill_dirs` or `extra_rule_dirs`.
-    PathEntry { kind: PathKind, path: String },
-}
-
-/// Hand-written `Debug` (P70): an imported environment variable's value and a hook's command print as `<redacted>`
-/// (users keep API keys there). The destructures are exhaustive, so a new field fails to compile here until its Debug output is decided.
-impl std::fmt::Debug for ImportableItem {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Permission(rule) => f.debug_tuple("Permission").field(rule).finish(),
-            Self::EnvVar { key, value: _ } => f
-                .debug_struct("EnvVar")
-                .field("key", key)
-                .field("value", &"<redacted>")
-                .finish(),
-            Self::McpServer { name, config } => f
-                .debug_struct("McpServer")
-                .field("name", name)
-                .field("config", config)
-                .finish(),
-            Self::Hook { event, matcher, command, timeout } => f
-                .debug_struct("Hook")
-                .field("event", event)
-                .field("matcher", matcher)
-                // A hook command may embed a credential (`curl -H 'Authorization: Bearer …'`).
-                .field("command", &if command.is_empty() { "" } else { "<redacted>" })
-                .field("timeout", timeout)
-                .finish(),
-            Self::PathEntry { kind, path } => f
-                .debug_struct("PathEntry")
-                .field("kind", kind)
-                .field("path", path)
-                .finish(),
-        }
-    }
-}
-
-/// A plan describing what would be imported and where.
-#[derive(Debug, Clone, Default)]
-pub struct ImportPlan {
-    /// Items to write to `~/.fuigo/config.toml`.
-    pub global_items: Vec<ImportableItem>,
-    /// Items to write to `<repo>/.fuigo/config.toml`.
-    pub project_items: Vec<ImportableItem>,
-}
-
-impl ImportPlan {
-    /// Total number of items across both scopes.
-    pub fn total_items(&self) -> usize {
-        self.global_items.len() + self.project_items.len()
-    }
-
-    /// Whether there's nothing to import.
-    pub fn is_empty(&self) -> bool {
-        self.global_items.is_empty() && self.project_items.is_empty()
-    }
-
-    /// Format a human-readable summary of the import plan.
-    pub fn summary(&self, cwd: &Path) -> String {
-        if self.is_empty() {
-            return "No Claude settings found to import.".to_string();
-        }
-
-        let mut out = String::from("Found Claude settings to import:\n");
-
-        if !self.global_items.is_empty() {
-            out.push_str("\nGlobal (~/.fuigo/config.toml):\n");
-            out.push_str(&format_item_summary(&self.global_items));
-        }
-
-        if !self.project_items.is_empty() {
-            out.push_str(&format!(
-                "\nProject ({}/.fuigo/config.toml):\n",
-                find_project_root(cwd).display()
-            ));
-            out.push_str(&format_item_summary(&self.project_items));
-        }
-
-        out
-    }
-}
-
-/// Format a summary of items grouped by type, with per-item detail lines.
-fn format_item_summary(items: &[ImportableItem]) -> String {
-    let mut out = String::new();
-
-    // Permission rules
-    let perms: Vec<_> = items
-        .iter()
-        .filter_map(|i| match i {
-            ImportableItem::Permission(rule) => Some(rule),
-            _ => None,
-        })
-        .collect();
-    if !perms.is_empty() {
-        let mut allow = 0u32;
-        let mut deny = 0u32;
-        let mut ask = 0u32;
-        for rule in &perms {
-            match rule.action {
-                RuleAction::Allow => allow += 1,
-                RuleAction::Deny => deny += 1,
-                RuleAction::Ask => ask += 1,
-            }
-        }
-        let mut parts = Vec::new();
-        if allow > 0 {
-            parts.push(format!("{} allow", allow));
-        }
-        if deny > 0 {
-            parts.push(format!("{} deny", deny));
-        }
-        if ask > 0 {
-            parts.push(format!("{} ask", ask));
-        }
-        out.push_str(&format!(
-            "  - {} permission rule(s) ({})\n",
-            perms.len(),
-            parts.join(", ")
-        ));
-        for rule in &perms {
-            let action = match rule.action {
-                RuleAction::Allow => "allow",
-                RuleAction::Deny => "deny",
-                RuleAction::Ask => "ask",
-            };
-            out.push_str(&format!("      {} {}\n", action, format_rule_string(rule)));
-        }
-    }
-
-    // Env vars
-    let envs: Vec<_> = items
-        .iter()
-        .filter_map(|i| match i {
-            ImportableItem::EnvVar { key, value } => Some((key, value)),
-            _ => None,
-        })
-        .collect();
-    if !envs.is_empty() {
-        out.push_str(&format!("  - {} environment variable(s)\n", envs.len()));
-        for (key, value) in &envs {
-            // Redact the value: even keys like FOO_KEY can hide secrets (API tokens, credentials)
-            // The raw value still flows into the on-disk config.toml for actual use; only the human-facing summary suppresses it
-            // The length hint lets the user recognise their setting without exposing the contents in terminals, screenshots, or CI logs
-            out.push_str(&format!(
-                "      {} = <redacted, {} chars>\n",
-                key,
-                value.len()
-            ));
-        }
-    }
-
-    // MCP servers
-    let mcps: Vec<_> = items
-        .iter()
-        .filter_map(|i| match i {
-            ImportableItem::McpServer { name, .. } => Some(name),
-            _ => None,
-        })
-        .collect();
-    if !mcps.is_empty() {
-        out.push_str(&format!("  - {} MCP server(s)\n", mcps.len()));
-        for name in &mcps {
-            out.push_str(&format!("      {}\n", name));
-        }
-    }
-
-    // Hooks
-    let hooks: Vec<_> = items
-        .iter()
-        .filter_map(|i| match i {
-            ImportableItem::Hook {
-                event,
-                matcher,
-                command,
-                timeout,
-            } => Some((event, matcher, command, timeout)),
-            _ => None,
-        })
-        .collect();
-    if !hooks.is_empty() {
-        out.push_str(&format!("  - {} hook(s)\n", hooks.len()));
-        for (event, matcher, command, timeout) in &hooks {
-            let m = matcher.as_deref().unwrap_or("*");
-            let timeout_suffix = match timeout {
-                Some(t) => format!(" (timeout: {}s)", t),
-                None => String::new(),
-            };
-            out.push_str(&format!(
-                "      {} [{}] {}{}\n",
-                event, m, command, timeout_suffix
-            ));
-        }
-    }
-
-    // Path entries
-    let paths_iter = items.iter().filter_map(|i| match i {
-        ImportableItem::PathEntry { kind, path } => Some((*kind, path)),
-        _ => None,
-    });
-    let skill_paths: Vec<&String> = paths_iter
-        .clone()
-        .filter_map(|(k, p)| if k == PathKind::Skill { Some(p) } else { None })
-        .collect();
-    let rule_paths: Vec<&String> = paths_iter
-        .filter_map(|(k, p)| if k == PathKind::Rule { Some(p) } else { None })
-        .collect();
-    if !skill_paths.is_empty() {
-        out.push_str(&format!("  - {} extra skill dir(s)\n", skill_paths.len()));
-        for p in &skill_paths {
-            out.push_str(&format!("      {}\n", p));
-        }
-    }
-    if !rule_paths.is_empty() {
-        out.push_str(&format!("  - {} extra rule dir(s)\n", rule_paths.len()));
-        for p in &rule_paths {
-            out.push_str(&format!("      {}\n", p));
-        }
-    }
-
-    out
-}
-
-/// Parse Claude `hooks` JSON from a settings file at `path` into `ImportableItem::Hook` items.
-///
-/// Claude `hooks` shape:
-/// ```json
-/// {
-///   "hooks": {
-///     "PreToolUse": [
-///       { "matcher": "Bash", "hooks": [{ "type": "command", "command": "echo x", "timeout": 5 }] }
-///     ]
-///   }
-/// }
-/// ```
-///
-/// Each command handler becomes one `ImportableItem::Hook`.
-/// HTTP handlers and other types are skipped (we only import shell commands).
-fn extract_hooks_from_settings_file(path: &Path) -> Vec<ImportableItem> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let value: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    let Some(hooks_obj) = value.get("hooks").and_then(|v| v.as_object()) else {
-        return Vec::new();
-    };
-
-    let mut items = Vec::new();
-    for (event, groups_val) in hooks_obj {
-        let Some(groups) = groups_val.as_array() else {
-            continue;
-        };
-        for group in groups {
-            let matcher = group
-                .get("matcher")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string());
-            let Some(handlers) = group.get("hooks").and_then(|v| v.as_array()) else {
-                continue;
-            };
-            for handler in handlers {
-                let handler_type = handler.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                if handler_type != "command" {
-                    debug!(
-                        path = %path.display(),
-                        event = %event,
-                        handler_type = %handler_type,
-                        "Skipping non-command hook handler during import"
-                    );
-                    continue;
-                }
-                let Some(command) = handler.get("command").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                let timeout = handler.get("timeout").and_then(|v| v.as_u64());
-                items.push(ImportableItem::Hook {
-                    event: event.clone(),
-                    matcher: matcher.clone(),
-                    command: command.to_string(),
-                    timeout,
-                });
-            }
-        }
-    }
-    items
-}
-
 // Scanner
+
+/// A parsed permission rule in the migration crate's own shape.
+/// A tool the crate does not know yet imports as a tool-less rule (`Any`), as the string form has no name for it.
+fn import_permission(rule: &PermissionRule) -> ImportPermission {
+    ImportPermission {
+        action: match rule.action {
+            RuleAction::Allow => ImportRuleAction::Allow,
+            RuleAction::Deny => ImportRuleAction::Deny,
+            RuleAction::Ask => ImportRuleAction::Ask,
+        },
+        tool: match rule.tool {
+            ToolFilter::Bash => ImportTool::Bash,
+            ToolFilter::Edit => ImportTool::Edit,
+            ToolFilter::Read => ImportTool::Read,
+            ToolFilter::Grep => ImportTool::Grep,
+            ToolFilter::Mcp => ImportTool::Mcp,
+            ToolFilter::WebFetch => ImportTool::WebFetch,
+            ToolFilter::WebSearch => ImportTool::WebSearch,
+            ToolFilter::AgentMessage => ImportTool::AgentMessage,
+            _ => ImportTool::Any,
+        },
+        pattern: rule.pattern.clone(),
+        pattern_mode: match rule.pattern_mode {
+            PatternMode::Glob => ImportPatternMode::Glob,
+            PatternMode::Domain => ImportPatternMode::Domain,
+        },
+    }
+}
+
+/// One source settings file, as the migration crate takes it: its permission rules (an unparseable rule is
+/// skipped) and its environment variables, in a stable order.
+fn settings_snapshot(path: &Path) -> Option<ClaudeSettingsSnapshot> {
+    let settings = load_claude_settings(path)?;
+    let mut snapshot = ClaudeSettingsSnapshot::default();
+    if let Some(perms) = settings.permissions {
+        for (action, entries) in [
+            (RuleAction::Allow, perms.allow),
+            (RuleAction::Deny, perms.deny),
+            (RuleAction::Ask, perms.ask),
+        ] {
+            for rule_str in entries {
+                match parse_permission_rule(&rule_str, action) {
+                    Ok(rule) => snapshot.permissions.push(import_permission(&rule)),
+                    Err(e) => {
+                        debug!(
+                            path = %path.display(),
+                            rule = %rule_str,
+                            error = %e,
+                            "Skipping unparseable Claude permission rule"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    if let Some(env) = settings.env {
+        snapshot.env = env.into_iter().collect();
+        snapshot.env.sort();
+    }
+    Some(snapshot)
+}
 
 /// Scan all Claude settings sources and build an import plan.
 ///
 /// Discovers:
 /// - Permission rules from `.claude/settings*.json` (global and project)
-/// - Environment variables from `.claude/settings*.json`
+/// - Environment variables and hooks from `.claude/settings*.json`
 /// - MCP servers from `~/.claude.json` (global and per-project)
 /// - MCP servers from `.mcp.json` files (project)
+/// - `~/.claude/{skills,rules}` and `<repo>/.claude/{skills,rules}` directories
 pub fn scan_importable_settings(cwd: &Path) -> ImportPlan {
-    let mut plan = ImportPlan::default();
-
-    let all_paths = find_claude_settings_paths(cwd);
-    // The home used for the is_global split must match the resolution in config.rs and claude_import_state.rs, or scan and hash tiers disagree
-    let home = fuigo_dirs::home_dir();
-
-    for path in &all_paths {
-        let Some(settings) = load_claude_settings(path) else {
-            continue;
-        };
-
-        let is_global = home
-            .as_ref()
-            .is_some_and(|h| path.starts_with(h.join(".claude")));
-        let target = if is_global {
-            &mut plan.global_items
-        } else {
-            &mut plan.project_items
-        };
-
-        // Permission rules.
-        if let Some(perms) = settings.permissions {
-            for (action, entries) in [
-                (RuleAction::Allow, perms.allow),
-                (RuleAction::Deny, perms.deny),
-                (RuleAction::Ask, perms.ask),
-            ] {
-                for rule_str in entries {
-                    match parse_permission_rule(&rule_str, action) {
-                        Ok(rule) => target.push(ImportableItem::Permission(rule)),
-                        Err(e) => {
-                            debug!(
-                                path = %path.display(),
-                                rule = %rule_str,
-                                error = %e,
-                                "Skipping unparseable Claude permission rule"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // Environment variables.
-        if let Some(env) = settings.env {
-            for (key, value) in env {
-                target.push(ImportableItem::EnvVar { key, value });
-            }
-        }
-
-        // Hooks (re-parsed directly from the JSON since `ClaudeSettings` doesn't model `hooks`).
-        for hook in extract_hooks_from_settings_file(path) {
-            target.push(hook);
-        }
-    }
-
-    scan_claude_json_mcp_servers(cwd, &mut plan);
-
-    scan_mcp_json_servers(cwd, &mut plan);
-
-    scan_claude_path_dirs(cwd, &mut plan);
-
-    if !plan.is_empty() {
-        info!(
-            global = plan.global_items.len(),
-            project = plan.project_items.len(),
-            "Scanned Claude settings for import"
-        );
-    }
-
-    plan
-}
-
-/// Scan `~/.claude/{skills,rules}` (global) and `<repo>/.claude/{skills,rules}` (project).
-/// Emits `PathEntry` items so the dirs survive the runtime cutoff.
-fn scan_claude_path_dirs(cwd: &Path, plan: &mut ImportPlan) {
-    // Track canonicalised global paths so the project scan below can dedup against them
-    // When the user runs `/import-claude` from `~`, the project root *is* the home directory
-    // The same `.claude/skills` would otherwise be added to both global and project scopes
-    let mut global_added: std::collections::HashSet<std::path::PathBuf> =
-        std::collections::HashSet::new();
-
-    if let Some(home) = fuigo_dirs::home_dir() {
-        for (kind, sub) in [(PathKind::Skill, "skills"), (PathKind::Rule, "rules")] {
-            let dir = home.join(".claude").join(sub);
-            if dir.is_dir() {
-                let canonical = dunce::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
-                global_added.insert(canonical);
-                plan.global_items.push(ImportableItem::PathEntry {
-                    kind,
-                    path: dir.to_string_lossy().to_string(),
-                });
-            }
-        }
-    }
-
-    let project_root = find_project_root(cwd);
-    for (kind, sub) in [(PathKind::Skill, "skills"), (PathKind::Rule, "rules")] {
-        let dir = project_root.join(".claude").join(sub);
-        if dir.is_dir() {
-            let canonical = dunce::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
-            if global_added.contains(&canonical) {
-                debug!(
-                    path = %dir.display(),
-                    "Skipping project .claude/ path that resolves to the same dir as the global entry"
-                );
-                continue;
-            }
-            plan.project_items.push(ImportableItem::PathEntry {
-                kind,
-                path: dir.to_string_lossy().to_string(),
-            });
-        }
-    }
-}
-
-/// Scan MCP servers from `~/.claude.json`.
-fn scan_claude_json_mcp_servers(cwd: &Path, plan: &mut ImportPlan) {
-    let servers = crate::util::config::load_claude_json_mcp_servers_as_configs_unfiltered(cwd);
-    if servers.is_empty() {
-        return;
-    }
-
+    let settings_paths = find_claude_settings_paths(cwd);
     // TODO: project-specific servers are incorrectly classified as global here
     // `load_claude_json_mcp_servers_as_configs()` merges the top-level `mcpServers` in `~/.claude.json` with `projects.<cwd>.mcpServers` into one map
     // The fix: call `load_claude_json_mcp_servers_from()` twice (user-level entries, then project entries), or expose a split variant in `config.rs`
-    for (name, config) in servers {
-        plan.global_items.push(ImportableItem::McpServer {
-            name,
-            config: Box::new(config),
-        });
-    }
-}
-
-/// Scan MCP servers from `.mcp.json` files.
-fn scan_mcp_json_servers(cwd: &Path, plan: &mut ImportPlan) {
-    let servers = crate::util::config::load_mcp_json_servers_as_configs_unfiltered(cwd);
-    for (name, config) in servers {
-        plan.project_items.push(ImportableItem::McpServer {
-            name,
-            config: Box::new(config),
-        });
-    }
-}
-
-// Repo Root Discovery
-
-/// Find the git repo root for project config writes.
-///
-/// Uses `git2::Repository::discover` (matching `config/mod.rs:find_project_configs`)
-/// to find the repo root. Falls back to `cwd` if no git repo is found.
-pub fn find_project_root(cwd: &Path) -> PathBuf {
-    git2::Repository::discover(cwd)
-        .ok()
-        .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| cwd.to_path_buf())
+    let claude_json_servers =
+        crate::util::config::load_claude_json_mcp_servers_as_configs_unfiltered(cwd)
+            .into_iter()
+            .collect();
+    let mcp_json_servers = crate::util::config::load_mcp_json_servers_as_configs_unfiltered(cwd)
+        .into_iter()
+        .collect();
+    fuigo_external_agent_migration::scan_importable_settings(
+        cwd,
+        &settings_paths,
+        settings_snapshot,
+        claude_json_servers,
+        mcp_json_servers,
+    )
 }
 
 // Import Marker (Read Side)
@@ -644,33 +245,8 @@ fn with_import_marker(
     config_path: &Path,
     current: fuigo_config::fs_atomic::Current<'_>,
 ) -> anyhow::Result<String> {
-    // Report parse errors instead of silently discarding the file
-    // An atomic rewrite would otherwise drop unrelated sections ([model], [ui], etc.) and overwrite a hand-edited config that happens to have a trailing comma
-    // The user can fix the TOML and retry
-    let mut root: TomlValue = match crate::util::config::current_str(current) {
-        Ok(Some(s)) => toml::from_str(s).map_err(|e| {
-            anyhow::anyhow!(
-                "refusing to write import marker: existing config at {} is \
-                 not valid TOML ({}). Fix the file (or move it aside) and \
-                 retry.",
-                config_path.display(),
-                e
-            )
-        })?,
-        Ok(None) => TomlValue::Table(TomlMap::new()),
-        Err(e) => return Err(e.into()),
-    };
-    let table = root
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("config root is not a table"))?;
-    let compat = table
-        .entry("claude_compat")
-        .or_insert_with(|| TomlValue::Table(TomlMap::new()));
-    let compat_table = compat
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("[claude_compat] is not a table"))?;
-    compat_table.insert("imported".to_string(), TomlValue::Boolean(true));
-    Ok(toml::to_string_pretty(&root)?)
+    let text = crate::util::config::current_str(current)?;
+    Ok(marker_config_text(config_path, text)?)
 }
 
 /// Public entry point for the slash command: write the marker, log success, and seed the in-process cache so gate checks reflect it without restart.
@@ -748,23 +324,6 @@ pub fn apply_import(plan: &ImportPlan, cwd: &Path) -> anyhow::Result<ImportResul
     Ok(result)
 }
 
-/// Result of applying an import.
-#[derive(Debug, Default)]
-pub struct ImportResult {
-    /// Number of items written to global config.
-    pub global_count: usize,
-    /// Number of items written to project config.
-    pub project_count: usize,
-    /// Paths of config files that were modified.
-    pub modified_files: Vec<String>,
-}
-
-impl ImportResult {
-    pub fn total(&self) -> usize {
-        self.global_count + self.project_count
-    }
-}
-
 /// Apply items to a single config.toml file using atomic write.
 ///
 /// The read-modify-write goes through the shared helper ([`edit_owner_only`]),
@@ -790,256 +349,15 @@ fn apply_items_to_text(
     current: fuigo_config::fs_atomic::Current<'_>,
     items: &[ImportableItem],
 ) -> anyhow::Result<fuigo_config::fs_atomic::Edit<usize>> {
-    // Read existing TOML, reporting parse errors instead of silently discarding the file
-    // An atomic rewrite would otherwise drop unrelated sections ([model], [ui], etc.) and overwrite a hand-edited config that happens to have a trailing comma
-    let mut root: TomlValue = match crate::util::config::current_str(current) {
-        Ok(Some(s)) => toml::from_str(s).map_err(|e| {
-            anyhow::anyhow!(
-                "refusing to import: existing config at {} is not valid TOML \
-                 ({}). Fix the file (or move it aside) and retry.",
-                config_path.display(),
-                e
-            )
-        })?,
-        Ok(None) => TomlValue::Table(TomlMap::new()),
-        Err(e) => return Err(e.into()),
-    };
-
-    let table = root
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("config root is not a table"))?;
-
-    let mut count = 0usize;
-
-    // Group items by type.
-    let mut permissions: Vec<&PermissionRule> = Vec::new();
-    let mut env_vars: Vec<(&str, &str)> = Vec::new();
-    let mut mcp_servers: Vec<(&str, &McpServerConfig)> = Vec::new();
-    let mut skill_dirs: Vec<&str> = Vec::new();
-    let mut rule_dirs: Vec<&str> = Vec::new();
-
-    for item in items {
-        match item {
-            ImportableItem::Permission(rule) => permissions.push(rule),
-            ImportableItem::EnvVar { key, value } => env_vars.push((key, value)),
-            ImportableItem::McpServer { name, config } => mcp_servers.push((name, config)),
-            // Hooks are written to .fuigo/hooks/ JSON files in apply_hooks_to_dir, not into config.toml
-            ImportableItem::Hook { .. } => {}
-            ImportableItem::PathEntry { kind, path } => match kind {
-                PathKind::Skill => skill_dirs.push(path.as_str()),
-                PathKind::Rule => rule_dirs.push(path.as_str()),
-            },
-        }
-    }
-
-    if !permissions.is_empty() {
-        count += merge_permissions(table, &permissions)?;
-    }
-
-    if !skill_dirs.is_empty() {
-        count += merge_paths(table, "extra_skill_dirs", &skill_dirs)?;
-    }
-    if !rule_dirs.is_empty() {
-        count += merge_paths(table, "extra_rule_dirs", &rule_dirs)?;
-    }
-
-    if !env_vars.is_empty() {
-        count += merge_env_vars(table, &env_vars);
-    }
-
-    if !mcp_servers.is_empty() {
-        count += merge_mcp_servers(table, &mcp_servers)?;
-    }
-
-    if count == 0 {
-        return Ok(fuigo_config::fs_atomic::Edit::Keep(0));
-    }
-    Ok(fuigo_config::fs_atomic::Edit::Replace {
-        contents: toml::to_string_pretty(&root)?.into_bytes(),
-        value: count,
+    let text = crate::util::config::current_str(current)?;
+    let patch = merge_items_into_config(config_path, text, items)?;
+    Ok(match patch.contents {
+        Some(contents) => fuigo_config::fs_atomic::Edit::Replace {
+            contents: contents.into_bytes(),
+            value: patch.count,
+        },
+        None => fuigo_config::fs_atomic::Edit::Keep(0),
     })
-}
-
-/// Merge permission rules into `[permission]` using the compact format.
-/// Existing rules are preserved. New rules are appended to the appropriate action list (`allow`, `deny`, `ask`).
-fn merge_permissions(
-    table: &mut TomlMap<String, TomlValue>,
-    rules: &[&PermissionRule],
-) -> anyhow::Result<usize> {
-    let permission = table
-        .entry("permission")
-        .or_insert_with(|| TomlValue::Table(TomlMap::new()));
-    let perm_table = permission
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("[permission] is not a table"))?;
-
-    let mut count = 0;
-
-    // Group rules by action.
-    let mut allow_rules: Vec<String> = Vec::new();
-    let mut deny_rules: Vec<String> = Vec::new();
-    let mut ask_rules: Vec<String> = Vec::new();
-
-    for rule in rules {
-        let formatted = format_rule_string(rule);
-        match rule.action {
-            RuleAction::Allow => allow_rules.push(formatted),
-            RuleAction::Deny => deny_rules.push(formatted),
-            RuleAction::Ask => ask_rules.push(formatted),
-        }
-    }
-
-    for (key, new_rules) in [
-        ("allow", allow_rules),
-        ("deny", deny_rules),
-        ("ask", ask_rules),
-    ] {
-        if new_rules.is_empty() {
-            continue;
-        }
-
-        let arr = perm_table
-            .entry(key)
-            .or_insert_with(|| TomlValue::Array(Vec::new()));
-        let existing = arr
-            .as_array_mut()
-            .ok_or_else(|| anyhow::anyhow!("permission.{key} is not an array"))?;
-
-        // Collect existing strings for dedup.
-        let existing_set: std::collections::HashSet<String> = existing
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect();
-
-        for rule_str in new_rules {
-            if !existing_set.contains(&rule_str) {
-                existing.push(TomlValue::String(rule_str));
-                count += 1;
-            }
-        }
-    }
-
-    Ok(count)
-}
-
-/// Format a `PermissionRule` back to the compact Claude-style string.
-///
-/// Examples:
-///   - `"Bash(npm run build)"` for `{ Allow, Bash, "npm run build" }`
-///   - `"Read(src/*.rs)"` for `{ Allow, Read, "src/*.rs" }`
-///   - `"Bash"` for `{ Allow, Bash, None }` (bare tool name, any pattern)
-///   - `"*"` for `{ Allow, Any, None }` (catch-all rule)
-fn format_rule_string(rule: &PermissionRule) -> String {
-    let tool_name = match rule.tool {
-        ToolFilter::Any => "",
-        ToolFilter::Bash => "Bash",
-        ToolFilter::Edit => "Edit",
-        ToolFilter::Read => "Read",
-        ToolFilter::Grep => "Grep",
-        ToolFilter::Mcp => "MCPTool",
-        ToolFilter::WebFetch => "WebFetch",
-        ToolFilter::WebSearch => "WebSearch",
-        ToolFilter::AgentMessage => "AgentMessage",
-        _ => "",
-    };
-
-    match (&rule.pattern, &rule.tool) {
-        // Catch-all: any tool and no pattern formats to "*"
-        (None, ToolFilter::Any) => "*".to_string(),
-        (Some(pat), ToolFilter::Any) => pat.clone(),
-        (None, _) => tool_name.to_string(),
-        (Some(pat), _) => {
-            let pattern = match rule.pattern_mode {
-                PatternMode::Domain => format!("domain:{}", pat),
-                PatternMode::Glob => pat.clone(),
-            };
-            format!("{}({})", tool_name, pattern)
-        }
-    }
-}
-
-/// Merge environment variables into `[env]`. Existing keys are NOT overwritten.
-fn merge_env_vars(table: &mut TomlMap<String, TomlValue>, vars: &[(&str, &str)]) -> usize {
-    let env = table
-        .entry("env")
-        .or_insert_with(|| TomlValue::Table(TomlMap::new()));
-    let env_table = match env.as_table_mut() {
-        Some(t) => t,
-        None => {
-            warn!("[env] in config.toml is not a table, skipping env import");
-            return 0;
-        }
-    };
-
-    let mut count = 0;
-    for (key, value) in vars {
-        if !env_table.contains_key(*key) {
-            env_table.insert(key.to_string(), TomlValue::String(value.to_string()));
-            count += 1;
-        }
-    }
-    count
-}
-
-/// Merge MCP server configs into `[mcp_servers]`. Existing servers are NOT overwritten.
-fn merge_mcp_servers(
-    table: &mut TomlMap<String, TomlValue>,
-    servers: &[(&str, &McpServerConfig)],
-) -> anyhow::Result<usize> {
-    let mcp = table
-        .entry("mcp_servers")
-        .or_insert_with(|| TomlValue::Table(TomlMap::new()));
-    let mcp_table = mcp
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("[mcp_servers] is not a table"))?;
-
-    let mut count = 0;
-    for (name, config) in servers {
-        if !mcp_table.contains_key(*name) {
-            let serialized = toml::Value::try_from(*config)
-                .map_err(|e| anyhow::anyhow!("failed to serialize MCP server {name}: {e}"))?;
-            mcp_table.insert(name.to_string(), serialized);
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
-/// Merge a list of path strings into `[paths] <key>` (an array of strings).
-/// Existing entries are preserved; new entries that aren't already present are appended.
-/// Returns the number of newly added entries.
-fn merge_paths(
-    table: &mut TomlMap<String, TomlValue>,
-    key: &str,
-    new_paths: &[&str],
-) -> anyhow::Result<usize> {
-    let paths = table
-        .entry("paths")
-        .or_insert_with(|| TomlValue::Table(TomlMap::new()));
-    let paths_table = paths
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("[paths] is not a table"))?;
-
-    let arr = paths_table
-        .entry(key)
-        .or_insert_with(|| TomlValue::Array(Vec::new()));
-    let existing = arr
-        .as_array_mut()
-        .ok_or_else(|| anyhow::anyhow!("paths.{key} is not an array"))?;
-
-    let existing_set: std::collections::HashSet<String> = existing
-        .iter()
-        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-        .collect();
-
-    let mut count = 0usize;
-    for p in new_paths {
-        if !existing_set.contains(*p) {
-            existing.push(TomlValue::String(p.to_string()));
-            count += 1;
-        }
-    }
-    Ok(count)
 }
 
 /// Merge `Hook` items into `<hooks_dir>/imported-from-claude.json`.
@@ -1050,11 +368,7 @@ fn merge_paths(
 ///
 /// Returns the number of newly added hook entries.
 fn apply_hooks_to_dir(hooks_dir: &Path, items: &[ImportableItem]) -> anyhow::Result<usize> {
-    let new_hooks: Vec<&ImportableItem> = items
-        .iter()
-        .filter(|i| matches!(i, ImportableItem::Hook { .. }))
-        .collect();
-    if new_hooks.is_empty() {
+    if !items.iter().any(|i| matches!(i, ImportableItem::Hook { .. })) {
         return Ok(0);
     }
 
@@ -1077,7 +391,7 @@ fn apply_hooks_to_dir(hooks_dir: &Path, items: &[ImportableItem]) -> anyhow::Res
                 fuigo_config::write_through::NewFileMode::Default,
             )
         },
-        |current| merge_hooks_into(&target, current, &new_hooks),
+        |current| merge_hooks_text(&target, current, items),
     )
     .map_err(|e| match e {
         fuigo_config::fs_atomic::EditError::Edit(e) => e,
@@ -1096,212 +410,34 @@ fn apply_hooks_to_dir(hooks_dir: &Path, items: &[ImportableItem]) -> anyhow::Res
     Ok(count)
 }
 
-/// One pass of [`apply_hooks_to_dir`]: `new_hooks` merged into `current` (the
-/// file's bytes), and whether that changed anything.
-fn merge_hooks_into(
+/// One pass of [`apply_hooks_to_dir`]: what to write for `current` (the file's bytes).
+fn merge_hooks_text(
     target: &Path,
     current: fuigo_config::fs_atomic::Current<'_>,
-    new_hooks: &[&ImportableItem],
+    items: &[ImportableItem],
 ) -> anyhow::Result<fuigo_config::fs_atomic::Edit<usize>> {
-    // Read existing JSON if present.
-    let mut root: serde_json::Value = match crate::util::config::current_str(current) {
-        Ok(Some(s)) => serde_json::from_str(s).unwrap_or_else(|e| {
-            warn!(
-                path = %target.display(),
-                error = %e,
-                "Existing imported-from-claude.json is malformed; replacing with fresh content. \
-                 Manual edits in the malformed file will be lost."
-            );
-            serde_json::json!({})
-        }),
-        Ok(None) => serde_json::json!({}),
-        Err(e) => return Err(e.into()),
-    };
-    let root_obj = root
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("{}: root is not a JSON object", target.display()))?;
-    let hooks_obj = root_obj
-        .entry("hooks".to_string())
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("{}: hooks is not a JSON object", target.display()))?;
-
-    let mut count = 0usize;
-    // `dirty` tracks whether we mutated the JSON in any way (including in-place timeout refreshes that don't add new entries)
-    // The file is re-written only when dirty, even when count == 0
-    let mut dirty = false;
-    for &item in new_hooks {
-        let ImportableItem::Hook {
-            event,
-            matcher,
-            command,
-            timeout,
-        } = item
-        else {
-            continue;
-        };
-
-        let groups = hooks_obj
-            .entry(event.clone())
-            .or_insert_with(|| serde_json::json!([]))
-            .as_array_mut()
-            .ok_or_else(|| {
-                anyhow::anyhow!("{}: hooks.{} is not a JSON array", target.display(), event)
-            })?;
-
-        // Dedup on `(event, matcher, command)`
-        // If a matching entry already exists, update its `timeout` in place and skip adding a new group; otherwise append a new group below
-        // A re-import with a changed timeout therefore reflects in the output
-        //
-        // Invariant: `extract_hooks_from_settings_file` filters empty matcher strings to `None`, so the comparison only distinguishes `None` from `Some(s)`
-        let mut updated = false;
-        for g in groups.iter_mut() {
-            let existing_matcher = g.get("matcher").and_then(|v| v.as_str());
-            let matcher_matches = match (existing_matcher, matcher.as_deref()) {
-                (None, None) => true,
-                (Some(a), Some(b)) => a == b,
-                _ => false,
-            };
-            if !matcher_matches {
-                continue;
-            }
-            let Some(handlers) = g.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
-                continue;
-            };
-            for h in handlers.iter_mut() {
-                let cmd_match = h.get("type").and_then(|v| v.as_str()) == Some("command")
-                    && h.get("command").and_then(|v| v.as_str()) == Some(command);
-                if !cmd_match {
-                    continue;
-                }
-                if let Some(handler_obj) = h.as_object_mut() {
-                    match timeout {
-                        Some(t) => {
-                            handler_obj.insert("timeout".to_string(), serde_json::json!(t));
-                        }
-                        None => {
-                            handler_obj.remove("timeout");
-                        }
-                    }
-                }
-                debug!(
-                    event = %event,
-                    matcher = ?matcher,
-                    command = %command,
-                    timeout = ?timeout,
-                    "Hook already present; refreshed timeout in place"
-                );
-                updated = true;
-                dirty = true;
-                break;
-            }
-            if updated {
-                break;
-            }
-        }
-        if updated {
-            continue;
-        }
-
-        let mut handler = serde_json::json!({
-            "type": "command",
-            "command": command,
-        });
-        if let Some(t) = timeout {
-            handler
-                .as_object_mut()
-                .unwrap()
-                .insert("timeout".to_string(), serde_json::json!(t));
-        }
-
-        let mut group = serde_json::json!({
-            "hooks": [handler],
-        });
-        if let Some(m) = matcher {
-            group
-                .as_object_mut()
-                .unwrap()
-                .insert("matcher".to_string(), serde_json::json!(m));
-        }
-        groups.push(group);
-        count += 1;
-    }
-
-    if count > 0 || dirty {
-        Ok(fuigo_config::fs_atomic::Edit::Replace {
-            contents: serde_json::to_string_pretty(&root)?.into_bytes(),
-            value: count,
-        })
-    } else {
-        Ok(fuigo_config::fs_atomic::Edit::Keep(count))
-    }
+    let text = crate::util::config::current_str(current)?;
+    let merge = merge_hooks(target, text, items)?;
+    Ok(match merge.contents {
+        Some(contents) => fuigo_config::fs_atomic::Edit::Replace {
+            contents: contents.into_bytes(),
+            value: merge.added,
+        },
+        None => fuigo_config::fs_atomic::Edit::Keep(merge.added),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn format_rule_bash_with_pattern() {
-        let rule = PermissionRule {
-            action: RuleAction::Allow,
-            tool: ToolFilter::Bash,
-            pattern: Some("npm run build".to_string()),
-            pattern_mode: PatternMode::Glob,
-        };
-        assert_eq!(format_rule_string(&rule), "Bash(npm run build)");
-    }
-
-    #[test]
-    fn format_rule_bare_tool_name() {
-        let rule = PermissionRule {
-            action: RuleAction::Allow,
-            tool: ToolFilter::Bash,
-            pattern: None,
-            pattern_mode: PatternMode::Glob,
-        };
-        assert_eq!(format_rule_string(&rule), "Bash");
-    }
-
-    #[test]
-    fn format_rule_any_none_is_star() {
-        let rule = PermissionRule {
-            action: RuleAction::Allow,
-            tool: ToolFilter::Any,
-            pattern: None,
-            pattern_mode: PatternMode::Glob,
-        };
-        assert_eq!(format_rule_string(&rule), "*");
-    }
-
-    #[test]
-    fn format_rule_any_with_pattern() {
-        let rule = PermissionRule {
-            action: RuleAction::Allow,
-            tool: ToolFilter::Any,
-            pattern: Some("src/**".to_string()),
-            pattern_mode: PatternMode::Glob,
-        };
-        assert_eq!(format_rule_string(&rule), "src/**");
-    }
-
-    #[test]
-    fn format_rule_web_fetch_domain() {
-        let rule = PermissionRule {
-            action: RuleAction::Allow,
-            tool: ToolFilter::WebFetch,
-            pattern: Some("example.com".to_string()),
-            pattern_mode: PatternMode::Domain,
-        };
-        assert_eq!(format_rule_string(&rule), "WebFetch(domain:example.com)");
-    }
+    use fuigo_external_agent_migration::format_rule_string;
 
     #[test]
     fn format_rule_round_trip() {
         // Parse a Claude rule, format it back, and verify it produces the same rule.
         let original = "Bash(npm run build)";
         let parsed = parse_permission_rule(original, RuleAction::Allow).unwrap();
-        let formatted = format_rule_string(&parsed);
+        let formatted = format_rule_string(&import_permission(&parsed));
         assert_eq!(formatted, original);
 
         // Round-trip the formatted string.
@@ -1314,78 +450,10 @@ mod tests {
         let parsed = parse_permission_rule("Bash(sed:*)", RuleAction::Deny).unwrap();
         assert_eq!(parsed.pattern.as_deref(), Some("sed"));
         let reparsed =
-            parse_permission_rule(&format_rule_string(&parsed), RuleAction::Deny).unwrap();
+            parse_permission_rule(&format_rule_string(&import_permission(&parsed)), RuleAction::Deny).unwrap();
         assert_eq!(parsed.tool, reparsed.tool);
         assert_eq!(parsed.pattern, reparsed.pattern);
         assert_eq!(parsed.pattern_mode, reparsed.pattern_mode);
-    }
-
-    #[test]
-    fn merge_permissions_dedup() {
-        let mut table = TomlMap::new();
-        // Pre-populate with one existing rule.
-        let mut perm = TomlMap::new();
-        perm.insert(
-            "allow".to_string(),
-            TomlValue::Array(vec![TomlValue::String("Bash(npm test)".to_string())]),
-        );
-        table.insert("permission".to_string(), TomlValue::Table(perm));
-
-        let rule_existing = PermissionRule {
-            action: RuleAction::Allow,
-            tool: ToolFilter::Bash,
-            pattern: Some("npm test".to_string()),
-            pattern_mode: PatternMode::Glob,
-        };
-        let rule_new = PermissionRule {
-            action: RuleAction::Allow,
-            tool: ToolFilter::Bash,
-            pattern: Some("npm run build".to_string()),
-            pattern_mode: PatternMode::Glob,
-        };
-
-        let count = merge_permissions(&mut table, &[&rule_existing, &rule_new]).unwrap();
-        // Only the new rule is added; the existing one is deduped
-        assert_eq!(count, 1);
-
-        let arr = table["permission"]["allow"].as_array().unwrap();
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0].as_str().unwrap(), "Bash(npm test)");
-        assert_eq!(arr[1].as_str().unwrap(), "Bash(npm run build)");
-    }
-
-    #[test]
-    fn merge_env_vars_no_overwrite() {
-        let mut table = TomlMap::new();
-        let mut env = TomlMap::new();
-        env.insert(
-            "EXISTING".to_string(),
-            TomlValue::String("old_value".to_string()),
-        );
-        table.insert("env".to_string(), TomlValue::Table(env));
-
-        let count = merge_env_vars(
-            &mut table,
-            &[("EXISTING", "new_value"), ("NEW_VAR", "value")],
-        );
-        // Only NEW_VAR is added
-        assert_eq!(count, 1);
-
-        let env_table = table["env"].as_table().unwrap();
-        assert_eq!(
-            env_table["EXISTING"].as_str().unwrap(),
-            "old_value",
-            "existing key should NOT be overwritten"
-        );
-        assert_eq!(env_table["NEW_VAR"].as_str().unwrap(), "value");
-    }
-
-    #[test]
-    fn merge_env_vars_creates_section() {
-        let mut table = TomlMap::new();
-        let count = merge_env_vars(&mut table, &[("FOO", "bar")]);
-        assert_eq!(count, 1);
-        assert_eq!(table["env"]["FOO"].as_str().unwrap(), "bar");
     }
 
     #[test]
@@ -1470,85 +538,6 @@ mod tests {
             // Also clear the workspace-side env-var override so it doesn't leak into subsequent tests
             unsafe { std::env::remove_var("_FUIGO_CLAUDE_MARKER_OVERRIDE") };
         }
-    }
-
-    /// RAII guard that removes an env var on drop, preventing leaks when
-    /// an assertion panics before manual cleanup.
-
-    #[test]
-    fn extract_hooks_basic_command() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        std::fs::write(
-            &path,
-            r#"{
-                "hooks": {
-                    "PreToolUse": [
-                        {
-                            "matcher": "Bash",
-                            "hooks": [
-                                { "type": "command", "command": "echo hi", "timeout": 7 }
-                            ]
-                        }
-                    ]
-                }
-            }"#,
-        )
-        .unwrap();
-        let items = extract_hooks_from_settings_file(&path);
-        assert_eq!(items.len(), 1);
-        let ImportableItem::Hook {
-            event,
-            matcher,
-            command,
-            timeout,
-        } = &items[0]
-        else {
-            panic!("expected Hook variant");
-        };
-        assert_eq!(event, "PreToolUse");
-        assert_eq!(matcher.as_deref(), Some("Bash"));
-        assert_eq!(command, "echo hi");
-        assert_eq!(*timeout, Some(7));
-    }
-
-    #[test]
-    fn extract_hooks_skips_non_command_handlers() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        std::fs::write(
-            &path,
-            r#"{
-                "hooks": {
-                    "PostToolUse": [
-                        {
-                            "hooks": [
-                                { "type": "http", "url": "https://example.com" },
-                                { "type": "command", "command": "true" }
-                            ]
-                        }
-                    ]
-                }
-            }"#,
-        )
-        .unwrap();
-        let items = extract_hooks_from_settings_file(&path);
-        assert_eq!(items.len(), 1, "only command handler should be imported");
-    }
-
-    #[test]
-    fn extract_hooks_empty_when_no_hooks_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        std::fs::write(&path, r#"{ "permissions": { "allow": [] } }"#).unwrap();
-        assert!(extract_hooks_from_settings_file(&path).is_empty());
-    }
-
-    #[test]
-    fn extract_hooks_missing_file_returns_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("missing.json");
-        assert!(extract_hooks_from_settings_file(&path).is_empty());
     }
 
     /// P72: two imports into one hooks file at once (two Fuigos, or a
@@ -1941,73 +930,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_hooks_multiple_events_and_matchers() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        std::fs::write(
-            &path,
-            r#"{
-                "hooks": {
-                    "PreToolUse": [
-                        { "matcher": "Bash", "hooks": [{ "type": "command", "command": "a" }] },
-                        { "matcher": "Edit", "hooks": [{ "type": "command", "command": "b" }] }
-                    ],
-                    "PostToolUse": [
-                        { "hooks": [
-                            { "type": "command", "command": "c" },
-                            { "type": "command", "command": "d" }
-                        ] }
-                    ]
-                }
-            }"#,
-        )
-        .unwrap();
-        let items = extract_hooks_from_settings_file(&path);
-        assert_eq!(items.len(), 4, "4 hooks across 2 events / 3 matchers");
-        let events: std::collections::HashSet<&str> = items
-            .iter()
-            .filter_map(|i| match i {
-                ImportableItem::Hook { event, .. } => Some(event.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert!(events.contains("PreToolUse"));
-        assert!(events.contains("PostToolUse"));
-    }
-
-    #[test]
-    fn extract_hooks_malformed_hooks_field_is_silent_skip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        // `hooks` is a string instead of an object
-        std::fs::write(&path, r#"{ "hooks": "oops" }"#).unwrap();
-        // Function early-returns when `hooks` is not an object.
-        assert!(extract_hooks_from_settings_file(&path).is_empty());
-    }
-
-    #[test]
-    fn extract_hooks_empty_command_string_is_imported_as_is() {
-        // Documented behavior: an empty command string is imported verbatim.
-        // Users editing `.claude/settings.json` to debug an empty-command entry will see it appear in the import summary, not silently disappear
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        std::fs::write(
-            &path,
-            r#"{ "hooks": { "PreToolUse": [
-                { "matcher": "Bash", "hooks": [{ "type": "command", "command": "" }] }
-            ] } }"#,
-        )
-        .unwrap();
-        let items = extract_hooks_from_settings_file(&path);
-        assert_eq!(items.len(), 1);
-        if let ImportableItem::Hook { command, .. } = &items[0] {
-            assert_eq!(command, "");
-        } else {
-            panic!("expected Hook variant");
-        }
-    }
-
-    #[test]
     fn apply_hooks_to_dir_updates_timeout_on_dedup() {
         let dir = tempfile::tempdir().unwrap();
         let hooks_dir = dir.path().join("hooks");
@@ -2071,33 +993,6 @@ mod tests {
             .as_array()
             .unwrap();
         assert!(handlers[0].get("timeout").is_none());
-    }
-
-    #[test]
-    fn merge_paths_creates_section() {
-        let mut table = TomlMap::new();
-        let count = merge_paths(&mut table, "extra_skill_dirs", &["/a", "/b"]).unwrap();
-        assert_eq!(count, 2);
-        let arr = table["paths"]["extra_skill_dirs"].as_array().unwrap();
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0].as_str().unwrap(), "/a");
-        assert_eq!(arr[1].as_str().unwrap(), "/b");
-    }
-
-    #[test]
-    fn merge_paths_dedup_existing() {
-        let mut table = TomlMap::new();
-        let mut paths = TomlMap::new();
-        paths.insert(
-            "extra_skill_dirs".into(),
-            TomlValue::Array(vec![TomlValue::String("/existing".into())]),
-        );
-        table.insert("paths".into(), TomlValue::Table(paths));
-
-        let count = merge_paths(&mut table, "extra_skill_dirs", &["/existing", "/new"]).unwrap();
-        assert_eq!(count, 1, "existing entry should be deduped");
-        let arr = table["paths"]["extra_skill_dirs"].as_array().unwrap();
-        assert_eq!(arr.len(), 2);
     }
 
     #[test]
@@ -2278,3 +1173,7 @@ extra_rule_dirs = ["/c/rules"]
         );
     }
 }
+
+#[cfg(test)]
+#[path = "claude_import_formats_tests.rs"]
+mod formats_tests;

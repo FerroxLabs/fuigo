@@ -749,13 +749,39 @@ fn location_picker_label(path: &std::path::Path) -> String {
     crate::render::line_utils::truncate_str(raw, 30)
 }
 
+/// Undo the quoting a path carries when it is pasted from a file manager (`"my dir"`, `'my dir'`) or completed by a shell
+/// (`my\ dir`). Quotes count only when they wrap the whole text; on Windows a backslash is a separator, so only quotes are
+/// removed there.
+fn unquote_typed_path(text: &str) -> String {
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 && matches!(bytes[0], b'"' | b'\'') && bytes[bytes.len() - 1] == bytes[0] {
+        return text[1..text.len() - 1].to_owned();
+    }
+    if cfg!(windows) || !text.contains('\\') {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, chars.peek()) {
+            ('\\', Some(next)) if matches!(next, ' ' | '"' | '\'' | '(' | ')' | '[' | ']' | '&' | ';' | '$' | '#' | '!' | '\\') => {
+                out.push(*next);
+                chars.next();
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Resolve a raw location-picker / `/cd` path string to an absolute path, expanding a leading `~` and joining relative paths against `cwd`.
 /// Returns `None` for empty input or when `~` can't be expanded. The caller validates that the result is a directory.
 pub(super) fn resolve_location_input(
     input: &str,
     cwd: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    let trimmed = input.trim();
+    let unquoted = unquote_typed_path(input.trim());
+    let trimmed = unquoted.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -1233,6 +1259,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
+    let subagent_model_inheritance_from_app = app.subagent_model_inheritance;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     // Dashboard commands run before any session exists, so the startup seed is the only answer available here
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
@@ -1276,6 +1303,17 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                     "/{token} is not available for your account. Billing: {}",
                     super::billing::UPSELL_URL_UPGRADE
                 ));
+            }
+            return vec![];
+        }
+
+        // A bare `/loop` has nothing to schedule: show how to use it instead of starting a session whose first prompt is the slash text
+        if invocation.token == "loop" && invocation.args.trim().is_empty() {
+            if let Some(d) = app.dashboard.as_mut() {
+                d.dispatch.set_text("");
+                d.error_toast = Some(
+                    fuigo_tools::implementations::fuigo_build::loop_usage_message().to_string(),
+                );
             }
             return vec![];
         }
@@ -1339,6 +1377,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                 respect_manual_folds: respect_manual_folds_from_app,
                 auto_mode_gate: auto_mode_gate_from_app,
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
+                subagent_model_inheritance: subagent_model_inheritance_from_app,
                 voice_stt_language: voice_stt_language_from_app,
                 scheduler_background_loops: scheduler_background_loops_seed,
             },
@@ -1660,7 +1699,7 @@ pub(super) fn dispatch_dashboard_peek_reply(
                 entry.images = images;
             }
         }
-        maybe_drain_queue(agent)
+        maybe_drain_queue(agent, &mut app.pending_image_notices)
     };
     note_peek_page_flip(app, agent_id, drain.page_flip_entry);
     let effects = drain.effects;
