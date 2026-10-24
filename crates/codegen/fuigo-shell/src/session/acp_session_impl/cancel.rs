@@ -681,11 +681,24 @@ impl SessionActor {
         if tore_down_task {
             self.cancel_active_sampling_requests();
             if rewound_input.is_none() {
+                // A foreground `task` call the turn was blocked in: its child is moved to the background and its tool
+                // result says so. The answers must exist before the repair below writes its generic text.
+                // A user Stop that cancels subagents kills the child instead, and keeps the generic text.
+                let answers = if !cancel_subagents && let Some(prompt_id) = cancelled_prompt_id.as_deref() {
+                    let interrupt = if send_now {
+                        fuigo_tool_types::ForegroundSpawnInterrupt::UserSentMessage
+                    } else {
+                        fuigo_tool_types::ForegroundSpawnInterrupt::UserStoppedTurn
+                    };
+                    self.hand_off_foreground_subagents(prompt_id, interrupt).await
+                } else {
+                    std::collections::HashMap::new()
+                };
                 // The aborted turn can strand a continue reminder awaiting its continuation, plus dangling tool calls
                 // Repair now so the on-disk tail is clean even if the session ends here (the next push would otherwise repair lazily)
                 // Rewinds skip this: they replace the turn's history wholesale
                 self.chat_state_handle
-                    .repair_dangling_after_harness_halt("user_cancel");
+                    .repair_dangling_after_harness_halt("user_cancel", answers);
             }
         }
 

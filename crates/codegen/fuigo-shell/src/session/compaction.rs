@@ -5,7 +5,7 @@ use super::SessionActor;
 use super::is_project_instructions;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::session::compaction_config::{
-    AsyncCompactionCache, SUPPRESS_AUTH, SUPPRESS_NONE, SUPPRESS_STICKY, SUPPRESS_TURN,
+    AsyncCompactionCache, MAX_CONSECUTIVE_OVERFLOW_COMPACTIONS, SUPPRESS_AUTH, SUPPRESS_NONE, SUPPRESS_STICKY, SUPPRESS_TURN,
     SUPPRESS_UNTIL_SUCCESS, SUPPRESS_VALIDATING,
 };
 use crate::session::helpers::CompactionStateContext;
@@ -999,6 +999,11 @@ impl SessionActor {
                 is_subagent: self.startup_hints.is_subagent,
             },
         );
+        // The summarizer is pinned to the active goal; a `/compact <text>` focus the user typed still leads
+        let user_context = crate::session::acp_session::merge_compaction_user_context(
+            user_context,
+            self.goal_compaction_user_context(),
+        );
         let compact_source = trigger_str;
         self.dispatch_hook(
             fuigo_hooks::event::HookEventName::PreCompact,
@@ -1368,8 +1373,14 @@ impl SessionActor {
         let (discovered_agents_md, all_skills_for_compaction, _edited_paths, mut state_context) =
             if use_short_prompt {
                 let empty_edited: std::collections::BTreeSet<String> = Default::default();
-                let ctx =
-                    CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
+                let ctx = CompactionStateContext::build(
+                    &conversation,
+                    CompactionInputs {
+                        goal_objective: self.goal_objective_for_compaction(),
+                        ..Default::default()
+                    },
+                )
+                .await;
                 (Vec::<std::path::PathBuf>::new(), vec![], empty_edited, ctx)
             } else {
                 // Never hold `self.agent.borrow()` across `.await`: a zero-turn harness rebuild
@@ -1551,6 +1562,7 @@ impl SessionActor {
                             scheduled_loops,
                             workflows,
                             workflow_tool_name,
+                            goal_objective: self.goal_objective_for_compaction(),
                             ..Default::default()
                         },
                     )
@@ -1716,6 +1728,18 @@ impl SessionActor {
                 system_reminder
             }
         };
+        let system_reminder = if let Some(goal_section) = self.compaction_goal_section().await {
+            use crate::session::acp_session::splice_goal_section;
+            match system_reminder {
+                Some(existing) => Some(splice_goal_section(&existing, &goal_section)),
+                None => {
+                    let tag = self.reminder_wrapper_tag();
+                    Some(format!("<{tag}>\n{goal_section}\n</{tag}>"))
+                }
+            }
+        } else {
+            system_reminder
+        };
         if let Some(ref recovery_backend) = memory_backend_impl {
             let n = recovery_backend
                 .search_counter
@@ -1841,7 +1865,6 @@ impl SessionActor {
                 context_window,
             )
         };
-        let new_len = compacted_history.len();
         self.persist_compaction_checkpoint(
             compacted_history,
             compaction_epoch,
@@ -1851,6 +1874,10 @@ impl SessionActor {
             cancel.clone(),
             if prefix_released { 0 } else { prefix_len },
         ).await?;
+        // The compacted history carries the live objective, but the rules cue that set the goal is gone:
+        // the next sample must see the next-step continuation, not nothing (or a stale create-style cue)
+        self.reseed_active_goal_after_compaction().await;
+        let new_len = self.chat_state_handle.get_conversation_len().await;
         self.compaction.prefix_released.store(prefix_released, std::sync::atomic::Ordering::Relaxed);
         self.compaction.validation_tokens_before.store(tokens_before, std::sync::atomic::Ordering::Relaxed);
         if self.startup_hints.inherited_prefix_len.is_some() {
@@ -2003,6 +2030,53 @@ impl SessionActor {
             return false;
         }
         self.estimate_exceeds_error_context_window(err).await
+    }
+    /// The context window to compact against when a failed request should be recovered by compact-and-resubmit, or `None`.
+    ///
+    /// Two signals qualify: the response reported a window the token estimate exceeds ([`Self::should_compact_on_error`]), or the
+    /// server's own error says the prompt was too large. Many servers send the second without any window header, so the session's
+    /// configured window stands in. Rate limits and auth failures never qualify, whatever wording they use.
+    /// Returns `None` once [`MAX_CONSECUTIVE_OVERFLOW_COMPACTIONS`] recoveries ran since the last response that succeeded.
+    pub(crate) async fn overflow_compaction_window(
+        &self,
+        err: &fuigo_sampler::SamplingErrorInfo,
+    ) -> Option<u64> {
+        use fuigo_sampler::SamplingErrorKind;
+        if self.compaction.is_suppressed() {
+            return None;
+        }
+        let reported = if self.should_compact_on_error(err).await {
+            err.model_metadata
+                .as_ref()
+                .and_then(|m| m.context_window)
+                .filter(|cw| *cw > 0)
+        } else {
+            None
+        };
+        let window = match reported {
+            Some(cw) => cw,
+            None => {
+                if matches!(err.kind, SamplingErrorKind::Auth | SamplingErrorKind::RateLimited)
+                    || !error_names_context_overflow(err)
+                {
+                    return None;
+                }
+                self.chat_state_handle
+                    .get_sampling_config()
+                    .await?
+                    .context_window
+                    .get()
+            }
+        };
+        let done = self.compaction.overflow_compactions_since_response.get();
+        if done >= MAX_CONSECUTIVE_OVERFLOW_COMPACTIONS {
+            tracing::warn!(
+                done,
+                "context overflow persists after {MAX_CONSECUTIVE_OVERFLOW_COMPACTIONS} consecutive compactions; surfacing the error"
+            );
+            return None;
+        }
+        Some(window)
     }
     /// The request's token estimate exceeds the failed response's reported context window.
     /// This probable-overflow signal is shared by compact-and-resubmit and the mid-salvage truncated-complete arm.
@@ -2405,6 +2479,18 @@ impl SessionActor {
 /// The artifact used to copy `data` verbatim, which only ever worked while `data` was a bare string;
 /// every compaction error now carries the object, so it reads the object's `message` like the rest of
 /// the shell does (`acp_error_text`) instead of recording `<no error data>` for every failure.
+/// The server's own error says the request was larger than the model accepts (token or request-size overflow).
+/// A 429 that promises capacity later (`Retry-After`) with no structured size code is a per-minute budget, not an overflow.
+fn error_names_context_overflow(err: &fuigo_sampler::SamplingErrorInfo) -> bool {
+    let size_coded = err
+        .error_code
+        .as_ref()
+        .is_some_and(fuigo_sampling_types::ApiErrorCode::is_size_overflow);
+    if err.status_code == Some(429) && err.retry_after_secs.is_some() && !size_coded {
+        return false;
+    }
+    size_coded || is_context_length_error(&err.message)
+}
 fn compaction_artifact_error_text(error: &acp::Error) -> String {
     crate::sampling::error::acp_error_message(error)
 }

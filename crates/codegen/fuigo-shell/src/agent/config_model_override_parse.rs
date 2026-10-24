@@ -759,6 +759,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             context_window: Some(200_000),
+            max_request_bytes: None,
             context_windows: None,
             auto_compact_threshold_percent: Some(80),
             system_prompt_label: Some("label".into()),

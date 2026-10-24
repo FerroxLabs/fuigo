@@ -2369,6 +2369,7 @@ async fn retry_after_lost_ack_converges_memory_and_disk_to_authoritative_item() 
             query_params: Default::default(),
             env_http_headers: Default::default(),
             context_window: std::num::NonZeroU64::new(128_000).unwrap(),
+            max_request_bytes: None,
             reasoning_effort: None,
             stream_tool_calls: None,
             mtls_cert_dir: None,
@@ -2631,6 +2632,47 @@ async fn usage_json_rewrites_session_and_appends_turns() {
         .unwrap();
     assert!(raw.contains("\"turns\""));
     assert!(raw.contains("\"session\""));
+}
+/// Two processes appending turns to one session (a leader and an attached client, a resume racing a live session)
+/// each read `usage.json`, add their turn and write it back. Without a lock across that read-modify-write the later
+/// write replaces the earlier one's turn.
+#[tokio::test]
+async fn two_writers_updating_usage_keep_every_turn() {
+    use crate::session::usage_file::UsageSummary;
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let first = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let second = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    first.init_session(&info, default_model_id()).await.unwrap();
+    const PER_WRITER: u32 = 25;
+    async fn write_turns(adapter: JsonlStorageAdapter, info: Info, base: u32) {
+        for i in 0..PER_WRITER {
+            let turn = base + i;
+            let live = UsageSummary {
+                input_tokens: 1,
+                model_calls: 1,
+                ..UsageSummary::default()
+            };
+            adapter
+                .update_usage(
+                    &info,
+                    Box::new(move |file| {
+                        let mut file = file.unwrap_or_default();
+                        file.apply_turn(turn, "t", &live, None);
+                        file
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+    }
+    tokio::join!(
+        write_turns(first.clone(), info.clone(), 100),
+        write_turns(second.clone(), info.clone(), 200),
+    );
+    let persisted = first.read_usage(&info).await.unwrap().unwrap();
+    assert_eq!(persisted.turns.len(), 2 * PER_WRITER as usize, "no turn may be lost");
+    assert_eq!(persisted.session.input_tokens, 2 * u64::from(PER_WRITER));
 }
 #[tokio::test]
 async fn corrupt_usage_json_does_not_read_as_missing() {

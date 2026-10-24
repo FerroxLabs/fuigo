@@ -105,10 +105,12 @@ impl WriteQueue {
                 None => {
                     // A panicking write must not stop the ones queued after it,
                     // and is a failure like any other.
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(write)).unwrap_or_else(|_| {
-                        tracing::warn!("a config write panicked");
-                        Err("the write panicked".to_owned())
-                    })
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(write)).unwrap_or_else(
+                        |_| {
+                            tracing::warn!("a config write panicked");
+                            Err("the write panicked".to_owned())
+                        },
+                    )
                 }
                 Some(reason) => Err(reason),
             };
@@ -154,7 +156,9 @@ impl WriteQueue {
 /// the requester or, failing that, at exit.
 fn not_started(job: Job, error: &dyn std::fmt::Display) {
     tracing::warn!(%error, "could not start the config write worker; write not run");
-    job(Some(format!("could not start the config write worker: {error}")));
+    job(Some(format!(
+        "could not start the config write worker: {error}"
+    )));
 }
 
 /// What [`drain`] found at exit.
@@ -172,7 +176,12 @@ impl DrainReport {
         let mut out: Vec<String> = self
             .failures
             .iter()
-            .map(|e| format!("fuigo: a settings change was not saved: {}", fuigo_tty_utils::untrusted(e)))
+            .map(|e| {
+                format!(
+                    "fuigo: a settings change was not saved: {}",
+                    fuigo_tty_utils::untrusted(e)
+                )
+            })
             .collect();
         if self.timed_out {
             out.push(
@@ -237,7 +246,12 @@ mod tests {
             .collect();
         let results: Vec<u64> = receivers
             .into_iter()
-            .map(|rx| rx.blocking_recv().unwrap().map_err(WriteFailure::acknowledge).unwrap())
+            .map(|rx| {
+                rx.blocking_recv()
+                    .unwrap()
+                    .map_err(WriteFailure::acknowledge)
+                    .unwrap()
+            })
             .collect();
         assert_eq!(results, (0..20).collect::<Vec<_>>());
         let log = log.lock().unwrap();
@@ -301,9 +315,15 @@ mod tests {
             Ok(())
         });
         drop(rx);
-        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst), "must not run unordered");
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "must not run unordered"
+        );
         let messages = drain(Duration::from_secs(10)).await.messages().join("\n");
-        assert!(messages.contains("could not start the config write worker: forced"), "{messages}");
+        assert!(
+            messages.contains("could not start the config write worker: forced"),
+            "{messages}"
+        );
     }
 
     /// A panicking write does not stop the writes queued after it.
@@ -313,7 +333,13 @@ mod tests {
         let after = run(|| Ok(7u8));
         let failure = boom.blocking_recv().unwrap().unwrap_err().acknowledge();
         assert!(failure.contains("panicked"), "{failure}");
-        assert_eq!(after.blocking_recv().unwrap().map_err(WriteFailure::acknowledge), Ok(7));
+        assert_eq!(
+            after
+                .blocking_recv()
+                .unwrap()
+                .map_err(WriteFailure::acknowledge),
+            Ok(7)
+        );
     }
 
     /// A failure message carries text from the file system or the config file; the exit lines built from it must not
@@ -325,7 +351,10 @@ mod tests {
             timed_out: false,
         };
         let out = report.messages().join("\n");
-        assert!(out.starts_with("fuigo: a settings change was not saved: bad "), "{out:?}");
+        assert!(
+            out.starts_with("fuigo: a settings change was not saved: bad "),
+            "{out:?}"
+        );
         assert!(out.contains("forged"), "{out:?}");
         for bad in ['\x1b', '\r', '\n', '\t'] {
             assert!(!out.contains(bad), "{bad:?} survived in {out:?}");

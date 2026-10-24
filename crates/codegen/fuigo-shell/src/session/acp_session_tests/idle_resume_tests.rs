@@ -38,9 +38,9 @@ async fn test_last_api_request_at_idle_detection() {
         })
         .await;
 }
-/// End-to-end test for `maybe_refresh_model_metadata_on_resume` against a loopback `/models-v2`.
+/// End-to-end test for `maybe_refresh_model_metadata_on_resume` against a loopback `/models`.
 ///
-/// Before P42 this asserted that the refresh fetched `/models-v2` from the loopback mock (with the session token)
+/// Before P42 this asserted that the refresh fetched `/models` from the loopback mock (with the session token)
 /// and updated `context_window` / `max_completion_tokens`. Since P42 the refresh carries the session token only
 /// to a destination that may receive it (`session_delivery::session_may_reach`: a configured https origin, never
 /// loopback), and its other guard, `is_cli_chat_proxy_url`, admits only loopback or the compiled prod
@@ -48,7 +48,7 @@ async fn test_last_api_request_at_idle_detection() {
 /// pins that: a session idle for 11 minutes makes NO request to the loopback mock, and its metadata is unchanged.
 /// The positive path needs a compiled-in prod cli-chat-proxy; see receipt R034.
 #[tokio::test(flavor = "current_thread")]
-async fn test_e2e_idle_resume_never_sends_the_session_to_a_loopback_models_v2() {
+async fn test_e2e_idle_resume_never_sends_the_session_to_a_loopback_models() {
     use axum::routing::get;
     let local = tokio::task::LocalSet::new();
     local
@@ -56,7 +56,7 @@ async fn test_e2e_idle_resume_never_sends_the_session_to_a_loopback_models_v2() 
             let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let hit = hits.clone();
             let app = axum::Router::new().route(
-                "/v1/models-v2",
+                "/v1/models",
                 get(move || async move {
                     hit.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     axum::Json(serde_json::json!({
@@ -120,6 +120,7 @@ async fn test_e2e_idle_resume_never_sends_the_session_to_a_loopback_models_v2() 
                     query_params: Default::default(),
                     env_http_headers: Default::default(),
                     context_window: std::num::NonZeroU64::new(200_000).unwrap(),
+                    max_request_bytes: None,
                     reasoning_effort: None,
                     stream_tool_calls: None,
                     mtls_cert_dir: None,
@@ -219,6 +220,7 @@ async fn test_e2e_idle_resume_never_sends_the_session_to_a_loopback_models_v2() 
                     context_window_selection: Default::default(),
                     count: std::sync::atomic::AtomicU64::new(0),
                     auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
+                    overflow_compactions_since_response: std::cell::Cell::new(0),
                     previous_model: std::cell::Cell::new(None),
                     compaction_mode: fuigo_chat_state::CompactionMode::Transcript,
                     verbatim_input: true,
@@ -394,7 +396,7 @@ async fn test_e2e_idle_resume_never_sends_the_session_to_a_loopback_models_v2() 
             assert_eq!(
                 hits.load(std::sync::atomic::Ordering::SeqCst),
                 0,
-                "the session-carrying /models-v2 refresh must not reach a loopback destination"
+                "the session-carrying /models refresh must not reach a loopback destination"
             );
             assert_eq!(
                 cfg_after.context_window,

@@ -384,6 +384,13 @@ fn notify_model_changed(
             model_id,
             reasoning_effort,
             context_window_selection,
+        )
+        .with_route(
+            agent
+                .models_manager
+                .models()
+                .get(model_id)
+                .map(|entry| entry.route().label),
         ),
         meta: None,
     };

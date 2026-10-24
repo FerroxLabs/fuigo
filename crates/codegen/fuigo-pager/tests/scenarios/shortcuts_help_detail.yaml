@@ -44,10 +44,10 @@ steps:
     text: collapse
   - action: assert_not_contains
     text: panicked
-  # Move selection off the section header onto the CancelTurn hint
-  # (Essentials order: send, prompt, scrollback, cancel).
+  # Move selection onto the CancelTurn hint
+  # (Essentials order: send, scrollback, cancel; the selection starts on send).
   - action: keys
-    keys: "<Down><Down><Down>"
+    keys: "<Down><Down>"
   - action: wait
     millis: 200
   # Inline-expand (right arrow): the action's long_help renders under the row.

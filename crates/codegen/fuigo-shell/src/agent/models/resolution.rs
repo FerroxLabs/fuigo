@@ -111,6 +111,15 @@ pub(crate) fn resolve_default_model(
 
     match &model_pref {
         None => {
+            // Nothing set a default. With exactly one connection and that connection a signed-in
+            // subscription, start on its best model instead of a Flux default nobody can reach.
+            // An explicit default (`Some(pref)`) never reaches this arm.
+            if let Some(implicit) =
+                crate::auth::provider_status::ProviderStatus::current(false).implicit_default_key()
+                && let Some((key, entry)) = visible.get_key_value(&implicit)
+            {
+                return (key.clone(), entry.clone(), config::ConfigSource::Default);
+            }
             let (key, first) = first_or_fallback();
             (key, first, config::ConfigSource::Default)
         }
@@ -165,6 +174,11 @@ pub(crate) fn resolve_default_model(
 }
 
 /// Filter hidden and auth-gated entries out of `catalog` and convert to ACP wire format.
+///
+/// The list is one row per MODEL: a model reachable through Flux Router, a subscription and a provider key
+/// carries all of its routes in `meta.routes`, best first (see [`super::ranking`]), and the entries for its
+/// other routes are marked `meta.altRouteOf` so a client can show them behind the primary one. Models that
+/// are reachable come first; the ones that need a connection follow.
 pub(crate) fn available_models(
     catalog: &IndexMap<String, ModelEntry>,
     is_session_auth: bool,
@@ -174,7 +188,58 @@ pub(crate) fn available_models(
         .filter(|(_, e)| e.info.visible_for_auth(is_session_auth))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    config::to_acp_model_info(&visible)
+    let flux_ready = is_session_auth || crate::agent::auth_method::has_fuigo_api_key_env();
+    annotate_routes(
+        config::to_acp_model_info(&visible),
+        &super::ranking::rank_catalog(&visible, flux_ready),
+    )
+}
+
+/// Attach every model's ranked routes to its ACP info and order the list: reachable models first.
+fn annotate_routes(
+    mut infos: IndexMap<acp::ModelId, acp::ModelInfo>,
+    ranked: &[super::ranking::RankedModel],
+) -> IndexMap<acp::ModelId, acp::ModelInfo> {
+    let mut out: IndexMap<acp::ModelId, acp::ModelInfo> = IndexMap::with_capacity(infos.len());
+    for model in ranked {
+        let primary_key = model.primary().key.clone();
+        let routes: Vec<serde_json::Value> = model
+            .choices
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "key": c.key,
+                    "label": c.route.label,
+                    "badge": c.route.badge(),
+                    "reason": c.reason(),
+                    "word": c.word(),
+                    "ready": c.ready,
+                })
+            })
+            .collect();
+        for (i, choice) in model.choices.iter().enumerate() {
+            let id = acp::ModelId::new(choice.key.clone());
+            let Some(mut info) = infos.shift_remove(&id) else {
+                continue;
+            };
+            let mut meta = info.meta.take().unwrap_or_default();
+            if i == 0 {
+                // A model with a single route says nothing: that is the wire shape clients already know.
+                if model.choices.len() > 1 {
+                    meta.insert("routes".to_owned(), serde_json::Value::Array(routes.clone()));
+                }
+                if !model.reachable() {
+                    meta.insert("connect".to_owned(), serde_json::json!(model.primary().reason()));
+                }
+            } else {
+                meta.insert("altRouteOf".to_owned(), serde_json::json!(primary_key));
+            }
+            out.insert(id, info.meta(Some(meta)));
+        }
+    }
+    // Anything the ranking did not see keeps its place at the end.
+    out.extend(infos);
+    out
 }
 
 /// Compiled glob matcher shared by `allowed_models`, `disabled_models`, and `hidden_models` (matched against catalog key or model id).

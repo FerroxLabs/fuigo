@@ -1,6 +1,8 @@
 //! Cache-aware byte budgeting for inline images on owned request histories.
 
-use fuigo_sampling_types::{ContentPart, ConversationItem};
+use std::num::NonZeroU64;
+
+use fuigo_sampling_types::{ApiBackend, ContentPart, ConversationItem};
 
 /// Replaces an inline image evicted to keep the request body under the proxy's
 /// 50 MB limit. Phrased so the model treats the image as gone rather than
@@ -17,7 +19,9 @@ const TOOL_IMAGE_COMPACT_NOTE: &str = "[One or more images from this tool result
 /// (nginx `proxy-body-size`). Bodies larger than this are rejected with HTTP
 /// 413 — or a connection reset before the response is written. Inline image
 /// `data:` URLs (base64) are the dominant term in this size.
-const MAX_REQUEST_BYTES: usize = 50 * 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = ApiBackend::ChatCompletions
+    .default_max_request_bytes()
+    .get() as usize;
 
 /// Evict old images once the serialized body reaches this size.
 ///
@@ -136,14 +140,35 @@ pub struct BudgetedConversation {
     pub outcome: ImageBudgetOutcome,
 }
 
-/// Applies the production 47 MiB trigger and 25 MiB reclaim target.
+const TRIGGER_HEADROOM_BYTES: usize = MAX_REQUEST_BYTES - IMAGE_COMPACT_TRIGGER_BYTES;
+
+/// Below this cap the reclaim mark would meet the trigger, so smaller caps are raised to it.
+const MIN_REQUEST_BYTES: usize = 4 * TRIGGER_HEADROOM_BYTES;
+
+/// Trigger and reclaim target for a provider request-body cap.
+/// Model resolution fills the cap from `api_backend` when unset, so `None` only reaches here from a config that
+/// skipped it and gets the 50 MiB default.
+pub fn image_budget_limits(max_request_bytes: Option<NonZeroU64>) -> (usize, usize) {
+    let Some(max_request_bytes) = max_request_bytes else {
+        return (
+            IMAGE_COMPACT_TRIGGER_BYTES,
+            IMAGE_COMPACT_RECLAIM_TARGET_BYTES,
+        );
+    };
+    let cap = usize::try_from(max_request_bytes.get())
+        .unwrap_or(usize::MAX)
+        .max(MIN_REQUEST_BYTES);
+    (cap - TRIGGER_HEADROOM_BYTES, cap / 2)
+}
+
+/// Applies the trigger and reclaim target derived from `max_request_bytes`.
 #[must_use]
-pub fn apply_image_budget(items: Vec<ConversationItem>) -> BudgetedConversation {
-    apply_image_budget_with_limits(
-        items,
-        IMAGE_COMPACT_TRIGGER_BYTES,
-        IMAGE_COMPACT_RECLAIM_TARGET_BYTES,
-    )
+pub fn apply_image_budget(
+    items: Vec<ConversationItem>,
+    max_request_bytes: Option<NonZeroU64>,
+) -> BudgetedConversation {
+    let (trigger_bytes, reclaim_target_bytes) = image_budget_limits(max_request_bytes);
+    apply_image_budget_with_limits(items, trigger_bytes, reclaim_target_bytes)
 }
 
 /// Applies an explicit high-water trigger and low-water reclaim target.
@@ -415,10 +440,69 @@ mod tests {
     }
 
     #[test]
+    fn limits_follow_the_request_cap() {
+        assert_eq!(
+            image_budget_limits(None),
+            (
+                IMAGE_COMPACT_TRIGGER_BYTES,
+                IMAGE_COMPACT_RECLAIM_TARGET_BYTES
+            )
+        );
+        assert_eq!(
+            image_budget_limits(NonZeroU64::new(30_000_000)),
+            (30_000_000 - TRIGGER_HEADROOM_BYTES, 15_000_000)
+        );
+        assert_eq!(
+            image_budget_limits(NonZeroU64::new(1)),
+            image_budget_limits(NonZeroU64::new(MIN_REQUEST_BYTES as u64))
+        );
+    }
+
+    #[test]
+    fn backend_defaults_scale_the_limits() {
+        assert_eq!(
+            image_budget_limits(None),
+            image_budget_limits(Some(
+                ApiBackend::ChatCompletions.default_max_request_bytes()
+            )),
+            "the resolved default matches the unresolved fallback"
+        );
+        assert_eq!(
+            image_budget_limits(Some(ApiBackend::Responses.default_max_request_bytes())),
+            image_budget_limits(Some(
+                ApiBackend::ChatCompletions.default_max_request_bytes()
+            ))
+        );
+        assert_eq!(
+            (30_000_000 - TRIGGER_HEADROOM_BYTES, 15_000_000),
+            image_budget_limits(Some(ApiBackend::Messages.default_max_request_bytes()))
+        );
+    }
+
+    /// A Messages-API body between its 30 MB cap and the old fixed 47 MiB trigger used to ride through
+    /// unevicted (and be rejected by the host); under the Messages cap it now evicts.
+    #[test]
+    fn a_messages_cap_evicts_a_body_the_fixed_trigger_would_have_sent() {
+        let history: Vec<ConversationItem> = (0..35)
+            .map(|_| ConversationItem::user_with_parts(vec![data_image('A', 1024 * 1024)]))
+            .collect();
+        let fixed = apply_image_budget(history.clone(), None);
+        assert!(!fixed.outcome.needs_image_compaction, "35 MiB is under 47 MiB");
+        assert_eq!(fixed.outcome.evicted, 0);
+        let capped = apply_image_budget(
+            history,
+            Some(ApiBackend::Messages.default_max_request_bytes()),
+        );
+        assert!(capped.outcome.needs_image_compaction);
+        assert!(capped.outcome.evicted > 0);
+        assert!(capped.outcome.body_bytes_after <= 15_000_000);
+    }
+
+    #[test]
     fn below_trigger_preserves_complete_history() {
         let history = mixed_history();
         let expected = serde_json::to_value(&history).unwrap();
-        let budgeted = apply_image_budget(history);
+        let budgeted = apply_image_budget(history, None);
         assert_eq!(
             budgeted.outcome,
             ImageBudgetOutcome {
@@ -514,7 +598,7 @@ mod tests {
                 )])
             })
             .collect();
-        let budgeted = apply_image_budget(history);
+        let budgeted = apply_image_budget(history, None);
 
         assert!(budgeted.outcome.body_bytes >= IMAGE_COMPACT_TRIGGER_BYTES);
         assert!(budgeted.outcome.body_bytes_after <= IMAGE_COMPACT_RECLAIM_TARGET_BYTES);

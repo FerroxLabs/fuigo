@@ -1852,8 +1852,17 @@ fn marketplace_allowlist_normalizes_git_urls() {
 
     assert!(al.is_url_allowed("git@github.enterprise.example:ACME/repo.git"));
     assert!(al.is_url_allowed("git@github.enterprise.example:ACME/repo"));
-    assert!(al.is_url_allowed("git@github.enterprise.example:acme/repo.git"));
+    // The host folds case; the path is identity, so a differently-cased path earns no grant.
+    assert!(al.is_url_allowed("git@GITHUB.ENTERPRISE.EXAMPLE:ACME/repo.git"));
+    assert!(!al.is_url_allowed("git@github.enterprise.example:acme/repo.git"));
     assert!(!al.is_url_allowed("git@evil.com:ACME/repo.git"));
+    // scp and https forms of one repository never alias.
+    let https = MarketplaceAllowlist {
+        allowed_urls: vec!["https://github.com/Org/Repo.git".into()],
+        source_path: None,
+    };
+    assert!(!https.is_url_allowed("git@github.com:Org/Repo.git"));
+    assert!(https.is_url_allowed("https://GitHub.com/Org/Repo"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════

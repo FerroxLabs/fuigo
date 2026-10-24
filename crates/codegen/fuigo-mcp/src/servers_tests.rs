@@ -34,6 +34,56 @@ async fn resilient_transport_skips_undecodable_line_and_keeps_stream_alive() {
     );
 }
 
+/// Feed `bytes` (one wire line) to the production stdio transport and return what `receive` makes of it.
+async fn receive_one_line(bytes: &[u8]) -> Option<RxJsonRpcMessage<RoleClient>> {
+    let (mut server_out, client_in) = tokio::io::duplex(64 * 1024);
+    let mut transport = ResilientRwTransport::new(
+        client_in,
+        tokio::io::sink(),
+        "badchars".to_string(),
+        fuigo_session_events::EventWriter::noop(),
+    );
+    server_out.write_all(bytes).await.unwrap();
+    server_out.write_all(b"\n").await.unwrap();
+    drop(server_out);
+    tokio::time::timeout(std::time::Duration::from_secs(5), transport.receive())
+        .await
+        .expect("receive must not hang")
+}
+
+fn is_response(msg: &Option<RxJsonRpcMessage<RoleClient>>) -> bool {
+    matches!(msg, Some(rmcp::model::JsonRpcMessage::Response(_)))
+}
+
+#[tokio::test]
+async fn a_reply_with_a_leading_byte_order_mark_is_decoded() {
+    let mut line = vec![0xEF, 0xBB, 0xBF];
+    line.extend_from_slice(br#"{"jsonrpc":"2.0","id":1,"result":{}}"#);
+    assert!(is_response(&receive_one_line(&line).await));
+}
+
+#[tokio::test]
+async fn a_reply_with_a_raw_control_character_in_a_string_is_decoded() {
+    let line = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"a\x01b\tc\"}]}}";
+    assert!(is_response(&receive_one_line(line).await));
+}
+
+#[tokio::test]
+async fn a_reply_with_invalid_utf8_in_a_string_is_decoded() {
+    let line = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"a\xFF\xFEb\"}]}}";
+    assert!(is_response(&receive_one_line(line).await));
+}
+
+#[tokio::test]
+async fn a_repaired_reply_keeps_its_text_and_garbage_is_still_skipped() {
+    let line = b"{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"a\x01b\"}]}}";
+    let msg = receive_one_line(line).await.expect("decoded");
+    let text = serde_json::to_string(&msg).unwrap();
+    assert!(text.contains(r#""id":7"#), "{text}");
+    assert!(text.contains(r"a\u0001b"), "the control character is kept escaped: {text}");
+    assert!(receive_one_line(b"not json at all").await.is_none());
+}
+
 fn make_stdio_server(name: &str, command: &str) -> acp::McpServer {
     acp::McpServer::Stdio(acp::McpServerStdio::new(name, PathBuf::from(command)))
 }
@@ -311,6 +361,59 @@ fn test_mcp_state_new() {
     assert!(!state.has_finished_init());
     assert!(matches!(state.init_progress(), InitProgress::NotStarted));
     assert_eq!(state.generation, 0);
+}
+
+#[test]
+fn admitted_servers_start_as_the_spawn_list_and_default_to_empty() {
+    let state = McpState::new(vec![make_http_server("a", "https://a.example/a")]);
+    assert_eq!(state.admitted_servers().snapshot(), state.configs);
+    assert!(AdmittedMcpServers::default().snapshot().is_empty());
+}
+
+#[test]
+fn admitted_servers_follow_update_configs_and_update_configs_diff() {
+    let mut state = McpState::new(vec![make_http_server("a", "https://a.example/a")]);
+    let cell = state.admitted_servers();
+
+    assert!(state.update_configs(vec![make_http_server("b", "https://b.example/b")]));
+    assert_eq!(
+        cell.snapshot(),
+        state.configs,
+        "a handle clone sees the config update_configs committed"
+    );
+
+    let diff = state
+        .update_configs_diff(vec![make_http_server("c", "https://c.example/c")])
+        .expect("configs changed");
+    assert_eq!(diff.added, vec!["c".to_string()]);
+    assert_eq!(
+        cell.snapshot(),
+        state.configs,
+        "a handle clone sees the config update_configs_diff committed"
+    );
+}
+
+#[test]
+fn admitted_servers_keep_a_snapshot_taken_before_a_later_commit() {
+    let mut state = McpState::new(vec![make_http_server("a", "https://a.example/a")]);
+    let cell = state.admitted_servers();
+    let forked = cell.snapshot();
+
+    state.update_configs_diff(vec![make_http_server("b", "https://b.example/b")]);
+
+    assert_eq!(forked.len(), 1, "a fork's copy is not rewritten later");
+    assert_eq!(mcp_server_name(&forked[0]), "a");
+    assert_eq!(mcp_server_name(&cell.snapshot()[0]), "b");
+}
+
+#[test]
+fn an_unchanged_update_leaves_the_admitted_list_alone() {
+    let configs = vec![make_http_server("a", "https://a.example/a")];
+    let mut state = McpState::new(configs.clone());
+    let cell = state.admitted_servers();
+    assert!(!state.update_configs(configs.clone()));
+    assert!(state.update_configs_diff(configs.clone()).is_none());
+    assert_eq!(cell.snapshot(), configs);
 }
 
 #[test]
@@ -1620,6 +1723,7 @@ async fn recover_and_retry_surfaces_original_error_when_recover_fails() {
     let err = tool
         .recover_and_retry(
             &client,
+            &client.request_tracker.begin_request(),
             params,
             std::time::Duration::from_secs(1),
             1,
@@ -3077,6 +3181,47 @@ async fn try_call_tool_http_invalid_params_not_recovered() {
     );
 }
 
+/// The refusal note leads the result even though the fake server's retry reports success.
+#[tokio::test(flavor = "multi_thread")]
+async fn mrtr_declined_elicitation_is_noted_ahead_of_the_call_result() {
+    use crate::elicitation::{ElicitationRefusal, decline_result, refusal_note};
+    use rmcp::model::ContentBlock;
+    let (url, _handles) = spawn_fake_mcp(CallToolBehavior::FormElicitThenOk).await;
+    let client = fake_http_client(&url, 5);
+    let inbox = crate::elicitation::ElicitationInbox::new();
+    client.set_elicitation_tx(Some(inbox.clone()));
+
+    let decline = tokio::spawn(async move {
+        let job = inbox
+            .recv()
+            .await
+            .expect("elicitation job reaches the inbox");
+        let _ = job.response_tx.send(decline_result());
+    });
+    let ew = fuigo_session_events::EventWriter::noop();
+    let mut reconnect = false;
+    let mut is_timeout = false;
+    let out = fake_echo_tool()
+        .try_call_tool(
+            &client,
+            &serde_json::json!({"q": 1}),
+            &mut reconnect,
+            &mut is_timeout,
+            &ew,
+        )
+        .await
+        .expect("tool call completes after the MRTR round");
+    decline.await.unwrap();
+
+    assert_eq!(
+        vec![
+            ContentBlock::text(refusal_note("fake", ElicitationRefusal::Declined)),
+            ContentBlock::text("ok"),
+        ],
+        out.content
+    );
+}
+
 /// End-to-end SEP-2322 form flow against the wire-level fake server:
 /// `tools/call` → `input_required` (form elicitation + `requestState`) → HITL accept via the
 /// elicitation inbox → retried `tools/call` echoing `requestState` and carrying
@@ -3170,6 +3315,48 @@ async fn try_call_tool_mrtr_form_elicitation_round_trip() {
     assert_eq!(
         retry["arguments"]["q"], 1,
         "retry must re-send the original arguments"
+    );
+}
+
+/// The recovered re-send still carries the declined answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn mrtr_declined_elicitation_is_noted_after_transport_recovery() {
+    use crate::elicitation::{ElicitationRefusal, decline_result, refusal_note};
+    use rmcp::model::ContentBlock;
+    let (url, _handles) = spawn_fake_mcp(CallToolBehavior::FormElicitThenErrorThenOk).await;
+    let client = fake_http_client(&url, 5);
+    let inbox = crate::elicitation::ElicitationInbox::new();
+    client.set_elicitation_tx(Some(inbox.clone()));
+
+    let decline = tokio::spawn(async move {
+        let job = inbox
+            .recv()
+            .await
+            .expect("elicitation job reaches the inbox");
+        let _ = job.response_tx.send(decline_result());
+    });
+    let ew = fuigo_session_events::EventWriter::noop();
+    let mut reconnect = false;
+    let mut is_timeout = false;
+    let out = fake_echo_tool()
+        .try_call_tool(
+            &client,
+            &serde_json::json!({}),
+            &mut reconnect,
+            &mut is_timeout,
+            &ew,
+        )
+        .await
+        .expect("tool call completes after recovery");
+    decline.await.unwrap();
+
+    assert!(reconnect, "the failed retry must trigger recovery");
+    assert_eq!(
+        vec![
+            ContentBlock::text(refusal_note("fake", ElicitationRefusal::Declined)),
+            ContentBlock::text("ok"),
+        ],
+        out.content
     );
 }
 
@@ -3588,6 +3775,8 @@ async fn try_call_tool_reconnects_then_succeeds_after_retriable_transport_error(
             server_name: "dead".to_string(),
             notify_tx: Arc::new(parking_lot::Mutex::new(None)),
             elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
+            request_tracker: Default::default(),
+            service_id: Default::default(),
             progress: Default::default(),
             progress_generation: 0,
         };
@@ -3704,6 +3893,8 @@ async fn watched_live_client(name: &str) -> Arc<McpClient> {
         server_name: name.to_string(),
         notify_tx: Arc::new(parking_lot::Mutex::new(None)),
         elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
+        request_tracker: Default::default(),
+        service_id: Default::default(),
         progress: Default::default(),
         progress_generation: 0,
     };
@@ -4412,6 +4603,8 @@ async fn client_handler_routes_tools_changed() {
         server_name: "test".to_string(),
         notify_tx: Arc::new(parking_lot::Mutex::new(Some(tx))),
         elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
+        request_tracker: Default::default(),
+        service_id: Default::default(),
         progress: Default::default(),
         progress_generation: 0,
     };

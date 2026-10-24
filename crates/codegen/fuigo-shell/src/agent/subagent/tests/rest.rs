@@ -568,6 +568,22 @@ fn subagent_worktree_snapshot_gate_local_enables() {
     ctx.agent_config = Some(config);
     assert!(ctx.resolve_subagent_worktree_snapshot_enabled());
 }
+/// A child that may itself spawn keeps the parent's model lock: the child spawn path reads the same feature.
+#[test]
+fn subagent_model_inheritance_gate_defaults_off() {
+    let ctx = ctx_with_toggle(std::collections::HashMap::new());
+    assert!(!ctx.resolve_subagent_model_inheritance_enabled());
+}
+#[test]
+fn subagent_model_inheritance_gate_local_enables() {
+    let mut config = crate::agent::config::Config::default();
+    config
+        .feature_values
+        .insert(crate::agent::config::Feature::SubagentModelInheritance, true);
+    let mut ctx = ctx_with_toggle(std::collections::HashMap::new());
+    ctx.agent_config = Some(config);
+    assert!(ctx.resolve_subagent_model_inheritance_enabled());
+}
 #[test]
 fn subagent_tool_filter_removes_ask_user_question() {
     let mut tools = vec![

@@ -286,7 +286,9 @@ pub(crate) fn switch_to_agent(app: &mut AppView, target: AgentId, cause: SwitchC
     app.sync_permission_mode_slash_gate();
     surface_yolo_launch_block_notice(app, target);
 
-    if matches!(cause, SwitchCause::New | SwitchCause::Fork)
+    // A cold `/resume` builds a new loading agent, so it follows the overlay exactly as `/new` and `/fork` do; otherwise the session
+    // overlay would close the moment the load starts
+    if matches!(cause, SwitchCause::New | SwitchCause::Fork | SwitchCause::Load)
         && let Some(previous) = previous_top_level
         && let Some(d) = app.dashboard.as_mut()
     {

@@ -455,3 +455,63 @@ async fn rewind_to_synthetic_auto_wake_turn_cuts_at_the_wake() {
         })
         .await;
 }
+
+/// Row 48.1: the rewind picker offers what the user typed and skips the turns the runtime started by itself.
+/// The session is `[U0 typed, U1 automatic, U2 typed, U3 automatic]`; the automatic turns are recorded in `updates.jsonl` by their
+/// chunk marker, so the picker is told prompts 0 and 2 only, and the answer survives a restart.
+#[tokio::test(flavor = "current_thread")]
+async fn rewind_points_skip_runtime_started_turns() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
+            let actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
+
+            let mut snap = actor
+                .chat_state_handle
+                .snapshot()
+                .await
+                .expect("snapshot available");
+            snap.prompt_index = 4;
+            snap.prompt_texts = vec![
+                "P0".into(),
+                "Background task abc completed".into(),
+                "P2".into(),
+                "Workflow wf-1 completed".into(),
+            ];
+            actor.chat_state_handle.restore_snapshot(snap);
+
+            let line = |index: usize, text: &str, automatic: bool| {
+                let meta = if automatic {
+                    format!(r#"{{"promptIndex":{index},"automaticTurn":true}}"#)
+                } else {
+                    format!(r#"{{"promptIndex":{index}}}"#)
+                };
+                format!(
+                    r#"{{"timestamp":{index},"method":"session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"user_message_chunk","content":{{"type":"text","text":"{text}"}},"_meta":{meta}}}}}}}"#
+                )
+            };
+            let dir = crate::session::persistence::session_dir(&actor.session_info);
+            std::fs::create_dir_all(&dir).expect("session dir");
+            let updates = dir.join("updates.jsonl");
+            let body = [
+                line(0, "P0", false),
+                line(1, "Background task abc completed", true),
+                line(2, "P2", false),
+                line(3, "Workflow wf-1 completed", true),
+            ]
+            .join("\n");
+            std::fs::write(&updates, body + "\n").expect("write updates.jsonl");
+
+            let points = actor.get_rewind_points().await;
+            let _ = std::fs::remove_file(&updates);
+            let offered: Vec<usize> = points
+                .rewind_points
+                .iter()
+                .map(|p| p.prompt_index)
+                .collect();
+            assert_eq!(offered, vec![0, 2], "only user-typed prompts are offered");
+        })
+        .await;
+}

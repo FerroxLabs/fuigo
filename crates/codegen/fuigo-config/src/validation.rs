@@ -609,6 +609,7 @@ pub const REQUIREMENTS_BOOL_FEATURES: &[&str] = &[
     "repo_status_in_system_prompt",
     "terminal_theme",
     "peer_messaging",
+    "subagent_model_inheritance",
     "image_gen",
     "image_edit",
     "video_gen",
@@ -863,7 +864,7 @@ pub fn permission_rule_shape_ok(rule: &toml::Value) -> bool {
 
 /// P183 round 7 (Grok r4 M4): the shape fuigo-hooks decodes one `[hooks]` event into (`Vec<MatcherGroup>`): an array of
 /// tables, each with an optional string `matcher` and a `hooks` array of handler tables (`type` a string; `command` and `url`
-/// strings, `timeout` a non-negative integer, `env` a table of strings, all optional). fuigo-config cannot depend on
+/// strings, `args` an array of strings, `timeout` a non-negative integer, `env` a table of strings, all optional). fuigo-config cannot depend on
 /// fuigo-hooks; the test `config_hook_shape_matches_strict_parse_p183r7` there keeps the two in step.
 pub fn hook_event_shape_ok(value: &toml::Value) -> bool {
     type Table = toml::map::Map<String, toml::Value>;
@@ -875,6 +876,10 @@ pub fn hook_event_shape_ok(value: &toml::Value) -> bool {
             h.get("type").is_some_and(toml::Value::is_str)
                 && opt(h, "command", toml::Value::is_str)
                 && opt(h, "url", toml::Value::is_str)
+                && opt(h, "args", |v| {
+                    v.as_array()
+                        .is_some_and(|a| a.iter().all(toml::Value::is_str))
+                })
                 && opt(h, "timeout", |v| v.as_integer().is_some_and(|n| n >= 0))
                 && opt(h, "env", |v| {
                     v.as_table()
@@ -3325,6 +3330,7 @@ minimum_version = "not-a-version"
     const GOOD: &str = "[sandbox]\nprofile = \"strict\"\n";
 
     /// Runs `f` on a thread and fails (instead of hanging the suite) when it does not return in 10 s: a fifo must not block.
+    #[cfg(unix)]
     fn within_10s<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -3333,6 +3339,7 @@ minimum_version = "not-a-version"
         rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the read blocked")
     }
 
+    #[cfg(unix)]
     fn mkfifo(path: &Path) {
         use std::os::unix::ffi::OsStrExt as _;
         let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
@@ -3342,6 +3349,7 @@ minimum_version = "not-a-version"
     /// The audit's SEQUENCE: validate a good file, then replace the directory entry with each kind of untrusted object. The
     /// validated copy is enforced every time (never `Ok(None)`, never the replacement's text), the copy is not forgotten, and a
     /// process with no copy gets an `Err` (lock-down). Without the fix a char device / fifo read blank and cleared the copy.
+    #[cfg(unix)]
     #[test]
     fn non_regular_replacement_keeps_validated_copy_p183r10() {
         type Make = fn(&Path);
@@ -3382,6 +3390,7 @@ minimum_version = "not-a-version"
     }
 
     /// A symlink to a regular file the admin does not own is judged on the target (the opened descriptor): injected uid.
+    #[cfg(unix)]
     #[test]
     fn symlink_to_untrusted_file_is_broken_p183r10() {
         let sys = tempfile::tempdir().unwrap();
@@ -3401,6 +3410,7 @@ minimum_version = "not-a-version"
     }
 
     /// A group/other-writable directory holding the entry makes the file untrusted, kept copy or lock-down.
+    #[cfg(unix)]
     #[test]
     fn writable_parent_directory_is_broken_p183r10() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -3425,6 +3435,7 @@ minimum_version = "not-a-version"
     }
 
     /// The admin directory reached through a (trusted) symlink is a legitimate setup.
+    #[cfg(unix)]
     #[test]
     fn admin_directory_behind_a_symlink_is_trusted_p183r10() {
         let real = tempfile::tempdir().unwrap();
@@ -3448,6 +3459,7 @@ minimum_version = "not-a-version"
     }
 
     /// `managed_config.toml` takes the same reader: a fifo there is an error, not an empty table.
+    #[cfg(unix)]
     #[test]
     fn fifo_managed_config_is_an_error_not_blank_p183r10() {
         let sys = tempfile::tempdir().unwrap();
@@ -3463,11 +3475,14 @@ minimum_version = "not-a-version"
         let sys = tempfile::tempdir().unwrap();
         let ok = Ok(None);
         assert!(broken_admin_sources_at(Some(sys.path()), None, &ok).is_empty());
-        mkfifo(&sys.path().join("requirements.toml"));
-        let d = sys.path().to_path_buf();
-        let got = within_10s(move || broken_admin_sources_at(Some(&d), None, &Ok(None)));
-        assert_eq!(got.len(), 1);
-        assert!(got[0].detail.contains("not a regular file"), "{}", got[0].detail);
+        #[cfg(unix)]
+        {
+            mkfifo(&sys.path().join("requirements.toml"));
+            let d = sys.path().to_path_buf();
+            let got = within_10s(move || broken_admin_sources_at(Some(&d), None, &Ok(None)));
+            assert_eq!(got.len(), 1);
+            assert!(got[0].detail.contains("not a regular file"), "{}", got[0].detail);
+        }
 
         let none = tempfile::tempdir().unwrap();
         let claude = none.path().join("managed-settings.json");

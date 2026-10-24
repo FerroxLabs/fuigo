@@ -12,9 +12,19 @@ use std::time::{Duration, Instant};
 /// Cap on the bytes read from one `git ls-tree` (exceeding it is undetermined).
 pub(crate) const MAX_LISTING_BYTES: usize = 16 * 1024 * 1024;
 /// Wall-clock bound for one git child (exceeding it is undetermined).
+///
+/// Exceeding it keeps the floor (fail closed), which is right in production. Under test the bound is out of reach of a
+/// saturated host: measured with 192 CPU hogs, a single git spawn took 1.4-5.9 s and one whole check 12.9 s, so the
+/// 2 s / 8 s bounds turned a narrow git allow plus a branch switch into a prompt (rejected by the recording client).
+#[cfg(not(test))]
 pub(crate) const GIT_CHILD_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(test)]
+pub(crate) const GIT_CHILD_TIMEOUT: Duration = Duration::from_secs(120);
 /// Bound for a whole check run off the actor (several children).
+#[cfg(not(test))]
 pub(crate) const CHECK_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(test)]
+pub(crate) const CHECK_TIMEOUT: Duration = Duration::from_secs(240);
 
 /// One tree-ish the command involves. `required`: a ref that does not resolve is undetermined (otherwise it is
 /// skipped, as for `@{upstream}` of a branch with no upstream). A tree that cannot be LISTED (over the cap, timeout,

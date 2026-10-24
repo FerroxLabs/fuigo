@@ -32,7 +32,7 @@ gate_marker_pids() {
     [ "$p" = "$$" ] && continue
     ok=0
     # A process that is exiting or exec-ing can fail the read transiently: retry (up to ~2 s) before judging it.
-    for try in $(seq 1 40); do
+    for ((try = 1; try <= 40; try++)); do
       if { exec {fd}< "$root/$p/environ"; } 2>/dev/null; then
         while IFS= read -r -d '' kv <&"$fd"; do
           [ "$kv" = "FUIGO_GATE_RUN=$id" ] && { echo "$p"; break; }
@@ -41,14 +41,16 @@ gate_marker_pids() {
         ok=1; break
       fi
       [ -d "$root/$p" ] || { ok=1; break; }                       # gone
-      if stat=$(cat "$root/$p/stat" 2>/dev/null); then
+      stat=""; { IFS= read -r -d "" stat < "$root/$p/stat"; } 2>/dev/null   # builtin read, no fork: this runs for every zombie/kthread
+      if [ -n "$stat" ]; then
         rest=${stat##*) }; set -- $rest; flags=${7:-0}
         case "$1" in Z|X) ok=1; break;; esac                        # zombie / dead: no environment, cannot run
         [ $(( flags & 2097152 )) -ne 0 ] && { ok=1; break; }        # kernel thread (PF_KTHREAD): no environment
       fi
       # With a cgroup scope name given (e.g. fuigo-gate-X.scope): a process whose cgroup is readable and is NOT the run's scope cannot be part of the
       # run (the cgroup scan is the authority for members); an unreadable-env process OUTSIDE the scope is not ours.
-      if [ -n "$unit" ] && cg=$(cat "$root/$p/cgroup" 2>/dev/null) && [ -n "$cg" ]; then
+      cg=""; [ -z "$unit" ] || { IFS= read -r -d "" cg < "$root/$p/cgroup"; } 2>/dev/null
+      if [ -n "$unit" ] && [ -n "$cg" ]; then
         case "$cg" in *"$unit"*) ;; *) ok=1; break;; esac
       fi
       sleep 0.05

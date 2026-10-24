@@ -2411,3 +2411,115 @@ fn patch_removes_any_empty_id_key() {
     assert!(input[1].get("id").is_none());
     assert_eq!(input[2]["id"], "rs_1");
 }
+
+#[test]
+fn tool_guidance_description_reaches_responses_wire() {
+    let req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
+        .with_tools(vec![ToolSpec {
+        name: "read_file".to_string(),
+        description: Some("stock text\n\nGUIDE-WIRE".to_string()),
+        parameters: serde_json::json!({"type": "object"}),
+        freeform: None,
+    }]);
+    let responses_req: rs::CreateResponse = (&req).into();
+    let wire = serde_json::to_value(&responses_req).unwrap();
+    assert_eq!(wire["tools"][0]["description"], "stock text\n\nGUIDE-WIRE");
+}
+
+// ── A provider returns a custom tool call downgraded to a function_call ────────
+
+const DOWNGRADE_PATCH: &str = "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch\n";
+
+fn is_apply_patch(name: &str) -> bool {
+    name == "apply_patch" || name == "read_file"
+}
+
+fn convert_with_custom(output: Vec<rs::OutputItem>) -> Vec<ConversationItem> {
+    response_to_conversation_items_with_custom(
+        response_with_output(output),
+        is_apply_patch,
+        |name| name == "apply_patch",
+    )
+}
+
+/// `function_call` + `{"input": text}` for a tool declared custom reads as the freeform call (the text, not the JSON),
+/// and replays as it arrived: a `function_call` and a matching `function_call_output`.
+#[test]
+fn downgraded_custom_call_is_read_as_freeform_and_replays_as_function_call() {
+    let args = serde_json::json!({ "input": DOWNGRADE_PATCH }).to_string();
+    let turn = convert_with_custom(vec![wire_function_call("call_1", "apply_patch", &args)]);
+    let ConversationItem::Assistant(a) = turn.last().unwrap() else {
+        panic!("{turn:?}")
+    };
+    assert_eq!(a.tool_calls.len(), 1);
+    assert_eq!(a.tool_calls[0].name, "apply_patch");
+    assert_eq!(a.tool_calls[0].arguments.as_ref(), DOWNGRADE_PATCH, "the text, never the JSON envelope");
+
+    let mut items = vec![ConversationItem::user("edit a.txt")];
+    items.extend(turn);
+    items.push(ConversationItem::tool_result("call_1", "Success."));
+    let req = ConversationRequest::from_items(items).with_tools(vec![freeform_apply_patch_spec()]);
+    let input = input_items_json(&req);
+    assert_eq!(input[1]["type"], "function_call", "{input:?}");
+    assert_eq!(input[1]["call_id"], "call_1");
+    assert_eq!(input[1]["name"], "apply_patch");
+    let echoed: serde_json::Value = serde_json::from_str(input[1]["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(echoed, serde_json::json!({ "input": DOWNGRADE_PATCH }));
+    assert_eq!(input[2]["type"], "function_call_output", "{input:?}");
+    assert_eq!(input[2]["call_id"], "call_1");
+    let body = serde_json::to_string(&rs::CreateResponse::from(&req)).unwrap();
+    assert!(!body.contains("custom_tool_call\""), "no custom call item for a downgraded call: {body}");
+}
+
+/// The recorded order survives the JSONL round trip, so a resumed session still replays the downgraded shape.
+#[test]
+fn downgraded_custom_call_order_round_trips() {
+    let args = serde_json::json!({ "input": DOWNGRADE_PATCH }).to_string();
+    let turn = convert_with_custom(vec![wire_function_call("call_1", "apply_patch", &args)]);
+    let ConversationItem::Assistant(a) = turn.last().unwrap() else {
+        panic!("{turn:?}")
+    };
+    let json = serde_json::to_string(a).unwrap();
+    let back: AssistantItem = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.output_order, a.output_order);
+    assert!(matches!(back.output_order.as_deref(), Some([OutputSlot::DowngradedCustomCall { .. }])));
+}
+
+/// A genuine function tool, a custom tool called with another shape, and malformed arguments are all unchanged:
+/// the call is kept with its arguments as sent (so the tool answers with a parse error rather than the call vanishing).
+#[test]
+fn only_the_exact_downgrade_shape_is_remapped() {
+    let cases = [
+        ("read_file", r#"{"input":"x"}"#),
+        ("apply_patch", r#"{"patch":"x"}"#),
+        ("apply_patch", r#"{"input":"x","extra":1}"#),
+        ("apply_patch", r#"{"input":5}"#),
+        ("apply_patch", r#"{"input":"cut off"#),
+        ("apply_patch", "[]"),
+    ];
+    for (name, args) in cases {
+        let turn = convert_with_custom(vec![wire_function_call("call_1", name, args)]);
+        let ConversationItem::Assistant(a) = turn.last().unwrap() else {
+            panic!("{turn:?}")
+        };
+        assert_eq!(a.tool_calls.len(), 1, "{name} {args}: the call must not be dropped");
+        assert_eq!(a.tool_calls[0].arguments.as_ref(), args, "{name} {args}");
+        assert_eq!(a.output_order, None, "{name} {args}: replays as a plain function_call");
+    }
+}
+
+/// Pin: a correct `custom_tool_call` still maps to the freeform call with the raw text.
+#[test]
+fn correct_custom_tool_call_still_works_with_custom_set() {
+    let turn = convert_with_custom(vec![rs::OutputItem::CustomToolCall(custom_tool_call(
+        "call_1",
+        "apply_patch",
+        DOWNGRADE_PATCH,
+        "ctc_1",
+    ))]);
+    let ConversationItem::Assistant(a) = turn.last().unwrap() else {
+        panic!("{turn:?}")
+    };
+    assert_eq!(a.tool_calls[0].arguments.as_ref(), DOWNGRADE_PATCH);
+    assert!(matches!(a.output_order.as_deref(), Some([OutputSlot::CustomToolCall { .. }])));
+}

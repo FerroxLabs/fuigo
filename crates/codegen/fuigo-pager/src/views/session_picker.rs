@@ -447,12 +447,14 @@ fn selectable_fallback<T>(map: &[Option<T>], preferred: usize) -> Option<usize> 
 // Filtering
 // ---------------------------------------------------------------------------
 
-/// Case-insensitive substring match (callers pass a pre-lowercased query).
+/// Case-insensitive match (callers pass a pre-lowercased query): every whitespace-separated word of the query
+/// must appear in `name` as a substring, in any order. A one-word query is the plain substring match.
 ///
 /// Deliberately not an ordered-chars subsequence match.
 /// That matched so loosely (e.g. "rc" hitting "rust-check") that spurious title rows drowned out the results users actually searched for.
 pub(crate) fn fuzzy_matches_session(name: &str, query: &str) -> bool {
-    query.is_empty() || name.to_lowercase().contains(query)
+    let name = name.to_lowercase();
+    query.split_whitespace().all(|word| name.contains(word))
 }
 
 /// The query the picker's local fuzzy filter should apply on top of the current entries.
@@ -1055,6 +1057,31 @@ mod tests {
     #[test]
     fn repo_name_from_cwd_single_dir() {
         assert_eq!(repo_name_from_cwd("/fuigo"), "fuigo");
+    }
+
+    /// A query of several words finds titles holding every word, in any order (not only the words as one phrase).
+    #[test]
+    fn fuzzy_matches_session_requires_every_word_in_any_order() {
+        assert!(fuzzy_matches_session("Fix the login bug", "login fix"));
+        assert!(fuzzy_matches_session("Fix the login bug", "bug  fix"));
+        assert!(!fuzzy_matches_session("Fix the login bug", "login billing"));
+        assert!(fuzzy_matches_session("Fix the login bug", "  "));
+        assert!(fuzzy_matches_session("Fix the login bug", "the login"));
+    }
+
+    #[test]
+    fn filter_session_entries_applies_the_all_words_rule_to_titles() {
+        let titled = |id: &str, title: &str| {
+            let mut e = make_entry(id, "r");
+            e.summary = title.into();
+            e
+        };
+        let entries = [
+            titled("id-1", "Fix the login bug"),
+            titled("id-2", "Refactor billing"),
+        ];
+        let hits = filter_session_entries(Some(&entries), "BUG login", SourceFilter::default());
+        assert_eq!(hits, vec![0]);
     }
 
     /// Substring-only title matching: the old ordered-chars fallback let short queries match most titles, drowning real hits in junk rows.

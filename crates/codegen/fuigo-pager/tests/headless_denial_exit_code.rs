@@ -139,10 +139,13 @@ async fn a_denied_headless_run_exits_three_and_says_why() {
         "stderr must name the rule: {}",
         result.stderr
     );
+    // One line per refusal, carrying the remedy: no second "blocked" summary line.
+    let lines: Vec<&str> = result.stderr.lines().filter(|l| l.starts_with("fuigo: ")).collect();
+    assert_eq!(lines.len(), 1, "exactly one stderr line per refusal: {}", result.stderr);
     assert!(
-        result.stderr.contains("blocked"),
-        "stderr must say the run was blocked: {}",
-        result.stderr
+        lines[0].starts_with("fuigo: refused") && lines[0].contains("Remedy:"),
+        "the one line is the refusal with its remedy: {}",
+        lines[0]
     );
     // D.2.2: the reason is on the document a machine reads, not only in the prose.
     let doc: serde_json::Value = serde_json::from_str(result.stdout.trim()).unwrap_or_else(|e| {

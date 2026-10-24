@@ -382,6 +382,12 @@ impl PtyHarness {
         self.screen.contains(text)
     }
 
+    /// Whether the child's terminal is in raw mode right now (see [`PtyController::is_raw_mode`]).
+    #[cfg(unix)]
+    pub fn is_raw_mode(&self) -> Option<bool> {
+        self.pty.is_raw_mode()
+    }
+
     /// Active terminal modes the child has enabled (bracketed paste, mouse
     /// reporting, alt screen, …), as tracked by the virtual terminal.
     pub fn terminal_modes(&self) -> ptyctl::term::TerminalModes {

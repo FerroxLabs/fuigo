@@ -22,12 +22,17 @@ async fn storage_upload_parks_on_401_and_drains_after_recovery() {
 
     // Explicit overrides win over the sandbox defaults
     // Disable only the fake API-key credential so the seeded OAuth entry stays active
-    let overrides = [
+    // Fuigo ships with no OAuth issuer: name the one the seeded entry belongs to, and reach the mock over the trusted
+    // HTTPS front that session auth requires (see `spawn_polling_session_with_env`)
+    let mut overrides = vec![
         oauth_credential_ops()[0],
         EnvOp::set("FUIGO_TRACE_UPLOAD", "true"),
         EnvOp::set("FUIGO_TELEMETRY_TRACE_UPLOAD", "true"),
         EnvOp::set("FUIGO_UPLOAD_QUEUE_AUTH_PROBE_SECS", "2"),
     ];
+    overrides.extend(oauth_provider_ops());
+    let front_env = content.session_front_env();
+    overrides.extend(front_env.iter().map(|(key, value)| EnvOp::set(key, value)));
 
     let binary = pager_binary().expect("resolve pager binary");
     let mut harness = PtyHarness::spawn_with_content_env_ops(
@@ -104,8 +109,13 @@ async fn storage_upload_parks_on_401_and_drains_after_recovery() {
     let uploads = content.storage_uploads();
     assert!(
         !uploads.is_empty(),
-        "parked artifact uploads after recovery; storage requests: {}",
-        content.storage_request_count()
+        "parked artifact uploads after recovery; storage requests while parked: {parked_count} -> {after}, now {}; requests: {:?}",
+        content.storage_request_count(),
+        content
+            .requests()
+            .iter()
+            .map(|entry| format!("{} {}", entry.method, entry.path))
+            .collect::<Vec<_>>()
     );
     assert!(
         uploads.iter().all(|u| u.size > 0),

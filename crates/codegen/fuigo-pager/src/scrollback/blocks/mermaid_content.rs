@@ -276,6 +276,8 @@ pub(crate) enum AffordanceKind {
     CopyPath,
     /// Copy the diagram's Mermaid source (no render needed).
     CopySource,
+    /// Copy the registered text verbatim (the `[Copy]` rows under code blocks and tables).
+    CopyText,
 }
 
 /// One button in a diagram's affordance row, with its start column so the painted label and the click hit-rect can't drift.
@@ -344,7 +346,39 @@ pub struct DiagramAffordance {
     /// Post-wrap, block-relative row offset of the affordance row (its index in the block's `output()` lines).
     pub row_offset: u16,
     /// Diagram source (the fence body); the data every button acts on.
+    /// Empty for a copy row, whose buttons carry their own text.
     pub source: String,
+    /// `Some` for a `[Copy]` row under a code block or table; `None` for a diagram's row.
+    pub copy: Option<CopyRow>,
+}
+
+/// One button of a copy row: its label and the exact text a click puts on the clipboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyButton {
+    pub label: String,
+    pub text: String,
+}
+
+/// A `[Copy]` row under a code block or table: a dim leading label and its clickable buttons.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyRow {
+    /// Leading dim, non-clickable label (the language or file name; `table`).
+    pub label: String,
+    pub buttons: Vec<CopyButton>,
+}
+
+/// Start column of each button of `row`, left to right, past the leading label.
+/// The painter and the click hit-rects both use this, so they can't drift.
+pub(crate) fn copy_row_button_cols(row: &CopyRow) -> Vec<u16> {
+    let mut col = UnicodeWidthStr::width(row.label.as_str()) as u16 + AFFORDANCE_GAP;
+    row.buttons
+        .iter()
+        .map(|button| {
+            let at = col;
+            col += UnicodeWidthStr::width(button.label.as_str()) as u16 + AFFORDANCE_GAP;
+            at
+        })
+        .collect()
 }
 
 /// Post-wrap end row of every pre-wrap line, indexed by pre-wrap line number.
@@ -401,18 +435,59 @@ fn continuation_row(line: Line<'static>) -> BlockLine {
 pub(crate) fn apply_affordance_rows(
     output: &mut BlockOutput,
     prewrap_ranges: &[Range<usize>],
-    mut source_for: impl FnMut(usize) -> String,
+    source_for: impl FnMut(usize) -> String,
 ) -> Vec<DiagramAffordance> {
-    let inserts = diagram_insert_rows(&output.lines, prewrap_ranges);
+    apply_affordance_rows_with_copy(output, prewrap_ranges, source_for, Vec::new())
+}
+
+/// [`apply_affordance_rows`] plus a `[Copy]` row beneath each `(pre-wrap range, row)` in `copy_rows`.
+/// The diagram rows and the copy rows are interleaved in document order, and each reported `row_offset` accounts for every row inserted above it.
+pub(crate) fn apply_affordance_rows_with_copy(
+    output: &mut BlockOutput,
+    prewrap_ranges: &[Range<usize>],
+    mut source_for: impl FnMut(usize) -> String,
+    copy_rows: Vec<(Range<usize>, CopyRow)>,
+) -> Vec<DiagramAffordance> {
+    enum Item {
+        Diagram(usize),
+        Copy(CopyRow),
+    }
+    let mut inserts: Vec<(usize, Item)> = diagram_insert_rows(&output.lines, prewrap_ranges)
+        .into_iter()
+        .map(|(insert_at, idx)| (insert_at, Item::Diagram(idx)))
+        .collect();
+    if !copy_rows.is_empty() {
+        let ends = prewrap_end_rows(&output.lines);
+        inserts.extend(copy_rows.into_iter().filter_map(|(range, row)| {
+            if range.is_empty() {
+                return None;
+            }
+            ends.get(range.end - 1)
+                .map(|&insert_at| (insert_at, Item::Copy(row)))
+        }));
+        inserts.sort_by_key(|(insert_at, _)| *insert_at);
+    }
+    let positions: Vec<usize> = inserts.iter().map(|(insert_at, _)| *insert_at).collect();
     let affordances: Vec<DiagramAffordance> = inserts
-        .iter()
+        .into_iter()
         .enumerate()
-        .map(|(k, &(insert_at, idx))| DiagramAffordance {
-            row_offset: (insert_at + k) as u16,
-            source: source_for(idx),
+        .map(|(k, (insert_at, item))| {
+            let row_offset = (insert_at + k) as u16;
+            match item {
+                Item::Diagram(idx) => DiagramAffordance {
+                    row_offset,
+                    source: source_for(idx),
+                    copy: None,
+                },
+                Item::Copy(row) => DiagramAffordance {
+                    row_offset,
+                    source: String::new(),
+                    copy: Some(row),
+                },
+            }
         })
         .collect();
-    for &(insert_at, _) in inserts.iter().rev() {
+    for &insert_at in positions.iter().rev() {
         output
             .lines
             .insert(insert_at, continuation_row(Line::from(String::new())));

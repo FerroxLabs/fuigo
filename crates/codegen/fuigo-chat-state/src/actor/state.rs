@@ -295,6 +295,7 @@ mod tests {
             query_params: Default::default(),
             env_http_headers: Default::default(),
             context_window: std::num::NonZeroU64::new(128_000).unwrap(),
+            max_request_bytes: None,
             reasoning_effort: None,
             stream_tool_calls: None,
             mtls_cert_dir: None,

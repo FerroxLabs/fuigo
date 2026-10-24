@@ -26,9 +26,8 @@ use state::{
 use wire::{
     AssistantFrame, AssistantMessage, CompactBoundaryLine, CompactMetadata, ContentBlock,
     MessageUsage, MessagesLine, PartialDelta, PermissionDenial, ResponseDiscardedLine, ResultLine,
-    SystemInitLine,
-    SystemLine, ToolResultBlock, ToolResultLine, ToolResultMessage, messages_permission_mode,
-    new_uuid,
+    SystemInitLine, SystemLine, ToolResultBlock, ToolResultLine, ToolResultMessage,
+    messages_permission_mode, new_uuid,
 };
 
 /// `streaming-messages-json`: the Messages API wire format.
@@ -340,13 +339,13 @@ impl MessagesReducer {
         }
         if self.include_partials() && self.framing.message_open() {
             self.partial_close_message(out, None);
-            out.push(to_line(&MessagesLine::System(SystemLine::ResponseDiscarded(
-                ResponseDiscardedLine {
+            out.push(to_line(&MessagesLine::System(
+                SystemLine::ResponseDiscarded(ResponseDiscardedLine {
                     message_id,
                     session_id: self.session_id().to_string(),
                     uuid: new_uuid(),
-                },
-            ))));
+                }),
+            )));
         }
         // A tool call the dead attempt reported (a hosted x_search card) goes with it, and nothing may answer it
         // later: no `tool_use` is left without its result, and no `tool_result` without its `tool_use`
@@ -634,7 +633,8 @@ impl Reducer for MessagesReducer {
                 self.flush_tool_results(&mut out);
                 self.emit_client_tool_call(&mut out, tc);
             }
-            StreamEvent::ToolCallUpdate(u) if self.discarded_tool_ids.contains(&u.tool_call_id) => {}
+            StreamEvent::ToolCallUpdate(u) if self.discarded_tool_ids.contains(&u.tool_call_id) => {
+            }
             StreamEvent::ToolCallUpdate(u) => {
                 let terminal = matches!(
                     u.status,
@@ -723,7 +723,8 @@ impl Reducer for MessagesReducer {
                 // Whatever block is open (text, or thinking with or without its signature) keeps its position ahead of this one
                 self.finalize_open();
                 let index = self.blocks.len();
-                self.blocks.push(ContentBlock::RedactedThinking { data: data.clone() });
+                self.blocks
+                    .push(ContentBlock::RedactedThinking { data: data.clone() });
                 if self.include_partials() {
                     self.partial_redacted_thinking(&mut out, index, &data);
                 }

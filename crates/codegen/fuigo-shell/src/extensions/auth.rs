@@ -89,6 +89,10 @@ async fn handle_set_api_key(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResu
             // P70: held in memory, ahead of the env key exactly as the `set_var` it replaces overwrote it, but never
             // in the agent's environment, so no child process inherits it.
             crate::agent::auth_method::apply_set_api_key(Some(k));
+            // A new key is a sign-in: the model list is fetched with it now (a start with no key had only the
+            // bundled models), exactly as `authenticate` with a runtime key does.
+            agent.models_manager.note_successful_sign_in();
+            agent.models_manager.on_auth_changed().await;
         }
     } else {
         crate::auth::clear_api_key_async(&fuigo_home)

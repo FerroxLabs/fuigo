@@ -1057,3 +1057,55 @@ fn output_writer_errors_propagate() {
     assert!(write_report(&healthy_report(), false, &mut BrokenWriter).is_err());
     assert!(write_report(&healthy_report(), true, &mut BrokenWriter).is_err());
 }
+
+fn hook_info_for_doctor(
+    name: &str,
+    command: &str,
+    state: fuigo_hooks_plugins_types::HookState,
+    source: &str,
+    reason: Option<&str>,
+    fix_hint: Option<&str>,
+) -> fuigo_hooks_plugins_types::HookInfo {
+    fuigo_hooks_plugins_types::HookInfo {
+        name: name.into(),
+        event: fuigo_hooks_plugins_types::HookEvent::SessionStart,
+        handler_type: fuigo_hooks_plugins_types::HookHandlerType::Command,
+        matcher: None,
+        command: Some(command.into()),
+        url: None,
+        timeout_ms: 5000,
+        source_dir: "/tmp".into(),
+        disabled: false,
+        pinned: false,
+        removable: false,
+        health: fuigo_hooks_plugins_types::HookHealthInfo {
+            source: source.into(),
+            state,
+            reason: reason.map(str::to_owned),
+            fix_hint: fix_hint.map(str::to_owned),
+        },
+    }
+}
+
+/// 1.0.32 HOOKS-COMPAT: `fuigo doctor` lists each hook with source, event, state, why it is not running, and a fix hint.
+#[test]
+fn doctor_lists_each_hook_with_state_reason_and_fix_hint() {
+    use fuigo_hooks_plugins_types::HookState;
+    let text = human::format_hooks_section(&[
+        hook_info_for_doctor("a", "node /p/run.mjs", HookState::Ok, "stripe", None, None),
+        hook_info_for_doctor(
+            "b",
+            "node /p/x.mjs",
+            HookState::Skipped,
+            "claude-mem",
+            Some("command not found: node (not on PATH)"),
+            Some("Install node or add it to PATH, then reload hooks."),
+        ),
+        hook_info_for_doctor("c", "./check.sh", HookState::Failing, "global", Some("exit 2: boom"), Some("Run it by hand.")),
+    ]);
+    assert_eq!(
+        text,
+        "\nHooks\n\n  ok       stripe           Session Start          node /p/run.mjs\n  skipped  claude-mem       Session Start          node /p/x.mjs\n           why: command not found: node (not on PATH)\n           fix: Install node or add it to PATH, then reload hooks.\n  failing  global           Session Start          ./check.sh\n           why: exit 2: boom\n           fix: Run it by hand.\n\n  3 hooks: 1 ok, 1 skipped, 1 failing. Turn a hook off or on with /hooks.\n"
+    );
+    assert_eq!(human::format_hooks_section(&[]), "", "no hooks: the report is unchanged");
+}

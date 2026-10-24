@@ -987,6 +987,7 @@ impl AgentView {
             && (self.image_viewer.is_some()
                 || self.video_viewer.is_some()
                 || self.gboom.is_some()
+                || self.stoke.is_some()
                 || self.block_viewer.is_some()
                 || self.extensions_modal.is_some()
                 || self.agents_modal.is_some()
@@ -1375,6 +1376,7 @@ impl AgentView {
         let viewer_open = self.active_subagent.is_some();
         let dock_on = crate::views::dock::enabled()
             && !viewer_open
+            && !self.prompt.compact()
             && area.height > agent::SHORT_TERMINAL_ROWS;
         self.dock_on = dock_on;
         self.reconcile_dock_before_paint();
@@ -1540,7 +1542,10 @@ impl AgentView {
         let peer_reserved_rows = u16::from(peer_row_text.is_some());
         if peer_reserved_rows > 0 {
             layout.scrollback.height -= peer_reserved_rows;
-            layout.scrollback_content.height = layout.scrollback_content.height.saturating_sub(peer_reserved_rows);
+            layout.scrollback_content.height = layout
+                .scrollback_content
+                .height
+                .saturating_sub(peer_reserved_rows);
         }
         let overlay_blocks_rail_hover = self.jump_state.is_some()
             || self.rewind_state.is_some()
@@ -1549,7 +1554,6 @@ impl AgentView {
         if layout.timeline_width > 0 {
             self.sync_pending_user_input_marks();
             self.scrollback.set_cwd(Some(self.session.cwd.clone()));
-            let _ = self.sync_inline_edit_layout(layout.scrollback_content.width);
             self.scrollback.prepare_layout(
                 layout.scrollback_content.width,
                 layout.scrollback_content.height,
@@ -1597,8 +1601,10 @@ impl AgentView {
                     }
                     if peer_reserved_rows > 0 {
                         layout.scrollback.height -= peer_reserved_rows;
-                        layout.scrollback_content.height =
-                            layout.scrollback_content.height.saturating_sub(peer_reserved_rows);
+                        layout.scrollback_content.height = layout
+                            .scrollback_content
+                            .height
+                            .saturating_sub(peer_reserved_rows);
                     }
                     self.scrollback.prepare_layout(
                         layout.scrollback_content.width,
@@ -1749,6 +1755,7 @@ impl AgentView {
             .current_branch
             .clone()
             .or_else(|| lazy_git.as_ref().and_then(|i| i.branch.clone()));
+        let mut branch_width: u16 = 0;
         let git_text = branch.map(|b| {
             let icon = crate::git_info::branch_icon();
             if b.is_empty() {
@@ -1758,10 +1765,14 @@ impl AgentView {
             }
         });
         if let Some(git_text) = git_text {
-            let git_style = Style::default()
+            let mut git_style = Style::default()
                 .fg(theme.text_primary)
                 .bg(theme.bg_base)
                 .add_modifier(ratatui::style::Modifier::DIM);
+            if self.hit_branch.hovered {
+                git_style = git_style.remove_modifier(ratatui::style::Modifier::DIM);
+            }
+            branch_width = git_text.width() as u16;
             path_offset += git_text.width() as u16;
             parts.push(Span::styled(git_text, git_style));
             path_offset += 1;
@@ -1811,6 +1822,13 @@ impl AgentView {
             &cwd_line,
             cwd_width,
         );
+        let visible_branch_width = branch_width.min(cwd_width);
+        self.hit_branch.rect = (visible_branch_width > 0).then_some(Rect {
+            x: layout.status_bar.x,
+            y: layout.status_bar.y,
+            width: visible_branch_width,
+            height: 1,
+        });
         let path_x = layout.status_bar.x + path_offset;
         let visible_path_width = path_width.min(cwd_width.saturating_sub(path_offset));
         self.hit_cwd.rect = (visible_path_width > 0).then_some(Rect {
@@ -1845,18 +1863,15 @@ impl AgentView {
         let dropdown_open = self.prompt.any_dropdown_open();
         self.hit_upgrade_cta
             .set_unless_dropdown(upgrade_cta_rect, dropdown_open);
-        let mut inline_edit_cursor: Option<(u16, u16)> = None;
         let sticky_gap_row: Option<u16>;
         {
             self.sync_pending_user_input_marks();
             self.scrollback.set_cwd(Some(self.session.cwd.clone()));
-            let inline_edit_dim_from =
-                self.sync_inline_edit_layout(layout.scrollback_content.width);
             self.scrollback.prepare_layout(
                 layout.scrollback_content.width,
                 layout.scrollback_content.height,
             );
-            let rewind_dim_from = self.rewind_dim_from_entry().or(inline_edit_dim_from);
+            let rewind_dim_from = self.rewind_dim_from_entry();
             let sb_focused = self.active_pane == ActivePane::Scrollback && !overlay_focused;
             let search_highlight = if search_active {
                 self.scrollback_search
@@ -1886,12 +1901,6 @@ impl AgentView {
                 sb_rendered.selection_boundaries,
             );
             self.reclamp_drag_head_post_render(false);
-            if self.inline_edit.is_some() {
-                let cursor = self.render_inline_edit(buf, layout.scrollback_content);
-                if self.rewind_state.is_none() {
-                    inline_edit_cursor = cursor;
-                }
-            }
             if search_reserved_rows > 0
                 && let Some(search) = self.scrollback_search.as_ref()
             {
@@ -2251,7 +2260,13 @@ impl AgentView {
         if let Some(text) = peer_row_text.as_deref() {
             let y = layout.scrollback.y + layout.scrollback.height;
             let style = ratatui::style::Style::default().fg(theme.accent_running);
-            buf.set_stringn(layout.scrollback.x, y, text, usize::from(layout.scrollback.width), style);
+            buf.set_stringn(
+                layout.scrollback.x,
+                y,
+                text,
+                usize::from(layout.scrollback.width),
+                style,
+            );
         }
         self.last_btw_selection_model = ResolvedSelectionModel::default();
         self.last_btw_area = Rect::default();
@@ -2679,6 +2694,11 @@ impl AgentView {
         let model_label = match self.session.models.reasoning_effort {
             Some(eff) => format!("{model_id} ({eff})"),
             None => model_id,
+        };
+        // The route Fuigo uses is part of the answer to "which model am I on": "Grok 4.7 \u{b7} Grok subscription".
+        let model_label = match self.session.models.current_route_label() {
+            Some(route) => format!("{model_label} \u{b7} {route}"),
+            None => model_label,
         };
         let info = match &self.prompt_mode {
             PromptMode::Normal => PromptInfo {
@@ -3809,6 +3829,12 @@ impl AgentView {
             };
             return (viewer_cursor, prompt_post_flush);
         }
+        if let Some(stoke) = self.stoke.as_mut() {
+            // Full-screen `/stoke` fire: paints every cell of the frame, shortcuts row included.
+            stoke.paint(buf, area);
+            self.pane_areas = layout.pane_areas();
+            return (None, prompt_post_flush);
+        }
         if let Some(ref mut viewer) = self.image_viewer {
             use crate::terminal::image::{GraphicsProtocol, detect_graphics_protocol};
             use crate::views::file_search::line_viewer::dim_area;
@@ -4676,12 +4702,7 @@ impl AgentView {
                 }
             }
         }
-        let cursor = if self.inline_edit.is_some() {
-            inline_edit_cursor
-        } else {
-            prompt_cursor_pos
-        };
-        (cursor, prompt_post_flush)
+        (prompt_cursor_pos, prompt_post_flush)
     }
 }
 /// Draw one ▼/▲ scroll-indicator arrow centered on row `y`, or clear its hit area when hidden (`y: None`).
@@ -5125,6 +5146,21 @@ mod feedback_input_tests {
                     + "\n"
             })
             .collect()
+    }
+    /// The welcome backdrop belongs to the welcome screen alone: once a session exists (agent view, with or without messages)
+    /// there is no Wind mark. The mark is hundreds of braille cells, so a stray draw would be unmistakable.
+    #[test]
+    fn agent_view_never_carries_the_welcome_wind_mark() {
+        let mut agent = make_agent();
+        let screen = render_text_sized(&mut agent, 120, 40);
+        let dots = screen
+            .chars()
+            .filter(|c| ('\u{2801}'..='\u{28FF}').contains(c))
+            .count();
+        assert!(
+            dots < 20,
+            "unexpected braille field in the agent view: {dots}\n{screen}"
+        );
     }
     /// The feedback pane keeps the question card, and puts a multi-line report area where the options and the one-line freeform row would be.
     #[test]

@@ -291,6 +291,7 @@ fn hook_frames() -> Vec<(&'static str, String, String)> {
         disabled: false,
         pinned: false,
         removable: true,
+        health: Default::default(),
     };
     let hooks = vec![
         hook("global/fmt:pre_tool_use[0].hooks[0]", Some("./fmt.sh".to_owned()), None),

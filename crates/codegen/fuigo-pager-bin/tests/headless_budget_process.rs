@@ -309,6 +309,7 @@ async fn a_redirect_allow_bash_cannot_cover_names_the_remedy_that_works() {
         result.stderr
     );
     assert!(!fx.workspace_file("allowed.txt").exists(), "nothing approved the write");
+    assert_one_fuigo_line(&result.stderr);
     let doc: serde_json::Value = serde_json::from_str(result.stdout.trim()).unwrap_or_else(|e| {
         panic!("stdout must stay exactly one JSON value ({e}): {}", result.stdout)
     });
@@ -320,6 +321,39 @@ async fn a_redirect_allow_bash_cannot_cover_names_the_remedy_that_works() {
              --allow rule covers it: {text}"
         );
     }
+}
+
+/// Exactly one `fuigo:` line per refusal (it carries rule and remedy); a second line repeating it is the defect.
+fn assert_one_fuigo_line(stderr: &str) {
+    let lines: Vec<&str> = stderr.lines().filter(|l| l.starts_with("fuigo: ")).collect();
+    assert_eq!(
+        lines.iter().filter(|l| l.contains("headless_never_approves")).count(),
+        1,
+        "one refusal line carrying the rule: {stderr}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("fuigo: blocked") || l.contains("Exiting 3")),
+        "the refusal must not be repeated by a second line: {stderr}"
+    );
+}
+
+/// A read-only command that only silences stderr is an ordinary shell command: the remedy is an `--allow` rule,
+/// not the redirect/`--always-approve` one, and the refusal stays a refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dev_null_redirect_gets_the_ordinary_shell_remedy() {
+    let fx = fixture().await;
+    let _call = script_shell_call(&fx.server, "rm -rf ./victim 2>/dev/null");
+    let _then = script_text(&fx.server, "done");
+    let result = fx
+        .run(&["-p", "look around", "--trust", "--output-format", "json"], &[])
+        .await;
+    assert_eq!(result.status.code(), Some(3), "stdout:\n{}\nstderr:\n{}", result.stdout, result.stderr);
+    assert_one_fuigo_line(&result.stderr);
+    assert!(
+        result.stderr.contains("--allow") && !result.stderr.contains("redirect"),
+        "ordinary shell remedy expected: {}",
+        result.stderr
+    );
 }
 
 /// The remedy that line names really works: the identical turn under `--always-approve` runs the command.

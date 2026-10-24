@@ -153,6 +153,16 @@ pub fn build_diff_hunks(details: &[SearchReplaceEditDetail]) -> Vec<DiffHunk> {
 /// Builds diff hunks from full before/after text alone, with no structured `SearchReplaceEditDetail`.
 /// The ACP `ToolCallContent::Diff` fallback uses this for pre-execution previews.
 pub fn diff_hunks_from_strings(old_text: &str, new_text: &str, start_line: usize) -> Vec<DiffHunk> {
+    // A binary file read as text is a wall of replacement characters and control bytes: say what it is instead
+    let binary = [new_text, old_text].into_iter().find(|text| looks_binary(text));
+    if let Some(text) = binary {
+        return vec![vec![DiffLine {
+            text: format!("(binary file, {} bytes: contents not shown)\n", text.len()),
+            lo: start_line,
+            ln: start_line,
+            tag: ChangeTag::Insert,
+        }]];
+    }
     let detail = SearchReplaceEditDetail {
         old_string: old_text.to_owned(),
         old_line: start_line,
@@ -163,6 +173,27 @@ pub fn diff_hunks_from_strings(old_text: &str, new_text: &str, start_line: usize
         line_prefix: String::new(),
     };
     build_diff_hunks(&[detail])
+}
+
+/// Whether `text` is a binary file that was read or written as text: it holds a NUL, or a tenth of it is replacement
+/// characters and control bytes other than the usual whitespace. Scans a bounded prefix.
+pub fn looks_binary(text: &str) -> bool {
+    const SAMPLE_BYTES: usize = 8192;
+    let mut total = 0usize;
+    let mut odd = 0usize;
+    for ch in text.chars() {
+        if total * 4 >= SAMPLE_BYTES {
+            break;
+        }
+        total += 1;
+        if ch == '\0' {
+            return true;
+        }
+        if ch == '\u{FFFD}' || (ch.is_control() && !matches!(ch, '\n' | '\r' | '\t' | '\u{1b}' | '\u{c}')) {
+            odd += 1;
+        }
+    }
+    total > 0 && odd * 10 >= total
 }
 
 /// Stitches overlapping or adjacent hunks from consecutive edits to the same file into unified hunks.
@@ -757,6 +788,24 @@ mod tests {
             1,
             "should have exactly one inserted blank line"
         );
+    }
+
+    /// 54.5: a binary file in a write card is named as binary, not dumped.
+    #[test]
+    fn a_binary_file_is_not_shown_as_text() {
+        let png = "\u{89}PNG\r\n\u{1a}\n\0\0\0\rIHDR\u{FFFD}\u{FFFD}\u{1}\u{2}";
+        for (old, new) in [("", png), (png, "plain text\n")] {
+            let hunks = diff_hunks_from_strings(old, new, 1);
+            assert_eq!(hunks.len(), 1);
+            assert_eq!(hunks[0].len(), 1, "one placeholder row, not a row per garbage line");
+            assert!(hunks[0][0].text.contains("binary file"), "{:?}", hunks[0][0].text);
+            assert!(!hunks[0][0].text.contains('\0') && !hunks[0][0].text.contains("PNG"));
+        }
+        // Ordinary text, tabs and an ANSI escape are not binary
+        assert!(!looks_binary("fn main() {\n\tprintln!(\"hi\");\n}\n"));
+        assert!(!looks_binary("\u{1b}[31mred\u{1b}[0m text"));
+        assert!(!looks_binary(""));
+        assert_eq!(diff_hunks_from_strings("a\n", "b\n", 1).len(), 1);
     }
 
     #[test]

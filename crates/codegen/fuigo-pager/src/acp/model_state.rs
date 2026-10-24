@@ -1,7 +1,8 @@
 use agent_client_protocol as acp;
 use fuigo_shell::sampling::types::{
     ModelNotice, ReasoningEffort, ReasoningEffortOption, parse_context_window_meta,
-    parse_context_windows_meta, parse_model_notice_meta, parse_reasoning_effort_meta, parse_reasoning_efforts_meta, supports_reasoning_effort_meta,
+    parse_context_windows_meta, parse_model_notice_meta, parse_reasoning_effort_meta,
+    parse_reasoning_efforts_meta, supports_reasoning_effort_meta,
 };
 use indexmap::IndexMap;
 
@@ -41,6 +42,97 @@ impl EffortTokenError {
     }
 }
 
+/// The route label in a model's `meta`, as the agent attached it.
+pub(crate) fn route_label_of(info: &acp::ModelInfo) -> Option<String> {
+    info.meta
+        .as_ref()?
+        .get(fuigo_shell::agent::config::ROUTE_META_KEY)?
+        .get("label")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// The short route badge in a model's `meta` ("included in your Grok subscription", "your OpenAI key").
+/// Flux Router routes carry none (that is the wire shape every client already assumes).
+pub(crate) fn route_badge_of(info: &acp::ModelInfo) -> Option<String> {
+    info.meta
+        .as_ref()?
+        .get(fuigo_shell::agent::config::ROUTE_META_KEY)?
+        .get("badge")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// The route label of a model that carries none: Flux Router is the unmarked route on the wire.
+pub(crate) const FLUX_ROUTE_LABEL: &str = "Flux Router";
+/// `meta` flag on an entry this client made up for a model the engine named but the catalogue does not list.
+pub(crate) const OUTSIDE_CATALOG_META_KEY: &str = "outsideCatalog";
+/// The badge of a model that carries none.
+pub(crate) const FLUX_ROUTE_BADGE: &str = "via Flux Router";
+
+/// The badge every list shows for a model, `/model` and the welcome "Pick a model:" page alike: the primary
+/// ranked route's, else the single route's, else Flux Router's (the unmarked route). One function, so the two
+/// lists cannot disagree and a list of only Flux models still says so on every row.
+pub(crate) fn badge_of(info: &acp::ModelInfo) -> String {
+    routes_of(info)
+        .first()
+        .map(|r| r.badge.clone())
+        .or_else(|| route_badge_of(info))
+        .unwrap_or_else(|| FLUX_ROUTE_BADGE.to_owned())
+}
+
+/// One way of reaching a model, as the agent ranked it (`meta.routes`, best first).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RouteMeta {
+    pub key: String,
+    pub label: String,
+    pub badge: String,
+    pub reason: String,
+    /// What is typed after `via` to pick this route.
+    pub word: String,
+    pub ready: bool,
+}
+
+/// The ranked routes in a model's `meta`. Empty for a model the agent did not rank.
+pub(crate) fn routes_of(info: &acp::ModelInfo) -> Vec<RouteMeta> {
+    let Some(list) = info.meta.as_ref().and_then(|m| m.get("routes")).and_then(|v| v.as_array())
+    else {
+        return Vec::new();
+    };
+    let text = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned);
+    list.iter()
+        .filter_map(|r| {
+            Some(RouteMeta {
+                key: text(r, "key")?,
+                label: text(r, "label")?,
+                badge: text(r, "badge")?,
+                reason: text(r, "reason").unwrap_or_default(),
+                word: text(r, "word")?,
+                ready: r.get("ready").and_then(|x| x.as_bool()).unwrap_or(true),
+            })
+        })
+        .collect()
+}
+
+/// The primary entry's key when this entry is an alternate route to the same model.
+pub(crate) fn alt_route_of(info: &acp::ModelInfo) -> Option<String> {
+    info.meta.as_ref()?.get("altRouteOf")?.as_str().map(str::to_owned)
+}
+
+/// What to connect before this model can be used (`meta.connect`), when no route is ready.
+pub(crate) fn connect_hint(info: &acp::ModelInfo) -> Option<String> {
+    info.meta.as_ref()?.get("connect")?.as_str().map(str::to_owned)
+}
+
+/// A model that some route reaches now: what the welcome "Pick a model:" list shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UsableModel {
+    pub id: acp::ModelId,
+    pub name: String,
+    /// "via Flux Router", "included in your Grok subscription", "your OpenAI key".
+    pub badge: String,
+}
+
 /// Per-agent model state.
 #[derive(Debug, Clone, Default)]
 pub struct ModelState {
@@ -70,6 +162,81 @@ impl ModelState {
         } else {
             Some(current.0.to_string())
         }
+    }
+
+    /// The route Fuigo uses for the current model ("Grok subscription", "Flux Router"), from the
+    /// `route` the agent attached to the model. `None` when the agent did not say.
+    pub fn current_route_label(&self) -> Option<String> {
+        let current = self.current.as_ref()?;
+        // A listed model with no route in its `meta` is on Flux Router (the unmarked route): the status line
+        // names it too. A model the list does not know stays unnamed; no route is invented for it.
+        let info = self.available.get(current)?;
+        if let Some(label) = route_label_of(info) {
+            return Some(label);
+        }
+        let outside = info.meta.as_ref().is_some_and(|m| m.contains_key(OUTSIDE_CATALOG_META_KEY));
+        (!outside).then(|| FLUX_ROUTE_LABEL.to_owned())
+    }
+
+    /// The entry of `name` (a display name or id) that uses the route typed as `word` (`flux`, `grok`, ...).
+    /// `Err` lists the route words the model has, so the error can say what is available.
+    pub(crate) fn resolve_route(&self, name: &str, word: &str) -> Result<acp::ModelId, Vec<String>> {
+        let Some(primary) = self.resolve_by_name_or_id(name) else {
+            return Err(Vec::new());
+        };
+        // `name` may match an alternate entry; the routes live on the primary one.
+        let primary = self
+            .available
+            .get(&primary)
+            .and_then(alt_route_of)
+            .map(acp::ModelId::new)
+            .unwrap_or(primary);
+        let routes = self.available.get(&primary).map(routes_of).unwrap_or_default();
+        let word = word.trim().to_ascii_lowercase();
+        match routes.iter().find(|r| r.word == word) {
+            Some(r) => Ok(acp::ModelId::new(r.key.clone())),
+            None => Err(routes.into_iter().map(|r| r.word).collect()),
+        }
+    }
+
+    /// Every model some route reaches right now, once each, best route first, in list order.
+    pub(crate) fn usable_models(&self) -> Vec<UsableModel> {
+        self.available
+            .iter()
+            .filter(|(_, info)| alt_route_of(info).is_none() && connect_hint(info).is_none())
+            .map(|(id, info)| UsableModel {
+                id: id.clone(),
+                name: info.name.clone(),
+                badge: badge_of(info),
+            })
+            .collect()
+    }
+
+    /// Why the model named `explicit` (the user's own `[models] default`) cannot be used right now,
+    /// as `(display name, what to connect)`. `None` when it is usable, unknown to the list, or when
+    /// no other model is usable (the sign-in picker handles that case).
+    pub(crate) fn unusable_default_reason(&self, explicit: &str) -> Option<(String, String)> {
+        let id = self.resolve_by_name_or_id(explicit)?;
+        let primary = self
+            .available
+            .get(&id)
+            .and_then(alt_route_of)
+            .map(acp::ModelId::new)
+            .unwrap_or(id);
+        let info = self.available.get(&primary)?;
+        let why = connect_hint(info)?;
+        if self.usable_models().is_empty() {
+            return None;
+        }
+        Some((info.name.clone(), why))
+    }
+
+    /// One line for the welcome screen when Fuigo started on a route other than Flux Router: the model,
+    /// the route, and how to change it. Nothing is routed silently.
+    pub fn route_note(&self) -> Option<String> {
+        let route = self.current_route_label().filter(|r| r != FLUX_ROUTE_LABEL)?;
+        let name = self.current_model_name()?;
+        Some(format!("Using {name} \u{b7} {route}. /model changes it."))
     }
 
     /// Machine-readable model ID string for the current model (e.g. "grok-4.5").
@@ -629,7 +796,9 @@ mod tests {
         state.available.insert(other.clone(), info);
         let plain = acp::ModelId::new(Arc::from("plain"));
         let mut info = acp::ModelInfo::new(plain.clone(), "Plain".to_string());
-        info.meta = serde_json::json!({ "totalContextTokens": 64_000 }).as_object().cloned();
+        info.meta = serde_json::json!({ "totalContextTokens": 64_000 })
+            .as_object()
+            .cloned();
         state.available.insert(plain.clone(), info);
 
         state.context_window_selection = Some(400_000);
@@ -649,9 +818,55 @@ mod tests {
         })
         .as_object()
         .cloned();
-        let state: ModelState =
-            Some(acp::SessionModelState::new(id, vec![info])).into();
+        let state: ModelState = Some(acp::SessionModelState::new(id, vec![info])).into();
         assert_eq!(state.context_window_selection, Some(400_000));
         assert_eq!(state.get_context_window(), Some(400_000));
+    }
+
+    // ---- the route is part of "which model am I on" ----
+
+    fn with_route(id: &str, label: &str) -> ModelState {
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            fuigo_shell::agent::config::ROUTE_META_KEY.to_owned(),
+            serde_json::json!({ "label": label }),
+        );
+        let id = acp::ModelId::new(Arc::from(id));
+        let mut state = ModelState::default();
+        state
+            .available
+            .insert(id.clone(), acp::ModelInfo::new(id.clone(), "Grok 4.7").meta(Some(meta)));
+        state.current = Some(id);
+        state
+    }
+
+    #[test]
+    fn the_current_route_comes_from_the_models_meta() {
+        let state = with_route("xai/grok-4.7", "Grok subscription");
+        assert_eq!(state.current_model_name().as_deref(), Some("Grok 4.7"));
+        assert_eq!(state.current_route_label().as_deref(), Some("Grok subscription"));
+    }
+
+    #[test]
+    fn the_route_note_names_model_and_route_unless_the_route_is_flux() {
+        let note = with_route("xai/grok-4.7", "Grok subscription").route_note().expect("a note");
+        assert_eq!(note, "Using Grok 4.7 \u{b7} Grok subscription. /model changes it.");
+        assert_eq!(with_route("grok-4.7", "Flux Router").route_note(), None);
+        assert_eq!(ModelState::default().route_note(), None);
+    }
+
+    /// Flux Router is the unmarked route on the wire, so a listed model with no route in its `meta` is on Flux
+    /// Router and the status line says so ("Never route silently"). A model the list does not know gets no
+    /// invented route (see `model_changed_outside_the_catalog_without_a_route_invents_none`).
+    #[test]
+    fn a_listed_model_with_no_route_is_on_flux_router() {
+        let mut state = ModelState::default();
+        let id = acp::ModelId::new(Arc::from("m"));
+        state.available.insert(id.clone(), acp::ModelInfo::new(id.clone(), "M"));
+        state.current = Some(id);
+        assert_eq!(state.current_route_label().as_deref(), Some("Flux Router"));
+        assert_eq!(state.route_note(), None, "Flux Router is the default: no note");
+        state.current = Some(acp::ModelId::new(Arc::from("not-listed")));
+        assert_eq!(state.current_route_label(), None);
     }
 }

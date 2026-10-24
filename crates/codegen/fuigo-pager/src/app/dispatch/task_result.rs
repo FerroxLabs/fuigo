@@ -31,8 +31,9 @@ use super::session::fork::{
     handle_fork_session_failed, handle_fork_session_ready, handle_worktree_forked,
 };
 use super::session::lifecycle::{
-    dispatch_exit_session, handle_session_created, handle_session_failed,
-    handle_context_window_set, handle_switch_model_complete, handle_worktree_session_created, handle_worktree_session_failed,
+    dispatch_exit_session, handle_context_window_set, handle_session_created,
+    handle_session_failed, handle_switch_model_complete, handle_worktree_session_created,
+    handle_worktree_session_failed,
 };
 use super::session::load::{
     handle_card_detail_loaded, handle_deep_search_results, handle_session_load_failed,
@@ -260,26 +261,21 @@ fn deliver_provider_write_result(
         }
         ConfigWriteReport::Agent(id) if app.agents.contains_key(&id) => {
             if let Some(agent) = app.agents.get_mut(&id) {
-                push_and_page_flip(
-                    &mut agent.scrollback,
-                    RenderBlock::system(text),
-                );
+                push_and_page_flip(&mut agent.scrollback, RenderBlock::system(text));
             }
         }
         ConfigWriteReport::Agent(id) => deliver_doctor_message(app, id, text),
-        ConfigWriteReport::Dashboard | ConfigWriteReport::Anywhere => {
-            match app.active_view {
-                ActiveView::Agent(id) => deliver_doctor_message(app, id, text),
-                _ => match app.agents.keys().next().copied() {
-                    Some(id) => deliver_doctor_message(app, id, text),
-                    None => app.startup_warnings.push(crate::startup::StartupWarning {
-                        severity: crate::startup::WarningSeverity::Info,
-                        message: text,
-                        action: None,
-                    }),
-                },
-            }
-        }
+        ConfigWriteReport::Dashboard | ConfigWriteReport::Anywhere => match app.active_view {
+            ActiveView::Agent(id) => deliver_doctor_message(app, id, text),
+            _ => match app.agents.keys().next().copied() {
+                Some(id) => deliver_doctor_message(app, id, text),
+                None => app.startup_warnings.push(crate::startup::StartupWarning {
+                    severity: crate::startup::WarningSeverity::Info,
+                    message: text,
+                    action: None,
+                }),
+            },
+        },
     }
 }
 pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec<Effect> {
@@ -951,7 +947,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::PeerRpcDone { agent_id, outcome } => super::peer::on_rpc_done(app, agent_id, outcome),
+        TaskResult::PeerRpcDone { agent_id, outcome } => {
+            super::peer::on_rpc_done(app, agent_id, outcome)
+        }
         TaskResult::PromptHistoryLoaded { agent_id, prompts } => {
             use fuigo_tools::implementations::skills::skill::extract_skill_display_text;
             if let Some(agent) = app.agents.get_mut(&agent_id) {
@@ -998,6 +996,17 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::AuthComplete { request_seq, meta } => {
             handle_auth_complete(app, request_seq, meta)
+        }
+        TaskResult::SubscriptionSignedOut { provider, error } => {
+            app.refresh_sign_in_status();
+            app.sign_in_notice = Some(match error {
+                None => format!(
+                    "Signed out of {}. Its tokens were removed from this machine; they were not revoked at the provider.",
+                    provider.label()
+                ),
+                Some(e) => format!("Could not sign out of {}: {e}", provider.label()),
+            });
+            vec![]
         }
         TaskResult::AuthFailed { request_seq, error } => {
             if let AuthState::Authenticating {
@@ -1787,7 +1796,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 (None, Ok(())) => {}
                 (None, Err(e)) => {
                     let scrubbed = scrub_error_for_toast(&e);
-                    app.show_toast(&format!("\u{2717} Could not save agent setting: {scrubbed}"));
+                    app.show_toast(&format!(
+                        "\u{2717} Could not save agent setting: {scrubbed}"
+                    ));
                 }
             }
             vec![]
@@ -1798,8 +1809,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             deliver_provider_write_result(app, report_to, result);
             vec![]
         }
-        TaskResult::PermissionModeRefused { session_id, rollback, error } => {
-            let effects = super::modes::roll_back_refused_permission_mode(app, &session_id, rollback);
+        TaskResult::PermissionModeRefused {
+            session_id,
+            rollback,
+            error,
+        } => {
+            let effects =
+                super::modes::roll_back_refused_permission_mode(app, &session_id, rollback);
             let scrubbed = scrub_error_for_toast(&error);
             app.show_toast(&format!("\u{2717} Permission mode not changed: {scrubbed}"));
             effects

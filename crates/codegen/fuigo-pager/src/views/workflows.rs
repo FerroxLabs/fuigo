@@ -19,6 +19,14 @@ pub struct WorkflowAgentRowView {
     pub duration_ms: u64,
 }
 
+impl WorkflowAgentRowView {
+    /// Whether the agent has finished (done, failed or cancelled).
+    /// A running agent, or one in any state this view does not know, is not finished and never counts toward `done/total`.
+    pub fn is_finished(&self) -> bool {
+        matches!(self.state.as_str(), "done" | "failed" | "cancelled")
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct WorkflowAgentLiveStatus {
     pub activity: Option<String>,
@@ -158,7 +166,7 @@ impl WorkflowRunSnapshot {
     }
 
     fn done_agents(&self) -> usize {
-        self.agents.iter().filter(|a| a.state != "running").count()
+        self.agents.iter().filter(|a| a.is_finished()).count()
     }
 }
 
@@ -430,9 +438,8 @@ impl WorkflowsViewState {
                     self.roster_top_agent_id = None;
                 } else {
                     self.roster_scroll = self.roster_scroll.saturating_sub(lines as usize);
-                    if self.roster_scroll == 0 {
-                        self.roster_top_agent_id = None;
-                    }
+                    // The old anchor names the pre-scroll top row; keeping it would snap the next paint back to it
+                    self.roster_top_agent_id = None;
                 }
             }
             Some(_) => {}
@@ -625,7 +632,12 @@ fn render_list(
             break;
         }
         let (glyph, glyph_style) = status_glyph_and_style(&run.status, theme);
-        let done_phases = run.phases.iter().filter(|(_, s)| s == "done").count();
+        // A phase that still has a running agent is not finished, whatever state the run recorded for it.
+        let done_phases = run
+            .phases
+            .iter()
+            .filter(|(title, s)| s == "done" && !run.phase_has_running_agents(title))
+            .count();
         let phase_part = if run.phases.is_empty() {
             run.status.clone()
         } else {
@@ -869,7 +881,7 @@ fn render_detail(
         } else {
             run.agents_in_phase(Some(title))
                 .iter()
-                .filter(|agent| agent.state != "running")
+                .filter(|agent| agent.is_finished())
                 .count()
         };
         let running_in = if all_agents_phase {
@@ -1209,6 +1221,46 @@ mod tests {
         assert!(text.contains("grok-4.5"), "{text}");
         assert!(text.contains("1/2 agents"), "{text}");
         assert!(text.contains("s save"), "{text}");
+    }
+
+    /// 53.7(b): `done/total` counts only agents that have finished. A running agent, or one in a state the view
+    /// does not know, is in the total but never in the done count, in the run header, the run list and the phase rail.
+    #[test]
+    fn done_over_total_counts_only_finished_agents() {
+        let mut run = make_run("wf_1", "deep-research", "active");
+        // a1 done (Plan), a2 running (Research); add a queued agent and a failed one.
+        for (id, state, phase) in [("a3", "queued", "Research"), ("a4", "failed", "Research")] {
+            run.agents.push(WorkflowAgentRowView {
+                agent_id: id.into(),
+                label: id.into(),
+                phase: Some(phase.into()),
+                model: None,
+                state: state.into(),
+                tokens_used: 0,
+                duration_ms: 0,
+            });
+        }
+        assert_eq!(run.done_agents(), 2, "done + failed only; running and queued are not finished");
+        let runs = vec![&run];
+        let mut state = WorkflowsViewState::default();
+        state.normalize(&runs);
+        let text = render_to_text(&runs, &state);
+        assert!(text.contains("2/4 agents"), "run header: {text}");
+        assert!(!text.contains("3/4 agents"), "{text}");
+        // Research has a2 running, a3 queued, a4 failed: one of three finished.
+        assert!(text.contains("1/3"), "phase rail: {text}");
+        assert!(!text.contains("2/3"), "{text}");
+    }
+
+    #[test]
+    fn a_phase_with_a_running_agent_is_not_a_done_phase_in_the_run_list() {
+        let mut run = make_run("wf_1", "deep-research", "active");
+        // The run recorded Plan as done, but one of its agents is still running.
+        run.agents[0].state = "running".into();
+        let runs = vec![&run];
+        let state = WorkflowsViewState::default();
+        let text = render_to_text(&runs, &state);
+        assert!(text.contains("0/3 phases"), "{text}");
     }
 
     #[test]
@@ -1863,5 +1915,59 @@ mod tests {
         state.normalize(&runs);
         assert_eq!(state.selected_run, 0);
         assert_eq!(state.selected_phase, 2);
+    }
+}
+
+#[cfg(test)]
+mod roster_snap_tests {
+    use super::*;
+    use ratatui::buffer::Buffer;
+
+    /// Wheel-scrolling toward newer agents must hold its position on the next paint instead of springing back to the row that was on top before the wheel moved.
+    #[test]
+    fn roster_wheel_toward_newer_rows_does_not_snap_back() {
+        let mut run = super::tests::make_run("wf_big", "fanout", "active");
+        run.phases = Vec::new();
+        run.current_phase = None;
+        run.agents = (0..30)
+            .map(|i| WorkflowAgentRowView {
+                agent_id: format!("a{i:02}"),
+                label: format!("agent-{i:02}"),
+                phase: None,
+                model: None,
+                state: "done".into(),
+                tokens_used: 0,
+                duration_ms: 0,
+            })
+            .collect();
+        let runs = vec![&run];
+        let area = Rect::new(0, 0, 100, 30);
+        let mut state = WorkflowsViewState::default();
+        state.normalize(&runs);
+        let paint = |state: &mut WorkflowsViewState| {
+            let mut buf = Buffer::empty(area);
+            render_workflows(
+                &mut buf,
+                area,
+                &runs,
+                state,
+                0,
+                &WorkflowAgentLiveMap::default(),
+            );
+        };
+        paint(&mut state);
+        state.roster_scroll = 10;
+        paint(&mut state);
+        assert_eq!(state.roster_scroll, 10);
+        let roster = state.roster_area.expect("roster painted");
+        state.handle_scroll(3, roster.x + 1, roster.y + 1, &runs);
+        paint(&mut state);
+        assert_eq!(
+            state.roster_scroll, 7,
+            "wheel toward newer rows must not snap back to the old anchor"
+        );
+        state.handle_scroll(3, roster.x + 1, roster.y + 1, &runs);
+        paint(&mut state);
+        assert_eq!(state.roster_scroll, 4);
     }
 }

@@ -88,6 +88,7 @@ fn hook_info(name: &str, source_dir: &str) -> fuigo_hooks_plugins_types::HookInf
         disabled: false,
         pinned: false,
         removable: false,
+        health: Default::default(),
     }
 }
 
@@ -192,7 +193,11 @@ fn plugins_group_header_row_actions_prompt_for_plugin_row() {
             matches!(outcome, InputOutcome::Changed),
             "{key_char:?}: no dispatch from a header row, got {outcome:?}"
         );
-        assert_hint(&agent, &format!("Select a plugin row to {verb}."), &format!("{key_char:?}"));
+        assert_hint(
+            &agent,
+            &format!("Select a plugin row to {verb}."),
+            &format!("{key_char:?}"),
+        );
     }
 }
 
@@ -208,7 +213,11 @@ fn marketplace_source_row_plugin_actions_prompt_for_plugin_row() {
             matches!(outcome, InputOutcome::Changed),
             "{key_char}: no dispatch from a source row"
         );
-        assert_hint(&agent, &format!("Select a plugin row to {verb}."), &key_char.to_string());
+        assert_hint(
+            &agent,
+            &format!("Select a plugin row to {verb}."),
+            &key_char.to_string(),
+        );
     }
 }
 
@@ -258,7 +267,11 @@ fn hook_and_skill_toggle_on_group_header_posts_row_hint() {
             matches!(outcome, InputOutcome::Changed),
             "{noun}: header row must not dispatch a toggle, got {outcome:?}"
         );
-        assert_hint(&agent, &format!("Select a {noun} row to enable/disable."), noun);
+        assert_hint(
+            &agent,
+            &format!("Select a {noun} row to enable/disable."),
+            noun,
+        );
     }
 }
 

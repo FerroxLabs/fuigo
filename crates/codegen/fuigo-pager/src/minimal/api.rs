@@ -142,6 +142,16 @@ pub(crate) struct MinimalState {
     /// Minimal prints the whole plan as a normal committed block (rather than under the prompt), so this de-dupes the per-frame push.
     /// Each revision is a fresh ExitPlanMode with a new id, so every revised plan still commits as its own block.
     pub(crate) committed_plan_tool_call_id: Option<String>,
+    /// Layout the history was printed in, and a pending reprint after a resize.
+    pub(crate) reprint: crate::minimal_reprint::ReprintState,
+}
+
+impl MinimalState {
+    /// The sliced `/transcript` build and a waiting reprint advance only inside a draw.
+    /// Ticks keep drawing while either is pending.
+    pub(crate) fn needs_frames(&self) -> bool {
+        self.transcript.is_some() || self.reprint.is_waiting()
+    }
 }
 
 /// `AppView::minimal_state.show_todos`.
@@ -868,6 +878,52 @@ pub fn open_test_elicitation(v: &mut AgentView, server_name: &str, message: &str
         None,
         None,
     ));
+}
+
+/// Test-only: queue a bare permission request (no options) on `v`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn open_test_permission(v: &mut AgentView) {
+    let (response_tx, _rx) = tokio::sync::oneshot::channel();
+    let request = agent_client_protocol::RequestPermissionRequest::new(
+        agent_client_protocol::SessionId::new(std::sync::Arc::from("test")),
+        agent_client_protocol::ToolCallUpdate::new(
+            agent_client_protocol::ToolCallId::new(std::sync::Arc::from("call-1")),
+            agent_client_protocol::ToolCallUpdateFields::default(),
+        ),
+        vec![],
+    );
+    v.permission_queue
+        .push_back(crate::views::permission_view::PermissionViewState {
+            request: fuigo_acp_lib::AcpArgs {
+                request,
+                response_tx,
+            },
+            id: 0,
+            focus: crate::views::permission_view::PermissionFocus::Options,
+            options: vec![],
+            active_idx: 0,
+            bash_highlights: None,
+            bash_selection_count: 0,
+            bash_deny_selection_count: 0,
+            bash_command_raw: None,
+            mcp_scope: None,
+            title: "Allow command?".to_owned(),
+            description: vec![],
+            args_expanded: false,
+            desc_scroll: 0,
+            subagent_label: None,
+            options_area_height: 0,
+            options_scroll_offset: 0,
+        });
+}
+
+/// Test-only: open the "Subagents are still running. Stop them?" confirm on `v`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn open_test_cancel_turn(v: &mut AgentView) {
+    v.cancel_turn_view = Some(CancelTurnViewState {
+        active_idx: 0,
+        running_count: 1,
+    });
 }
 
 /// Test-only setter for `AgentView::plan_mode_active`.

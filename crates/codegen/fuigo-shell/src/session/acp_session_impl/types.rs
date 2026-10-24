@@ -140,6 +140,12 @@ pub(crate) enum ToolLoop {
     HookDenied {
         hook_name: String,
     },
+    /// A `PostToolUse` hook answered `continue: false`: the tool ran, and the turn ends after this batch.
+    /// The remaining calls of the batch are not run (each gets a cancelled result so the provider batch stays paired).
+    HookStop {
+        hook_name: String,
+        reason: Option<String>,
+    },
 }
 
 /// Why the TodoGate fired.

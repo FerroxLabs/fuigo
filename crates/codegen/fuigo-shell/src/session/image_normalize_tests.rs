@@ -1067,3 +1067,71 @@ async fn seven_by_eight_is_rejected() {
     assert_eq!(result.dropped.len(), 1);
     assert!(result.dropped[0].contains("7×8"));
 }
+
+/// A JPEG whose left half is red and right half blue, carrying an EXIF Orientation tag.
+fn jpeg_with_exif_orientation(width: u32, height: u32, orientation: u16) -> Vec<u8> {
+    use image::{ImageBuffer, Rgb};
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(width, height, |x, _| {
+        if x < width / 2 { Rgb([230, 20, 20]) } else { Rgb([20, 20, 230]) }
+    });
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 95)
+        .encode_image(&DynamicImage::ImageRgb8(img))
+        .unwrap();
+    // APP1 "Exif" segment: big-endian TIFF with one IFD0 entry (0x0112 Orientation, SHORT).
+    let mut tiff = Vec::new();
+    tiff.extend_from_slice(b"MM\0\x2a\0\0\0\x08");
+    tiff.extend_from_slice(&1u16.to_be_bytes());
+    tiff.extend_from_slice(&0x0112u16.to_be_bytes());
+    tiff.extend_from_slice(&3u16.to_be_bytes());
+    tiff.extend_from_slice(&1u32.to_be_bytes());
+    tiff.extend_from_slice(&orientation.to_be_bytes());
+    tiff.extend_from_slice(&[0, 0]);
+    tiff.extend_from_slice(&0u32.to_be_bytes());
+    let mut segment = vec![0xFF, 0xE1];
+    segment.extend_from_slice(&((2 + 6 + tiff.len()) as u16).to_be_bytes());
+    segment.extend_from_slice(b"Exif\0\0");
+    segment.extend_from_slice(&tiff);
+    let mut out = jpeg[..2].to_vec();
+    out.extend_from_slice(&segment);
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+/// 50.12: a photo that says "rotate 90 degrees clockwise" in EXIF must reach the model upright, not sideways.
+#[tokio::test]
+async fn exif_orientation_is_applied_before_the_image_is_sent() {
+    let jpeg = jpeg_with_exif_orientation(300, 150, 6);
+    let content = ImageContent::new(
+        base64::engine::general_purpose::STANDARD.encode(&jpeg),
+        "image/jpeg",
+    );
+    let cache = fresh_cache();
+    let out = match normalize_one_in(content, 1, false, &cache).await {
+        Outcome::Unchanged(c) | Outcome::Compressed { content: c, .. } => c,
+        other => panic!("expected the image to be kept, got {other:?}"),
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&out.data)
+        .unwrap();
+    let decoded = image::load_from_memory(&bytes).unwrap().to_rgb8();
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (150, 300),
+        "rotated a quarter turn"
+    );
+    let top = decoded.get_pixel(75, 20).0;
+    let bottom = decoded.get_pixel(75, 280).0;
+    assert!(top[0] > 150 && top[2] < 100, "red half is now on top: {top:?}");
+    assert!(bottom[2] > 150 && bottom[0] < 100, "blue half is now at the bottom: {bottom:?}");
+}
+/// An upright photo (no orientation tag) is untouched.
+#[tokio::test]
+async fn jpeg_without_orientation_passes_through_unchanged() {
+    let jpeg = jpeg_with_exif_orientation(300, 150, 1);
+    let data = base64::engine::general_purpose::STANDARD.encode(&jpeg);
+    let cache = fresh_cache();
+    match normalize_one_in(ImageContent::new(data.clone(), "image/jpeg"), 1, false, &cache).await {
+        Outcome::Unchanged(c) => assert_eq!(c.data, data),
+        other => panic!("expected Unchanged, got {other:?}"),
+    }
+}

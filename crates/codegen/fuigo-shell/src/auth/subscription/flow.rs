@@ -90,7 +90,12 @@ impl TokenClient {
         // ambiguous, not a send failure.
         .map_err(|_| SubscriptionError::AmbiguousExchange)?
     }
-    async fn exchange(&self, code: &str, verifier: &str, redirect: &str) -> Result<Credential> {
+    pub(super) async fn exchange(
+        &self,
+        code: &str,
+        verifier: &str,
+        redirect: &str,
+    ) -> Result<(Credential, Option<String>)> {
         let body = self
             .post(&[
                 ("grant_type", "authorization_code"),
@@ -100,7 +105,8 @@ impl TokenClient {
                 ("redirect_uri", redirect),
             ])
             .await?;
-        parse_credential(self.provider, body)
+        let identity = display_identity(&body);
+        Ok((parse_credential(self.provider, body)?, identity))
     }
     pub(super) async fn refresh(&self, refresh: &str) -> Result<Credential> {
         let mut form = vec![
@@ -236,6 +242,18 @@ pub(super) async fn read_json_response(
         body.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&body).map_err(|_| SubscriptionError::InvalidCredentials)
+}
+/// A name to show after sign-in, from the ID token the token response already carries: `email`,
+/// then `name`, then `preferred_username`. Display only: it is never stored, and the opaque
+/// account id is never a substitute. Anything empty, oversized or with control characters is
+/// ignored, so a hostile claim cannot reach the terminal.
+pub(super) fn display_identity(body: &serde_json::Value) -> Option<String> {
+    let id = claims(body.get("id_token")?.as_str()?)?;
+    ["email", "name", "preferred_username"].into_iter().find_map(|key| {
+        let value = id.get(key)?.as_str()?.trim();
+        (!value.is_empty() && value.chars().count() <= 120 && !value.chars().any(char::is_control))
+            .then(|| value.to_owned())
+    })
 }
 fn parse_credential(provider: SubscriptionProvider, body: serde_json::Value) -> Result<Credential> {
     let access = body
@@ -630,11 +648,14 @@ impl LoginAttempt {
         let store = store.clone();
         drop(self.listener);
         tokio::spawn(async move {
-            let credential = self
+            let (credential, identity) = self
                 .client
                 .exchange(&code, &self.verifier, &self.redirect)
                 .await?;
-            store.save(credential).await
+            let provider = credential.provider;
+            store.save(credential).await?;
+            super::remember_signin_identity(provider, identity);
+            Ok(())
         })
         .await
         .map_err(|_| SubscriptionError::Network)?
@@ -693,17 +714,93 @@ pub async fn cli_login(provider: SubscriptionProvider) -> Result<()> {
         fuigo_tty_utils::cli_eprintln!("Open the URL above in your browser.");
     }
     let cancel = CancellationToken::new();
-    let finish = attempt.finish_with_code_input(
-        &store,
-        cancel.clone(),
-        Duration::from_secs(600),
-        super::manual::code(provider),
+    // Silent from before the prompt text appears until every exit of this function.
+    let prompt = super::manual::Prompt::show(provider);
+    let outcome = {
+        let finish = attempt.finish_with_code_input(
+            &store,
+            cancel.clone(),
+            Duration::from_secs(600),
+            prompt.code(),
+        );
+        tokio::pin!(finish);
+        tokio::select! {
+            result = &mut finish => result,
+            _ = tokio::signal::ctrl_c() => { cancel.cancel(); finish.await },
+        }
+    };
+    drop(prompt);
+    outcome?;
+    // Sign-in is the only step: fetch the model list now so `/model` and the welcome screen
+    // have it, then say what happens next. Nothing here is written to config.toml.
+    let fetched = super::catalog::refresh_catalog(provider).await.is_ok();
+    let status = crate::auth::provider_status::ProviderStatus::current(false);
+    let explicit = crate::config::load_agent_config_disk_only()
+        .ok()
+        .and_then(|config| config.models.default);
+    fuigo_tty_utils::cli_eprintln!(
+        "{}",
+        fuigo_tty_utils::untrusted(status.login_summary(
+            provider,
+            explicit.as_deref(),
+            fetched,
+            super::take_signin_identity(provider).as_deref(),
+            "Run `fuigo`.",
+        ))
     );
-    tokio::pin!(finish);
-    tokio::select! {
-        result = &mut finish => result?,
-        _ = tokio::signal::ctrl_c() => { cancel.cancel(); finish.await?; },
-    }
-    fuigo_tty_utils::cli_eprintln!("{} subscription login saved by Fuigo.", provider.name());
     Ok(())
+}
+
+/// A pasted xAI code from the TUI: same rules as the terminal prompt (`manual::read_from`).
+async fn pasted_code(mut rx: tokio::sync::mpsc::UnboundedReceiver<String>) -> Result<String> {
+    match rx.recv().await {
+        Some(code) => {
+            let code = code.trim();
+            if code.is_empty() || code.chars().any(char::is_whitespace) || code.contains("://") {
+                return Err(SubscriptionError::Callback);
+            }
+            Ok(code.to_owned())
+        }
+        // The sender is gone: nothing will ever be pasted, so only the browser callback can finish.
+        None => std::future::pending().await,
+    }
+}
+
+/// Finish an already-started attempt for the TUI: the browser callback, or a code pasted through
+/// `code_rx`. Nothing is printed. On success the provider's model list is fetched and cached
+/// (best effort) so `/model` and the welcome screen have it without any further step.
+pub(super) async fn finish_for_tui(
+    attempt: LoginAttempt,
+    store: &SubscriptionStore,
+    code_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    refresh_models: bool,
+) -> Result<()> {
+    let provider = attempt.provider;
+    attempt
+        .finish_with_code_input(
+            store,
+            CancellationToken::new(),
+            Duration::from_secs(600),
+            pasted_code(code_rx),
+        )
+        .await?;
+    if refresh_models {
+        let _ = super::catalog::refresh_catalog(provider).await;
+    }
+    Ok(())
+}
+
+/// Sign in from inside the TUI. `publish` receives the authorization URL as soon as the
+/// listener is up (the screen shows it; the browser is opened here as well). Dropping the
+/// returned future cancels the attempt and frees the callback port.
+pub async fn sign_in_for_tui(
+    provider: SubscriptionProvider,
+    publish: impl FnOnce(String),
+    code_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+) -> Result<()> {
+    let store = default_store()?;
+    let attempt = LoginAttempt::start(provider).await?;
+    publish(attempt.authorization_url().to_owned());
+    let _ = webbrowser::open(attempt.authorization_url());
+    finish_for_tui(attempt, &store, code_rx, true).await
 }

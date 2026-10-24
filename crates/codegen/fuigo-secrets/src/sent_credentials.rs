@@ -1354,6 +1354,12 @@ impl<W: std::io::Write> std::io::Write for ScrubWriter<W> {
     }
 }
 
+/// Serializes every test that reads or writes the process-wide registry: the tests here that record into it, and the
+/// sanitizer tests, whose `redact_secrets` scrubs against it. A value left behind by a registry test (some record
+/// short values such as `abcdefgh`) would otherwise be redacted out of whatever a sanitizer test is checking.
+#[cfg(test)]
+pub(crate) static REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Test-only: forget every recorded credential. The registry is process-wide; tests that assert on it reset it.
 #[doc(hidden)]
 pub fn clear_for_tests() {
@@ -1366,11 +1372,7 @@ pub fn clear_for_tests() {
 mod tests {
     use super::*;
     use std::io::Write as _;
-    use std::sync::Mutex;
-
-    /// The registry is process-wide; serialize the tests that reset it. Every value recorded here is distinctive
-    /// (`p70b…`, mixed-case runs) so the sanitizer tests running beside these never contain one.
-    static LOCK: Mutex<()> = Mutex::new(());
+    use super::REGISTRY_TEST_LOCK as LOCK;
 
     const KEY: &str = "p70b-key-Xq7Lm2Vz";
 

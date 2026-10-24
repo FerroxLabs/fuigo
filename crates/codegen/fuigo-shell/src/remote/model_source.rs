@@ -3,7 +3,7 @@ use crate::agent::config::EndpointsConfig;
 use crate::agent::models::ModelFetchAuth;
 use crate::auth::FuigoAuth;
 use crate::remote::client::{BackendError, FetchModelsResult};
-mod oai;
+pub(crate) mod oai;
 pub(crate) trait ModelSource {
     /// Identifies this source in the models disk cache, so entries fetched from one URL never load for another.
     fn cache_origin(&self) -> String;

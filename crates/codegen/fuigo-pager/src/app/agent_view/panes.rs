@@ -62,18 +62,6 @@ impl AgentView {
             self.highlighted_link_idx = None;
             return InputOutcome::Action(Action::OpenLink(target));
         }
-        if crate::app::inline_edit::INLINE_EDIT_ENABLED
-            && key!(Enter).matches(key)
-            && !self.scrollback.is_selected_group_header()
-            && let Some(idx) = self.scrollback.selected()
-            && self
-                .scrollback
-                .entry(idx)
-                .is_some_and(|e| e.block.is_user_prompt())
-            && self.enter_inline_edit(idx)
-        {
-            return InputOutcome::Changed;
-        }
         if key!(Enter).matches(key)
             && !self.scrollback.is_selected_group_header()
             && let Some(idx) = self.scrollback.selected()
@@ -252,9 +240,20 @@ impl AgentView {
     /// Poll the background search daemon for new results, revealing the freshly parked match when they change.
     /// Returns `true` if the UI should redraw.
     pub(crate) fn poll_scrollback_search(&mut self) -> bool {
+        // Streaming output changes the corpus under an open search: rescan (paced) so the match count and cursor stay true
+        if let Some(search) = self.scrollback_search.as_mut() {
+            search.resync(&self.scrollback, std::time::Instant::now());
+        }
         let changed = self.scrollback_search.as_mut().is_some_and(|s| s.poll());
         if changed {
-            self.reveal_current_search_match();
+            // A rescan caused by new content changes the counts but is not a navigation: do not pull the view to the match
+            let quiet = self
+                .scrollback_search
+                .as_mut()
+                .is_some_and(|s| s.take_quiet_refresh());
+            if !quiet {
+                self.reveal_current_search_match();
+            }
         }
         changed
     }
@@ -830,7 +829,9 @@ impl AgentView {
                 self.dock_watcher_rows().get(i).and_then(|(id, row)| {
                     row.killable.then(|| match id {
                         DockWatcherId::Monitor(task_id) => Action::KillBgTask(task_id.clone()),
-                        DockWatcherId::Loop(task_id) => Action::CancelScheduledTask(task_id.clone()),
+                        DockWatcherId::Loop(task_id) => {
+                            Action::CancelScheduledTask(task_id.clone())
+                        }
                     })
                 })
             }

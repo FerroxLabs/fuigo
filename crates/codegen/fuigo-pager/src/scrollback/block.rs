@@ -1099,6 +1099,26 @@ impl RenderBlock {
         }
     }
 
+    /// Fenced code blocks of a markdown block, in document order (pre-wrap line coordinates).
+    pub fn with_code_blocks<R>(&self, f: impl FnOnce(&[fuigo_markdown::CodeBlockSpan]) -> R) -> R {
+        match self {
+            RenderBlock::AgentMessage(b) => b.content().with_code_blocks(f),
+            RenderBlock::Thinking(b) => b.content().with_code_blocks(f),
+            RenderBlock::Btw(b) => b.content().with_code_blocks(f),
+            _ => f(&[]),
+        }
+    }
+
+    /// The body of each fenced code block, parallel to [`Self::with_code_blocks`], with the tabs the author wrote.
+    pub fn code_block_texts(&self) -> Vec<String> {
+        match self {
+            RenderBlock::AgentMessage(b) => b.content().code_block_texts(),
+            RenderBlock::Thinking(b) => b.content().code_block_texts(),
+            RenderBlock::Btw(b) => b.content().code_block_texts(),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn with_table_copy_meta<R>(
         &self,
         f: impl FnOnce(&[fuigo_markdown::TableCopyMeta]) -> R,

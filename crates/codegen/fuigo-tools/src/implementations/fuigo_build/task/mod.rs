@@ -21,6 +21,7 @@ pub mod admission;
 pub mod backend;
 pub mod coordinator;
 mod coordinator_state;
+pub mod model_policy;
 pub use coordinator_state::{cap_completion_output, completion_summary};
 pub mod parent_message;
 pub mod types;
@@ -148,7 +149,9 @@ async fn detect_continue_parent_work(
 /// Resolve the model-facing get-output tool and param names for the
 /// background notices. Kind-wide resolution is correct here: these name the
 /// retrieval tool's schema (which the host may rename), not task's own.
-async fn resolve_background_notice_names(resources: &SharedResources) -> (String, String, String) {
+pub(crate) async fn resolve_background_notice_names(
+    resources: &SharedResources,
+) -> (String, String, String) {
     let canonical = fuigo_tool_types::BackgroundNoticeNaming::CANONICAL;
     let res = resources.lock().await;
     let Some(renderer) = res.get::<crate::types::template_renderer::TemplateRenderer>() else {
@@ -172,6 +175,16 @@ async fn resolve_background_notice_names(resources: &SharedResources) -> (String
             .unwrap_or(canonical.timeout_ms_param)
             .to_string(),
     )
+}
+
+/// Whether the client delivers system reminders, i.e. whether a finished child actually wakes the model.
+/// Only then may a background notice promise a completion notification.
+pub(crate) async fn notified_on_completion(resources: &SharedResources) -> bool {
+    resources
+        .lock()
+        .await
+        .get::<crate::types::resources::SystemRemindersEnabled>()
+        .is_none_or(|e| e.0)
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -322,6 +335,29 @@ impl crate::types::tool_metadata::ToolMetadata for TaskTool {
         &DESC
     }
 
+    /// Params-aware definition: a session that locked subagents to the parent model does not advertise the `model`
+    /// argument. A description override (including the guidance layer's) is rendered as-is.
+    fn versioned_definition(
+        &self,
+        _contract_version: Option<&str>,
+        client_name: &str,
+        description_override: Option<&str>,
+        renderer: &crate::types::template_renderer::TemplateRenderer,
+        param_map: &std::collections::HashMap<String, String>,
+        input_schema: &serde_json::Value,
+        effective_params: &serde_json::Value,
+    ) -> crate::types::definition::ToolDefinition {
+        model_policy::task_versioned_definition(
+            client_name,
+            description_override,
+            self.description_template(),
+            renderer,
+            param_map,
+            input_schema,
+            effective_params,
+        )
+    }
+
     fn requires_expr(&self) -> Expr<ToolRequirement> {
         // The task tool can only be used when both get_task_output
         // (BackgroundTaskAction) and kill_task (KillTaskAction) are present,
@@ -390,6 +426,7 @@ impl fuigo_tool_runtime::Tool for TaskTool {
             parent_session_id,
             parent_prompt_id,
             foreground_wait,
+            task_params,
         ) = {
             let res = resources.lock().await;
 
@@ -407,6 +444,10 @@ impl fuigo_tool_runtime::Tool for TaskTool {
                 .clone();
 
             let model_validator = res.get::<TaskModelValidator>().cloned();
+            let task_params = res
+                .get::<crate::types::resources::Params<model_policy::TaskParams>>()
+                .map(|params| params.0.clone())
+                .unwrap_or_default();
 
             let parent_session_id = res
                 .get::<SessionIdResource>()
@@ -427,6 +468,7 @@ impl fuigo_tool_runtime::Tool for TaskTool {
                 parent_session_id,
                 parent_prompt_id,
                 foreground_wait,
+                task_params,
             )
         };
 
@@ -456,6 +498,15 @@ impl fuigo_tool_runtime::Tool for TaskTool {
         } else {
             model
         };
+
+        // A session that locked subagents to the parent model refuses an explicit choice before any validation or
+        // child work, whatever the schema the model saw.
+        if model.is_some() && task_params.model_selection == model_policy::TaskModelSelection::Inherited {
+            let param_names = crate::types::tool_metadata::invoking_param_names(&ctx);
+            return Err(fuigo_tool_runtime::ToolError::invalid_arguments(
+                model_policy::hidden_selection_message(param_names.resolve(model_policy::MODEL_PARAM)),
+            ));
+        }
 
         // Treat blank/empty/"null" cwd as absent (models sometimes emit these).
         // Also strip stray surrounding quote characters and expand `~`.
@@ -508,11 +559,12 @@ impl fuigo_tool_runtime::Tool for TaskTool {
 
         // 2. Eager validation — catch unknown / disabled / not-allowed
         //    types before the fire-and-forget background spawn.
-        match backend
+        let type_was_omitted = !input.subagent_type_specified;
+        let outcome = backend
             .backend()
             .validate_type(&input.subagent_type, &parent_session_id)
-            .await
-        {
+            .await;
+        match outcome {
             SubagentValidateTypeOutcome::Ok => {}
             SubagentValidateTypeOutcome::Unknown { available } => {
                 let suffix = if available.is_empty() {
@@ -531,9 +583,16 @@ impl fuigo_tool_runtime::Tool for TaskTool {
                     input.subagent_type
                 )));
             }
+            // The type is never guessed: the permission ask and the allowlist both name the type that runs, so a call
+            // that left it out is told to name one.
             SubagentValidateTypeOutcome::NotAllowed { allowed } => {
+                let hint = if type_was_omitted && is_default_subagent_type(&input.subagent_type) {
+                    ". No subagent_type was given; retry with subagent_type set to one of them."
+                } else {
+                    ""
+                };
                 return Err(fuigo_tool_runtime::ToolError::invalid_arguments(format!(
-                    "agent can only spawn: {}; '{}' not allowed",
+                    "agent can only spawn: {}; '{}' not allowed{hint}",
                     allowed.join(", "),
                     input.subagent_type
                 )));
@@ -627,6 +686,7 @@ impl fuigo_tool_runtime::Tool for TaskTool {
             fork_context: false,
             owner: SubagentOwner::Task,
             cancel_token: child_cancellation,
+            tool_call_id: Some(ctx.call_id.as_str().to_owned()),
         };
 
         // 4. Background mode: await registration (pending/queued), not the
@@ -719,11 +779,7 @@ impl fuigo_tool_runtime::Tool for TaskTool {
             };
             // Only promise a completion notification when the client
             // actually delivers system reminders.
-            let notified_on_completion = resources
-                .lock()
-                .await
-                .get::<crate::types::resources::SystemRemindersEnabled>()
-                .is_none_or(|e| e.0);
+            let notified_on_completion = notified_on_completion(&resources).await;
             let continue_parent =
                 detect_continue_parent_work(&resources, &input.description, &input.prompt).await;
 
@@ -765,6 +821,10 @@ impl fuigo_tool_runtime::Tool for TaskTool {
             ))
         }
     }
+}
+
+fn is_default_subagent_type(subagent_type: &str) -> bool {
+    subagent_type.eq_ignore_ascii_case("general-purpose")
 }
 
 #[cfg(test)]
@@ -853,6 +913,7 @@ mod tests {
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
@@ -892,6 +953,7 @@ mod tests {
                 description: "nested ok".into(),
                 prompt: "should be allowed at max_depth=2".into(),
                 subagent_type: "explore".into(),
+                subagent_type_specified: false,
                 run_in_background: true,
                 capability_mode: None,
                 isolation: None,
@@ -911,6 +973,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_spawn_carries_the_model_tool_call_id_that_issued_it() {
+        let (backend, mut rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(0));
+        resources.insert(SessionIdResource("parent-session".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
+
+        let drain = tokio::spawn(async move {
+            match rx.recv().await {
+                Some(SubagentEvent::Spawn(mut req)) => {
+                    req.notify_registered();
+                    Some(req.request.tool_call_id.clone())
+                }
+                _ => None,
+            }
+        });
+
+        let result = fuigo_tool_runtime::Tool::run(
+            &TaskTool,
+            crate::types::tool_metadata::test_ctx_with_call_id(
+                resources.into_shared(),
+                "test-call-1",
+            ),
+            TaskToolInput {
+                description: "tracked".into(),
+                prompt: "carry the call id".into(),
+                subagent_type: "explore".into(),
+                subagent_type_specified: true,
+                run_in_background: true,
+                capability_mode: None,
+                isolation: None,
+                resume_from: None,
+                cwd: None,
+                model: None,
+                task_id: None,
+            },
+        )
+        .await;
+
+        assert!(result.is_ok(), "{result:?}");
+        let seen = tokio::time::timeout(std::time::Duration::from_secs(2), drain)
+            .await
+            .expect("the spawn event arrives")
+            .unwrap();
+        assert_eq!(
+            Some(Some("test-call-1".to_owned())),
+            seen,
+            "a turn-end hand-off finds the child by the call that spawned it"
+        );
+    }
+
+    #[tokio::test]
     async fn subagent_cannot_spawn_nested_subagent() {
         let (backend, _rx) = make_backend();
         let mut resources = Resources::new();
@@ -926,6 +1041,7 @@ mod tests {
                 description: "nested spawn".into(),
                 prompt: "should be rejected".into(),
                 subagent_type: "explore".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
@@ -957,6 +1073,7 @@ mod tests {
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
@@ -1015,6 +1132,7 @@ mod tests {
                 description: "Find auth middleware".into(),
                 prompt: "Search for authentication middleware files".into(),
                 subagent_type: "explore".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
@@ -1071,6 +1189,7 @@ mod tests {
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
@@ -1114,6 +1233,7 @@ mod tests {
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
@@ -1222,6 +1342,7 @@ mod tests {
             description: "test".into(),
             prompt: "do it".into(),
             subagent_type: subagent_type.into(),
+            subagent_type_specified: false,
             run_in_background: background,
             capability_mode: None,
             isolation: None,
@@ -1852,6 +1973,7 @@ mod tests {
             description: "find bugs".into(),
             prompt: "search for bugs".into(),
             subagent_type: "explore".into(),
+            subagent_type_specified: false,
             run_in_background: true,
             capability_mode: Some(SubagentCapabilityMode::ReadOnly),
             isolation: Some(SubagentIsolationMode::Worktree),
@@ -2120,6 +2242,7 @@ mod tests {
             description: "d".into(),
             prompt: "p".into(),
             subagent_type: "general-purpose".into(),
+            subagent_type_specified: false,
             run_in_background: false,
             capability_mode: None,
             isolation: None,
@@ -2169,6 +2292,7 @@ mod tests {
                 description: "d".into(),
                 prompt: "p".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
@@ -2205,6 +2329,7 @@ mod tests {
             description: "d".into(),
             prompt: "p".into(),
             subagent_type: "general-purpose".into(),
+            subagent_type_specified: false,
             run_in_background: false,
             capability_mode: None,
             isolation: None,
@@ -2251,6 +2376,7 @@ mod tests {
                 description: "resume".into(),
                 prompt: "continue".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
@@ -2317,6 +2443,7 @@ mod tests {
                     description: "test sentinel".into(),
                     prompt: "work".into(),
                     subagent_type: "general-purpose".into(),
+                    subagent_type_specified: false,
                     run_in_background: false,
                     capability_mode: None,
                     isolation: None,
@@ -2363,6 +2490,7 @@ mod tests {
             description: "d".into(),
             prompt: "p".into(),
             subagent_type: "general-purpose".into(),
+            subagent_type_specified: false,
             run_in_background: false,
             capability_mode: None,
             isolation: None,
@@ -2391,6 +2519,7 @@ mod tests {
                 description: "test cwd conflict".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::Worktree),
@@ -2445,6 +2574,7 @@ mod tests {
                 description: "test empty cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::Worktree),
@@ -2495,6 +2625,7 @@ mod tests {
                 description: "test null cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::Worktree),
@@ -2545,6 +2676,7 @@ mod tests {
                 description: "test whitespace cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::Worktree),
@@ -2598,6 +2730,7 @@ mod tests {
                 description: "test nonexistent cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::Worktree),
@@ -2632,6 +2765,7 @@ mod tests {
                 description: "test nonexistent cwd no worktree".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
@@ -2687,6 +2821,7 @@ mod tests {
                     description: "test sentinel cwd".into(),
                     prompt: "work".into(),
                     subagent_type: "general-purpose".into(),
+                    subagent_type_specified: false,
                     run_in_background: false,
                     capability_mode: None,
                     isolation: None,
@@ -2740,6 +2875,7 @@ mod tests {
                 description: "cwd test".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
@@ -2797,6 +2933,7 @@ mod tests {
                 description: "stray quote cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
@@ -2849,6 +2986,7 @@ mod tests {
                 description: "cwd with none".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::None),
@@ -2897,6 +3035,7 @@ mod tests {
                 description: "cwd + resume".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,
@@ -3168,5 +3307,119 @@ mod tests {
             ToolOutput::SubagentCompleted(sub) => assert!(sub.output.contains("resumed")),
             other => panic!("Expected SubagentCompleted, got {other:?}"),
         }
+    }
+
+    /// Run the task tool against a backend whose type validation is `outcome_fn`, and report the type the spawn
+    /// request carried (or the tool error).
+    async fn spawned_type(
+        outcome_fn: impl Fn(&str, &str) -> SubagentValidateTypeOutcome + Send + 'static,
+        params: Option<model_policy::TaskParams>,
+        input: TaskToolInput,
+    ) -> Result<String, String> {
+        let (backend, mut rx) = make_backend_with_validation_fn(outcome_fn);
+        let mut resources = resources_for_task(backend);
+        if let Some(params) = params {
+            resources.insert(crate::types::resources::Params(params));
+        }
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await?);
+            let spawned = request.subagent_type.clone();
+            request
+                .respond_with(|request| SubagentResult {
+                    success: true,
+                    output: std::sync::Arc::from("done"),
+                    subagent_id: request.id.clone(),
+                    child_session_id: request.id.clone(),
+                    ..Default::default()
+                })
+                .unwrap();
+            Some(spawned)
+        });
+        let result =
+            fuigo_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input).await;
+        let spawned = handle.await.unwrap();
+        match result {
+            Ok(_) => Ok(spawned.expect("a successful call spawns")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn inherited_params() -> model_policy::TaskParams {
+        model_policy::TaskParams {
+            model_selection: model_policy::TaskModelSelection::Inherited,
+        }
+    }
+
+    #[tokio::test]
+    async fn omitted_type_that_is_not_allowed_is_sent_back_to_name_one() {
+        let spawned = spawned_type(
+            |_, _| SubagentValidateTypeOutcome::NotAllowed { allowed: vec!["explore".into()] },
+            None,
+            task_input("general-purpose", false),
+        )
+        .await;
+        let message = spawned.expect_err("the type is not guessed");
+        assert!(message.contains("No subagent_type was given"), "{message}");
+        assert!(message.contains("only spawn: explore"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn named_general_purpose_keeps_the_plain_not_allowed_error() {
+        let mut input = task_input("general-purpose", false);
+        input.subagent_type_specified = true;
+        let spawned = spawned_type(
+            |_, _| SubagentValidateTypeOutcome::NotAllowed { allowed: vec!["explore".into()] },
+            None,
+            input,
+        )
+        .await;
+        let message = spawned.expect_err("a named type outside the allowlist is refused");
+        assert!(message.contains("'general-purpose' not allowed"), "{message}");
+        assert!(!message.contains("No subagent_type was given"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn inherited_selection_refuses_an_explicit_model_before_any_child_work() {
+        let mut input = task_input("explore", false);
+        input.model = Some("alpha".into());
+        let spawned =
+            spawned_type(|_, _| SubagentValidateTypeOutcome::Ok, Some(inherited_params()), input).await;
+        let message = spawned.expect_err("the model argument is locked");
+        assert!(message.contains("Explicit subagent model selection is unavailable"), "{message}");
+        assert!(message.contains("without the model argument"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn inherited_selection_names_the_client_facing_model_argument() {
+        let (backend, _rx) = make_backend();
+        let mut resources = resources_for_task(backend);
+        resources.insert(crate::types::resources::Params(inherited_params()));
+        let mut ctx = test_ctx(resources.into_shared());
+        ctx.extensions.insert(crate::types::resources::InvokingToolParamNames(
+            [("model".to_string(), "llm".to_string())].into(),
+        ));
+        let mut input = task_input("explore", false);
+        input.model = Some("alpha".into());
+        let error = fuigo_tool_runtime::Tool::run(&TaskTool, ctx, input).await.unwrap_err();
+        assert!(error.to_string().contains("without the llm argument"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn inherited_selection_lets_an_omitted_model_spawn() {
+        let spawned = spawned_type(
+            |_, _| SubagentValidateTypeOutcome::Ok,
+            Some(inherited_params()),
+            task_input("explore", false),
+        )
+        .await;
+        assert_eq!(spawned.as_deref(), Ok("explore"));
+    }
+
+    #[tokio::test]
+    async fn selectable_selection_keeps_the_model_argument_working() {
+        let mut input = task_input("explore", false);
+        input.model = Some("alpha".into());
+        let spawned = spawned_type(|_, _| SubagentValidateTypeOutcome::Ok, None, input).await;
+        assert_eq!(spawned.as_deref(), Ok("explore"));
     }
 }

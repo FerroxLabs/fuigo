@@ -1608,6 +1608,36 @@ fn verb_group_expand_and_collapse_round_trip() {
     assert_eq!(cached_height_at(&state, 1), 0);
 }
 
+/// An expanded group keeps its members' rows when further calls join the run behind it.
+#[test]
+fn expanded_verb_group_stays_open_as_calls_join() {
+    let mut state = verb_state();
+    let ids = push_reads(&mut state, 2);
+    state.prepare_layout(80, 40);
+    state.set_selected(Some(0));
+    assert!(state.toggle_group_expansion());
+    state.prepare_layout(80, 40);
+    assert!(cached_height_at(&state, 1) > 0);
+
+    for joined in 2..5 {
+        let more = push_reads(&mut state, 1);
+        assert_eq!(more.len(), 1);
+        state.prepare_layout(80, 40);
+        assert!(state.expanded_groups.contains(&ids[0]), "key survives call {joined}");
+        assert!(verb_header_at(&state, 0));
+        assert!(
+            state.layout_cache.as_ref().unwrap().entries[0].group_collapse_header,
+            "the group is still expanded after call {joined} joined"
+        );
+        for member in 1..=joined {
+            assert!(
+                cached_height_at(&state, member) > 0,
+                "member {member} keeps its rows once call {joined} joined"
+            );
+        }
+    }
+}
+
 #[test]
 fn verb_group_singleton_expand_and_collapse_round_trip() {
     let mut state = verb_state();

@@ -83,14 +83,29 @@ fn codex_read_file_catalog_entry_matches_tool_source() {
 #[test]
 fn fuigo_build_read_file_catalog_entry_matches_tool_source() {
     let (_, fuigo_build) = read_file_entries();
-    // The registry renders `${{ params.read.target_file }}` with the client's
+    // The registry renders `${{ params.read.target_file }}`, `offset` and `limit` with the client's
     // parameter names (canonical here) and `{max_lines_read}` from the default
     // truncation config, exactly as the headless dump that fed the catalog.
     let renderer = TemplateRenderer::new(
         HashMap::from([(ToolKind::Read, "read_file".to_string())]),
-        HashMap::from([(ToolKind::Read, HashMap::from([("target_file".to_string(), "target_file".to_string())]))]),
+        HashMap::from([(
+            ToolKind::Read,
+            // Every property of the tool's schema maps to itself under canonical names, as the registry builds it.
+            HashMap::from(
+                ["target_file", "offset", "limit"].map(|name| (name.to_string(), name.to_string())),
+            ),
+        )]),
     );
     let rendered = renderer.render(ReadFileTool.description_template()).expect("renders");
     let live = TruncationConfig::default().interpolate_description(&rendered, "read_file", 0, 600_000);
     assert_eq!(fuigo_build.original, live, "fuigo-build read_file catalog `original` is stale; regenerate the catalog");
+}
+
+/// The compact text replaces the description the model sees, so it must make the same whole-read promise as `original`.
+#[test]
+fn fuigo_build_read_file_compact_text_carries_the_whole_read_note() {
+    let (_, fuigo_build) = read_file_entries();
+    let note = "SKILL.md and AGENTS.md/CLAUDE.md files are returned whole when they fit the per-call limit; offset and limit are ignored for them";
+    assert!(fuigo_build.original.contains(note), "original: {}", fuigo_build.original);
+    assert!(fuigo_build.compact.contains(note), "compact: {}", fuigo_build.compact);
 }

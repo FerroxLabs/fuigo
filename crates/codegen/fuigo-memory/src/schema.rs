@@ -11,6 +11,10 @@
 /// Bump when a breaking schema change requires dropping and recreating tables.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Drop and recreate the keyword index empty, for a rebuild from `chunks`.
+pub const RESET_FTS_SQL: &str = "DROP TABLE IF EXISTS chunks_fts; \
+     CREATE VIRTUAL TABLE chunks_fts USING fts5(text, content='');";
+
 /// Generate the SQL schema for the memory index.
 ///
 /// `dimensions` controls the embedding vector size for `chunks_vec`.

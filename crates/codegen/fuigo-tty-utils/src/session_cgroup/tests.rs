@@ -602,20 +602,31 @@ fn fake_outstanding_lease_refuses_then_delays_the_kill() {
     drop(lease);
     // A lease that ends mid-wait delays the kill instead of refusing it.
     let s = &s;
+    let finished = std::sync::atomic::AtomicBool::new(false);
+    let finished = &finished;
     std::thread::scope(|sc| {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         sc.spawn(move || {
             let mut c = Command::new("/bin/true");
             let l = s.place(&mut c).unwrap();
-            tx.send(()).unwrap();
-            std::thread::sleep(Duration::from_millis(300));
+            held_tx.send(()).unwrap();
+            // Released by the main thread, never by a timer: no scheduling delay can end the lease early.
+            release_rx.recv().unwrap();
             drop(l);
         });
-        rx.recv().unwrap();
-        let t = Instant::now();
-        let out = s.kill_and_wait(Duration::from_secs(3));
+        held_rx.recv().unwrap();
+        let killer = sc.spawn(move || {
+            let out = s.kill_and_wait(Duration::from_secs(30));
+            finished.store(true, Ordering::SeqCst);
+            out
+        });
+        // A late killer can only make this pass vacuously, never fail it.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!finished.load(Ordering::SeqCst), "kill_and_wait returned with a lease out");
+        release_tx.send(()).unwrap();
+        let out = killer.join().unwrap();
         assert!(matches!(out, KillOutcome::Emptied { .. }), "{out:?}");
-        assert!(t.elapsed() >= Duration::from_millis(200), "did not wait for the lease");
     });
     let _ = std::fs::remove_dir_all(root);
 }
@@ -625,19 +636,30 @@ fn fake_close_waits_for_outstanding_lease() {
     // Fails if the RwLock is replaced by a bare flag.
     let (_h, s, root) = fake_session("closewait", ok_files);
     let s = &s;
+    let closed = std::sync::atomic::AtomicBool::new(false);
+    let closed = &closed;
     std::thread::scope(|sc| {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         sc.spawn(move || {
             let mut c = Command::new("/bin/true");
             let l = s.place(&mut c).unwrap();
-            tx.send(()).unwrap();
-            std::thread::sleep(Duration::from_millis(300));
+            held_tx.send(()).unwrap();
+            // Released by the main thread, never by a timer: no scheduling delay can end the lease early.
+            release_rx.recv().unwrap();
             drop(l);
         });
-        rx.recv().unwrap();
-        let t = Instant::now();
-        s.close();
-        assert!(t.elapsed() >= Duration::from_millis(200), "close() returned with a lease out");
+        held_rx.recv().unwrap();
+        let closer = sc.spawn(move || {
+            s.close();
+            closed.store(true, Ordering::SeqCst);
+        });
+        // A late closer can only make this pass vacuously, never fail it.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!closed.load(Ordering::SeqCst), "close() returned with a lease out");
+        release_tx.send(()).unwrap();
+        closer.join().unwrap();
+        assert!(closed.load(Ordering::SeqCst));
     });
     assert_eq!(s.place(&mut Command::new("/bin/true")).err(), Some(PlaceError::Closed));
     let _ = std::fs::remove_dir_all(root);
@@ -647,9 +669,17 @@ fn fake_close_waits_for_outstanding_lease() {
 fn fake_spawn_during_kill_is_refused() {
     let (_h, s, root) = fake_session("duringkill", ok_files);
     std::fs::write(s.dir().join("cgroup.events"), "populated 1\n").unwrap(); // never empties
+    // Learn that the kill holds the write side from the kill itself, not from a timer.
+    let (in_kill_tx, in_kill_rx) = std::sync::mpsc::channel();
+    let in_kill_tx = std::sync::Mutex::new(in_kill_tx);
+    *s.hook.lock().unwrap() = Some(std::sync::Arc::new(move |stage: &'static str| {
+        if stage == "kill" {
+            let _ = in_kill_tx.lock().unwrap().send(());
+        }
+    }));
     std::thread::scope(|sc| {
         let k = sc.spawn(|| s.kill_and_wait(Duration::from_millis(600)));
-        std::thread::sleep(Duration::from_millis(150));
+        in_kill_rx.recv_timeout(Duration::from_secs(30)).expect("kill never started");
         assert!(matches!(s.spawn(&mut Command::new("/bin/true")), Err(SpawnError::Stopping)));
         assert!(matches!(k.join().unwrap(), KillOutcome::NotEmptied { .. }));
     });
@@ -962,7 +992,9 @@ mod scope_wiring {
         }
         // An enrolled-but-unplaced child (the MCP/LSP path: ProcessScope::spawn) is not.
         let mut other = tokio::process::Command::new("/bin/sh");
-        other.args(["-c", "sleep 60"]).stdin(Stdio::null());
+        // : dash forks for a lone , so killing the shell
+        // would orphan the sleep (it outlived the whole test run).
+        other.args(["-c", "exec sleep 60"]).stdin(Stdio::null());
         let (mut other_child, _group) = rt().block_on(async { scope.spawn(other).unwrap() });
         let other_pid = other_child.id().unwrap();
         assert!(!cg_rel(other_pid).contains(&want), "unplaced child landed in the session cgroup");
@@ -977,6 +1009,14 @@ mod scope_wiring {
         let _ = other_child.start_kill();
         let _ = rt().block_on(child.wait());
         let _ = rt().block_on(other_child.wait());
+        // The killed grandchildren are reparented and reaped by init, not by us; a zombie still
+        // populates the cgroup (rmdir would be EBUSY), so wait for the kernel to say it is empty.
+        let t = Instant::now();
+        while !std::fs::read_to_string(dir.join("cgroup.events")).is_ok_and(|e| e.contains("populated 0"))
+            && t.elapsed() < Duration::from_secs(30)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         scope.release_session_cgroup();
         assert!(!dir.exists(), "an empty directory is removed");
         let _ = std::fs::remove_dir_all(tmpd);

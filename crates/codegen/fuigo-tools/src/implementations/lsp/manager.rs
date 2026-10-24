@@ -120,6 +120,11 @@ pub struct LspManager {
     /// server is blocked on. Configurable so a test can exercise the real drain
     /// without spending the production durations waiting.
     pub pending_policy: PendingPolicy,
+    /// Test clock: how far the pending-edit bookkeeping believes time has moved on. A test that must see a file
+    /// outlive its deadline, or pass it, advances this instead of sleeping, so a scheduling stall on a loaded
+    /// machine cannot move a deadline between the two assertions that straddle it.
+    #[cfg(test)]
+    pub clock_advance: std::time::Duration,
     pub diagnostics_ready: DiagnosticsNotify,
     pub shutting_down: bool,
     pub next_lifecycle_id: u64,
@@ -140,6 +145,8 @@ impl Default for LspManager {
             tools_enabled: false,
             pending_diagnostics_by_server: HashMap::new(),
             pending_policy: PendingPolicy::default(),
+            #[cfg(test)]
+            clock_advance: std::time::Duration::ZERO,
             diagnostics_ready: Arc::new(tokio::sync::Notify::new()),
             shutting_down: false,
             next_lifecycle_id: 1,
@@ -150,6 +157,18 @@ impl Default for LspManager {
 }
 
 impl LspManager {
+    /// The instant the pending-edit bookkeeping runs on.
+    fn pending_now(&self) -> Instant {
+        #[cfg(test)]
+        {
+            Instant::now() + self.clock_advance
+        }
+        #[cfg(not(test))]
+        {
+            Instant::now()
+        }
+    }
+
     pub fn new(
         servers: BTreeMap<String, LspServerConfig>,
         workspace_root: PathBuf,
@@ -195,10 +214,11 @@ impl LspManager {
         version: i32,
     ) {
         let policy = self.pending_policy;
+        let now = self.pending_now();
         self.pending_diagnostics_by_server
             .entry(server_name.to_string())
             .or_insert_with(|| PendingEdits::new(policy))
-            .mark(lifecycle_id, uri.as_str(), version, Instant::now());
+            .mark(lifecycle_id, uri.as_str(), version, now);
     }
 
     pub async fn ensure_initialized(&mut self) {
@@ -347,7 +367,7 @@ impl LspManager {
     /// [`super::pending::SERVER_PATIENCE`], which lets the drain return immediately
     /// instead of blocking for its whole timeout.
     fn worth_blocking_for_diagnostics(&self) -> bool {
-        let now = Instant::now();
+        let now = self.pending_now();
         self.pending_diagnostics_by_server
             .values()
             .any(|pending| pending.worth_blocking(now))
@@ -373,7 +393,7 @@ impl LspManager {
             }
         }
 
-        let now = Instant::now();
+        let now = self.pending_now();
         let policy = self.pending_policy;
         for Reopened {
             server_name,
@@ -433,7 +453,7 @@ impl LspManager {
     /// keeps waiting for one it has already had is what makes the set grow
     /// without bound.
     fn take_answered_diagnostics(&mut self) -> Option<DiagnosticsSummary> {
-        let now = Instant::now();
+        let now = self.pending_now();
         let mut collected = CollectedDiagnostics::default();
 
         // In server-name order, so what the reader sees does not depend on how

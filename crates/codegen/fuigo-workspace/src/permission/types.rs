@@ -1218,6 +1218,7 @@ pub(crate) mod tests {
                 prompt: "edit config.toml".into(),
                 description: "spawn".into(),
                 subagent_type: "general-purpose".into(),
+                subagent_type_specified: false,
                 run_in_background: false,
                 capability_mode: None,
                 isolation: None,

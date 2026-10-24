@@ -30,6 +30,60 @@ trait TmuxCommandRunner {
 
 struct LiveTmuxCommandRunner;
 
+/// Set once a probe learns the tmux server `$TMUX` points at is not answering, so the other probes of this run do not
+/// each ask (and wait on) the same dead socket.
+static SERVER_UNREACHABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Wraps a runner so the first "no server" or timeout answer ends every later server query.
+/// `tmux -V` reads no server and always runs.
+struct ServerGate<'a> {
+    inner: &'a dyn TmuxCommandRunner,
+    unreachable: &'a std::sync::atomic::AtomicBool,
+}
+
+impl<'a> ServerGate<'a> {
+    fn new(inner: &'a dyn TmuxCommandRunner, unreachable: &'a std::sync::atomic::AtomicBool) -> Self {
+        Self { inner, unreachable }
+    }
+
+    fn live() -> ServerGate<'static> {
+        ServerGate::new(&LiveTmuxCommandRunner, &SERVER_UNREACHABLE)
+    }
+}
+
+/// Whether a failed run means there is no server to ask: tmux says so on stderr, or the query hit its deadline.
+fn server_unreachable(result: &Result<TmuxCommandOutput, String>) -> bool {
+    match result {
+        Ok(output) if !output.status_success => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            stderr.contains("no server running")
+                || stderr.contains("error connecting to")
+                || stderr.contains("failed to connect to server")
+        }
+        Ok(_) => false,
+        Err(error) => error.contains("timed out"),
+    }
+}
+
+impl TmuxCommandRunner for ServerGate<'_> {
+    fn run(&self, command: TmuxCommand<'_>) -> Result<TmuxCommandOutput, String> {
+        use std::sync::atomic::Ordering;
+        let needs_server = !matches!(command, TmuxCommand::Version);
+        if needs_server && self.unreachable.load(Ordering::Relaxed) {
+            return Ok(TmuxCommandOutput {
+                status_success: false,
+                stdout: Vec::new(),
+                stderr: b"tmux server is not answering".to_vec(),
+            });
+        }
+        let result = self.inner.run(command);
+        if needs_server && server_unreachable(&result) {
+            self.unreachable.store(true, Ordering::Relaxed);
+        }
+        result
+    }
+}
+
 impl TmuxCommandRunner for LiveTmuxCommandRunner {
     fn run(&self, command: TmuxCommand<'_>) -> Result<TmuxCommandOutput, String> {
         run_tmux_bounded(command, TMUX_QUERY_TIMEOUT)
@@ -165,7 +219,7 @@ impl<T> TmuxQueryResult<T> {
 }
 
 pub fn query_version() -> TmuxQueryResult<String> {
-    query_version_with(&LiveTmuxCommandRunner)
+    query_version_with(&ServerGate::live())
 }
 
 fn query_version_with(runner: &dyn TmuxCommandRunner) -> TmuxQueryResult<String> {
@@ -173,7 +227,7 @@ fn query_version_with(runner: &dyn TmuxCommandRunner) -> TmuxQueryResult<String>
 }
 
 pub fn query_option(option: &str) -> TmuxQueryResult<String> {
-    query_option_with(&LiveTmuxCommandRunner, option)
+    query_option_with(&ServerGate::live(), option)
 }
 
 fn query_option_with(runner: &dyn TmuxCommandRunner, option: &str) -> TmuxQueryResult<String> {
@@ -181,7 +235,7 @@ fn query_option_with(runner: &dyn TmuxCommandRunner, option: &str) -> TmuxQueryR
 }
 
 pub fn query_option_support(option: &str) -> TmuxQueryResult<()> {
-    query_option_support_with(&LiveTmuxCommandRunner, option)
+    query_option_support_with(&ServerGate::live(), option)
 }
 
 fn query_option_support_with(runner: &dyn TmuxCommandRunner, option: &str) -> TmuxQueryResult<()> {
@@ -205,7 +259,7 @@ fn query_option_support_with(runner: &dyn TmuxCommandRunner, option: &str) -> Tm
 /// tmux before 3.2 has no `terminal-features` and renders the unknown format as an empty string.
 /// A server with no attached client has nothing to report.
 pub fn query_client_features() -> TmuxQueryResult<String> {
-    query_client_features_with(&LiveTmuxCommandRunner)
+    query_client_features_with(&ServerGate::live())
 }
 
 fn query_client_features_with(runner: &dyn TmuxCommandRunner) -> TmuxQueryResult<String> {
@@ -213,7 +267,7 @@ fn query_client_features_with(runner: &dyn TmuxCommandRunner) -> TmuxQueryResult
 }
 
 pub fn query_control_mode() -> TmuxQueryResult<bool> {
-    query_control_mode_with(&LiveTmuxCommandRunner)
+    query_control_mode_with(&ServerGate::live())
 }
 
 fn query_control_mode_with(runner: &dyn TmuxCommandRunner) -> TmuxQueryResult<bool> {
@@ -389,6 +443,46 @@ mod tests {
             query_version_with(&runner),
             TmuxQueryResult::Error("spawn failed".to_owned())
         );
+    }
+
+    /// 54.7: `$TMUX` pointing at a server that is gone made every probe at startup ask (and wait on) the dead socket.
+    /// The first answer that says so is enough.
+    #[test]
+    fn a_stopped_server_is_asked_once_not_once_per_query() {
+        let down = std::sync::atomic::AtomicBool::new(false);
+        let runner = FakeRunner::output(false, b"", b"no server running on /tmp/tmux-0/default\n");
+        let gated = ServerGate::new(&runner, &down);
+        assert_eq!(query_control_mode_with(&gated), TmuxQueryResult::Unavailable);
+        assert_eq!(query_client_features_with(&gated), TmuxQueryResult::Unavailable);
+        assert_eq!(query_option_with(&gated, "extended-keys"), TmuxQueryResult::Unavailable);
+        assert_eq!(query_option_support_with(&gated, "allow-passthrough"), TmuxQueryResult::Unavailable);
+        assert_eq!(runner.calls.borrow().as_slice(), ["control-mode"]);
+        // `tmux -V` needs no server and is never short-circuited.
+        let _ = query_version_with(&gated);
+        assert_eq!(runner.calls.borrow().as_slice(), ["control-mode", "version"]);
+    }
+
+    #[test]
+    fn a_timed_out_query_stops_the_remaining_ones() {
+        let down = std::sync::atomic::AtomicBool::new(false);
+        let runner = FakeRunner {
+            output: Err("tmux query timed out after 2s".to_owned()),
+            calls: RefCell::new(Vec::new()),
+        };
+        let gated = ServerGate::new(&runner, &down);
+        assert!(matches!(query_control_mode_with(&gated), TmuxQueryResult::Error(_)));
+        assert_eq!(query_client_features_with(&gated), TmuxQueryResult::Unavailable);
+        assert_eq!(runner.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn an_ordinary_failure_does_not_silence_later_queries() {
+        let down = std::sync::atomic::AtomicBool::new(false);
+        let runner = FakeRunner::output(false, b"", b"invalid option: extended-keys\n");
+        let gated = ServerGate::new(&runner, &down);
+        let _ = query_option_with(&gated, "extended-keys");
+        let _ = query_control_mode_with(&gated);
+        assert_eq!(runner.calls.borrow().len(), 2);
     }
 
     #[test]

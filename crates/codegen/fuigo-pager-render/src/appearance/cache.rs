@@ -132,6 +132,66 @@ pub fn set_show_timeline(enabled: bool) {
     TIMELINE_LOADED.with(|l| l.set(true));
 }
 
+// -- Welcome background mark -----------------------------------------------------
+
+const BACKGROUND_MARK_DEFAULT: bool = UiConfig::BACKGROUND_MARK_DEFAULT;
+/// `[ui].animations` default: decorative animations (the background mark's spin) are on.
+const ANIMATIONS_DEFAULT: bool = true;
+
+thread_local! {
+    static BACKGROUND_MARK_CURRENT: Cell<bool> = const { Cell::new(BACKGROUND_MARK_DEFAULT) };
+    static BACKGROUND_MARK_LOADED: Cell<bool> = const { Cell::new(false) };
+    static BACKGROUND_MARK_ANIMATE_CURRENT: Cell<bool> = const { Cell::new(BACKGROUND_MARK_DEFAULT) };
+    static BACKGROUND_MARK_ANIMATE_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Read cached `[ui].background_mark`, seeding from the effective config on first call.
+pub fn load_background_mark() -> bool {
+    BACKGROUND_MARK_LOADED.with(|loaded| {
+        if !loaded.get() {
+            BACKGROUND_MARK_CURRENT.with(|c| {
+                c.set(load_bool_from_effective_config(
+                    "background_mark",
+                    BACKGROUND_MARK_DEFAULT,
+                ))
+            });
+            loaded.set(true);
+        }
+    });
+    BACKGROUND_MARK_CURRENT.with(|c| c.get())
+}
+
+pub fn set_background_mark(enabled: bool) {
+    BACKGROUND_MARK_CURRENT.with(|c| c.set(enabled));
+    BACKGROUND_MARK_LOADED.with(|l| l.set(true));
+}
+
+/// `[ui].animations`: whether decorative animations may run. The caller caches the answer.
+pub fn load_animations() -> bool {
+    load_bool_from_effective_config("animations", ANIMATIONS_DEFAULT)
+}
+
+/// Read cached `[ui].background_mark_animate`, seeding from the effective config on first call.
+pub fn load_background_mark_animate() -> bool {
+    BACKGROUND_MARK_ANIMATE_LOADED.with(|loaded| {
+        if !loaded.get() {
+            BACKGROUND_MARK_ANIMATE_CURRENT.with(|c| {
+                c.set(load_bool_from_effective_config(
+                    "background_mark_animate",
+                    BACKGROUND_MARK_DEFAULT,
+                ))
+            });
+            loaded.set(true);
+        }
+    });
+    BACKGROUND_MARK_ANIMATE_CURRENT.with(|c| c.get())
+}
+
+pub fn set_background_mark_animate(enabled: bool) {
+    BACKGROUND_MARK_ANIMATE_CURRENT.with(|c| c.set(enabled));
+    BACKGROUND_MARK_ANIMATE_LOADED.with(|l| l.set(true));
+}
+
 // -- Page-flip on send ---------------------------------------------------------
 
 thread_local! {
@@ -632,6 +692,11 @@ pub fn prime(ui: &UiConfig) {
     set_timestamps(ui.show_timestamps.unwrap_or(TIMESTAMPS_DEFAULT));
     set_show_timeline(ui.show_timeline_enabled());
     set_page_flip_on_send(ui.page_flip_on_send_enabled());
+    set_background_mark(ui.background_mark.unwrap_or(BACKGROUND_MARK_DEFAULT));
+    set_background_mark_animate(
+        ui.background_mark_animate
+            .unwrap_or(BACKGROUND_MARK_DEFAULT),
+    );
     set_combine_queued_prompts(
         ui.combine_queued_prompts
             .unwrap_or(COMBINE_QUEUED_PROMPTS_DEFAULT),
@@ -756,6 +821,7 @@ mod tests {
             ui.follow_up_behavior()
         );
         assert_eq!(SIMPLE_MODE_DEFAULT, ui.simple_mode.unwrap_or(true));
+        assert_eq!(ANIMATIONS_DEFAULT, ui.animations.unwrap_or(ANIMATIONS_DEFAULT));
         assert_eq!(VIM_MODE_DEFAULT, ui.vim_mode.unwrap_or(false));
         assert_eq!(
             SHOW_THINKING_BLOCKS_DEFAULT,

@@ -1,4 +1,5 @@
 use super::*;
+use fuigo_chat_state::image_budget::IMAGE_COMPACT_TRIGGER_BYTES;
 use fuigo_sampling_types::ContentPart;
 
 fn data_image(bytes: usize) -> ContentPart {
@@ -8,14 +9,30 @@ fn data_image(bytes: usize) -> ContentPart {
     }
 }
 
+/// A compaction request is held to the same per-model cap as a turn request: 28 MB of images is under the
+/// default trigger but over a 30 MB (Messages-style) cap's.
+#[test]
+fn a_smaller_request_cap_lowers_the_compaction_trigger() {
+    let source = vec![ConversationItem::user_with_parts(vec![data_image(28_000_000)])];
+    let uncapped = build_compaction_chat_history(source.clone(), None, true, None, 0);
+    let capped = build_compaction_chat_history(source, None, true, NonZeroU64::new(30_000_000), 0);
+    assert!(!uncapped.image_budget.needs_image_compaction);
+    assert_eq!(uncapped.image_budget.evicted, 0);
+    assert!(capped.image_budget.needs_image_compaction);
+    assert_eq!(capped.image_budget.evicted, 1);
+    // Re-preparing an already prepared history keeps it verbatim whatever cap is passed.
+    let again = CompactionHistoryInput::from(capped).prepare(None, 0);
+    assert_eq!(again.image_budget.evicted, 1);
+}
+
 #[test]
 fn reserved_tool_headroom_triggers_small_history_once() {
     let source = vec![ConversationItem::user_with_parts(vec![data_image(500)])];
-    let unreserved = build_compaction_chat_history(source.clone(), None, true, 0);
+    let unreserved = build_compaction_chat_history(source.clone(), None, true, None, 0);
     let effective_trigger = unreserved.image_budget.body_bytes.saturating_sub(1);
     let reserved_bytes = IMAGE_COMPACT_TRIGGER_BYTES.saturating_sub(effective_trigger);
     let reserved_tokens = u64::try_from(reserved_bytes.div_ceil(4)).unwrap();
-    let prepared = build_compaction_chat_history(source, None, true, reserved_tokens);
+    let prepared = build_compaction_chat_history(source, None, true, None, reserved_tokens);
 
     assert!(!unreserved.image_budget.needs_image_compaction);
     assert!(prepared.image_budget.needs_image_compaction);
@@ -27,7 +44,7 @@ fn reserved_tool_headroom_triggers_small_history_once() {
 
     let expected_items = serde_json::to_value(&prepared.items).unwrap();
     let expected_budget = prepared.image_budget;
-    let final_boundary = CompactionHistoryInput::from(prepared).prepare(u64::MAX);
+    let final_boundary = CompactionHistoryInput::from(prepared).prepare(None, u64::MAX);
     assert_eq!(final_boundary.image_budget, expected_budget);
     assert_eq!(
         serde_json::to_value(final_boundary.items).unwrap(),
@@ -44,8 +61,8 @@ fn compaction_summary_input_projects_agent_message_once_and_keeps_source_raw() {
     let source = vec![ConversationItem::agent_message(&raw)];
     let source_serialized = serde_json::to_vec(&source).unwrap();
 
-    let prepared = build_compaction_chat_history(source.clone(), None, true, 0);
-    let final_boundary = CompactionHistoryInput::from(prepared).prepare(0);
+    let prepared = build_compaction_chat_history(source.clone(), None, true, None, 0);
+    let final_boundary = CompactionHistoryInput::from(prepared).prepare(None, 0);
 
     assert_eq!(
         final_boundary.items[0].text_content(),
@@ -66,8 +83,8 @@ fn prepared_image_only_agent_history_cannot_be_projected_again() {
     image_only.content = vec![data_image(100)];
 
     let prepared =
-        build_compaction_chat_history(vec![ConversationItem::User(image_only)], None, true, 0);
-    let final_boundary = CompactionHistoryInput::from(prepared).prepare(0);
+        build_compaction_chat_history(vec![ConversationItem::User(image_only)], None, true, None, 0);
+    let final_boundary = CompactionHistoryInput::from(prepared).prepare(None, 0);
     let ConversationItem::User(user) = &final_boundary.items[0] else {
         panic!("prepared agent message must stay a user item");
     };
@@ -87,7 +104,7 @@ fn no_image_history_preserves_non_agent_message_prefix_before_prompt() {
         ConversationItem::tool_result("call-1", "tool text"),
     ];
     let source_serialized = serde_json::to_value(&source).unwrap();
-    let request = build_compaction_chat_history(source.clone(), None, true, 0);
+    let request = build_compaction_chat_history(source.clone(), None, true, None, 0);
 
     assert_eq!(request.image_budget.inline_images, 0);
     assert_eq!(

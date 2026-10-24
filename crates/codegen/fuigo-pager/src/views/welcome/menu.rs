@@ -5,7 +5,7 @@ use ratatui::text::Span;
 
 use crate::theme::Theme;
 
-use super::logo::logo_visual_width;
+use super::STACKED_COLUMN_WIDTH;
 
 fn cols(text: &str) -> u16 {
     unicode_width::UnicodeWidthStr::width(text) as u16
@@ -41,7 +41,7 @@ pub fn render_menu(
         .map(|(key, label)| cols(key) + cols(label) + 4)
         .max()
         .unwrap_or(0);
-    let menu_width = logo_visual_width(area.height)
+    let menu_width = STACKED_COLUMN_WIDTH
         .max(30)
         .max(content_min)
         .max(min_width_hint);

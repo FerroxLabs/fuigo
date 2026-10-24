@@ -139,14 +139,22 @@ pub fn print_report(
             writeln!(
                 out,
                 "  Worktree registry at {} could not be opened; rows show as untracked. Check its permissions.",
-                untrusted(abbreviate(&report.registry_path, &report.fuigo_home, &home_label))
+                untrusted(abbreviate(
+                    &report.registry_path,
+                    &report.fuigo_home,
+                    &home_label
+                ))
             )?;
         }
         RegistryState::Corrupt => {
             writeln!(
                 out,
                 "  Worktree registry is damaged; rows show as untracked. Remove {} and run `fuigo worktree db rebuild` to recreate it.",
-                untrusted(abbreviate(&report.registry_path, &report.fuigo_home, &home_label))
+                untrusted(abbreviate(
+                    &report.registry_path,
+                    &report.fuigo_home,
+                    &home_label
+                ))
             )?;
         }
     }

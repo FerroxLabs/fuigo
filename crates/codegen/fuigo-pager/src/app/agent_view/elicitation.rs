@@ -14,8 +14,6 @@ pub(crate) enum UnansweredElicitation {
     Cancelled,
     /// The server stopped waiting (its own timeout), or another window answered.
     ClosedElsewhere,
-    /// This window cancelled it to show a newer request.
-    Superseded,
 }
 
 impl AgentView {
@@ -24,6 +22,11 @@ impl AgentView {
 
         if key.code == KeyCode::Esc {
             return self.handle_card_esc();
+        }
+        if key.code == KeyCode::Enter && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+            // The send-now chord is not an answer; see `card_swallows_send_now`
+            self.show_toast("Answer the prompt first (Enter picks the highlighted choice)");
+            return InputOutcome::Changed;
         }
         if key!('c', CONTROL).matches(key) {
             return self.resolve_elicitation_cancel();
@@ -307,7 +310,11 @@ impl AgentView {
 
     pub(crate) fn promote_pending_elicitation(&mut self) {
         use crate::views::elicitation_view::ElicitationViewState;
-        let Some((req, tx)) = self.pending_elicitation.take() else {
+        let Some((req, tx)) = self
+            .pending_elicitation
+            .take()
+            .or_else(|| self.queued_elicitations.pop_front())
+        else {
             return;
         };
         let stashed = self.stash_prompt_for_elicitation();
@@ -442,9 +449,6 @@ impl AgentView {
             UnansweredElicitation::ClosedElsewhere => format!(
                 "MCP “{server}” request for input closed before it was answered here (it timed out or was answered elsewhere)."
             ),
-            UnansweredElicitation::Superseded => {
-                format!("Cancelled MCP “{server}” request for input to show a newer one.")
-            }
         };
         crate::app::mode_switch::push_block_behind_live_stream(
             &mut self.scrollback,

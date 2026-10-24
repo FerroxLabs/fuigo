@@ -70,20 +70,49 @@ pub fn print_table(records: &[WorktreeRecord], out: &mut impl Write) -> std::io:
                 m
             });
     let breakdown: Vec<String> = by_kind.iter().map(|(k, v)| format!("{v} {k}")).collect();
-    writeln!(out, "  {} worktrees ({})", total, fuigo_tty_utils::untrusted(breakdown.join(", ")))
+    writeln!(
+        out,
+        "  {} worktrees ({})",
+        total,
+        fuigo_tty_utils::untrusted(breakdown.join(", "))
+    )
 }
 pub fn print_json(records: &[WorktreeRecord], out: &mut impl Write) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(records).unwrap_or_else(|_| "[]".to_string());
     writeln!(out, "{json}")
 }
 pub fn print_show(rec: &WorktreeRecord, out: &mut impl Write) -> std::io::Result<()> {
-    writeln!(out, "  Path:           {}", fuigo_tty_utils::untrusted(rec.path.display()))?;
-    writeln!(out, "  ID:             {}", fuigo_tty_utils::untrusted(&rec.id))?;
-    writeln!(out, "  Type:           {}", fuigo_tty_utils::untrusted(rec.kind.as_str()))?;
-    writeln!(out, "  Source Repo:    {}", fuigo_tty_utils::untrusted(rec.source_repo.display()))?;
-    writeln!(out, "  Creation Mode:  {}", fuigo_tty_utils::untrusted(&rec.creation_mode))?;
+    writeln!(
+        out,
+        "  Path:           {}",
+        fuigo_tty_utils::untrusted(rec.path.display())
+    )?;
+    writeln!(
+        out,
+        "  ID:             {}",
+        fuigo_tty_utils::untrusted(&rec.id)
+    )?;
+    writeln!(
+        out,
+        "  Type:           {}",
+        fuigo_tty_utils::untrusted(rec.kind.as_str())
+    )?;
+    writeln!(
+        out,
+        "  Source Repo:    {}",
+        fuigo_tty_utils::untrusted(rec.source_repo.display())
+    )?;
+    writeln!(
+        out,
+        "  Creation Mode:  {}",
+        fuigo_tty_utils::untrusted(&rec.creation_mode)
+    )?;
     if let Some(ref git_ref) = rec.git_ref {
-        writeln!(out, "  Git Ref:        {}", fuigo_tty_utils::untrusted(git_ref))?;
+        writeln!(
+            out,
+            "  Git Ref:        {}",
+            fuigo_tty_utils::untrusted(git_ref)
+        )?;
     }
     if let Some(ref commit) = rec.head_commit {
         let short = if commit.len() > 12 {
@@ -91,7 +120,11 @@ pub fn print_show(rec: &WorktreeRecord, out: &mut impl Write) -> std::io::Result
         } else {
             commit
         };
-        writeln!(out, "  HEAD:           {}", fuigo_tty_utils::untrusted(short))?;
+        writeln!(
+            out,
+            "  HEAD:           {}",
+            fuigo_tty_utils::untrusted(short)
+        )?;
     }
     writeln!(
         out,
@@ -107,9 +140,17 @@ pub fn print_show(rec: &WorktreeRecord, out: &mut impl Write) -> std::io::Result
     if let Some(pid) = rec.creator_pid {
         writeln!(out, "  Creator PID:    {pid}")?;
     }
-    writeln!(out, "  Status:         {}", fuigo_tty_utils::untrusted(rec.status.as_str()))?;
+    writeln!(
+        out,
+        "  Status:         {}",
+        fuigo_tty_utils::untrusted(rec.status.as_str())
+    )?;
     if let Some(label) = rec.label() {
-        writeln!(out, "  Label:          {}", fuigo_tty_utils::untrusted(label))?;
+        writeln!(
+            out,
+            "  Label:          {}",
+            fuigo_tty_utils::untrusted(label)
+        )?;
     }
     if rec.path.exists() {
         let size = physical_dir_size(&rec.path, Volume::of(&rec.path));
@@ -163,7 +204,12 @@ pub fn print_gc(report: &GcReport, out: &mut impl Write) -> std::io::Result<()> 
         const MAX_KEPT_PRINTED: usize = 20;
         let printed = report.kept.len().min(MAX_KEPT_PRINTED);
         for kept in report.kept.iter().take(MAX_KEPT_PRINTED) {
-            writeln!(out, "      {}  ({})", fuigo_tty_utils::untrusted(&kept.path), fuigo_tty_utils::untrusted(&kept.reason))?;
+            writeln!(
+                out,
+                "      {}  ({})",
+                fuigo_tty_utils::untrusted(&kept.path),
+                fuigo_tty_utils::untrusted(&kept.reason)
+            )?;
         }
         let rest = usize::try_from(report.kept_unsafe)
             .unwrap_or(usize::MAX)

@@ -55,6 +55,13 @@ pub fn hitl_permission_live_enabled() -> bool {
 #[async_trait]
 pub trait PermissionHookTransport: Send + Sync {
     async fn request_permission(&self, payload: Value) -> Result<Value, String>;
+
+    /// The sandbox card for the held connection `hold_id` is stale: the hold was released by
+    /// something other than that card's answer, so a late answer records nothing. Told once per
+    /// card; a transport that can take a card off the screen does so here, the default cannot.
+    async fn withdraw_permission(&self, hold_id: &str) {
+        let _ = hold_id;
+    }
 }
 pub struct ToolServerPermissionTransport {
     server: WeakToolServer,
@@ -103,6 +110,16 @@ impl PermissionHookTransport for ToolServerPermissionTransport {
             .with_label_values(&[outcome])
             .observe(start.elapsed().as_secs_f64());
         reply_result.map_err(|e| e.to_string())
+    }
+
+    /// The hub's permission channel carries no frame that takes a card back, so the desktop
+    /// shows this card until its deadline; logged so the gap is visible.
+    async fn withdraw_permission(&self, hold_id: &str) {
+        tracing::debug!(
+            hold_id,
+            session = ?self.session_id,
+            "sandbox card withdrawn on the daemon; the hub has no frame to take it off the screen"
+        );
     }
 }
 fn scope_for_access(access: &AccessKind) -> &'static str {
@@ -505,6 +522,10 @@ pub(crate) struct HubPolicyContext<'a> {
     /// Every spelling of each file a read of the call opens (P198), resolved as the reader resolves it
     /// ([`hub_read_spellings`]); a `Read` access whose path is listed is judged in all of them, as a local read is.
     pub(crate) read_spellings: &'a [HubReadSpelling],
+    /// The sandbox's cover for THIS call: `Some` only while its command is really wrapped by a backend under
+    /// `enforce` (`SandboxCover::for_call`). With it the sandbox card replaces the default prompt when every
+    /// reason for it is on the list in `sandbox_card::card_replaces`; `None` changes nothing.
+    pub(crate) sandbox_cover: Option<&'a crate::permission::SandboxCover>,
 }
 
 /// One file a hub-routed read opens, in every spelling the policy must judge (P198; see
@@ -715,14 +736,26 @@ fn hub_access_verdict(access: &AccessKind, ctx: &HubPolicyContext<'_>) -> HubPol
         return settle_prompt_policy(reason, ctx);
     }
     let policy_allows = matches!(decision, Some(Decision::Allow));
-    if !crate::permission::manager::hub_needs_default_prompt(access, ctx.policy, policy_allows, ctx.cwd) {
+    let default_prompt = crate::permission::manager::hub_default_prompt(
+        access,
+        ctx.policy,
+        policy_allows,
+        ctx.cwd,
+        ctx.sandbox_cover,
+    );
+    if !default_prompt.needs {
         return HubPolicyVerdict::Allow;
     }
     match ctx.prompt_policy {
+        // dontAsk refuses what would need approval; the sandbox card is not an approval, so it refuses still.
         PromptPolicy::Deny => HubPolicyVerdict::Deny(DONT_ASK.to_owned()),
         PromptPolicy::Allow => HubPolicyVerdict::Allow,
         PromptPolicy::Ask | PromptPolicy::Auto if ctx.default_prompts => {
-            HubPolicyVerdict::Ask(hub_ask_reason::DEFAULT_PROMPT)
+            if crate::permission::card_replaces(&default_prompt.causes, ctx.sandbox_cover).is_some() {
+                HubPolicyVerdict::Allow
+            } else {
+                HubPolicyVerdict::Ask(hub_ask_reason::DEFAULT_PROMPT)
+            }
         }
         PromptPolicy::Ask | PromptPolicy::Auto => HubPolicyVerdict::Allow,
     }
@@ -1344,6 +1377,7 @@ mod tests {
             walk_searches: false,
             patch_targets: &[],
             read_spellings: &[],
+            sandbox_cover: None,
         }
     }
 

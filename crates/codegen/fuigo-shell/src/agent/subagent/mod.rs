@@ -459,6 +459,10 @@ impl SubagentSpawnContext {
                 .and_then(|r| r.compaction_detail.as_deref()),
         ))
     }
+    /// Whether subagents run on the parent model only (`[features] subagent_model_inheritance`).
+    pub(crate) fn resolve_subagent_model_inheritance_enabled(&self) -> bool {
+        self.resolve_feature(crate::agent::config::Feature::SubagentModelInheritance)
+    }
     /// Whether a completed subagent's working copy is saved into the repo as a git ref and its directory deleted.
     pub(crate) fn resolve_subagent_worktree_snapshot_enabled(&self) -> bool {
         self.resolve_feature(crate::agent::config::Feature::SubagentWorktreeSnapshot)
@@ -730,6 +734,7 @@ async fn read_parent_sampling_config(
                 query_params: cfg.query_params.clone(),
                 env_http_headers: cfg.env_http_headers.clone(),
                 context_window: cfg.context_window.get(),
+                max_request_bytes: cfg.max_request_bytes,
                 client_version: creds.client_version,
                 reasoning_effort: cfg.reasoning_effort,
                 force_http1: false,

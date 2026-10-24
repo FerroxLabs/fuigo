@@ -131,7 +131,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal, ctx: &Terminal
     {
         clear_btw_geometry(agent);
     }
-    fuigo_pager::render::draw::draw_frame(terminal, cursor, ctx, |frame, _link_spans| {
+    fuigo_pager::render::draw::draw_frame_at_adopted_size(terminal, cursor, ctx, |frame, _link_spans| {
         let area = frame.area();
         if area.height == 0 || area.width < 4 {
             return (None, None);

@@ -22,6 +22,8 @@ use crate::session::git::{
 };
 
 mod identity;
+#[cfg(test)]
+mod rowsa2_tests;
 pub use identity::{WorktreeIdentity, worktree_identity_for_cwd, worktree_identity_in};
 
 // Canonical in fuigo-workspace-types; re-exported for existing paths.
@@ -1282,6 +1284,89 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
 // Remove Worktree
 // ============================================================================
 
+/// Why `grok worktree rm <path>` must not remove `path`, or `None` when it may go ahead.
+///
+/// Refused whatever `force` says (it overrides busy and dirty, never what the path is):
+/// a `.git` folder or anything inside one, a git repository (a main working tree or a bare repo: a linked worktree's
+/// `.git` is a file), and any directory Fuigo did not create (neither recorded in the worktree database nor under
+/// its managed worktree directories). Without `force` it is also refused while in use (a process runs inside it, or the
+/// session that created it is alive) and while it holds uncommitted changes.
+///
+/// Blocking: reads the filesystem and the process table.
+pub(crate) fn removal_refusal(
+    path: &Path,
+    force: bool,
+    record: Option<&WorktreeRecord>,
+    fuigo_home: &Path,
+) -> Option<String> {
+    let shown = path.display();
+    let exists = std::fs::symlink_metadata(path).is_ok();
+    let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if canonical
+        .components()
+        .any(|part| part.as_os_str() == ".git")
+    {
+        return Some(format!(
+            "{shown} is a .git folder or inside one; refusing to remove it"
+        ));
+    }
+    if exists {
+        let git_entry = canonical.join(".git");
+        let bare = canonical.join("HEAD").is_file()
+            && canonical.join("objects").is_dir()
+            && canonical.join("refs").is_dir();
+        if git_entry.is_dir() || bare {
+            return Some(format!(
+                "{shown} is a git repository, not a linked worktree; refusing to remove it"
+            ));
+        }
+    }
+    if record.is_none()
+        && !fuigo_fast_worktree::path_under_managed_worktree_roots(&canonical, fuigo_home)
+    {
+        return Some(format!(
+            "{shown} is not a worktree Fuigo created; refusing to remove it"
+        ));
+    }
+    if force || !exists {
+        return None;
+    }
+    if let Some(busy) = fuigo_fast_worktree::worktree_in_use(&canonical, record) {
+        let detail = match busy {
+            fuigo_fast_worktree::InUse::Process => {
+                "a running process has its working directory inside it".to_owned()
+            }
+            fuigo_fast_worktree::InUse::Creator(pid) => {
+                format!("the session that created it is still running (pid {pid})")
+            }
+            fuigo_fast_worktree::InUse::Unknown => {
+                "whether a process is using it could not be checked".to_owned()
+            }
+        };
+        return Some(format!(
+            "{shown} is in use: {detail}. Stop what is using it, or pass --force to remove it anyway"
+        ));
+    }
+    if let Ok(repo) = Repository::open(&canonical) {
+        let mut options = git2::StatusOptions::new();
+        options.include_untracked(true).include_ignored(false);
+        match repo.statuses(Some(&mut options)) {
+            Ok(statuses) if statuses.is_empty() => {}
+            Ok(_) => {
+                return Some(format!(
+                    "{shown} has uncommitted changes. Commit or discard them, or pass --force to remove it anyway"
+                ));
+            }
+            Err(_) => {
+                return Some(format!(
+                    "{shown}: could not check for uncommitted changes. Pass --force to remove it anyway"
+                ));
+            }
+        }
+    }
+    None
+}
+
 pub async fn remove_worktree(
     req: &RemoveWorktreeRequest,
     copy_context: &BackgroundCopyContext,
@@ -1298,6 +1383,29 @@ pub async fn remove_worktree(
         (None, None) => anyhow::bail!("either worktreePath or idOrPath must be set"),
     };
     let worktree_path = Path::new(&resolved);
+    let hand_deleted_source_repo: Option<std::path::PathBuf>;
+
+    {
+        let guarded = worktree_path.to_path_buf();
+        let force = req.force;
+        let lookup = resolved.clone();
+        let (refusal, source_repo) = tokio::task::spawn_blocking(move || {
+            let record = open_db().ok().and_then(|db| db.get(&lookup).ok().flatten());
+            let refusal = removal_refusal(&guarded, force, record.as_ref(), &fuigo_home());
+            // Only a folder that is already gone needs its git registration cleared by hand.
+            let source_repo = record
+                .filter(|_| std::fs::symlink_metadata(&guarded).is_err())
+                .map(|r| r.source_repo);
+            (refusal, source_repo)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("worktree removal check failed: {e}"))?;
+        hand_deleted_source_repo = source_repo;
+        if let Some(reason) = refusal {
+            tracing::warn!(target: WORKTREE_LOG, path = %resolved, %reason, "REMOVE_REFUSED");
+            anyhow::bail!("{reason}");
+        }
+    }
 
     tracing::info!(
         target: WORKTREE_LOG,
@@ -1367,6 +1475,14 @@ pub async fn remove_worktree(
                 used_btrfs = report.used_btrfs_delete,
                 "REMOVE_OK: worktree removed successfully"
             );
+            if let Some(source_repo) = hand_deleted_source_repo.filter(|r| r.is_dir()) {
+                // The folder was deleted by hand, so git still lists it: forget it, or the path and branch stay claimed.
+                let gone = worktree_path.to_path_buf();
+                let _ = tokio::task::spawn_blocking(move || {
+                    fuigo_fast_worktree::remove_stale_worktree_registration(&source_repo, &gone)
+                })
+                .await;
+            }
             Ok(RemoveWorktreeResponse {
                 removed: true,
                 resolved_path: Some(resolved),
@@ -2415,7 +2531,10 @@ pub async fn remove_jj_workspace(workspace_path: &str) -> Result<()> {
         .unwrap_or("unknown")
         .replace(['/', '\\', '.'], "-");
 
-    if let Ok(root) = find_git_root_from_path(path) {
+    // Run inside the workspace: with no name `jj workspace forget` forgets the workspace it runs in, whatever it was
+    // called when created (the session id, not this folder's name).
+    let forgotten = path.is_dir() && jj_cli_mut(path, &["workspace", "forget"]).await.is_ok();
+    if !forgotten && let Ok(root) = find_git_root_from_path(path) {
         let _ = jj_cli_mut(&root, &["workspace", "forget", &name]).await;
     }
 
@@ -2773,13 +2892,91 @@ pub fn candidate_worktree_cwds_for_same_repo(current_cwd: &std::path::Path) -> R
         }
         Err(_) => Vec::new(),
     };
-    let fs_paths = scan_worktree_dirs_on_disk(&main_root);
-    Ok(build_candidate_list(
+    // The folder scan is keyed by repository NAME, so two repositories with one name share a folder: keep this repository's
+    let fs_paths: Vec<String> = scan_worktree_dirs_on_disk(&main_root)
+        .into_iter()
+        .filter(|path| worktree_belongs_to_repo(Path::new(path), &main_root))
+        .collect();
+    let mut candidates = build_candidate_list(
         &current_cwd.to_string_lossy(),
         &main_root.to_string_lossy(),
         &db_records,
         &fs_paths,
-    ))
+    );
+    // From a folder inside the repository, the same folder in each worktree is where sessions started there live
+    let roots: Vec<String> = candidates.iter().skip(1).cloned().collect();
+    let same_folder = same_subfolder_candidates(&current_cwd.to_string_lossy(), &main_root.to_string_lossy(), &roots);
+    for (offset, path) in same_folder.into_iter().enumerate() {
+        if !candidates.contains(&path) {
+            candidates.insert(1 + offset, path);
+        }
+    }
+    // A submodule is a repository of its own, so its worktrees are none of the superproject's. The superproject's
+    // worktrees each hold the same submodule at the same path: the sessions started there belong with these
+    if let Some((super_root, within)) = superproject_of(&main_root) {
+        let inside = current_cwd.strip_prefix(&main_root).unwrap_or(Path::new(""));
+        if let Ok(super_candidates) = candidate_worktree_cwds_for_same_repo(&super_root) {
+            for root in super_candidates {
+                let path = Path::new(&root).join(&within).join(inside).to_string_lossy().into_owned();
+                if !candidates.contains(&path) {
+                    candidates.push(path);
+                }
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+/// The repository that holds `repo_root` as a submodule, and the submodule's path inside it; `None` for a repository
+/// that is not a registered submodule of the repository around it.
+fn superproject_of(repo_root: &Path) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let parent = repo_root.parent()?;
+    let outer = Repository::discover(parent).ok()?;
+    let outer_root = crate::session::git::repo_workdir(&outer, parent)?;
+    let within = repo_root.strip_prefix(&outer_root).ok()?.to_path_buf();
+    outer.find_submodule(within.to_str()?).ok()?;
+    Some((outer_root, within))
+}
+
+/// The folder `current_cwd` names, relative to whichever of `main_root` or `worktree_roots` contains it, joined onto every
+/// OTHER root: the same subfolder in the main checkout and in each worktree. Empty when `current_cwd` is a root itself or
+/// is inside none of them.
+pub fn same_subfolder_candidates(current_cwd: &str, main_root: &str, worktree_roots: &[String]) -> Vec<String> {
+    let all: Vec<&str> = std::iter::once(main_root).chain(worktree_roots.iter().map(String::as_str)).collect();
+    let cwd = Path::new(current_cwd);
+    // The deepest root that contains the cwd is the checkout it is in
+    let Some((home_root, relative)) = all
+        .iter()
+        .filter_map(|root| cwd.strip_prefix(root).ok().map(|rel| (*root, rel)))
+        .min_by_key(|(_, rel)| rel.components().count())
+    else {
+        return Vec::new();
+    };
+    if relative.as_os_str().is_empty() {
+        return Vec::new();
+    }
+    all.iter()
+        .filter(|root| **root != home_root)
+        .map(|root| Path::new(root).join(relative).to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Whether `worktree` (a folder found under the shared worktree directory) is a checkout of the repository at `main_root`:
+/// a linked worktree whose git directory is that repository's, or a standalone clone that records it as its source.
+fn worktree_belongs_to_repo(worktree: &Path, main_root: &Path) -> bool {
+    let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if let Ok(marker) = std::fs::read_to_string(worktree.join(".git").join("fuigo-worktree-source")) {
+        let source = marker.trim();
+        if !source.is_empty() {
+            return canon(Path::new(source)) == canon(main_root);
+        }
+    }
+    let common = |path: &Path| git2::Repository::open(path).ok().map(|r| canon(r.commondir()));
+    match (common(worktree), common(main_root)) {
+        (Some(theirs), Some(ours)) => theirs == ours,
+        // Cannot tell: keep it, as before
+        _ => true,
+    }
 }
 
 /// Scan `~/.fuigo/worktrees/<repo_name>/` for subdirectories not tracked
@@ -3580,5 +3777,104 @@ mod tests {
             dest.exists(),
             "the winning creator must have created the worktree"
         );
+    }
+}
+
+#[cfg(test)]
+mod removal_refusal_tests {
+    use super::removal_refusal;
+    use std::path::{Path, PathBuf};
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("run git");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A repository with one commit, and a linked worktree of it under `<home>/worktrees/demo/wt`.
+    fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = root.path().join("fuigo-home");
+        let repo = root.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        let wt = home.join("worktrees").join("demo").join("wt");
+        std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+        git(&repo, &["worktree", "add", "-q", "-b", "feature", wt.to_str().unwrap()]);
+        (root, home, repo, wt)
+    }
+
+    #[test]
+    fn a_clean_worktree_fuigo_created_may_be_removed() {
+        let (_root, home, _repo, wt) = fixture();
+        assert_eq!(removal_refusal(&wt, false, None, &home), None);
+    }
+
+    #[test]
+    fn uncommitted_changes_need_force() {
+        let (_root, home, _repo, wt) = fixture();
+        std::fs::write(wt.join("new.txt"), "unsaved").unwrap();
+        let reason = removal_refusal(&wt, false, None, &home).expect("refused without -f");
+        assert!(reason.contains("uncommitted changes"), "{reason}");
+        assert!(reason.contains("--force"), "the remedy is named: {reason}");
+        assert_eq!(removal_refusal(&wt, true, None, &home), None, "-f overrides dirty");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_worktree_a_process_runs_in_needs_force() {
+        let (_root, home, _repo, wt) = fixture();
+        #[allow(clippy::disallowed_methods)] // test-owned child, killed and reaped below
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(&wt)
+            .spawn()
+            .expect("spawn sleep");
+        let refused = removal_refusal(&wt, false, None, &home);
+        let forced = removal_refusal(&wt, true, None, &home);
+        let _ = child.kill();
+        let _ = child.wait();
+        let reason = refused.expect("refused while in use");
+        assert!(reason.contains("in use"), "{reason}");
+        assert!(reason.contains("--force"), "{reason}");
+        assert_eq!(forced, None, "-f overrides in use");
+    }
+
+    #[test]
+    fn a_git_folder_and_a_repository_are_refused_even_with_force() {
+        let (_root, home, repo, _wt) = fixture();
+        let reason = removal_refusal(&repo.join(".git"), true, None, &home).expect(".git refused");
+        assert!(reason.contains(".git"), "{reason}");
+        let reason = removal_refusal(&repo.join(".git").join("refs"), true, None, &home).expect("inside .git refused");
+        assert!(reason.contains(".git"), "{reason}");
+        let reason = removal_refusal(&repo, true, None, &home).expect("repository refused");
+        assert!(reason.contains("git repository"), "{reason}");
+        let bare = repo.parent().unwrap().join("bare.git");
+        git(repo.parent().unwrap(), &["init", "-q", "--bare", bare.to_str().unwrap()]);
+        let reason = removal_refusal(&bare, true, None, &home).expect("bare repository refused");
+        assert!(reason.contains("git repository"), "{reason}");
+    }
+
+    #[test]
+    fn a_directory_fuigo_did_not_create_is_refused_even_with_force() {
+        let (root, home, _repo, _wt) = fixture();
+        let stranger = root.path().join("my-documents");
+        std::fs::create_dir_all(&stranger).unwrap();
+        std::fs::write(stranger.join("thesis.txt"), "important").unwrap();
+        let reason = removal_refusal(&stranger, true, None, &home).expect("not created by Fuigo");
+        assert!(reason.contains("not a worktree Fuigo created"), "{reason}");
+        let reason = removal_refusal(&stranger, false, None, &home).expect("not created by Fuigo");
+        assert!(reason.contains("not a worktree Fuigo created"), "{reason}");
     }
 }

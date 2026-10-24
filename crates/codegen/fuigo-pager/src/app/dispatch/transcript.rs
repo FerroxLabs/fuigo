@@ -101,12 +101,17 @@ pub(super) fn dispatch_copy_assistant_message(
         let stats = crate::clipboard::clipboard_stats_suffix(text);
 
         if let Some(p) = file_path {
-            match crate::clipboard::write_text_to_copy_file(text, &p) {
+            match crate::clipboard::write_text_to_new_file(text, &p, true) {
                 Ok(path) => {
                     agent.scrollback.push_block(RenderBlock::system(format!(
                         "Copied to {}{stats}",
                         path.display()
                     )));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    agent.scrollback.push_block(RenderBlock::system(
+                        "Nothing copied: a file with that name already exists. Choose another name or remove it first",
+                    ));
                 }
                 Err(e) => {
                     agent
@@ -169,23 +174,19 @@ pub(super) fn dispatch_export_conversation(
         }
 
         if let Some(p) = file_path {
-            // All fs logic (tilde, mkdir, write) lives here so the slash-command layer stays thin
-            let expanded =
-                std::path::PathBuf::from(shellexpand::tilde(&p.to_string_lossy()).as_ref());
-            if let Some(parent) = expanded.parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                agent.scrollback.push_block(RenderBlock::system(format!(
-                    "Failed to create directory: {e}"
-                )));
-                return;
-            }
-            match std::fs::write(&expanded, &md) {
-                Ok(()) => {
+            // All fs logic (tilde, mkdir, write) lives in the helper so the slash-command layer stays thin
+            // An existing file is never replaced
+            match crate::clipboard::write_text_to_new_file(&md, &p, false) {
+                Ok(expanded) => {
                     agent.scrollback.push_block(RenderBlock::system(format!(
                         "Conversation exported to {}",
                         expanded.display()
                     )));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    agent.scrollback.push_block(RenderBlock::system(
+                        "Nothing exported: a file with that name already exists. Choose another name or remove it first",
+                    ));
                 }
                 Err(e) => {
                     // Do not re-emit a user-supplied path in the error message (it may contain secrets or PII)
@@ -290,7 +291,12 @@ pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
         // Block has images/media but the terminal can't render pixels: toast and bail
         let has_media =
             !entry.block.image_references().is_empty() || entry.block.inline_media().is_some();
-        if has_media && !crate::terminal::image::detect_graphics_protocol().supports_images() {
+        // A video never needs the guard: without graphics it opens in the default player
+        let has_video = !entry.block.video_references().is_empty();
+        if has_media
+            && !has_video
+            && !crate::terminal::image::detect_graphics_protocol().supports_images()
+        {
             agent.guard_image_support();
             return;
         }

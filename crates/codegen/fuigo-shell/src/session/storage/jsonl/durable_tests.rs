@@ -535,3 +535,28 @@ async fn init_session_skips_parent_sync_on_a_populated_resume() {
 fn darwin_fullfsync_seam_reports_invalid_descriptor() {
     assert!(super::super::fullfsync_raw(-1).is_err());
 }
+
+/// REWINDPERF: on macOS every durable write pays full `F_FULLFSYNC` flushes, which cost hundreds of ms on a busy or
+/// external volume. One file sync and one directory sync must each be exactly ONE flush (Rust's `File::sync_all` already
+/// is `F_FULLFSYNC` there, so a `sync_all` followed by `fullfsync_raw` flushed every descriptor twice), and one atomic
+/// write is therefore exactly two: the temp file, then its parent directory.
+#[cfg(target_os = "macos")]
+#[test]
+fn darwin_durable_sync_is_one_full_flush_per_descriptor() {
+    use super::super::{FULLFSYNC_CALLS, sync_dir_durable, sync_file_durable, write_bytes_atomic};
+    let flushes = || FULLFSYNC_CALLS.with(std::cell::Cell::get);
+    let dir = tempfile::tempdir().unwrap();
+    let file = std::fs::File::create(dir.path().join("probe")).unwrap();
+
+    let start = flushes();
+    sync_file_durable(&file).unwrap();
+    assert_eq!(flushes() - start, 1, "one file sync is one full flush");
+
+    let start = flushes();
+    sync_dir_durable(dir.path()).unwrap();
+    assert_eq!(flushes() - start, 1, "one directory sync is one full flush");
+
+    let start = flushes();
+    write_bytes_atomic(&dir.path().join("atomic.json"), b"{}").unwrap();
+    assert_eq!(flushes() - start, 2, "an atomic write is one flush for the file and one for its parent");
+}

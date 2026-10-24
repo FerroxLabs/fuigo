@@ -77,6 +77,9 @@ pub struct PinGcReport {
     pub examined: u64,
     pub pruned: u64,
     pub deferred_grace: u64,
+    /// Examined ids this sweep neither pruned nor deferred: still live, or
+    /// their pin was already absent. `examined == pruned + deferred_grace +
+    /// kept_live` always holds.
     pub kept_live: u64,
     /// Worktree ids counted in `pruned`. Callers union these across grove
     /// data dirs so dry-run does not double-count a pin that is never deleted.
@@ -436,6 +439,12 @@ pub fn gc_orphan_pins(
         }
         match pin_exists(&source, &id) {
             Ok(false) => {
+                // The pin is already gone (deleted by a prior cycle, another
+                // sweeper, or the user). Nothing left for this sweep to
+                // prune or age: count it as kept (reason: pin already
+                // absent) so every examined id has exactly one outcome.
+                tracing::debug!(id, "pin GC: pin already absent; dropping orphan entry");
+                report.kept_live += 1;
                 state.orphans.remove(&id);
                 continue;
             }
@@ -844,6 +853,28 @@ mod tests {
         let r = gc_orphan_pins(&data, &[], 10 + PIN_GC_GRACE_SECS, false).unwrap();
         assert_eq!(r.pruned, 0);
         assert!(pin_exists(&repo, "wt-fly").unwrap());
+    }
+    #[test]
+    #[cfg(feature = "metadata")]
+    fn every_examined_orphan_has_exactly_one_outcome_even_when_its_pin_is_gone() {
+        fuigo_test_utils::require_git!();
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        git_commit_all(&repo, "c");
+        let data = tmp.path().join("grove-data");
+        // Journal row says orphan (aborted), but no pin ref exists in the repo.
+        write_create_state(&data, "wt-gone", "aborted", "/dest", &repo);
+        let r = gc_orphan_pins(&data, &[], 10 + PIN_GC_GRACE_SECS, false).unwrap();
+        assert_eq!(r.examined, 1);
+        assert_eq!(
+            r.pruned + r.deferred_grace + r.kept_live,
+            r.examined,
+            "an examined orphan must be counted in exactly one outcome: {r:?}"
+        );
+        assert_eq!(r.kept_live, 1, "absent pin is kept (nothing to prune): {r:?}");
     }
     #[test]
     #[cfg(feature = "metadata")]

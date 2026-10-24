@@ -9,6 +9,7 @@ pub mod fuigo_home;
 pub mod hash;
 pub mod image_compress;
 pub mod image_validate;
+pub mod lock_path;
 pub mod mcp_truncate;
 pub mod path_match;
 pub mod path_suggestions;

@@ -6,7 +6,7 @@
 //! Cells are host-paced PTY sessions, so a process-wide lock serializes them.
 //! The default in-process test parallelism would stretch gesture gaps and stack eight pagers onto one machine.
 //!
-//! Artifacts (recorder captures and per-cell report.json rows) land under `$TMPDIR/scroll-matrix-curated/` and are kept for post-mortems.
+//! Artifacts (recorder captures and per-cell report.json rows) land under `$TMPDIR/scroll-matrix-curated-<pid>/` (or `$TEST_TMPDIR/scroll-matrix-curated/`) and are kept for post-mortems.
 // Test, bench or example code: its prints reach a harness or a developer, never a user, so the
 // workspace print deny (R077) is waived here.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
@@ -24,11 +24,14 @@ static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Per-cell captures land here: Bazel's `TEST_TMPDIR` (unique per test action), or the system temp dir for plain `cargo test`.
 /// This target is `tags = ["local"]`, so concurrent executions on a CI host would otherwise share `/tmp/scroll-matrix-curated/<cell_id>.jsonl`.
 /// A second run's stale-capture `remove_file` (and its pager's `FUIGO_SCROLL_LOG` writer) then corrupts the first run's in-flight capture.
+///
+/// Plain `cargo test` gets a directory of its own per process (`scroll-matrix-curated-<pid>`): two suites running at once on one host (two gate lanes, or a rerun beside a live run) used to share
+/// `/tmp/scroll-matrix-curated/` and delete or overwrite each other's `.jsonl` ("failed to read scroll log ... No such file").
 fn artifacts_dir() -> PathBuf {
-    std::env::var_os("TEST_TMPDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("scroll-matrix-curated")
+    match std::env::var_os("TEST_TMPDIR") {
+        Some(dir) => PathBuf::from(dir).join("scroll-matrix-curated"),
+        None => std::env::temp_dir().join(format!("scroll-matrix-curated-{}", std::process::id())),
+    }
 }
 
 /// Run one curated cell by id and return its report (panics on unknown ids so a renamed cell can't leave a vacuous test behind).

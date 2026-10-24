@@ -1118,6 +1118,7 @@ fn test_model_entry(
             query_params: IndexMap::new(),
             env_http_headers: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
+            max_request_bytes: None,
             context_windows: Vec::new(),
             notice: None,
             auto_compact_threshold_percent: None,
@@ -1138,6 +1139,7 @@ fn test_model_entry(
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
+            price: None,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
             variants: Vec::new(),
@@ -2411,6 +2413,7 @@ fn model_info_from_config_propagates_use_concise() {
         auth_scheme: None,
         extra_headers: IndexMap::new(),
         context_window: NonZeroU64::new(200_000).unwrap(),
+        max_request_bytes: None,
         context_windows: Vec::new(),
         notice: None,
         auto_compact_threshold_percent: None,
@@ -2431,6 +2434,7 @@ fn model_info_from_config_propagates_use_concise() {
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,
+        price: None,
         stream_tool_calls: None,
         laziness_detector: LazinessDetectorPerModelConfig::default(),
         variants: Vec::new(),
@@ -2578,6 +2582,7 @@ fn model_info_from_config_propagates_agent_type() {
         auth_scheme: None,
         extra_headers: IndexMap::new(),
         context_window: NonZeroU64::new(200_000).unwrap(),
+        max_request_bytes: None,
         context_windows: Vec::new(),
         notice: None,
         auto_compact_threshold_percent: None,
@@ -2598,6 +2603,7 @@ fn model_info_from_config_propagates_agent_type() {
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,
+        price: None,
         stream_tool_calls: None,
         laziness_detector: LazinessDetectorPerModelConfig::default(),
         variants: Vec::new(),
@@ -3037,6 +3043,7 @@ fn inference_idle_timeout_propagates_to_model_info() {
         auth_scheme: None,
         extra_headers: IndexMap::new(),
         context_window: NonZeroU64::new(200_000).unwrap(),
+        max_request_bytes: None,
         context_windows: Vec::new(),
         notice: None,
         auto_compact_threshold_percent: None,
@@ -3057,6 +3064,7 @@ fn inference_idle_timeout_propagates_to_model_info() {
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,
+        price: None,
         stream_tool_calls: None,
         laziness_detector: LazinessDetectorPerModelConfig::default(),
         variants: Vec::new(),
@@ -7188,6 +7196,7 @@ fn prefetch_model_entry(slug: &str, context_window: u64, api_backend: ApiBackend
             query_params: IndexMap::new(),
             env_http_headers: IndexMap::new(),
             context_window: NonZeroU64::new(context_window).unwrap(),
+            max_request_bytes: None,
             context_windows: Vec::new(),
             notice: None,
             use_concise: false,
@@ -7206,6 +7215,7 @@ fn prefetch_model_entry(slug: &str, context_window: u64, api_backend: ApiBackend
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
+            price: None,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
             auto_compact_threshold_percent: None,
@@ -9537,6 +9547,33 @@ fn model_notice_table_form_and_blank_clears() {
     assert_eq!(a.info.notice, None, "a blank notice clears the inherited one");
 }
 
+/// A `[model.<id>]` table that customises a model (endpoint, name, window) but sets no `notice` keeps the model's own banner.
+#[test]
+fn custom_model_table_keeps_the_original_notice_banner() {
+    let raw: toml::Value = toml::from_str(
+        "[model.m]\nname = \"My model\"\nbase_url = \"https://custom.example/v1\"\ncontext_window = 64000\n",
+    )
+    .unwrap();
+    let parsed = crate::agent::config_model_override_parse::parse_model_overrides(&raw);
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let mut base = test_model_entry("m", "https://test.api/v1", None, None, None);
+    base.info.notice = Some(fuigo_sampling_types::ModelNotice {
+        severity: fuigo_sampling_types::ModelNoticeSeverity::Warning,
+        text: "retiring soon".to_owned(),
+        label: Some("deprecated".to_owned()),
+    });
+    let entry = parsed.models["m"].apply("m", Some(base), &EndpointsConfig::default());
+    assert_eq!(entry.info.name.as_deref(), Some("My model"));
+    assert_eq!(entry.info.base_url, "https://custom.example/v1");
+    let mut models = IndexMap::new();
+    models.insert("m".to_string(), entry);
+    let meta = to_acp_model_info(&models).values().next().unwrap().meta.clone().unwrap();
+    assert_eq!(
+        meta["notice"],
+        serde_json::json!({"severity": "warning", "text": "retiring soon", "label": "deprecated"})
+    );
+}
+
 #[test]
 fn hostile_model_notice_is_one_filtered_capped_line_in_config_and_meta() {
     let hostile = format!(
@@ -9570,4 +9607,86 @@ fn hostile_model_notice_is_one_filtered_capped_line_in_config_and_meta() {
             || ('\u{2066}'..='\u{2069}').contains(&c) || c == '\u{2028}' || c == '\u{2029}'), "{t:?}");
         assert!(t.starts_with("[2J ]0;pwn Allow? [y/n] system: evil"), "{t:?}");
     }
+}
+
+// ---- sign-in is the only step: signed-in subscription models need no TOML ----
+
+#[tokio::test]
+#[serial]
+async fn signed_in_subscription_models_appear_in_the_list_without_toml() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    use crate::auth::subscription::{SubscriptionProvider, catalog::test_sign_in};
+    let home = fuigo_test_support::FuigoHome::new();
+    // Nothing signed in: no subscription models.
+    let before = resolve_model_list(&Config::default(), None);
+    assert!(!before.keys().any(|k| k.starts_with("xai/") || k.starts_with("chatgpt/")));
+    test_sign_in(home.path(), SubscriptionProvider::Xai, "acct", &["grok-4.7", "grok-3"]).await;
+    test_sign_in(home.path(), SubscriptionProvider::Chatgpt, "acct2", &["gpt-5.1"]).await;
+    let resolved = resolve_model_list(&Config::default(), None);
+    let grok = resolved.get("xai/grok-4.7").expect("signed-in Grok model is listed");
+    assert_eq!(grok.info.model, "grok-4.7");
+    assert!(resolved.contains_key("xai/grok-3") && resolved.contains_key("chatgpt/gpt-5.1"));
+    // Bound to the subscription transport, with no key of any kind.
+    assert_eq!(
+        grok.auth_provider.as_ref().and_then(|p| p.subscription_provider()),
+        Some(crate::auth::subscription::SubscriptionProvider::Xai)
+    );
+    assert!(grok.api_key.is_none() && grok.env_key.is_none());
+    assert_eq!(
+        resolved["chatgpt/gpt-5.1"]
+            .auth_provider
+            .as_ref()
+            .and_then(|p| p.subscription_provider()),
+        Some(SubscriptionProvider::Chatgpt)
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_users_own_model_table_wins_over_a_signed_in_subscription_model() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    use crate::auth::subscription::{SubscriptionProvider, catalog::test_sign_in};
+    let home = fuigo_test_support::FuigoHome::new();
+    test_sign_in(home.path(), SubscriptionProvider::Xai, "acct", &["grok-4.7"]).await;
+    let mut cfg = Config::default();
+    cfg.config_models.insert(
+        "xai/grok-4.7".to_string(),
+        ConfigModelOverride {
+            model: Some("custom-wire-id".into()),
+            base_url: Some("http://127.0.0.1:9/v1".into()),
+            ..Default::default()
+        },
+    );
+    let resolved = resolve_model_list(&cfg, None);
+    assert_eq!(resolved["xai/grok-4.7"].info.model, "custom-wire-id");
+}
+
+/// First run with nothing but a signed-in subscription must not land on a key screen: the
+/// subscription's models carry their own credential, so the agent advertises an authenticated start.
+#[tokio::test]
+#[serial]
+async fn a_signed_in_subscription_alone_is_a_credential_so_first_run_skips_the_key_screen() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    use crate::auth::subscription::{SubscriptionProvider, catalog::test_sign_in};
+    let home = fuigo_test_support::FuigoHome::new();
+    let _a = EnvGuard::unset("FLUX_API_KEY");
+    let _b = EnvGuard::unset("FUIGO_API_KEY");
+    let _c = EnvGuard::unset("FUIGO_CODE_API_KEY");
+    let before = resolve_model_list(&Config::default(), None);
+    assert!(
+        !crate::agent::auth_method::should_advertise_fuigo_api_key(false, before.values()),
+        "no credential of any kind: the picker is shown"
+    );
+    test_sign_in(home.path(), SubscriptionProvider::Xai, "acct", &["grok-4.7"]).await;
+    let after = resolve_model_list(&Config::default(), None);
+    assert!(
+        crate::agent::auth_method::should_advertise_fuigo_api_key(false, after.values()),
+        "a signed-in subscription is a credential: no key screen"
+    );
 }

@@ -148,6 +148,63 @@ fn restore_elements_skips_out_of_bounds_ranges() {
 }
 
 #[test]
+fn restore_element_returns_id_over_existing_text() {
+    let mut textarea = ta_with("see [Image #1] now");
+    textarea.clear_history();
+
+    let id = textarea
+        .restore_element(4..14, ElementKind(3), None)
+        .unwrap_or_else(|| panic!("expected a registered element"));
+
+    assert_eq!(textarea.text(), "see [Image #1] now");
+    let elem = textarea
+        .elements()
+        .first()
+        .unwrap_or_else(|| panic!("expected an element"));
+    assert_eq!(
+        (elem.id, elem.range.clone(), elem.kind),
+        (id, 4..14, ElementKind(3))
+    );
+    assert!(
+        !textarea.can_undo(),
+        "restore_element must not record an undo step"
+    );
+}
+
+#[test]
+fn restore_element_rejects_overlapping_range() {
+    let mut textarea = ta_with("[Image #1] tail");
+    textarea
+        .restore_element(0..10, ElementKind(3), None)
+        .unwrap_or_else(|| panic!("first registration must succeed"));
+
+    assert_eq!(textarea.restore_element(5..12, ElementKind(3), None), None);
+    assert_eq!(textarea.restore_element(0..10, ElementKind(1), None), None);
+    assert_eq!(textarea.restore_element(0..100, ElementKind(3), None), None);
+    assert_eq!(textarea.elements().len(), 1);
+}
+
+#[test]
+fn restore_element_accepts_adjacent_range() {
+    let mut textarea = ta_with("[Image #1][Image #2]");
+    textarea
+        .restore_element(0..10, ElementKind(3), None)
+        .unwrap_or_else(|| panic!("first registration must succeed"));
+
+    assert!(
+        textarea
+            .restore_element(10..20, ElementKind(3), None)
+            .is_some()
+    );
+    let ranges: Vec<_> = textarea
+        .elements()
+        .iter()
+        .map(|element| element.range.clone())
+        .collect();
+    assert_eq!(ranges, vec![0..10, 10..20]);
+}
+
+#[test]
 fn set_text_restores_zero_length_element_metadata_through_history() {
     let mut textarea = TextArea::new();
     let id = textarea.insert_element("", ElementKind(7), None);
@@ -6465,4 +6522,133 @@ fn up_onto_soft_row_closed_by_element_lands_before_the_element() {
     t.move_cursor_up();
     assert_eq!(0, t.cursor());
     assert_eq!(0, cursor_row(&t, 8));
+}
+
+
+// ── 54.7: typing after a large paste, bounded work ──
+
+fn big_text(lines: usize) -> String {
+    (0..lines).map(|i| format!("line {i} lorem ipsum dolor sit amet consectetur adipiscing elit sed do")).collect::<Vec<_>>().join("\n")
+}
+
+/// Typing in a large buffer re-wraps the edited line, not the whole buffer.
+#[test]
+fn typing_after_a_large_paste_rewraps_only_the_edited_line() {
+    let mut ta = TextArea::new();
+    let t0 = std::time::Instant::now();
+    ta.set_text(&big_text(20_000));
+    let t1 = t0.elapsed();
+    ta.set_cursor(ta.text().len() / 2);
+    let t2 = t0.elapsed();
+    let _ = ta.desired_height(80);
+    let t3 = t0.elapsed();
+    perf_counters::take(&perf_counters::WRAP_BYTES);
+    crate::editor::scan_counter::SCANS.with(|c| c.set(0));
+    let (mut ins, mut hgt) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    for _ in 0..60 {
+        let a = std::time::Instant::now();
+        ta.insert_str("x");
+        ins += a.elapsed();
+        let b = std::time::Instant::now();
+        let _ = ta.desired_height(80);
+        hgt += b.elapsed();
+    }
+    eprintln!("insert {ins:?} height {hgt:?}");
+    eprintln!("set_text {t1:?} set_cursor {t2:?} first wrap {t3:?} keystrokes {:?}", t0.elapsed());
+    let scans = crate::editor::scan_counter::SCANS.with(|c| c.get());
+    assert_eq!(scans, 0, "typing walked the buffer from its start {scans} times");
+    let wrapped = perf_counters::take(&perf_counters::WRAP_BYTES);
+    eprintln!("wrapped bytes for 60 keystrokes in {} bytes: {wrapped}", ta.text().len());
+    assert!(wrapped <= 60 * 4096, "60 keystrokes wrapped {wrapped} bytes of a {} byte buffer", ta.text().len());
+}
+
+/// The incremental wrap must agree with wrapping the whole text, whatever the edit.
+#[test]
+fn incremental_wrap_matches_a_full_wrap_after_random_edits() {
+    use rand::{Rng, SeedableRng};
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x54_07);
+    let pieces = ["a", "bc", " ", "  ", "\n", "\n\n", "word ", "longerwordhere", "é", "😀", "x y z"];
+    for width in [1u16, 3, 7, 12, 30] {
+        let mut ta = TextArea::new();
+        ta.set_text("seed line one\n\nsecond  line  here\n");
+        let _ = ta.desired_height(width);
+        for step in 0..300 {
+            let len = ta.text().len();
+            let mut a = rng.random_range(0..=len);
+            let mut b = rng.random_range(0..=len);
+            while !ta.text().is_char_boundary(a) { a -= 1; }
+            while !ta.text().is_char_boundary(b) { b -= 1; }
+            if a > b { std::mem::swap(&mut a, &mut b); }
+            if rng.random_range(0..3) == 0 { b = a; }
+            let piece = pieces[rng.random_range(0..pieces.len())];
+            if rng.random_range(0..4) == 0 {
+                ta.replace_range(a..b, piece);
+            } else {
+                ta.set_cursor(a);
+                ta.insert_str(piece);
+            }
+            let cached = ta.wrapped_lines(width).clone();
+            let fresh = crate::wrapping::wrap_ranges(
+                ta.text(),
+                Options::new(width as usize).wrap_algorithm(textwrap::WrapAlgorithm::FirstFit),
+            );
+            assert_eq!(cached, fresh, "width {width} step {step} text {:?}", ta.text());
+        }
+    }
+}
+
+/// Typing words in a large buffer copies the buffer into the undo history once, not once per word.
+#[test]
+fn typing_words_after_a_large_paste_snapshots_the_text_once() {
+    let mut ta = TextArea::new();
+    ta.set_text(&big_text(20_000));
+    ta.set_cursor(ta.text().len());
+    let size = ta.text().len();
+    perf_counters::take(&perf_counters::SNAPSHOT_BYTES);
+    for _ in 0..40 {
+        for ch in "word ".chars() {
+            ta.insert_str(&ch.to_string());
+        }
+    }
+    let copied = perf_counters::take(&perf_counters::SNAPSHOT_BYTES);
+    eprintln!("snapshot bytes for 40 words in {size} bytes: {copied}");
+    assert!(copied <= 3 * size, "40 words copied {copied} bytes of a {size} byte buffer");
+}
+
+/// The undo history is bounded in bytes, not only in entries.
+#[test]
+fn undo_history_is_bounded_in_bytes() {
+    let mut ta = TextArea::new();
+    for i in 0..40 {
+        ta.set_text(&format!("{i}{}", "a".repeat(1 << 20)));
+    }
+    let retained: usize = ta.undo.stack.iter().chain(ta.undo.redo.iter()).map(|e| e.text.len()).sum();
+    eprintln!("undo bytes retained after 40 one-MiB replacements: {retained}");
+    assert!(retained <= 20 << 20, "undo history holds {retained} bytes");
+    assert!(ta.can_undo(), "the newest step is still undoable");
+}
+
+/// 54.7: typing next to a very large pasted chip walks and copies the buffer a bounded number of times.
+#[test]
+fn typing_beside_a_huge_paste_chip_stays_bounded() {
+    let mut ta = TextArea::new();
+    ta.insert_str("before ");
+    let big = big_text(20_000);
+    ta.insert_element(&big, ElementKind(1), Some(Line::from("[Pasted: 1.4 MB]")));
+    let size = ta.text().len();
+    let _ = ta.desired_height(80);
+    crate::editor::scan_counter::SCANS.with(|c| c.set(0));
+    perf_counters::take(&perf_counters::SNAPSHOT_BYTES);
+    let started = std::time::Instant::now();
+    for _ in 0..30 {
+        for ch in "word ".chars() {
+            ta.insert_str(&ch.to_string());
+            let _ = ta.desired_height(80);
+        }
+    }
+    let scans = crate::editor::scan_counter::SCANS.with(|c| c.get());
+    let copied = perf_counters::take(&perf_counters::SNAPSHOT_BYTES);
+    eprintln!("150 keystrokes beside a {size} byte chip: {:?}, snapshot bytes {copied}", started.elapsed());
+    assert_eq!(scans, 0, "typing walked the buffer from its start {scans} times");
+    assert!(copied <= 3 * size, "copied {copied} bytes of a {size} byte buffer");
 }

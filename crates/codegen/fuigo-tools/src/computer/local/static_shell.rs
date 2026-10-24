@@ -11,7 +11,6 @@
 
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
-use std::process::Stdio;
 use std::time::Duration;
 
 use command_fds::FdMapping;
@@ -53,12 +52,15 @@ impl StaticShellSnapshot {
     /// definitions between SOH markers. Returns an empty snapshot on any
     /// failure or timeout, degrading to a plain shell.
     pub async fn init(cwd: &Path) -> Self {
-        Self::init_with_policy(cwd, None).await
+        Self::init_with_policy(cwd, None, None).await
     }
 
+    /// `sandbox_hook` rewrites the capture's login shell when the daemon installed one; a refusal
+    /// degrades to the empty snapshot, like any other failed capture.
     pub async fn init_with_policy(
         cwd: &Path,
         policy: Option<&crate::util::ShellEnvironmentPolicy>,
+        sandbox_hook: Option<&dyn crate::sandbox_launch::SandboxLaunch>,
     ) -> Self {
         let shell = fuigo_config::shell::detect_unix_shell_kind();
 
@@ -78,16 +80,16 @@ impl StaticShellSnapshot {
         let result = tokio::time::timeout(INIT_TIMEOUT, async {
             // P189-unplaced: static-shell snapshot capture; stays UNPLACED on purpose: it runs the user's login shell start-up files with a Fuigo-chosen fixed script (never a model-chosen command), and a stop must not kill an ssh-agent or similar started by the profile. Stated limit: a process detached by the user's shell start-up files is outside the session cgroup and survives a stop.
             let mut cmd = tokio::process::Command::new(shell_binary(shell));
-            cmd.args(["-lc", &script])
-                .current_dir(cwd)
-                .stdin(fuigo_tty_utils::null_stdio())
-                .stdout(Stdio::piped())
-                .stderr(fuigo_tty_utils::null_stdio())
-                .kill_on_drop(true);
-            crate::util::detach_command(&mut cmd);
-            fuigo_sandbox::child_net::restrict_child_network(&mut cmd);
+            cmd.args(["-lc", &script]).current_dir(cwd);
             crate::util::apply_shell_environment_policy(&mut cmd, policy);
             cmd.envs(crate::util::pager_env());
+            let call = crate::sandbox_launch::CallId::shell_init("static-shell");
+            crate::sandbox_launch::prepare(sandbox_hook, &mut cmd, &call)
+                .inspect_err(|reason| {
+                    tracing::warn!(%reason, "static shell capture refused by the sandbox hook")
+                })
+                .ok()?;
+            crate::sandbox_launch::wire_prepared(&mut cmd, fuigo_tty_utils::null_stdio());
             // P189-unplaced: see the snapshot-capture note above (awaited helper, killed on drop).
             #[allow(clippy::disallowed_methods)] // probe killed on drop
             let mut child = cmd.spawn().ok()?;
@@ -252,8 +254,13 @@ fn set_cloexec(fd: &OwnedFd) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "static_shell_cli_facing_unchanged_tests.rs"]
+mod cli_facing_unchanged_tests;
+
 #[cfg(test)]
 mod tests {
+    use std::process::Stdio;
     use super::*;
     use command_fds::CommandFdExt;
 

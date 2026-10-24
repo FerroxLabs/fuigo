@@ -225,6 +225,10 @@ fn parse_results(stdout: &[u8], limit: usize) -> Vec<String> {
 // ─── Tests ──────────────────────────────────────────────────────────
 
 impl crate::types::tool_metadata::ToolMetadata for CodexGrepFilesTool {
+    fn lock_path_param(&self) -> Option<&'static str> {
+        Some("path")
+    }
+
     fn kind(&self) -> ToolKind {
         ToolKind::Search
     }

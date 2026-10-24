@@ -1082,8 +1082,15 @@ pub fn filter_skills(skills: Vec<SkillInfo>, ignore_paths: &[String]) -> Vec<Ski
         .filter(|skill| {
             let canonical =
                 dunce::canonicalize(&skill.path).unwrap_or_else(|_| PathBuf::from(&skill.path));
+            // The skill's folder as it is laid out, not where a symlinked SKILL.md leads: `ignore` names folders
+            let in_place = Path::new(&skill.path)
+                .parent()
+                .and_then(|dir| dunce::canonicalize(dir).ok())
+                .map(|dir| dir.join(Path::new(&skill.path).file_name().unwrap_or_default()));
             // >MAX_PATH caveat (see workspace clippy.toml); fail-open here: over-long ignored skills stay included
-            !expanded.iter().any(|ignore| canonical.starts_with(ignore))
+            !expanded.iter().any(|ignore| {
+                canonical.starts_with(ignore) || in_place.as_ref().is_some_and(|p| p.starts_with(ignore))
+            })
         })
         .collect()
 }
@@ -2319,6 +2326,46 @@ mod tests {
             !names.contains(&"unwanted"),
             "unwanted should be filtered: {names:?}"
         );
+    }
+
+    /// `[skills].ignore` names a skill's FOLDER. A skill whose `SKILL.md` is a symlink to a file elsewhere is still that
+    /// folder's skill: matching on where the link leads would let it slip through the ignore list.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_skills_ignore_matches_a_symlinked_skill_md_by_its_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+        init_git_repo(&repo_root);
+
+        let store = tmp.path().join("store");
+        write_skill_md(&store.join("shared"), "linked");
+        let custom_dir = tmp.path().join("custom-skills");
+        write_skill_md(&custom_dir.join("wanted"), "wanted");
+        let linked_dir = custom_dir.join("linked");
+        fs::create_dir_all(&linked_dir).unwrap();
+        std::os::unix::fs::symlink(store.join("shared").join("SKILL.md"), linked_dir.join("SKILL.md")).unwrap();
+
+        let list = |ignore: Vec<String>| {
+            let config = SkillsConfig {
+                auto_discover: None,
+                paths: vec![custom_dir.to_str().unwrap().to_string()],
+                ignore,
+                disabled: vec![],
+                server_skill_dirs: vec![],
+                bundled_skill_dirs: vec![],
+            };
+            let repo = repo_root.to_str().unwrap().to_string();
+            async move { list_skills(Some(&repo), &config, CompatConfig::default(), true).await }
+        };
+        let names = |skills: Vec<SkillInfo>| skills.into_iter().map(|s| s.name).collect::<Vec<_>>();
+
+        let all = names(list(vec![]).await);
+        assert!(all.contains(&"linked".to_string()) && all.contains(&"wanted".to_string()), "fixture: {all:?}");
+
+        let ignored = names(list(vec![linked_dir.to_str().unwrap().to_string()]).await);
+        assert!(!ignored.contains(&"linked".to_string()), "the symlinked skill must be ignored by its folder: {ignored:?}");
+        assert!(ignored.contains(&"wanted".to_string()), "{ignored:?}");
     }
 
     #[tokio::test]
@@ -3572,6 +3619,35 @@ mod discovery_budget_tests {
         );
         assert!(has(&first, "cached-skill") && has(&second, "cached-skill"));
         assert_eq!(first.len(), second.len());
+    }
+
+    /// 46.8: a large skills folder is read once. The first session start scans every skill; later starts of the same
+    /// session folder are served from the cache without reading a single skill file again, and a skill added later
+    /// still shows up at the next start.
+    #[tokio::test]
+    #[serial_test::serial(home_env)]
+    async fn a_large_skills_folder_is_scanned_once_and_a_late_skill_is_still_found() {
+        let (tmp, cwd) = project_with_skill("anchor-skill");
+        let skills_root = tmp.path().join(".fuigo").join("skills");
+        for i in 0..600 {
+            write_skill_md(&skills_root.join(format!("bulk-{i:04}")), &format!("bulk-{i:04}"));
+        }
+        let before = skill_discovery_scan_count(Some(&cwd));
+        let first = discover(Duration::from_secs(60), &cwd).await;
+        assert_eq!(first.len(), 601, "every skill of the large folder is found");
+        for _ in 0..3 {
+            let again = discover(Duration::from_secs(60), &cwd).await;
+            assert_eq!(again.len(), 601);
+        }
+        assert_eq!(
+            skill_discovery_scan_count(Some(&cwd)),
+            before + 1,
+            "three later session starts read no skill file: one scan in all"
+        );
+        write_skill_md(&skills_root.join("zz-late"), "zz-late");
+        let after = discover(Duration::from_secs(60), &cwd).await;
+        assert!(has(&after, "zz-late"), "a skill added to the large folder is picked up");
+        assert_eq!(skill_discovery_scan_count(Some(&cwd)), before + 2);
     }
 
     /// The cache is not sticky: adding a skill changes a root's mtime and forces a rescan.

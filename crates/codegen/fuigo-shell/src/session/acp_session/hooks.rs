@@ -201,6 +201,34 @@ impl SessionActor {
         .await
     }
 
+    /// A `PreToolUse` hook answered `continue: false`: the call is not made and the turn ends (row 59.7).
+    /// The model's tool call still gets a result so the provider batch stays paired; the user sees the
+    /// hook's `stopReason` when the turn loop turns the returned `HookStop` into a cancelled turn.
+    pub(super) async fn stop_turn_at_tool(
+        &self,
+        model_call_id: &str,
+        tool_call_id: &acp::ToolCallId,
+        tool_name: &str,
+        hook_name: String,
+        reason: String,
+    ) -> Result<ToolLoop, acp::Error> {
+        tracing::info!(%tool_name, %hook_name, %reason, "turn stopped by pre_tool_use hook (continue: false)");
+        fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::HookBlocked {
+            hook_name: hook_name.clone(),
+            cause: HookBlockCause::Denied,
+        });
+        self.handle_tool_not_executed(
+            model_call_id,
+            tool_call_id,
+            format!("Hook stopped the turn: {reason}"),
+        )
+        .await?;
+        Ok(ToolLoop::HookStop {
+            hook_name,
+            reason: Some(reason),
+        })
+    }
+
     pub(super) async fn block_unusable_rewrite(
         &self,
         model_call_id: &str,
@@ -347,6 +375,24 @@ impl SessionActor {
 
         let mut pending = self.client_gate_responses(&groups, Some(tool_name), envelope);
         while let Some((callback_id, response, _elapsed, _outcome)) = pending.next().await {
+            if response.continue_ == Some(false) {
+                let reason = response
+                    .stop_reason
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| response.system_message.filter(|s| !s.trim().is_empty()))
+                    .unwrap_or_else(|| "stopped by client hook".to_string());
+                let reason = clip_text(&reason, MAX_HOOK_FEEDBACK_CHARS);
+                return Ok(Some(
+                    self.stop_turn_at_tool(
+                        &call.id,
+                        tool_call_id,
+                        tool_name,
+                        format!("client:{callback_id}"),
+                        reason,
+                    )
+                    .await?,
+                ));
+            }
             if response.decision == ClientHookDecision::Deny {
                 let reason = response
                     .system_message
@@ -492,6 +538,16 @@ impl SessionActor {
                 http_info: None,
                 system_message: None,
             });
+            if response.continue_ == Some(false) && out.force_stop.is_none() {
+                out.force_stop = Some(fuigo_hooks::dispatcher::PostToolUseStop {
+                    hook_name: hook_name.clone(),
+                    reason: response
+                        .stop_reason
+                        .clone()
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| clip_text(&s, MAX_HOOK_FEEDBACK_CHARS)),
+                });
+            }
             if response.decision == ClientHookDecision::Deny {
                 let reason = response
                     .system_message

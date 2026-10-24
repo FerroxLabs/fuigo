@@ -112,7 +112,12 @@ impl MessagesReducer {
     }
 
     /// Emit a `redacted_thinking` content block in the partial stream: the blob rides the start, then the stop (no deltas).
-    pub(super) fn partial_redacted_thinking(&mut self, out: &mut Vec<Value>, index: usize, data: &str) {
+    pub(super) fn partial_redacted_thinking(
+        &mut self,
+        out: &mut Vec<Value>,
+        index: usize,
+        data: &str,
+    ) {
         self.partial_open_message(out);
         out.push(self.partial_wrap(StreamEventBody::ContentBlockStart {
             index,

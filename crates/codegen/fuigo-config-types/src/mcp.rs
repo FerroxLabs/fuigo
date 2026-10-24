@@ -470,9 +470,9 @@ impl McpServerConfig {
             } => {
                 // P147: `command` and `cwd` never receive the saved key, so a `${FUIGO_API_KEY:-default}` there is its
                 // default (as without a key in 1.0.20); `args` and `env` keep it for the spawn to resolve.
-                *command = fuigo_config::apply_first_party_key_defaults(&sub(command)).into_owned();
+                *command = expand_home(&fuigo_config::apply_first_party_key_defaults(&sub(command)));
                 for arg in args.iter_mut() {
-                    *arg = sub(arg);
+                    *arg = expand_home(&sub(arg));
                 }
                 if let Some(env) = env.as_mut() {
                     for value in env.values_mut() {
@@ -480,7 +480,7 @@ impl McpServerConfig {
                     }
                 }
                 if let Some(cwd) = cwd.as_mut() {
-                    *cwd = fuigo_config::apply_first_party_key_defaults(&sub(cwd)).into_owned();
+                    *cwd = expand_home(&fuigo_config::apply_first_party_key_defaults(&sub(cwd)));
                 }
             }
             McpServerTransportConfig::StreamableHttp { url, headers, .. } => {
@@ -1226,6 +1226,24 @@ mod p70_redacted_debug {
     }
 }
 
+/// A stdio server is started without a shell, so a word that starts with `~` or `~/` is expanded here to the user's home,
+/// as a shell would. `~user` and a `~` inside a word are left alone.
+fn expand_home(word: &str) -> String {
+    let rest = if word == "~" {
+        Some("")
+    } else {
+        word.strip_prefix("~/").or_else(|| word.strip_prefix("~\\"))
+    };
+    match (rest, fuigo_config::mcp_bearer_file::home_dir()) {
+        (Some(""), Some(home)) => home.to_string_lossy().into_owned(),
+        (Some(rest), Some(home)) => home.join(rest).to_string_lossy().into_owned(),
+        _ => word.to_owned(),
+    }
+}
+
+#[cfg(test)]
+#[path = "mcp_rowsa2_tests.rs"]
+mod rowsa2_tests;
 #[cfg(test)]
 #[path = "mcp_p136_tests.rs"]
 mod p136_tests;

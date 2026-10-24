@@ -373,7 +373,7 @@ fn process_is_gone(pid: i32) -> bool {
 
 /// Turn 1: the model backgrounds a long sleep (recording its pid). Turn 2: it answers `ANSWER`. The
 /// turn is then complete and the run waits on the background task, which is when the signal lands.
-async fn completed_then_interrupted(format: &'static str) -> (Out, i32) {
+async fn completed_then_interrupted(format: &'static str, signal: i32) -> (Out, i32) {
     let server = std::sync::Arc::new(
         MockInferenceServer::start().await.expect("start the mock inference server"),
     );
@@ -436,7 +436,7 @@ async fn completed_then_interrupted(format: &'static str) -> (Out, i32) {
             &sandbox,
             &["-p", "start a background task, then answer", "--trust", "--yolo", "--output-format", format],
             Some(&ready),
-            libc::SIGINT,
+            signal,
         );
         // Read the pid before the sandbox (and with it the pid file) is dropped with this closure.
         let pid = std::fs::read_to_string(&pf).ok().and_then(|t| t.trim().parse::<i32>().ok());
@@ -519,7 +519,7 @@ fn assert_answer_and_usage_preserved(format: &str, out: &Out) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_interrupt_after_a_completed_response_keeps_the_answer_and_usage_in_every_format() {
     for format in FORMATS {
-        let (out, pid) = completed_then_interrupted(format).await;
+        let (out, pid) = completed_then_interrupted(format, libc::SIGINT).await;
         // The turn completed first, so every format carries the interrupt on its ONE terminal document.
         let terminal = Terminal::OwnDocument;
         assert_reported_once(format, &out, "Interrupted by SIGINT", 130, terminal);
@@ -535,6 +535,22 @@ async fn an_interrupt_after_a_completed_response_keeps_the_answer_and_usage_in_e
             std::thread::sleep(Duration::from_millis(100));
         }
         assert!(process_is_gone(pid), "{format}: background task {pid} survived the interrupted run");
+    }
+}
+
+/// SIGTERM and SIGHUP (a terminal that closes, a service stop) end the run's shell commands as SIGINT does:
+/// the backgrounded task must not outlive the process that started it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sigterm_and_sighup_reap_the_runs_background_task() {
+    for (format, signal, code) in [("json", libc::SIGTERM, 143), ("plain", libc::SIGHUP, 129)] {
+        let (out, pid) = completed_then_interrupted(format, signal).await;
+        assert_eq!(out.code, Some(code), "{format}: exit code\nstdout:\n{}\nstderr:\n{}", out.stdout, out.stderr);
+        assert!(out.stdout.contains(ANSWER), "{format}: the completed answer survives\nstdout:\n{}", out.stdout);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !process_is_gone(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(process_is_gone(pid), "{format}: background task {pid} survived signal {signal}");
     }
 }
 

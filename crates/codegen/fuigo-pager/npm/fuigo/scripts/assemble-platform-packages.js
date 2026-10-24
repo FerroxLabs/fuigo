@@ -88,7 +88,12 @@ async function packPlatform({ platform, arch, envVar, defaultSource, binName }) 
     ensureDir(outBr);
     const raw = fs.readFileSync(source);
     const compressed = await brotliCompress(raw, {
-        params: { [zlib.constants.BROTLI_PARAM_QUALITY]: zlib.constants.BROTLI_MAX_QUALITY },
+        // lgwin 24 is the largest window the stock decoder (zlib.brotliDecompressSync in
+        // fuigo-install.js) accepts without a flag; the default of 22 costs ~3 MB per platform.
+        params: {
+            [zlib.constants.BROTLI_PARAM_QUALITY]: zlib.constants.BROTLI_MAX_QUALITY,
+            [zlib.constants.BROTLI_PARAM_LGWIN]: 24,
+        },
     });
     fs.writeFileSync(outBr, compressed);
     console.log(

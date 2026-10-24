@@ -709,7 +709,7 @@ async fn resolve_existing_session(
             if title_miss_hint {
                 anyhow::bail!(
                     "{REMOTE_RESTORE_NEEDS_WORKTREE}; {}",
-                    super::session_title_resolve::title_miss_hint(session_id)
+                    super::session_title_resolve::title_miss_hint_for(session_id, cwd, ctx.recent_session_selection)
                 );
             }
             anyhow::bail!("{REMOTE_RESTORE_NEEDS_WORKTREE}")
@@ -718,7 +718,7 @@ async fn resolve_existing_session(
             if title_miss_hint {
                 anyhow::bail!(
                     "Session does not exist: {}",
-                    super::session_title_resolve::title_miss_hint(session_id)
+                    super::session_title_resolve::title_miss_hint_for(session_id, cwd, ctx.recent_session_selection)
                 );
             }
             anyhow::bail!("Session does not exist")
@@ -732,7 +732,7 @@ async fn resolve_existing_session(
             restored.map_err(|e| {
                 anyhow::anyhow!(
                     "{e:#}; {}",
-                    super::session_title_resolve::title_miss_hint(session_id)
+                    super::session_title_resolve::title_miss_hint_for(session_id, cwd, ctx.recent_session_selection)
                 )
             })
         }
@@ -987,7 +987,10 @@ async fn resolve_session_by_title(
     };
     let id = chosen.info.id.to_string();
     tracing::info!(session_id = %id, "Session resolved by title");
-    fuigo_tty_utils::cli_eprintln!("Resuming session {} (matched by title)", fuigo_tty_utils::untrusted(&id));
+    fuigo_tty_utils::cli_eprintln!(
+        "Resuming session {} (matched by title)",
+        fuigo_tty_utils::untrusted(&id)
+    );
     Ok(Some(ResolvedExisting {
         id,
         original_cwd: None,

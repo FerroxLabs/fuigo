@@ -271,6 +271,9 @@ pub(super) fn dispatch_cancel_login(app: &mut AppView) -> Vec<Effect> {
     abort_prior_auth(app);
     app.next_auth_request_seq += 1;
     app.auth_state = AuthState::Done;
+    app.picker_modal = false;
+    app.picker_page = crate::app::pending_menu::PickerPage::Main;
+    app.subscription_signin = None;
     app.auth_show_raw_url = false;
     app.auth_code_input.reset();
     restore_auth_return_view(app, return_view);
@@ -290,6 +293,182 @@ pub(super) fn dispatch_cancel_login(app: &mut AppView) -> Vec<Effect> {
         Some(request_seq) => vec![Effect::CancelAuth { request_seq }],
         None => vec![],
     }
+}
+
+/// `/login`: open the sign-in picker, the same rows the first-run welcome screen shows.
+///
+/// Mid-session the caller's view is stashed (as for any login flow) and restored by
+/// [`dispatch_cancel_picker`] or when a sign-in completes. Nothing is contacted.
+pub(super) fn dispatch_open_sign_in_picker(app: &mut AppView) -> Vec<Effect> {
+    abort_prior_auth(app);
+    if !matches!(app.active_view, ActiveView::Welcome) {
+        app.auth_return_view = Some(app.active_view);
+        show_welcome(app);
+    }
+    app.refresh_sign_in_status();
+    app.picker_modal = true;
+    app.picker_page = crate::app::pending_menu::PickerPage::Main;
+    app.subscription_signin = None;
+    app.sign_in_notice = None;
+    app.welcome_menu_index = None;
+    app.welcome_prompt_focused = false;
+    app.auth_code_input.reset();
+    app.auth_show_raw_url = false;
+    app.auth_state = AuthState::Pending { error: None };
+    vec![]
+}
+
+/// Close the `/login` picker without changing anything and return to where the user was.
+pub(super) fn dispatch_cancel_picker(app: &mut AppView) -> Vec<Effect> {
+    if !app.picker_modal {
+        return vec![];
+    }
+    abort_prior_auth(app);
+    app.next_auth_request_seq += 1;
+    app.picker_modal = false;
+    app.picker_page = crate::app::pending_menu::PickerPage::Main;
+    app.subscription_signin = None;
+    app.auth_show_raw_url = false;
+    app.auth_code_input.reset();
+    app.auth_state = AuthState::Done;
+    if let Some(return_view) = app.auth_return_view.take() {
+        restore_auth_return_view(app, return_view);
+    }
+    vec![]
+}
+
+/// Start the browser sign-in for a subscription.
+pub(super) fn dispatch_sign_in_subscription(
+    app: &mut AppView,
+    provider: fuigo_shell::auth::subscription::SubscriptionProvider,
+) -> Vec<Effect> {
+    if !matches!(app.active_view, ActiveView::Welcome) {
+        app.auth_return_view = Some(app.active_view);
+        show_welcome(app);
+    }
+    abort_prior_auth(app);
+    let request_seq = app.next_auth_request_seq;
+    app.next_auth_request_seq += 1;
+    app.auth_code_input.reset();
+    app.sign_in_notice = None;
+    app.subscription_signin = Some(provider);
+    app.auth_state = AuthState::Authenticating {
+        request_seq,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    vec![
+        Effect::SubscriptionSignIn {
+            request_seq,
+            provider,
+        },
+        Effect::PollSubscriptionUrl { request_seq },
+    ]
+}
+
+/// Esc during a sign-in: drop the attempt (which frees the callback port) and show the picker again.
+pub(super) fn dispatch_cancel_sign_in(app: &mut AppView) -> Vec<Effect> {
+    abort_prior_auth(app);
+    app.next_auth_request_seq += 1;
+    app.subscription_signin = None;
+    app.auth_show_raw_url = false;
+    app.auth_code_input.reset();
+    app.auth_state = AuthState::Pending { error: None };
+    vec![]
+}
+
+/// A model chosen on the welcome "Pick a model:" page. The choice starts the session on that model
+/// and its route. The user's own default is left alone unless "make my pick the default" was on.
+pub(super) fn dispatch_pick_welcome_model(app: &mut AppView, index: usize) -> Vec<Effect> {
+    let usable = app.models.usable_models();
+    let Some(pick) = usable.get(index).cloned() else {
+        return vec![];
+    };
+    let make_default = app.pick_make_default;
+    app.pick_make_default = false;
+    app.auth_state = AuthState::Done;
+    app.picker_page = crate::app::pending_menu::PickerPage::Main;
+    app.welcome_menu_index = None;
+    app.welcome_prompt_focused = true;
+    app.models.set_current(pick.id.clone(), None);
+    let mut effects = Vec::new();
+    if let Some(aid) = app.home_session_agent
+        && let Some(agent) = app.agents.get_mut(&aid)
+    {
+        agent.session.models.set_current(pick.id.clone(), None);
+        match agent.session.session_id.clone() {
+            Some(session_id) => {
+                agent.session.model_switch_pending = true;
+                effects.push(Effect::SwitchModel {
+                    agent_id: aid,
+                    session_id,
+                    model_id: pick.id.clone(),
+                    effort: None,
+                    prev_model_id: None,
+                });
+            }
+            None => {
+                agent.session.deferred_model_switch = Some(crate::app::agent::DeferredModelSwitch {
+                    model_id: pick.id.clone(),
+                    effort: None,
+                    prev_model_id: None,
+                });
+            }
+        }
+    }
+    let route = if pick.badge.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", pick.badge)
+    };
+    if make_default {
+        effects.push(Effect::PersistPreferredModel {
+            model_id: pick.id.clone(),
+            reasoning_effort: None,
+        });
+        app.sign_in_notice = Some(format!(
+            "Using {}{route}, saved as your default model. /model changes it.",
+            pick.name
+        ));
+    } else {
+        // A completed switch normally saves the model as the default; this one is for this session.
+        app.session_only_model = Some(pick.id.clone());
+        app.sign_in_notice = Some(format!(
+            "Using {}{route} for this session. Your default model is unchanged; /model changes it.",
+            pick.name
+        ));
+    }
+    effects
+}
+
+/// A row of the provider-key page: say whether the key is usable and how to bind a model.
+/// Third-party keys stay in the environment; Fuigo writes only the variable NAME (`/provider`).
+pub(super) fn dispatch_provider_key_info(app: &mut AppView, id: &str) -> Vec<Effect> {
+    use fuigo_shell::auth::provider_status::ConnectionId;
+    let note = if id == "other" {
+        "Other OpenAI-compatible endpoint: add a [model.<name>] with base_url and env_key to \
+         ~/.fuigo/config.toml (docs/connect-a-model.md, Advanced). The key stays in your environment."
+            .to_string()
+    } else {
+        app.sign_in_status
+            .connections()
+            .into_iter()
+            .find(|c| matches!(c.id, ConnectionId::Key(k) if k == id))
+            .map(|c| {
+                if c.ready {
+                    format!(
+                        "{} is ready. Type /provider {id} <model-id> to route a model through it.",
+                        c.name
+                    )
+                } else {
+                    format!("{}: {}, then restart Fuigo.", c.name, c.state)
+                }
+            })
+            .unwrap_or_else(|| format!("Unknown provider {id}."))
+    };
+    app.sign_in_notice = Some(note);
+    vec![]
 }
 
 /// Open the API-key entry screen.
@@ -377,6 +556,12 @@ pub(super) fn dispatch_submit_auth_code(app: &mut AppView, code: String) -> Vec<
         _ => return vec![],
     };
 
+    if app.subscription_signin.is_some() {
+        return vec![Effect::SubscriptionCode {
+            request_seq,
+            code: crate::app::actions::SecretKey(code),
+        }];
+    }
     vec![Effect::SubmitAuthCode { request_seq, code }]
 }
 
@@ -404,6 +589,21 @@ pub(super) fn handle_auth_complete(
         app.auth_show_raw_url = false;
         app.welcome_prompt_focused = !app.is_access_blocked();
         app.auth_code_input.reset();
+        app.picker_modal = false;
+        app.picker_page = crate::app::pending_menu::PickerPage::Main;
+        app.refresh_sign_in_status();
+        if let Some(provider) = app.subscription_signin.take() {
+            let explicit = fuigo_shell::config::load_agent_config_disk_only()
+                .ok()
+                .and_then(|config| config.models.default);
+            app.sign_in_notice = Some(app.sign_in_status.login_summary(
+                provider,
+                explicit.as_deref(),
+                true,
+                fuigo_shell::auth::subscription::take_signin_identity(provider).as_deref(),
+                "Use /model to switch.",
+            ));
+        }
 
         // Mid-session re-auth (`/login` or a 401 prompt): restore the view the user was on instead of running the startup load-session flow
         // The session state lives in `app.agents`, independent of `active_view`, so it is preserved across the auth detour
@@ -427,7 +627,7 @@ pub(super) fn handle_auth_complete(
                         "Re-authenticated. Retrying\u{2026}".to_string(),
                     ));
                     agent.session.enqueue_in_flight_prompt_front(prompt);
-                    let drain = maybe_drain_queue(agent);
+                    let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
                     retry_effects.extend(drain.effects);
                     page_flips.push((agent.session.id, drain.page_flip_entry));
                 }

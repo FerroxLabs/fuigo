@@ -425,21 +425,38 @@ async fn fetch_url(
         let final_url = resp.url().to_string();
         let status_code = status.as_u16();
 
-        let body = resp.bytes().await?;
-
-        if body.len() > max_content_length {
-            return Err(WebFetchError::ResponseTooLarge {
-                max: max_content_length,
-            });
-        }
+        let body = read_body_capped(resp, max_content_length).await?;
 
         return Ok(FetchResult::Content {
-            body: body.to_vec(),
+            body,
             content_type,
             final_url,
             status_code,
         });
     }
+}
+
+/// Read a response body, refusing one larger than `max`.
+/// A declared `Content-Length` over the limit is refused from the headers, before any of the body is downloaded;
+/// a body of unknown length is cut off as soon as it passes the limit instead of being buffered whole first.
+async fn read_body_capped(
+    mut resp: reqwest::Response,
+    max: usize,
+) -> Result<Vec<u8>, WebFetchError> {
+    if resp
+        .content_length()
+        .is_some_and(|declared| declared > max as u64)
+    {
+        return Err(WebFetchError::ResponseTooLarge { max });
+    }
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > max {
+            return Err(WebFetchError::ResponseTooLarge { max });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// Exact host equality — no `www.` stripping. Distinct DNS labels (even when
@@ -856,6 +873,57 @@ mod tests {
                 "script", "style", "noscript", "svg", "iframe", "object", "embed",
             ])
             .build()
+    }
+
+    /// A response that declares a body larger than the limit is refused from its headers alone, before any of the body
+    /// is downloaded. The server here sends three bytes and then stops, so reading the body to the end would fail
+    /// with a transport error instead of the size error.
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // plain client: the server is a loopback test server, no TLS policy applies
+    async fn declared_oversized_body_is_refused_before_download() {
+        let url = fuigo_test_support::counting_server::spawn_http_server(|_head| {
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 2147483648\r\n\r\nabc".to_vec()
+        })
+        .await;
+        let url = Url::parse(&format!("{url}/big.bin")).unwrap();
+        // Bounded: reading the body to the end would wait on the stalled server forever
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            fetch_url(&reqwest::Client::new(), &url, 1024, true),
+        )
+        .await
+        .expect("the fetch must be refused from its headers, not wait for the body");
+        assert!(
+            matches!(outcome, Err(WebFetchError::ResponseTooLarge { max: 1024 })),
+            "expected the size refusal, got {:?}",
+            outcome.err()
+        );
+    }
+
+    /// A body of unknown length is cut off at the limit rather than buffered whole.
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // plain client: the server is a loopback test server, no TLS policy applies
+    async fn undeclared_oversized_body_is_refused_at_the_limit() {
+        let url = fuigo_test_support::counting_server::spawn_http_server(|_head| {
+            let mut out = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+            for _ in 0..4 {
+                out.extend_from_slice(b"400\r\n");
+                out.extend_from_slice(&[b'x'; 0x400]);
+                out.extend_from_slice(b"\r\n");
+            }
+            out.extend_from_slice(b"0\r\n\r\n");
+            out
+        })
+        .await;
+        let url = Url::parse(&format!("{url}/chunked.txt")).unwrap();
+        let outcome = fetch_url(&reqwest::Client::new(), &url, 2048, true).await;
+        assert!(
+            matches!(outcome, Err(WebFetchError::ResponseTooLarge { max: 2048 })),
+            "expected the size refusal, got {:?}",
+            outcome.err()
+        );
+        let within = fetch_url(&reqwest::Client::new(), &url, 4096, true).await;
+        assert!(matches!(within, Ok(FetchResult::Content { .. })), "a body within the limit is returned");
     }
 
     #[tokio::test]

@@ -16,11 +16,17 @@ pub struct SystemMessageBlock {
 
 impl SystemMessageBlock {
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into(), single_line: false }
+        Self {
+            text: text.into(),
+            single_line: false,
+        }
     }
 
     pub fn single_line(text: impl Into<String>) -> Self {
-        Self { text: text.into(), single_line: true }
+        Self {
+            text: text.into(),
+            single_line: true,
+        }
     }
 }
 
@@ -42,11 +48,19 @@ impl BlockContent for SystemMessageBlock {
             .map(|line| {
                 // A note can carry config keys, paths and API errors: hidden characters and row breaks never reach the row
                 let clean = fuigo_tty_utils::scrub_unsafe_display(line, Some(' '));
-                let clean = if self.single_line { cut_to_width(&clean, width) } else { clean.into_owned() };
+                let clean = if self.single_line {
+                    cut_to_width(&clean, width)
+                } else {
+                    clean.into_owned()
+                };
                 Line::from(Span::styled(clean, style))
             })
             .collect();
-        let wrapped = if self.single_line { styled_lines } else { word_wrap_lines(styled_lines, width) };
+        let wrapped = if self.single_line {
+            styled_lines
+        } else {
+            word_wrap_lines(styled_lines, width)
+        };
         let all_lines: Vec<BlockLine> = wrapped
             .into_iter()
             .map(|line| BlockLine::styled(line).with_selection_range(Some(0)))
@@ -127,7 +141,8 @@ mod tests {
             is_selected: false,
             cwd: None,
         };
-        let out = SystemMessageBlock::new("warn\u{2028}next\u{e0041}\u{00ad}\u{202e}tail").output(&ctx);
+        let out =
+            SystemMessageBlock::new("warn\u{2028}next\u{e0041}\u{00ad}\u{202e}tail").output(&ctx);
         let text: String = out
             .lines
             .iter()
@@ -153,8 +168,17 @@ mod tests {
             let long = "Held peer message from \"[a] accept [r] refuse words words words\" was released.\nsecond";
             let out = SystemMessageBlock::single_line(long).output(&ctx);
             assert_eq!(out.lines.len(), 1, "width {width}");
-            let text: String = out.lines[0].content.spans.iter().map(|s| s.content.to_string()).collect();
-            assert!(fuigo_tty_utils::display_width(&text) <= width as usize && text.ends_with('\u{2026}'), "{text:?}");
+            let text: String = out.lines[0]
+                .content
+                .spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect();
+            assert!(
+                fuigo_tty_utils::display_width(&text) <= width as usize
+                    && text.ends_with('\u{2026}'),
+                "{text:?}"
+            );
             // The same text through the wrapping constructor does wrap (the old behaviour this replaces).
             assert!(SystemMessageBlock::new(long).output(&ctx).lines.len() > 1);
         }

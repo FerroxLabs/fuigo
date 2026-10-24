@@ -2233,3 +2233,26 @@ fn create_goal_plumbs_baseline_commit_into_orchestration() {
     );
     assert!(t2.snapshot().unwrap().changes_baseline_commit.is_none());
 }
+
+#[test]
+fn idle_continuation_streak_counts_and_resets() {
+    let mut t = make_tracker();
+    t.create_goal("g".into(), "obj".into(), None, 0, "2026-01-01T00:00:00Z".into(), None);
+    assert_eq!(t.note_idle_continuation(), 1);
+    assert_eq!(t.note_idle_continuation(), 2);
+    t.reset_idle_continuations();
+    assert_eq!(t.note_idle_continuation(), 1);
+}
+
+#[test]
+fn resume_and_a_new_goal_reset_the_idle_streak() {
+    let mut t = make_tracker();
+    t.create_goal("g".into(), "obj".into(), None, 0, "2026-01-01T00:00:00Z".into(), None);
+    t.note_idle_continuation();
+    t.note_idle_continuation();
+    assert!(t.pause(GoalPauseReason::NoProgress));
+    assert!(t.resume());
+    assert_eq!(t.note_idle_continuation(), 1, "resume starts the count over");
+    t.create_goal("g2".into(), "obj2".into(), None, 0, "2026-01-01T00:00:00Z".into(), None);
+    assert_eq!(t.note_idle_continuation(), 1, "a replacement goal starts the count over");
+}

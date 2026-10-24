@@ -482,6 +482,36 @@ fn apply_mcp_server_policy(
         .collect()
 }
 
+/// Drop, from the servers an agent definition declares, every one the `enabled = false` / `disabled_mcp_servers` kill
+/// switch or managed policy would have dropped from the merge. A definition's servers are not a merge source, so
+/// without this gate it could start a server the merge refuses.
+pub(crate) fn filter_policy_blocked_agent_mcp(servers: Vec<acp::McpServer>, cwd: &std::path::Path) -> Vec<acp::McpServer> {
+    if servers.is_empty() {
+        return servers;
+    }
+    let disabled = crate::util::config::disabled_mcp_server_names(cwd);
+    let ms = fuigo_workspace::permission::resolution::managed_settings();
+    let project = if ms.project_mcp.is_disabled() {
+        crate::agent::folder_trust::project_scoped_mcp_names(cwd)
+    } else {
+        std::collections::HashSet::new()
+    };
+    filter_policy_blocked_agent_mcp_with(servers, &disabled, ms, &project)
+}
+
+fn filter_policy_blocked_agent_mcp_with(
+    servers: Vec<acp::McpServer>,
+    disabled: &std::collections::HashSet<String>,
+    ms: &fuigo_workspace::permission::resolution::ManagedSettings,
+    project: &std::collections::HashSet<String>,
+) -> Vec<acp::McpServer> {
+    apply_mcp_server_policy(servers, disabled, ms, project)
+        .into_iter()
+        .filter(|entry| entry.disabled_reason.is_none())
+        .map(|entry| entry.server)
+        .collect()
+}
+
 /// Like [`merge_managed_mcp_servers`] but returns `ConfigSource` alongside each server.
 pub(crate) fn merge_managed_mcp_servers_sourced(
     cwd: &std::path::Path,
@@ -499,6 +529,8 @@ pub(crate) fn merge_managed_mcp_servers_sourced(
     let config_source = ConfigSource::ConfigToml {
         path: fuigo_tools::util::fuigo_home::fuigo_home().join("config.toml"),
     };
+    // Each server names the file that declares it: a project `.fuigo/config.toml` is not the user's own config
+    let toml_origins = crate::util::config::toml_mcp_server_origins(cwd);
 
     // Use the TOML-only loader so that entries from imported editor configs and .mcp.json are not pre-loaded with ConfigSource::ConfigToml
     let mut servers: HashMap<String, (acp::McpServer, ConfigSource)> =
@@ -506,7 +538,11 @@ pub(crate) fn merge_managed_mcp_servers_sourced(
             .into_iter()
             .map(|s| {
                 let key = mcp_merge_key(&s);
-                (key, (s, config_source.clone()))
+                let source = toml_origins
+                    .get(mcp_server_name(&s))
+                    .cloned()
+                    .unwrap_or_else(|| config_source.clone());
+                (key, (s, source))
             })
             .collect();
     for (name, (_, source)) in &servers {
@@ -606,14 +642,17 @@ fn non_toml_mcp_servers_with_source(
         out.push((server, cursor_mcp_source.clone()));
     }
 
-    let mcp_json_source = ConfigSource::McpJson {
-        path: cwd.join(".mcp.json"),
-    };
+    // The file that holds each server, which is not always `cwd/.mcp.json`: a launch from a subfolder reads the ones above it
+    let mcp_json_origins = crate::util::config::mcp_json_server_origins(cwd);
     for server in crate::util::config::load_mcp_json_servers(cwd) {
         if toml_claimed_names.contains(mcp_server_name(&server)) {
             continue;
         }
-        out.push((server, mcp_json_source.clone()));
+        let path = mcp_json_origins
+            .get(mcp_server_name(&server))
+            .cloned()
+            .unwrap_or_else(|| cwd.join(".mcp.json"));
+        out.push((server, ConfigSource::McpJson { path }));
     }
 
     out
@@ -1631,6 +1670,67 @@ Authorization = "Bearer org2-token"
         }
     }
 
+    /// 46.1: `fuigo inspect` and `fuigo mcp doctor` print each server's source from this merge. A server defined at the
+    /// repository root and listed from a subfolder must name the file that defines it, not a file that does not exist
+    /// or the user's own config.
+    #[test]
+    fn sources_name_the_file_that_defines_each_server_even_from_a_subfolder() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        use fuigo_tools::types::config_source::ConfigSource;
+
+        let root = empty_cwd();
+        let sub = root.path().join("pkg").join("app");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(root.path().join(".fuigo")).unwrap();
+        std::fs::write(
+            root.path().join(".mcp.json"),
+            r#"{"mcpServers": {"fromjson": {"url": "https://json.example.test/mcp"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("pkg").join(".mcp.json"),
+            r#"{"mcpServers": {"frommid": {"url": "https://mid.example.test/mcp"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join(".fuigo").join("config.toml"),
+            "[mcp_servers.fromtoml]
+url = \"https://toml.example.test/mcp\"\n",
+        )
+        .unwrap();
+        git2::Repository::init(root.path()).unwrap();
+        crate::agent::folder_trust::record_for_test(root.path(), true);
+        crate::agent::folder_trust::record_for_test(&sub, true);
+
+        let compat = fuigo_tools::types::compat::CompatConfig::default();
+        let sourced = merge_managed_mcp_servers_sourced(&sub, None, &compat);
+        let source_of = |name: &str| {
+            sourced
+                .iter()
+                .find(|(s, _)| mcp_server_name(s) == name)
+                .unwrap_or_else(|| panic!("{name} must be listed"))
+                .1
+                .clone()
+        };
+        let canon = |p: &std::path::Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        match source_of("fromjson") {
+            ConfigSource::McpJson { path } => assert_eq!(canon(&path), canon(&root.path().join(".mcp.json"))),
+            other => panic!("fromjson: expected the root .mcp.json, got {other:?}"),
+        }
+        match source_of("frommid") {
+            ConfigSource::McpJson { path } => assert_eq!(canon(&path), canon(&root.path().join("pkg").join(".mcp.json"))),
+            other => panic!("frommid: expected pkg/.mcp.json, got {other:?}"),
+        }
+        match source_of("fromtoml") {
+            ConfigSource::ConfigToml { path } => {
+                assert_eq!(canon(&path), canon(&root.path().join(".fuigo").join("config.toml")));
+            }
+            other => panic!("fromtoml: expected the project config.toml, got {other:?}"),
+        }
+    }
+
     /// End-to-end folder-trust gate through the public merge: an untrusted workspace's project `.mcp.json` server is dropped before spawn.
     /// A client-supplied server still survives, and a trusted workspace keeps its `.mcp.json` server.
     #[test]
@@ -1764,6 +1864,116 @@ Authorization = "Bearer org2-token"
             }
             _other => panic!("expected Http server"),
         }
+    }
+
+    fn plugin_registry_with_inline_server(
+        plugin_root: &std::path::Path,
+        server_name: &str,
+        url: &str,
+    ) -> fuigo_agent::plugins::PluginRegistry {
+        use fuigo_agent::plugins::discovery::{DiscoveredPlugin, PluginId};
+        use fuigo_agent::plugins::manifest::{PathOrInline, PluginManifest};
+        use fuigo_agent::plugins::{PluginRegistry, PluginScope};
+
+        std::fs::create_dir_all(plugin_root).unwrap();
+        let manifest = PluginManifest {
+            name: "native-plugin".into(),
+            version: None,
+            description: None,
+            author: None,
+            homepage: None,
+            repository: None,
+            license: None,
+            keywords: vec![],
+            skills: None,
+            commands: None,
+            agents: None,
+            hooks: None,
+            mcp_servers: Some(PathOrInline::Inline(serde_json::json!({
+                server_name: { "type": "http", "url": url }
+            }))),
+            lsp_servers: None,
+        };
+        let id = PluginId::new(PluginScope::User, plugin_root, "native-plugin");
+        let dp = DiscoveredPlugin {
+            manifest,
+            id,
+            root: plugin_root.to_path_buf(),
+            canonical_root: plugin_root.to_path_buf(),
+            scope: PluginScope::User,
+            origin: fuigo_agent::plugins::PluginOrigin::UserFuigo,
+            trusted: true,
+            skill_dirs: vec![],
+            command_dirs: vec![],
+            agent_dirs: vec![],
+            hooks_path: None,
+            mcp_config_path: None,
+            lsp_config_path: None,
+            conflict: None,
+        };
+        PluginRegistry::from_discovered(vec![dp], &[], &["native-plugin".to_string()])
+    }
+
+    /// The disable is judged on the merge itself: a plugin's server is in it until `enabled = false` names it.
+    #[test]
+    fn plugin_mcp_disabled_server_excluded_from_merge() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = plugin_registry_with_inline_server(
+            &tmp.path().join("plug"),
+            "plugsrv",
+            "https://plug.example.test/mcp",
+        );
+        let cwd = empty_cwd();
+        let compat = fuigo_tools::types::compat::CompatConfig::default();
+
+        let merged = merge_managed_mcp_servers(vec![], cwd.path(), Some(&registry), &compat);
+        assert!(
+            merged.iter().any(|s| mcp_server_name(s) == "plugsrv"),
+            "plugin server must merge before the disable"
+        );
+
+        git2::Repository::init(cwd.path()).unwrap();
+        std::fs::create_dir_all(cwd.path().join(".fuigo")).unwrap();
+        std::fs::write(
+            cwd.path().join(".fuigo").join("config.toml"),
+            "[mcp_servers.plugsrv]\nurl = \"https://plug.example.test/mcp\"\nenabled = false\n",
+        )
+        .unwrap();
+        let merged = merge_managed_mcp_servers(vec![], cwd.path(), Some(&registry), &compat);
+        assert!(
+            !merged.iter().any(|s| mcp_server_name(s) == "plugsrv"),
+            "disabled plugin server must be dropped by the merge"
+        );
+    }
+
+    #[test]
+    fn filter_policy_blocked_agent_mcp_drops_enabled_false_name() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let cwd = empty_cwd();
+        git2::Repository::init(cwd.path()).unwrap();
+        std::fs::create_dir_all(cwd.path().join(".fuigo")).unwrap();
+        std::fs::write(
+            cwd.path().join(".fuigo").join("config.toml"),
+            r#"
+[mcp_servers.agent_md_ks_adder]
+url = "https://toml.example/mcp"
+enabled = false
+"#,
+        )
+        .unwrap();
+        let servers = vec![acp::McpServer::Http(
+            acp::McpServerHttp::new("agent_md_ks_adder", "https://agent.example/mcp")
+                .headers(vec![]),
+        )];
+        assert!(
+            filter_policy_blocked_agent_mcp(servers, cwd.path()).is_empty(),
+            "enabled = false must drop the name before overlay/pool spawn"
+        );
     }
 
     #[test]
@@ -2032,3 +2242,6 @@ mod p138_tests;
 #[cfg(test)]
 #[path = "managed_mcp_p141_tests.rs"]
 mod p141_tests;
+#[cfg(test)]
+#[path = "managed_mcp_c6_order_tests.rs"]
+mod c6_order_tests;

@@ -2,6 +2,7 @@
 //! This module takes [`Effect`] values produced by [`super::dispatch`] and spawns them as async tasks on a [`JoinSet`].
 //! When tasks complete, the event loop converts their output into [`TaskResult`] and feeds it back through dispatch.
 mod helpers;
+mod subscription_signin;
 use fuigo_shell::sampling::error::acp_error_text;
 use super::actions;
 use super::session_title_resolve::worktree_resume_failure_message;
@@ -1809,18 +1810,12 @@ pub(crate) fn execute(
                         {
                             return (ProbedAttachment::ProbeDropped, None);
                         }
-                        if probe_bracketed
-                            && crate::terminal::terminal_context()
-                                .brand
-                                .delivers_ime_as_bracketed_paste()
-                        {
-                            match crate::clipboard::bracketed_payload_came_from_clipboard_result(
-                                probe_text.as_deref().unwrap_or(""),
-                            ) {
-                                Ok(true) => {}
-                                Ok(false) => return (ProbedAttachment::ProbeDropped, None),
-                                Err(_) => return (ProbedAttachment::ProbeFailed, None),
-                            }
+                        if let Some(verdict) = helpers::bracketed_origin_verdict(
+                            probe_bracketed,
+                            probe_text.as_deref(),
+                            crate::clipboard::bracketed_payload_came_from_clipboard_result,
+                        ) {
+                            return (verdict, None);
                         }
                         let (image_data, file_urls) = match crate::clipboard::system_clipboard_probe_attachments(
                             probe_text.as_deref(),
@@ -2213,6 +2208,42 @@ pub(crate) fn execute(
                         .await
                 });
             meta.auth_abort_handle = Some((request_seq, abort_handle));
+        }
+        Effect::SubscriptionSignIn {
+            request_seq,
+            provider,
+        } => {
+            let tx = acp_tx.clone();
+            let abort_handle = tasks.spawn(async move {
+                subscription_signin::run(&tx, request_seq, provider).await
+            });
+            meta.auth_abort_handle = Some((request_seq, abort_handle));
+        }
+        Effect::SubscriptionSignOut { provider } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move { subscription_signin::sign_out(&tx, provider).await });
+        }
+        Effect::PollSubscriptionUrl { request_seq } => {
+            let abort_handle = tasks.spawn(async move {
+                let mut auth_url = None;
+                for _ in 0..200 {
+                    auth_url = subscription_signin::published_url(request_seq);
+                    if auth_url.is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                TaskResult::AuthUrlReady {
+                    request_seq,
+                    auth_url,
+                    external: false,
+                    mode: Some(subscription_signin::url_mode(request_seq).to_owned()),
+                }
+            });
+            meta.auth_url_poll_handle = Some((request_seq, abort_handle));
+        }
+        Effect::SubscriptionCode { request_seq, code } => {
+            subscription_signin::send_code(request_seq, code.0);
         }
         Effect::PollAuthUrl { request_seq } => {
             let tx = acp_tx.clone();
@@ -4151,7 +4182,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::RewindExecute { agent_id, session_id, target_prompt_index } => {
+        Effect::RewindExecute { agent_id, session_id, target_prompt_index, mode, force } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -4161,6 +4192,8 @@ pub(crate) fn execute(
                                 &rewind_execute_params(
                                     session_id.0.as_ref(),
                                     target_prompt_index,
+                                    mode,
+                                    force,
                                 ),
                             )
                             .expect("serialize rewind/execute params")
@@ -4957,16 +4990,17 @@ fn prompt_request_meta(
     }
     serde_json::Value::Object(map)
 }
-pub(crate) const REWIND_MODE_WIRE: &str = "conversation_only";
 pub(crate) fn rewind_execute_params(
     session_id: &str,
     target_prompt_index: usize,
+    mode: crate::views::rewind::RewindScope,
+    force: bool,
 ) -> serde_json::Value {
     serde_json::json!({
         "sessionId": session_id,
         "targetPromptIndex": target_prompt_index,
-        "force": true,
-        "mode": REWIND_MODE_WIRE,
+        "force": force,
+        "mode": mode.wire(),
     })
 }
 /// Build the `fuigo/btw` params.

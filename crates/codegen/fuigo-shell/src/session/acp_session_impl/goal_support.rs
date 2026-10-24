@@ -219,6 +219,33 @@ pub(crate) const GOAL_REVERIFY_AFTER_DEFAULT: u32 = 8;
 pub(super) const GOAL_CONTINUATION_SENTINEL: &str =
     "Goal NOT complete — continue working. Next step:";
 
+/// Heading and body for the active-goal section a compaction's system reminder carries.
+pub(crate) fn format_compaction_goal_section(rules_body: &str) -> String {
+    format!("## Active Goal\n{rules_body}")
+}
+
+/// Append the goal section as a sibling of the other reminder headings.
+pub(crate) fn splice_goal_section(existing: &str, goal_block: &str) -> String {
+    if let Some(pos) = existing.rfind("</system-reminder>") {
+        let mut out = existing.to_string();
+        out.insert_str(pos, &format!("\n\n{goal_block}\n"));
+        out
+    } else {
+        format!("{existing}\n\n{goal_block}")
+    }
+}
+
+/// The summarizer's user context: the user's own `/compact <text>` focus first, then the active goal's pin.
+pub(crate) fn merge_compaction_user_context(
+    user: Option<String>,
+    goal: Option<String>,
+) -> Option<String> {
+    match (user, goal) {
+        (Some(user), Some(goal)) => Some(format!("{user}\n\n{goal}")),
+        (user, goal) => user.or(goal),
+    }
+}
+
 /// Bail-specific preface for the `{bail_preface}` slot of [`GOAL_CONTINUATION_DIRECTIVE_TEMPLATE`].
 /// Used when the turn-final text matched a [`goal_stop_detector`](super::goal_stop_detector) pattern while pending todos remained.
 /// Names the apparent stop and the outstanding work, then lets the unchanged generic body carry the next-step / token / Rule-1/Rule-4 content.
@@ -1673,5 +1700,67 @@ impl SessionActor {
                 fuigo_tools::implementations::fuigo_build::task::types::GoalLoopActive(active),
             )
             .await;
+    }
+}
+
+#[cfg(test)]
+mod compaction_goal_section_tests {
+    use super::{format_compaction_goal_section, merge_compaction_user_context};
+
+    #[test]
+    fn user_compact_focus_leads_and_the_goal_pin_follows() {
+        let some = |s: &str| Some(s.to_owned());
+        assert_eq!(None, merge_compaction_user_context(None, None));
+        assert_eq!(
+            some("focus on auth"),
+            merge_compaction_user_context(some("focus on auth"), None)
+        );
+        assert_eq!(
+            some("Objective: ship"),
+            merge_compaction_user_context(None, some("Objective: ship"))
+        );
+        assert_eq!(
+            some("focus on auth\n\nObjective: ship"),
+            merge_compaction_user_context(some("focus on auth"), some("Objective: ship"))
+        );
+    }
+
+    #[test]
+    fn keeps_heading_and_normal_goal_rules() {
+        let out = format_compaction_goal_section("A goal has been set: ship it");
+        assert_eq!(out, "## Active Goal\nA goal has been set: ship it");
+        assert!(!out.contains("GoalTracker was not reset"));
+    }
+
+    #[test]
+    fn wraps_continuation_style_body() {
+        let out = format_compaction_goal_section(
+            "Objective: device test\nGoal NOT complete — continue working. Next step:\nssh in",
+        );
+        assert!(out.starts_with("## Active Goal\n"));
+        assert!(out.contains("Goal NOT complete — continue working. Next step:"));
+        assert!(out.contains("Objective: device test"));
+    }
+
+    #[test]
+    fn splices_goal_as_its_own_section() {
+        let existing = "<system-reminder>\n## Running Background Tasks\nThese tasks are still running:\n- \"t1\": `sleep 1` (running)\n</system-reminder>";
+        let out = super::splice_goal_section(existing, "A goal has been set: ship it");
+        let bg = out.find("## Running Background Tasks").unwrap();
+        let task = out.find("- \"t1\"").unwrap();
+        let goal = out.find("A goal has been set: ship it").unwrap();
+        assert!(bg < task && task < goal, "{out}");
+        let close = out.rfind("</system-reminder>").expect("the closing tag is kept");
+        assert!(
+            goal < close,
+            "the goal section sits inside the reminder, not after it: {out}"
+        );
+        assert!(out.ends_with("</system-reminder>"), "{out}");
+        assert_eq!(1, out.matches("</system-reminder>").count(), "{out}");
+        // With no reminder to join, the section follows the text.
+        assert_eq!(
+            "plain\n\nA goal has been set: ship it",
+            super::splice_goal_section("plain", "A goal has been set: ship it")
+        );
     }
 }

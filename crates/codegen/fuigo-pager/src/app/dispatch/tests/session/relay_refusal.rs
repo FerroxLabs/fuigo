@@ -20,10 +20,17 @@ fn a_sync_refusal_that_beat_session_new_is_shown_when_the_session_is_bound() {
     let _ = drain_startup_actions(&mut app);
     let home = app.home_session_agent.expect("home session");
     app.note_relay_sync_refusal("home-sid", "relay refused: how to trust it".to_owned());
-    assert!(system_texts(&app, home).iter().all(|t| !t.contains("how to trust")), "no session yet");
+    assert!(
+        system_texts(&app, home)
+            .iter()
+            .all(|t| !t.contains("how to trust")),
+        "no session yet"
+    );
     let _ = handle_session_created(&mut app, home, acp::SessionId::new("home-sid"), None, None);
     assert!(
-        system_texts(&app, home).iter().any(|t| t == "relay refused: how to trust it"),
+        system_texts(&app, home)
+            .iter()
+            .any(|t| t == "relay refused: how to trust it"),
         "{:?}",
         system_texts(&app, home)
     );

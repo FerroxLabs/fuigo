@@ -10,16 +10,25 @@ anyhow = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 fuigo-dirs = { workspace = true }
 dunce = { workspace = true }
+# The advisory lock every writer of a grants file takes around its read-modify-write.
+fs2 = { workspace = true }
+fuigo-file-lock = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+strum = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
+# NFC folding for the floor on APFS (normalisation-insensitive volumes).
+unicode-normalization = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 fuigo-config = { workspace = true }
 fuigo-tty-utils = { workspace = true }
+# globset validates every deny glob on BOTH platforms (so a glob is interpreted identically or rejected
+# identically), so it must build on Windows too: env.rs and canonical.rs use it unconditionally.
+globset = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
@@ -34,10 +43,6 @@ libc = { workspace = true }
 # are unix-only here, so they only compile on unix anyway; the enforce *code*
 # stays gated on `cfg(all(feature = "enforce", unix))`.
 nono = { version = "=0.53.0", default-features = false }
-# globset validates every deny glob on BOTH platforms (so a glob is interpreted
-# identically or rejected identically) and matches them on Linux. Non-optional for
-# the same reason as nono above.
-globset = { workspace = true }
 
 # Linux additionally walks the tree to expand globs to existing paths (enforce+
 # linux only). cfg(linux)-gated rather than enforce-gated: the cross-platform

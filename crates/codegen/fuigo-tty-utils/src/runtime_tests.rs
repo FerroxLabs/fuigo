@@ -66,9 +66,14 @@ fn prewarm_times_out_and_releases_workers() {
         drop(rt);
         let _ = done_tx.send(());
     });
+    // This is a liveness check (a drop that never returns), not a latency
+    // check: the bound only has to be far above any scheduling delay on a
+    // CPU-oversubscribed host, where a 2 s bound failed intermittently.
+    let started = Instant::now();
     assert!(
-        done_rx.recv_timeout(Duration::from_secs(2)).is_ok(),
-        "Runtime drop hung — parked pre-warm workers were not released"
+        done_rx.recv_timeout(Duration::from_secs(60)).is_ok(),
+        "Runtime drop hung — parked pre-warm workers were not released (waited {:?})",
+        started.elapsed()
     );
 }
 

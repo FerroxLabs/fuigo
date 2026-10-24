@@ -127,43 +127,144 @@ fn load_candidates(sessions_root: &Path) -> Result<(SessionCandidates, SessionCa
     };
     let mut all = SessionCandidates::new();
     let mut persisted = SessionCandidates::new();
+    // One folder that cannot be read (permissions, a vanished mount, a damaged entry) must not take the whole listing
+    // with it: the session list and `/resume` show everything else and the log names what was skipped.
     for cwd_entry in entries {
-        let cwd_entry = cwd_entry.map_err(|error| io_error("read", sessions_root, error))?;
+        let cwd_entry = match cwd_entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(root = %sessions_root.display(), %error, "skipping an unreadable entry of the sessions folder");
+                continue;
+            }
+        };
         let cwd_path = cwd_entry.path();
-        let cwd_type = cwd_entry
-            .file_type()
-            .map_err(|error| io_error("inspect", &cwd_path, error))?;
+        let cwd_type = match cwd_entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                tracing::warn!(path = %cwd_path.display(), %error, "skipping a sessions folder that cannot be inspected");
+                continue;
+            }
+        };
         if !cwd_type.is_dir() || cwd_type.is_symlink() {
             continue;
         }
-        for session_entry in
-            fs::read_dir(&cwd_path).map_err(|error| io_error("read", &cwd_path, error))?
-        {
-            let session_entry =
-                session_entry.map_err(|error| io_error("read", &cwd_path, error))?;
+        let session_entries = match fs::read_dir(&cwd_path) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(path = %cwd_path.display(), %error, "skipping an unreadable sessions folder");
+                continue;
+            }
+        };
+        for session_entry in session_entries {
+            let session_entry = match session_entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    tracing::warn!(path = %cwd_path.display(), %error, "skipping an unreadable session entry");
+                    continue;
+                }
+            };
             let path = session_entry.path();
-            let file_type = session_entry
-                .file_type()
-                .map_err(|error| io_error("inspect", &path, error))?;
+            let file_type = match session_entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "skipping a session that cannot be inspected");
+                    continue;
+                }
+            };
             let Some(id) = session_entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
             if !file_type.is_dir() || file_type.is_symlink() || id.starts_with('.') {
                 continue;
             }
-            all.entry(id.clone()).or_default().push(path.clone());
             let summary = path.join(super::SUMMARY_FILE);
             match fs::symlink_metadata(&summary) {
                 Ok(metadata)
                     if metadata.file_type().is_file() && !metadata.file_type().is_symlink() =>
                 {
+                    all.entry(id.clone()).or_default().push(path.clone());
                     persisted.entry(id).or_default().push(path);
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(io_error("inspect", &summary, error)),
-                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    all.entry(id).or_default().push(path);
+                }
+                Err(error) => {
+                    tracing::warn!(path = %summary.display(), %error, "skipping a session whose summary cannot be inspected");
+                }
+                Ok(_) => {
+                    all.entry(id).or_default().push(path);
+                }
             }
         }
     }
     Ok((all, persisted))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Run `f` with this thread's filesystem identity dropped to an unprivileged user, so permission checks apply
+    /// even when the suite runs as root. Only the calling thread is affected and it is restored before returning.
+    fn as_unprivileged<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    // SAFETY: setfsuid changes only the calling thread's filesystem uid; it is undone below.
+                    let previous = unsafe { libc::setfsuid(65534) };
+                    let out = f();
+                    // SAFETY: as above.
+                    unsafe { libc::setfsuid(previous as libc::uid_t) };
+                    out
+                })
+                .join()
+                .unwrap()
+        })
+    }
+
+    fn set_mode(path: &Path, mode: u32) {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn make_session(root: &Path, bucket: &str, id: &str) {
+        let dir = root.join(bucket).join(id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(super::super::SUMMARY_FILE), "{}").unwrap();
+        set_mode(&root.join(bucket), 0o755);
+        set_mode(&dir, 0o755);
+    }
+
+    #[test]
+    fn an_unreadable_workspace_folder_does_not_hide_the_other_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        set_mode(tmp.path(), 0o755);
+        let root = tmp.path().join("sessions");
+        fs::create_dir_all(&root).unwrap();
+        set_mode(&root, 0o755);
+        make_session(&root, "readable-cwd", "session-a");
+        make_session(&root, "locked-cwd", "session-b");
+        set_mode(&root.join("locked-cwd"), 0o000);
+
+        let view = as_unprivileged(|| RelocationView::load_for_sessions_root(&root));
+        set_mode(&root.join("locked-cwd"), 0o755);
+
+        let view = view.expect("a folder that cannot be read must be skipped, not fail the whole listing");
+        assert_eq!(
+            view.session_dirs(None).unwrap(),
+            vec![root.join("readable-cwd").join("session-a")],
+        );
+    }
+
+    #[test]
+    fn an_unreadable_sessions_root_is_still_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        set_mode(tmp.path(), 0o755);
+        let root = tmp.path().join("sessions");
+        fs::create_dir_all(&root).unwrap();
+        set_mode(&root, 0o000);
+        let view = as_unprivileged(|| RelocationView::load_for_sessions_root(&root));
+        set_mode(&root, 0o755);
+        assert!(view.is_err(), "nothing can be listed from an unreadable root");
+    }
 }

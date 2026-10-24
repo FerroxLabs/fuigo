@@ -105,7 +105,11 @@ fn run_clear(storage: &MemoryStorage, targets: &[ClearTarget], skip_confirm: boo
 
     fuigo_tty_utils::cli_println!("The following will be deleted:");
     for t in &existing {
-        fuigo_tty_utils::cli_println!("  {}: {}", fuigo_tty_utils::untrusted(t.label), fuigo_tty_utils::untrusted(t.path.display()));
+        fuigo_tty_utils::cli_println!(
+            "  {}: {}",
+            fuigo_tty_utils::untrusted(t.label),
+            fuigo_tty_utils::untrusted(t.path.display())
+        );
     }
 
     if !skip_confirm {

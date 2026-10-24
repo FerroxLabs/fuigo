@@ -69,7 +69,10 @@ impl HeadlessPrompt {
     }
 
     fn from_text(text: &str) -> anyhow::Result<Self> {
-        let trimmed = text.trim();
+        // A byte order mark (editors and shells on Windows add one) is not part of the prompt
+        let trimmed = text
+            .trim_start_matches(|c: char| c == '\u{feff}' || c.is_whitespace())
+            .trim_end();
         if trimmed.is_empty() {
             anyhow::bail!("prompt is empty");
         }
@@ -91,6 +94,7 @@ impl HeadlessPrompt {
 
 /// Parse ACP content blocks from an array (`[...]`) or typed wrapper (`{"type":"acp","content":[...]}`).
 fn parse_prompt_json(json_str: &str) -> anyhow::Result<Vec<acp::ContentBlock>> {
+    let json_str = json_str.trim_start_matches('\u{feff}');
     let value: serde_json::Value =
         serde_json::from_str(json_str).map_err(|e| anyhow::anyhow!("Invalid JSON: {e}"))?;
 
@@ -163,7 +167,8 @@ pub fn parse_permission_rules_lenient(
 ) -> Vec<fuigo_workspace::permission::types::PermissionRule> {
     let (rules, errors) = parse_permission_rules_inner(allow, deny);
     for (flag, rule, err) in errors {
-        fuigo_tty_utils::cli_eprintln!("warning: {} \"{}\": {}, skipping",
+        fuigo_tty_utils::cli_eprintln!(
+            "warning: {} \"{}\": {}, skipping",
             fuigo_tty_utils::untrusted(flag),
             fuigo_tty_utils::untrusted(rule),
             fuigo_tty_utils::untrusted(err)
@@ -249,5 +254,62 @@ pub(crate) fn apply_agent_flag(
             ResolvedAgent::FilePath(path) => config.agent_profile_path = Some(path),
             ResolvedAgent::Name(name) => config.agent.name = Some(name),
         }
+    }
+}
+
+#[cfg(test)]
+mod bom_tests {
+    use super::*;
+
+    const BOM: &str = "\u{feff}";
+
+    #[test]
+    fn a_leading_byte_order_mark_is_dropped_from_a_text_prompt() {
+        for raw in [format!("{BOM}hello"), format!("{BOM}{BOM}  hello  \n"), format!("  {BOM}hello")] {
+            match HeadlessPrompt::from_args(Some(&raw), None, None).unwrap() {
+                Some(HeadlessPrompt::Text(t)) => assert_eq!(t, "hello", "{raw:?}"),
+                other => panic!("expected text, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_prompt_that_is_only_a_byte_order_mark_is_empty() {
+        let err = HeadlessPrompt::from_args(Some(BOM), None, None).unwrap_err();
+        assert!(err.to_string().contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn a_byte_order_mark_inside_the_text_is_kept() {
+        match HeadlessPrompt::from_args(Some(&format!("a{BOM}b")), None, None).unwrap() {
+            Some(HeadlessPrompt::Text(t)) => assert_eq!(t, format!("a{BOM}b")),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prompt_json_with_a_leading_byte_order_mark_parses() {
+        let json = format!("{BOM}[{{\"type\":\"text\",\"text\":\"hi\"}}]");
+        match HeadlessPrompt::from_args(None, Some(&json), None).unwrap() {
+            Some(HeadlessPrompt::Blocks(blocks)) => assert_eq!(blocks.len(), 1),
+            other => panic!("expected blocks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prompt_files_written_with_a_byte_order_mark_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().join("p.txt");
+        std::fs::write(&text, format!("{BOM}from a file\n")).unwrap();
+        match HeadlessPrompt::from_file(&text).unwrap() {
+            HeadlessPrompt::Text(t) => assert_eq!(t, "from a file"),
+            other => panic!("expected text, got {other:?}"),
+        }
+        let json = dir.path().join("p.json");
+        std::fs::write(&json, format!("{BOM}[{{\"type\":\"text\",\"text\":\"x\"}}]")).unwrap();
+        assert!(matches!(
+            HeadlessPrompt::from_file(&json).unwrap(),
+            HeadlessPrompt::Blocks(_)
+        ));
     }
 }

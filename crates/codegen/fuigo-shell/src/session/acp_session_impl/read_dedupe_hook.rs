@@ -328,6 +328,7 @@ mod p174_tests {
             dispatch_target_name: None,
             is_read_only: true,
             rewriting_hook: None,
+            coercion_note: None,
             additional_context: Vec::new(),
             judged_read_paths: judged.map(|paths| {
                 paths

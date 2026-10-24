@@ -603,3 +603,20 @@ fn upgrade_then_fold_through_conversation_to_chat_messages() {
         "reconstructed sibling folded onto assistant.reasoning_content"
     );
 }
+
+#[test]
+fn tool_guidance_description_reaches_chat_completions_wire() {
+    let req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
+        .with_tools(vec![ToolSpec {
+        name: "read_file".to_string(),
+        description: Some("stock text\n\nGUIDE-WIRE".to_string()),
+        parameters: serde_json::json!({"type": "object"}),
+        freeform: None,
+    }]);
+    let chat_req: ChatCompletionRequest = req.into();
+    let wire = serde_json::to_value(&chat_req).unwrap();
+    assert_eq!(
+        wire["tools"][0]["function"]["description"],
+        "stock text\n\nGUIDE-WIRE"
+    );
+}

@@ -72,7 +72,7 @@ inner() {
   export FUIGO_VERSION
   rc=0
   # shellcheck disable=SC2086
-  cargo build --release --target "$target" -p fuigo-pager-bin ${EXTRA_CARGO_ARGS:-} || rc=$?
+  cargo build --profile release-dist --target "$target" -p fuigo-pager-bin ${EXTRA_CARGO_ARGS:-} || rc=$?
   # Hand every file written as root back to the host user.
   chown -R "$HOST_UID:$HOST_GID" "${CARGO_TARGET_DIR:-/work/target}" /root/.cargo/registry /root/.cargo/git 2>/dev/null || true
   exit $rc

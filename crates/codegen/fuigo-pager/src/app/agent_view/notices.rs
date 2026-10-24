@@ -144,6 +144,7 @@ impl AgentView {
             || self.block_viewer.is_some()
             // /gboom dims the same down-to-shortcuts region as the video viewer.
             || self.gboom.is_some()
+            || self.stoke.is_some()
             // Extensions/agents modals are centered popups (render_modal_window) that capture all input and early-return out of draw
             // They are distinct from active_modal, and persona_detail only renders atop the agents modal
             // A tip could at most peek beside the modal, so refuse
@@ -284,6 +285,14 @@ impl AgentView {
     /// When every trusted clipboard backend fails (common on Apple Terminal over SSH), the toast points at the backup file
     /// (`~/.fuigo/last-copy.txt`, or `FUIGO_COPY_FILE`) instead. The returned
     /// [`CopyDelivery`](crate::clipboard::CopyDelivery) tells callers where the copy actually landed (clipboard, backup file, or nowhere).
+    /// The full git branch name shown in the header, or `None` when detached or not in a repository.
+    pub(crate) fn header_branch_name(&self) -> Option<String> {
+        let branch = self.current_branch.clone().or_else(|| {
+            crate::git_info::cwd_git_info_lazy(&self.session.cwd).and_then(|i| i.branch.clone())
+        });
+        branch.filter(|b| !b.is_empty())
+    }
+
     pub fn copy_to_clipboard(&mut self, text: &str) -> crate::clipboard::CopyDelivery {
         let delivery = crate::clipboard::copy_text_or_file(text);
         self.show_toast_ticks(delivery.toast_message().as_ref(), delivery.toast_ticks());
@@ -341,6 +350,51 @@ impl AgentView {
     }
 
     /// Open `url` in the system browser.
+    /// Re-bind orphan `[Image #N]` text to the images the composer still holds, then name the
+    /// placeholders no record backs. Logged against this session; the caller queues the message on
+    /// `AppView::pending_image_notices`.
+    pub(crate) fn unbound_image_placeholder_notice(&mut self) -> Option<String> {
+        self.prompt.rebind_image_placeholders();
+        let unbound = self.prompt.unbound_image_placeholders();
+        if unbound.is_empty() {
+            return None;
+        }
+        let numbers = image_number_list(&unbound);
+        let message = if unbound.len() == 1 {
+            format!("Image {numbers} not attached — placeholder sent as text")
+        } else {
+            format!("Images {numbers} not attached — placeholders sent as text")
+        };
+        crate::unified_log::warn(
+            "prompt.image_placeholder_unbound",
+            self.session.session_id.as_ref().map(|s| s.0.as_ref()),
+            Some(serde_json::json!({
+                "display_numbers": unbound,
+                "attached": self.prompt.images.len(),
+            })),
+        );
+        Some(message)
+    }
+
+    /// Attached images whose bytes could not be loaded for the wire, logged against this session.
+    pub(crate) fn skipped_image_send_notice(&self, display_numbers: &[usize]) -> Option<String> {
+        if display_numbers.is_empty() {
+            return None;
+        }
+        let numbers = image_number_list(display_numbers);
+        let noun = if display_numbers.len() == 1 {
+            "Image"
+        } else {
+            "Images"
+        };
+        crate::unified_log::warn(
+            "prompt.image_send_skipped",
+            self.session.session_id.as_ref().map(|s| s.0.as_ref()),
+            Some(serde_json::json!({ "display_numbers": display_numbers })),
+        );
+        Some(format!("{noun} {numbers} couldn't be read — not sent"))
+    }
+
     /// When the opener cannot run (headless Linux VM, missing `xdg-open`, etc.), push a system message with the full URL so the user can copy it.
     /// Also best-effort copy to the clipboard, since OSC 52 works over SSH even without a local display.
     ///
@@ -379,6 +433,15 @@ impl AgentView {
             }
         }
     }
+}
+
+/// `#1, #3` for a toast.
+fn image_number_list(display_numbers: &[usize]) -> String {
+    display_numbers
+        .iter()
+        .map(|n| format!("#{n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]

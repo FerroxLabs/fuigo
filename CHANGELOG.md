@@ -4,6 +4,7 @@ Each release has its own notes under `docs/`. Binaries and npm platform packages
 
 | Version | Notes | Highlights |
 | --- | --- | --- |
+| 1.0.32 | [release notes](docs/release-notes-1.0.32.md) | One sign-in picker for ChatGPT, Grok, Flux Router and provider keys, and one ranked model list that names the route each model uses; opt-in per-command sandbox; smaller install; new welcome screen; many MCP, hook, permission, worktree, goal and terminal fixes. |
 | 1.0.31 | [release notes](docs/release-notes-1.0.31.md) | Fix: switching provider with `/model` no longer replays reasoning the new provider rejects; `/remember` reports the real file it wrote or that the note was not saved; session rules survive a model switch; MCP tool progress reaches the client; untrusted-folder tests; project-rules guide corrected; new README, brand and community files. |
 | 1.0.30 | [release notes](docs/release-notes-1.0.30.md) | Shared leader: one owner per session, prompts go only to the owner; project and `npx` copies no longer update the global install; more global-install layouts recognised. |
 | 1.0.29 | [release notes](docs/release-notes-1.0.29.md) | Shared leader: only the window that owns a session can change its permission mode; npm 11 install and upgrade fixes; two fixes for messages between sessions. |

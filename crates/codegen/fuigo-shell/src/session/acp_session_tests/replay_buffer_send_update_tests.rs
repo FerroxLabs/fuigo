@@ -138,6 +138,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
             context_window_selection: Default::default(),
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
+            overflow_compactions_since_response: std::cell::Cell::new(0),
             previous_model: std::cell::Cell::new(None),
             compaction_mode: fuigo_chat_state::CompactionMode::Transcript,
             verbatim_input: true,

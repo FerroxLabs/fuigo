@@ -4,9 +4,26 @@ use crate::permission::types::EditPolicy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use fuigo_paths::AbsPathBuf;
+use fuigo_sandbox::command::protected::{FileOwner, HeldDir};
 use fuigo_tools::util::fuigo_home::fuigo_home;
 
 const VALIDATED_MCP_SERVER_GRANTS_VERSION: i64 = 1;
+
+/// The most a daemon-owned `permission*.toml` may hold; a longer file is refused like a hostile one.
+const MAX_DAEMON_STATE_FILE_BYTES: u64 = 1024 * 1024;
+
+/// How a [`CachedStateStore`] reads and writes its `permission*.toml`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum StateFileAccess {
+    /// The CLI's own store, read as a plain file, as it always was.
+    Plain,
+    /// The daemon's store for a folder whose sandbox is on: the file is the daemon's own
+    /// ([`FileOwner::Daemon`]), reached from `fuigo_home` through directories held open one by
+    /// one ([`HeldDir`]), none a symlink — a command may have planted one — and never a legacy
+    /// location. Anything else is refused: the store then reads as empty and writes nothing
+    /// (fail closed).
+    DaemonOwned { fuigo_home: std::path::PathBuf },
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -130,6 +147,37 @@ fn permission_scope_root(cwd: &AbsPathBuf) -> std::path::PathBuf {
     }
 }
 
+/// The served folder when `cwd` lies under it and is inside no repository of its own; otherwise
+/// `cwd`, which the store resolves to its repo root as before. Both paths are compared canonical
+/// (the desktop joins its cwd from the raw home dir; the daemon canonicalizes the root it serves).
+/// The probe walks the filesystem, so it runs on the blocking pool; one that did not finish keeps
+/// the cwd key. A conversation bound to its own scratch directory beneath the folder a desktop
+/// exposes would otherwise key a cwd-scoped store, and an "always" answer would hold for one chat.
+pub(crate) async fn grant_dir_for(cwd: &AbsPathBuf, served_root: &std::path::Path) -> AbsPathBuf {
+    if cwd.as_path() == served_root {
+        return cwd.clone();
+    }
+    let Ok(root) = AbsPathBuf::new(served_root.to_path_buf()) else {
+        return cwd.clone();
+    };
+    let (probe_cwd, probe_root) = (cwd.clone(), root.clone());
+    let under_root_outside_repo = tokio::task::spawn_blocking(move || {
+        let canonical =
+            |path: &std::path::Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        canonical(probe_cwd.as_path()).starts_with(canonical(probe_root.as_path()))
+            && fuigo_agent::repo::RepoDirChain::resolve(probe_cwd.as_path())
+                .git_root
+                .is_none()
+    })
+    .await
+    .unwrap_or(false);
+    if under_root_outside_repo {
+        root
+    } else {
+        cwd.clone()
+    }
+}
+
 /// Test-only; production resolves the scope root once in [`resolve_store_dirs`] and derives everything from it.
 #[cfg(test)]
 fn state_dir_for_cwd(cwd: &AbsPathBuf) -> std::path::PathBuf {
@@ -139,8 +187,12 @@ fn state_dir_for_cwd(cwd: &AbsPathBuf) -> std::path::PathBuf {
 /// The store location from before repo-root keying (keyed on the exact cwd), when it differs from the resolved repo-root store `dir`.
 /// Read-only migration source: grants saved by older builds in a subdirectory still load until the repo-root store exists.
 /// The next persist carries them into it.
-fn legacy_state_dir(cwd: &AbsPathBuf, dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let legacy = fuigo_config::sessions_cwd_dir(cwd.as_str());
+fn legacy_state_dir_in(
+    fuigo_home: &std::path::Path,
+    cwd: &AbsPathBuf,
+    dir: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let legacy = fuigo_config::sessions_cwd_dir_in(fuigo_home, cwd.as_str());
     (legacy != dir).then_some(legacy)
 }
 
@@ -154,8 +206,18 @@ struct StoreDirs {
 }
 
 async fn resolve_store_dirs(cwd: &AbsPathBuf, ensure: bool) -> StoreDirs {
+    resolve_store_dirs_in(fuigo_config::fuigo_home(), cwd, ensure).await
+}
+
+/// [`resolve_store_dirs`] under an explicit fuigo home, for a holder that resolved the home once
+/// and injects it (the per-folder sandbox).
+async fn resolve_store_dirs_in(
+    fuigo_home: std::path::PathBuf,
+    cwd: &AbsPathBuf,
+    ensure: bool,
+) -> StoreDirs {
     let cwd = cwd.clone();
-    let fallback_dir = fuigo_config::sessions_cwd_dir(cwd.as_str());
+    let fallback_dir = fuigo_config::sessions_cwd_dir_in(&fuigo_home, cwd.as_str());
     tokio::task::spawn_blocking(move || {
         // Resolve the scope root ONCE: discovery walks the filesystem
         // The store dir, its ensure fallback, and the legacy compare all derive from this single resolution
@@ -163,15 +225,15 @@ async fn resolve_store_dirs(cwd: &AbsPathBuf, ensure: bool) -> StoreDirs {
         let dir = if ensure {
             // Canonical creator: tighten the sessions root this write may create
             // Falls back to the computed path (persist_state_to_dir re-creates it owner-only) so a failed ensure still gets a write
-            fuigo_config::ensure_sessions_cwd_dir(&root).unwrap_or_else(|e| {
+            fuigo_config::ensure_sessions_cwd_dir_in(&fuigo_home, &root).unwrap_or_else(|e| {
                 tracing::warn!(?e, "failed ensuring sessions cwd dir for permission state");
-                fuigo_config::sessions_cwd_dir(&root)
+                fuigo_config::sessions_cwd_dir_in(&fuigo_home, &root)
             })
         } else {
-            fuigo_config::sessions_cwd_dir(&root)
+            fuigo_config::sessions_cwd_dir_in(&fuigo_home, &root)
         };
         StoreDirs {
-            legacy_dir: legacy_state_dir(&cwd, &dir),
+            legacy_dir: legacy_state_dir_in(&fuigo_home, &cwd, &dir),
             dir,
         }
     })
@@ -233,6 +295,53 @@ async fn try_load_state(path: &std::path::Path) -> Option<PermissionState> {
     .await
 }
 
+/// The session directory of a daemon-owned `path`, held open from `fuigo_home` down
+/// ([`HeldDir`]): each directory the daemon's own and not a symlink, `create` making a missing
+/// one owner-only. A refusal is `ErrorKind::InvalidInput`; a missing directory `NotFound`.
+fn hold_daemon_dir(
+    fuigo_home: &std::path::Path,
+    path: &std::path::Path,
+    create: bool,
+) -> std::io::Result<HeldDir> {
+    let dir = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} has no directory", path.display()),
+        )
+    })?;
+    HeldDir::open(fuigo_home, dir, FileOwner::Daemon, create)
+}
+
+/// The daemon-owned store's state at `path` ([`StateFileAccess::DaemonOwned`]): read through the
+/// held session directory ([`hold_daemon_dir`]), the file opened without following a link and
+/// only when a regular file of the daemon's user under [`MAX_DAEMON_STATE_FILE_BYTES`]. `None`
+/// when absent or refused — logged — so a planted file grants nothing.
+async fn try_load_daemon_owned_state(
+    fuigo_home: &std::path::Path,
+    path: &std::path::Path,
+) -> Option<PermissionState> {
+    let (home, file) = (fuigo_home.to_path_buf(), path.to_path_buf());
+    let read = tokio::task::spawn_blocking(move || {
+        let text = hold_daemon_dir(&home, &file, false)?.read(
+            file.file_name().unwrap_or_default(),
+            MAX_DAEMON_STATE_FILE_BYTES,
+            FileOwner::Daemon,
+        )?;
+        toml::from_str::<PermissionState>(&text)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    })
+    .await
+    .map_err(std::io::Error::other);
+    match read {
+        Ok(Ok(state)) => Some(state),
+        Ok(Err(e)) | Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Ok(Err(e)) | Err(e) => {
+            tracing::warn!(?e, path = %path.display(), "daemon-owned permission state refused, not read");
+            None
+        }
+    }
+}
+
 async fn load_state_from_dir(
     dir: &std::path::Path,
     client_identifier: Option<&str>,
@@ -292,6 +401,7 @@ pub(crate) struct CachedStateStore {
     dir: std::path::PathBuf,
     legacy_dir: Option<std::path::PathBuf>,
     client_identifier: Option<String>,
+    access: StateFileAccess,
     /// `(mtime, len)` at the last read; size pairs with mtime to catch a same-tick write that coarse-granularity filesystems would hide.
     last_sig: Option<(std::time::SystemTime, u64)>,
 }
@@ -304,10 +414,34 @@ impl CachedStateStore {
         client_identifier: Option<&str>,
     ) -> (Self, PermissionState) {
         let dirs = resolve_store_dirs(cwd, false).await;
-        let mut store = Self {
+        Self::open(dirs, client_identifier, StateFileAccess::Plain).await
+    }
+
+    /// [`resolve_and_load`](Self::resolve_and_load) with `access`: under an injected fuigo home
+    /// ([`StateFileAccess::DaemonOwned`]), or the process's own ([`StateFileAccess::Plain`]).
+    pub(crate) async fn resolve_and_load_with(
+        cwd: &AbsPathBuf,
+        client_identifier: Option<&str>,
+        access: StateFileAccess,
+    ) -> (Self, PermissionState) {
+        let fuigo_home = match &access {
+            StateFileAccess::Plain => fuigo_config::fuigo_home(),
+            StateFileAccess::DaemonOwned { fuigo_home } => fuigo_home.clone(),
+        };
+        let dirs = resolve_store_dirs_in(fuigo_home, cwd, false).await;
+        Self::open(dirs, client_identifier, access).await
+    }
+
+    async fn open(
+        dirs: StoreDirs,
+        client_identifier: Option<&str>,
+        access: StateFileAccess,
+    ) -> (Self, PermissionState) {
+        let mut store = CachedStateStore {
             dir: dirs.dir,
             legacy_dir: dirs.legacy_dir,
             client_identifier: client_identifier.map(str::to_owned),
+            access,
             last_sig: None,
         };
         store.last_sig = store.current_sig().await;
@@ -315,19 +449,65 @@ impl CachedStateStore {
         (store, state)
     }
 
+    pub(crate) fn access(&self) -> &StateFileAccess {
+        &self.access
+    }
+
     async fn current_sig(&self) -> Option<(std::time::SystemTime, u64)> {
         let path = state_file_path(&self.dir, self.client_identifier.as_deref());
-        let meta = tokio::fs::metadata(path).await.ok()?;
+        // The daemon's own file is signed as the path itself: a link planted over it is a change
+        let meta = match self.access {
+            StateFileAccess::Plain => tokio::fs::metadata(path).await.ok()?,
+            StateFileAccess::DaemonOwned { .. } => tokio::fs::symlink_metadata(path).await.ok()?,
+        };
         Some((meta.modified().ok()?, meta.len()))
     }
 
     async fn read(&self) -> PermissionState {
-        load_state_with_fallback(
-            &self.dir,
-            self.legacy_dir.as_deref(),
-            self.client_identifier.as_deref(),
-        )
-        .await
+        match &self.access {
+            StateFileAccess::Plain => {
+                load_state_with_fallback(
+                    &self.dir,
+                    self.legacy_dir.as_deref(),
+                    self.client_identifier.as_deref(),
+                )
+                .await
+            }
+            // Per-client and legacy files are the CLI's: the daemon's store has one file
+            StateFileAccess::DaemonOwned { fuigo_home } => {
+                try_load_daemon_owned_state(fuigo_home, &state_file_path(&self.dir, None))
+                    .await
+                    .unwrap_or_default()
+            }
+        }
+    }
+
+    /// Write `state` back as this store reads it: merged with what is on disk for the CLI's
+    /// store ([`persist_state`]); for a daemon-owned store, into its one file through the held
+    /// session directory ([`hold_daemon_dir`]), created owner-only, replaced in that handle so a
+    /// link at the name is never written through — and not at all when the hold refuses: a grant
+    /// is then kept for the session only, logged.
+    pub(crate) async fn persist(&self, cwd: &AbsPathBuf, state: &PermissionState) {
+        let StateFileAccess::DaemonOwned { fuigo_home } = &self.access else {
+            return persist_state(cwd, state, self.client_identifier.as_deref()).await;
+        };
+        let path = state_file_path(&self.dir, None);
+        let mut merged = state.clone();
+        if let Some(on_disk) = try_load_daemon_owned_state(fuigo_home, &path).await {
+            merged.merge_grants_from(on_disk);
+        }
+        let home = fuigo_home.clone();
+        let result = persist_state_to_path_with_writer(&path, &merged, move |path, contents| {
+            hold_daemon_dir(&home, path, true)?.replace(
+                path.file_name().unwrap_or_default(),
+                contents,
+                FileOwner::Daemon,
+            )
+        })
+        .await;
+        if let Err(e) = result {
+            tracing::warn!(?e, path = %path.display(), "daemon-owned permission state not written");
+        }
     }
 
     /// Grants on disk when the file signature changed since the last read, else `None`; an unchanged store costs only the `stat`.
@@ -950,6 +1130,124 @@ allowed_mcp_servers = ["a"]
         assert!(result.is_none());
     }
 
+    /// The CLI's own store is read as a plain file: a symlinked `permission.toml` and a file
+    /// larger than a daemon-owned file may be are both loaded (the daemon's stricter read is
+    /// its own, in the sandbox side of the crate).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn try_load_state_follows_a_symlink_and_reads_a_large_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("elsewhere.toml");
+        let mut planted = PermissionState::default();
+        planted.allow_bash_execute = true;
+        planted.allowed_bash_commands = (0..60_000).map(|i| format!("cmd-{i:08}")).collect();
+        let text = toml::to_string_pretty(&planted).unwrap();
+        assert!(text.len() > 1024 * 1024);
+        tokio::fs::write(&target, text).await.unwrap();
+        let link = state_file_path(tmp.path(), None);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let loaded = try_load_state(&link).await.unwrap();
+        assert!(loaded.allow_bash_execute);
+        assert_eq!(loaded.allowed_bash_commands.len(), 60_000);
+        assert!(
+            load_state_from_dir(tmp.path(), None)
+                .await
+                .allow_bash_execute
+        );
+    }
+
+    /// The daemon's store for a folder whose sandbox is on reads and writes its one file only
+    /// through components below the fuigo home that are the daemon's own and not symlinks: a
+    /// session directory a command replaced with a link reads as empty and takes no write, a
+    /// linked file too, and the legacy and per-client locations are not consulted — where the
+    /// CLI's plain store (the same layout) follows the link, as it always did.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_owned_store_reads_and_writes_only_through_unbent_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fuigo_home = tmp.path().join("fuigo-home");
+        let dir = fuigo_home.join("sessions").join("enc-cwd");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let mut planted = PermissionState::default();
+        planted
+            .allowed_web_fetch_domains
+            .insert("planted.example".to_owned());
+        persist_state_to_dir(&elsewhere, &planted, None).await;
+        let mut own = PermissionState::default();
+        own.allowed_web_fetch_domains
+            .insert("own.example".to_owned());
+        persist_state_to_dir(&dir, &own, None).await;
+        let daemon_owned = || StateFileAccess::DaemonOwned {
+            fuigo_home: fuigo_home.clone(),
+        };
+        let dirs = || StoreDirs {
+            dir: dir.clone(),
+            legacy_dir: Some(elsewhere.clone()),
+        };
+        let cwd = AbsPathBuf::new(dir.clone()).unwrap();
+        let domains = |state: &PermissionState| state.allowed_web_fetch_domains.clone();
+
+        let (store, state) = CachedStateStore::open(dirs(), Some("client"), daemon_owned()).await;
+        assert_eq!(domains(&own), domains(&state), "its own regular file reads");
+        let mut granted = state.clone();
+        granted
+            .allowed_web_fetch_domains
+            .insert("granted.example".to_owned());
+        store.persist(&cwd, &granted).await;
+        assert_eq!(
+            domains(&granted),
+            domains(&load_state_from_dir(&dir, None).await),
+            "written into its one file, merged"
+        );
+        assert!(!state_file_path(&dir, Some("client")).exists());
+
+        std::fs::remove_file(state_file_path(&dir, None)).unwrap();
+        std::os::unix::fs::symlink(
+            state_file_path(&elsewhere, None),
+            state_file_path(&dir, None),
+        )
+        .unwrap();
+        let (_, state) = CachedStateStore::open(dirs(), None, daemon_owned()).await;
+        assert!(domains(&state).is_empty(), "a linked file reads as empty");
+        let (_, state) = CachedStateStore::open(dirs(), None, StateFileAccess::Plain).await;
+        assert_eq!(
+            domains(&planted),
+            domains(&state),
+            "the CLI's own store follows the link, as ever"
+        );
+
+        std::fs::remove_file(state_file_path(&dir, None)).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
+        let (store, state) = CachedStateStore::open(dirs(), None, daemon_owned()).await;
+        assert!(
+            domains(&state).is_empty(),
+            "a linked session directory reads as empty, not from the legacy location either"
+        );
+        store.persist(&cwd, &granted).await;
+        assert_eq!(
+            domains(&planted),
+            domains(&load_state_from_dir(&elsewhere, None).await),
+            "nothing was written through the link"
+        );
+        std::fs::remove_file(&dir).unwrap();
+        let (store, _) = CachedStateStore::open(dirs(), None, daemon_owned()).await;
+        store.persist(&cwd, &granted).await;
+        assert_eq!(
+            domains(&granted),
+            domains(&load_state_from_dir(&dir, None).await),
+            "with the link gone the write creates the directory and the file"
+        );
+        assert!(
+            try_load_daemon_owned_state(&fuigo_home, &state_file_path(&elsewhere, None))
+                .await
+                .is_none(),
+            "a file outside the fuigo home is refused"
+        );
+    }
+
     #[tokio::test]
     async fn try_load_state_valid_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1178,8 +1476,22 @@ allowed_mcp_servers = ["a"]
         assert_eq!(permission_scope_root(&sub_cwd), root);
         assert_eq!(state_dir_for_cwd(&root_cwd), state_dir_for_cwd(&sub_cwd));
         // The subdirectory keeps a distinct legacy (exact-cwd) location to migrate old grants from; the root has none
-        assert!(legacy_state_dir(&sub_cwd, &state_dir_for_cwd(&sub_cwd)).is_some());
-        assert!(legacy_state_dir(&root_cwd, &state_dir_for_cwd(&root_cwd)).is_none());
+        assert!(
+            legacy_state_dir_in(
+                &fuigo_config::fuigo_home(),
+                &sub_cwd,
+                &state_dir_for_cwd(&sub_cwd)
+            )
+            .is_some()
+        );
+        assert!(
+            legacy_state_dir_in(
+                &fuigo_config::fuigo_home(),
+                &root_cwd,
+                &state_dir_for_cwd(&root_cwd)
+            )
+            .is_none()
+        );
     }
 
     /// Linked worktrees must not share a grant store.
@@ -1265,7 +1577,14 @@ allowed_mcp_servers = ["a"]
             .is_none()
         {
             assert_eq!(permission_scope_root(&cwd), dir);
-            assert!(legacy_state_dir(&cwd, &state_dir_for_cwd(&cwd)).is_none());
+            assert!(
+                legacy_state_dir_in(
+                    &fuigo_config::fuigo_home(),
+                    &cwd,
+                    &state_dir_for_cwd(&cwd)
+                )
+                .is_none()
+            );
         }
     }
 }

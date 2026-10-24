@@ -5,11 +5,11 @@
 //! 160 characters (`ModelNotice::normalized`), and it is painted as plain styled cells (never markdown, never a link).
 //! [`height`] must measure with the same wrap that [`render`] paints.
 
+use fuigo_shell::sampling::types::{ModelNotice, ModelNoticeSeverity};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use fuigo_shell::sampling::types::{ModelNotice, ModelNoticeSeverity};
 
 use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;

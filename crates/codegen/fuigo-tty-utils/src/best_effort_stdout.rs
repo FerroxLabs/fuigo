@@ -58,6 +58,27 @@ pub fn hard_failure() -> bool {
     HARD_FAILURE.load(Ordering::Relaxed)
 }
 
+/// `true` when `err`, or anything in its `source()` chain, is an I/O error from a reader that went away
+/// (`BrokenPipe`). A command that propagates such an error with `?` (rather than printing through the macros here)
+/// ends quietly instead of reporting an error nobody is left to read.
+pub fn error_chain_is_gone_reader(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut next: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = next {
+        if e.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+        {
+            return true;
+        }
+        next = e.source();
+    }
+    false
+}
+
+/// Record that the reader is gone, for a caller that learned it from an error rather than from a write here.
+pub fn note_reader_gone() {
+    READER_GONE.store(true, Ordering::Relaxed);
+}
+
 pub(crate) fn classify(e: &std::io::Error) -> Outcome {
     if e.kind() == std::io::ErrorKind::BrokenPipe {
         Outcome::ReaderGone
@@ -441,5 +462,47 @@ mod tests {
             classify(&std::io::ErrorKind::WouldBlock.into()),
             Outcome::Failed
         );
+    }
+}
+
+#[cfg(test)]
+mod gone_reader_error_tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct Wrapped(Box<dyn std::error::Error + 'static>);
+    impl std::fmt::Display for Wrapped {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "wrapped")
+        }
+    }
+    impl std::error::Error for Wrapped {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(self.0.as_ref())
+        }
+    }
+
+    #[test]
+    fn a_broken_pipe_is_a_gone_reader_however_deep_it_is_wrapped() {
+        let bare = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+        assert!(error_chain_is_gone_reader(&bare));
+        let wrapped = Wrapped(Box::new(Wrapped(Box::new(std::io::Error::from(
+            std::io::ErrorKind::BrokenPipe,
+        )))));
+        assert!(error_chain_is_gone_reader(&wrapped));
+    }
+
+    #[test]
+    fn other_errors_are_not_a_gone_reader() {
+        let other = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(!error_chain_is_gone_reader(&other));
+        let wrapped = Wrapped(Box::new(std::io::Error::other("disk full")));
+        assert!(!error_chain_is_gone_reader(&wrapped));
+    }
+
+    #[test]
+    fn noting_a_gone_reader_is_visible_to_reader_gone() {
+        note_reader_gone();
+        assert!(reader_gone());
     }
 }

@@ -98,7 +98,7 @@ async fn bash_full_output_double_click_fold_pty() {
     // The header cell may have moved between locate and inject, or multi-click state from an earlier accidental click may still be open
     let fold_deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        double_click_text(&mut harness, "Run (user)");
+        double_click_text(&mut harness, "Ran (user)");
         if harness
             .wait_for_text_absent("L06", Duration::from_secs(3))
             .is_ok()
@@ -117,7 +117,7 @@ async fn bash_full_output_double_click_fold_pty() {
     // MULTI_CLICK_TIMEOUT_MS is 300ms; clear it before the expand gesture so the second double-click is not counted as click 3/4 of the first
     harness.update(Duration::from_millis(500));
     // Re-locate: collapse shrinks the block and may move the header on screen.
-    double_click_text(&mut harness, "Run (user)");
+    double_click_text(&mut harness, "Ran (user)");
     harness
         .wait_for_text("L06", Duration::from_secs(15))
         .unwrap_or_else(|_| {

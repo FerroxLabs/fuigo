@@ -31,6 +31,8 @@ pub struct ModelProviderConfig {
     pub context_window: Option<u64>,
     /// Selectable context windows inherited by models that set neither `context_window` nor `context_windows`.
     pub context_windows: Option<Vec<NonZeroU64>>,
+    /// Request-body cap of this endpoint; inherited by models that set none of their own.
+    pub max_request_bytes: Option<NonZeroU64>,
     /// Ceiling on generated tokens for models routed through this provider,
     /// inherited by every `[model.<id>]` that sets none of its own.
     ///
@@ -65,6 +67,7 @@ impl std::fmt::Debug for ModelProviderConfig {
             auth,
             context_window,
             context_windows,
+            max_request_bytes,
             max_completion_tokens,
         } = self;
         f.debug_struct("ModelProviderConfig")
@@ -81,6 +84,7 @@ impl std::fmt::Debug for ModelProviderConfig {
             .field("auth", auth)
             .field("context_window", context_window)
             .field("context_windows", context_windows)
+            .field("max_request_bytes", max_request_bytes)
             .field("max_completion_tokens", max_completion_tokens)
             .finish()
     }
@@ -389,6 +393,7 @@ impl ConfigModelOverride {
             auth,
             context_window,
             context_windows,
+            max_request_bytes,
             max_completion_tokens,
         } = provider;
 
@@ -398,6 +403,7 @@ impl ConfigModelOverride {
         merged.api_base_url = merged.api_base_url.or_else(|| api_base_url.clone());
         merged.api_backend = merged.api_backend.or_else(|| api_backend.clone());
         merged.auth_scheme = merged.auth_scheme.or(*auth_scheme);
+        merged.max_request_bytes = merged.max_request_bytes.or(*max_request_bytes);
         // Inherited wholesale only when the model sets none of its own.
         if merged.context_window.is_none() && merged.context_windows.is_none() {
             merged.context_window = *context_window;
@@ -1735,5 +1741,83 @@ mod context_window_tests {
         assert!(info.supports_context_window(w(400_000)));
         assert!(!info.supports_context_window(w(250_000)));
         assert!(!info.supports_context_window(w(800_000)));
+    }
+}
+
+#[cfg(test)]
+mod request_cap_tests {
+    use std::num::NonZeroU64;
+
+    use crate::agent::config::{Config, resolve_credentials, resolve_model_list, sampling_config_for_model};
+
+    /// The request-body cap each configured model ends up sending to the sampler, by model key.
+    fn caps(raw: &str) -> impl Fn(&str) -> Option<NonZeroU64> {
+        let raw: toml::Value = toml::from_str(raw).unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        move |key: &str| {
+            let model = resolved.get(key).expect("model should exist");
+            sampling_config_for_model(model, resolve_credentials(model, None), None, None, None, None)
+                .max_request_bytes
+        }
+    }
+
+    #[test]
+    fn model_inherits_provider_max_request_bytes() {
+        let cap = caps(
+            r#"
+            [model_providers.messages-gateway]
+            base_url = "https://gateway.example/v1"
+            api_backend = "messages"
+            max_request_bytes = 20000000
+
+            [model.inherits]
+            model = "claude-sonnet"
+            model_provider = "messages-gateway"
+
+            [model.overrides]
+            model = "claude-opus"
+            model_provider = "messages-gateway"
+            max_request_bytes = 10000000
+            "#,
+        );
+        assert_eq!(
+            NonZeroU64::new(20_000_000),
+            cap("inherits"),
+            "the provider cap reaches a model that sets none and beats the messages default"
+        );
+        assert_eq!(
+            NonZeroU64::new(10_000_000),
+            cap("overrides"),
+            "the model's own cap overrides the provider's"
+        );
+    }
+
+    #[test]
+    fn an_unset_cap_defaults_from_the_api_backend() {
+        let cap = caps(
+            r#"
+            [model.anthropic]
+            model = "claude-sonnet"
+            base_url = "https://gateway.example/v1"
+            api_backend = "messages"
+            context_window = 200000
+
+            [model.chat]
+            model = "m"
+            base_url = "https://gateway.example/v1"
+            api_backend = "chat_completions"
+            context_window = 200000
+
+            [model.responses]
+            model = "m"
+            base_url = "https://gateway.example/v1"
+            api_backend = "responses"
+            context_window = 200000
+            "#,
+        );
+        assert_eq!(NonZeroU64::new(30_000_000), cap("anthropic"));
+        assert_eq!(NonZeroU64::new(50 * 1024 * 1024), cap("chat"));
+        assert_eq!(NonZeroU64::new(50 * 1024 * 1024), cap("responses"));
     }
 }

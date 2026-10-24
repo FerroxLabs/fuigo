@@ -199,11 +199,15 @@ mod tests {
     }
     #[test]
     fn relative_dest_id_matches_cwd_join() {
+        // Reads the process cwd twice (here and inside the id); the tests that chdir hold this lock.
+        #[cfg(feature = "metadata")]
+        let _cwd_lock = crate::api::cwd_test_guard();
         let name = format!("fuigo-fwt-rel-{}", std::process::id());
         let rel = PathBuf::from(&name);
         let abs = std::env::current_dir().unwrap().join(&name);
         assert_eq!(worktree_id_from_path(&rel), worktree_id_from_path(&abs));
     }
+    #[cfg(unix)]
     #[test]
     fn worktree_id_does_not_follow_dest_or_parent_symlink() {
         let tmp = TempDir::new().unwrap();

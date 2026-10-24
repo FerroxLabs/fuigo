@@ -59,6 +59,16 @@ pub trait ToolMetadata: Send + Sync {
         self.kind().is_read_only()
     }
 
+    /// The canonical input field naming the workspace path this call touches
+    /// (`file_path` on `search_replace`, `filePath` on opencode `edit`, ...).
+    ///
+    /// The shell keys its per-path serialization of parallel calls on it (see `util::lock_path`), so two writers of
+    /// one file never run at the same time, whatever the harness calls the argument. Default `None`: the tool has no
+    /// single path key (shells, `apply_patch`, `todo_write`, directory listings whose `path` is a directory).
+    fn lock_path_param(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Notification variant tags this tool may emit during execution.
     /// Default: none. Tags match `ToolNotification`'s serde `type` discriminator
     /// (the keys of [`notification_schema_catalog`](crate::notification::notification_schema_catalog)).

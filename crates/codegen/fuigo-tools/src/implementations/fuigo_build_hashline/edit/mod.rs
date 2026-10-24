@@ -211,6 +211,10 @@ fn to_search_replace(
 }
 
 impl crate::types::tool_metadata::ToolMetadata for HashlineEditTool {
+    fn lock_path_param(&self) -> Option<&'static str> {
+        Some("file_path")
+    }
+
     fn kind(&self) -> ToolKind {
         ToolKind::Edit
     }

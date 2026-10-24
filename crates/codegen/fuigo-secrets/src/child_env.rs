@@ -13,6 +13,10 @@ use std::sync::LazyLock;
 /// denylist does not cover.
 pub mod provider_key_env_vars {
     /// FluxRouter, Fuigo's lead provider. `FLUX_API_KEY` is FluxRouter's own name for its key.
+    ///
+    /// ORDER IS PRECEDENCE: `FUIGO_API_KEY`, then `FUIGO_CODE_API_KEY`, then `FLUX_API_KEY`. Every reader of the Flux
+    /// key from the environment (runtime, `fuigo models`, `login --status`, the picker) takes this list; do not
+    /// write the names out again elsewhere.
     pub const FLUXROUTER: &[&str] = &["FUIGO_API_KEY", "FUIGO_CODE_API_KEY", "FLUX_API_KEY"];
     pub const ANTHROPIC: &[&str] = &["ANTHROPIC_API_KEY"];
     pub const OPENAI: &[&str] = &["OPENAI_API_KEY"];

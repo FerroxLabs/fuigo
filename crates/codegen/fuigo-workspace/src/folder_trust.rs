@@ -663,6 +663,12 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
     if directory_present_or_uncertain(&hook_root.join(".fuigo").join("workflows")) {
         hit!("workflows");
     }
+    // A project `.fuigo/tool-guidance.toml` rewrites tool descriptions the model sees, so it must gate like instructions
+    if chain.dirs.iter().any(|d| {
+        path_present_or_uncertain(&d.join(".fuigo").join(crate::tool_guidance::FILE_NAME))
+    }) {
+        hit!("tool_guidance");
+    }
     // Project instructions (AGENTS.md / CLAUDE.md / rules dirs) reach the model as agent instructions, so an instructions-only clone must gate too
     if fuigo_agent::prompt::agents_md::has_project_instruction_markers_in(
         project_sources.instruction_dirs(),
@@ -877,6 +883,16 @@ mod tests {
         let tmp = repo_tmp();
         std::fs::write(tmp.path().join(".envrc"), "export FOO=bar\n").unwrap();
         assert!(repo_configs_present(tmp.path()));
+    }
+
+    #[test]
+    fn repo_configs_present_detects_tool_guidance_file_from_subdir() {
+        let tmp = repo_tmp();
+        std::fs::create_dir_all(tmp.path().join(".fuigo")).unwrap();
+        std::fs::write(tmp.path().join(".fuigo").join("tool-guidance.toml"), "").unwrap();
+        let subdir = tmp.path().join("crates").join("inner");
+        std::fs::create_dir_all(&subdir).unwrap();
+        assert_eq!(repo_config_kinds(&subdir), vec!["tool_guidance"]);
     }
 
     #[test]

@@ -165,14 +165,20 @@ impl std::fmt::Debug for AddArgs {
         } = self;
         f.debug_struct("AddArgs")
             .field("name", name)
-            .field("command_or_url", &command_or_url.as_ref().map(|_| "<redacted>"))
+            .field(
+                "command_or_url",
+                &command_or_url.as_ref().map(|_| "<redacted>"),
+            )
             .field("args", &format_args!("<{} args redacted>", args.len()))
             .field("transport", transport)
             .field("scope", scope)
             .field("env", &format_args!("<{} args redacted>", env.len()))
             .field("header", &format_args!("<{} args redacted>", header.len()))
             .field("command", &command.as_ref().map(|_| "<redacted>"))
-            .field("legacy_args", &format_args!("<{} args redacted>", legacy_args.len()))
+            .field(
+                "legacy_args",
+                &format_args!("<{} args redacted>", legacy_args.len()),
+            )
             .field("url", &url.as_ref().map(|_| "<redacted>"))
             .field("transport_type", transport_type)
             .finish()
@@ -214,7 +220,9 @@ fn run_list(json: bool) -> Result<()> {
             .collect();
         fuigo_tty_utils::cli_println!("{}", serde_json::to_string_pretty(&payload)?);
     } else if servers.is_empty() {
-        fuigo_tty_utils::cli_println!("No MCP servers configured. Run `fuigo mcp add --help` to get started.");
+        fuigo_tty_utils::cli_println!(
+            "No MCP servers configured. Run `fuigo mcp add --help` to get started."
+        );
     } else {
         for (name, (config, scope)) in &servers {
             let transport = match &config.transport {
@@ -237,7 +245,11 @@ fn run_list(json: bool) -> Result<()> {
             } else {
                 ""
             };
-            fuigo_tty_utils::cli_println!("  {}: {}{status}{scope_note}", fuigo_tty_utils::untrusted(name), fuigo_tty_utils::untrusted(&transport));
+            fuigo_tty_utils::cli_println!(
+                "  {}: {}{status}{scope_note}",
+                fuigo_tty_utils::untrusted(name),
+                fuigo_tty_utils::untrusted(&transport)
+            );
         }
     }
     Ok(())
@@ -304,8 +316,15 @@ async fn run_add(args: AddArgs) -> Result<()> {
     }
     let path = scope_target(args.scope);
     fuigo_shell::util::config::save_mcp_server_config_at(&path, name, &config).await?;
-    fuigo_tty_utils::cli_println!("Added {} to {} config", fuigo_tty_utils::untrusted(&summary), args.scope.label());
-    fuigo_tty_utils::cli_println!("File modified: {}", fuigo_tty_utils::untrusted(scope_display(args.scope, &path)));
+    fuigo_tty_utils::cli_println!(
+        "Added {} to {} config",
+        fuigo_tty_utils::untrusted(&summary),
+        args.scope.label()
+    );
+    fuigo_tty_utils::cli_println!(
+        "File modified: {}",
+        fuigo_tty_utils::untrusted(scope_display(args.scope, &path))
+    );
     Ok(())
 }
 
@@ -527,7 +546,10 @@ fn looks_like_env_pair(s: &str) -> bool {
 /// Current working directory, exiting loudly when it cannot be determined.
 fn current_dir_or_exit() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|e| {
-        fuigo_tty_utils::cli_eprintln!("Cannot determine working directory: {}", fuigo_tty_utils::untrusted(e));
+        fuigo_tty_utils::cli_eprintln!(
+            "Cannot determine working directory: {}",
+            fuigo_tty_utils::untrusted(e)
+        );
         std::process::exit(1);
     })
 }
@@ -632,18 +654,27 @@ async fn run_set_enabled(name: &str, enabled: bool) -> Result<()> {
     let cwd = current_dir_or_exit();
 
     if !mcp_server_is_known(name, &cwd) {
-        fuigo_tty_utils::cli_eprintln!("No MCP server named '{}'.", fuigo_tty_utils::untrusted(name));
+        fuigo_tty_utils::cli_eprintln!(
+            "No MCP server named '{}'.",
+            fuigo_tty_utils::untrusted(name)
+        );
         let available = available_mcp_server_names(&cwd);
         if !available.is_empty() {
-            fuigo_tty_utils::cli_eprintln!("Available servers: {}", fuigo_tty_utils::untrusted(available.join(", ")));
+            fuigo_tty_utils::cli_eprintln!(
+                "Available servers: {}",
+                fuigo_tty_utils::untrusted(available.join(", "))
+            );
         } else {
-            fuigo_tty_utils::cli_eprintln!("No MCP servers configured. Run `fuigo mcp add --help` to get started.");
+            fuigo_tty_utils::cli_eprintln!(
+                "No MCP servers configured. Run `fuigo mcp add --help` to get started."
+            );
         }
         std::process::exit(1);
     }
 
     // P169 (Grok 4.7 #3): enabling a server managed policy blocks is refused before any config write.
-    if enabled && let Some(refusal) = fuigo_shell::util::config::cli_mcp_enable_refusal(&cwd, name) {
+    if enabled && let Some(refusal) = fuigo_shell::util::config::cli_mcp_enable_refusal(&cwd, name)
+    {
         bail!("{refusal}");
     }
 
@@ -663,17 +694,26 @@ async fn run_set_enabled(name: &str, enabled: bool) -> Result<()> {
         std::process::exit(1);
     }
     if !enabled && now_enabled {
-        fuigo_tty_utils::cli_eprintln!("Warning: '{}' is still enabled after disable.", fuigo_tty_utils::untrusted(name));
+        fuigo_tty_utils::cli_eprintln!(
+            "Warning: '{}' is still enabled after disable.",
+            fuigo_tty_utils::untrusted(name)
+        );
         std::process::exit(1);
     }
 
     if was_disabled == now_disabled {
         let state = if now_enabled { "enabled" } else { "disabled" };
-        fuigo_tty_utils::cli_println!("MCP server '{}' is already {state}.", fuigo_tty_utils::untrusted(name));
+        fuigo_tty_utils::cli_println!(
+            "MCP server '{}' is already {state}.",
+            fuigo_tty_utils::untrusted(name)
+        );
     } else if now_enabled {
         fuigo_tty_utils::cli_println!("Enabled MCP server '{}'.", fuigo_tty_utils::untrusted(name));
     } else {
-        fuigo_tty_utils::cli_println!("Disabled MCP server '{}'.", fuigo_tty_utils::untrusted(name));
+        fuigo_tty_utils::cli_println!(
+            "Disabled MCP server '{}'.",
+            fuigo_tty_utils::untrusted(name)
+        );
     }
 
     let user_config = fuigo_shell::util::config::user_config_path();
@@ -681,10 +721,15 @@ async fn run_set_enabled(name: &str, enabled: bool) -> Result<()> {
         if path == &user_config {
             fuigo_tty_utils::cli_println!(
                 "File modified: {}",
-                fuigo_tty_utils::untrusted(display_user_fuigo_path(fuigo_config::USER_CONFIG_FILENAME))
+                fuigo_tty_utils::untrusted(display_user_fuigo_path(
+                    fuigo_config::USER_CONFIG_FILENAME
+                ))
             );
         } else {
-            fuigo_tty_utils::cli_println!("File modified: {}", fuigo_tty_utils::untrusted(path.display()));
+            fuigo_tty_utils::cli_println!(
+                "File modified: {}",
+                fuigo_tty_utils::untrusted(path.display())
+            );
         }
     }
     Ok(())
@@ -711,17 +756,31 @@ async fn run_remove(name: &str, requested_scope: Option<McpScope>) -> Result<()>
         Ok(site) => site,
         Err(RemoveError::NotFound) => {
             let searched = requested_scope.map_or("user or project", McpScope::label);
-            fuigo_tty_utils::cli_eprintln!("No MCP server named '{}' in {searched} config", fuigo_tty_utils::untrusted(name));
+            fuigo_tty_utils::cli_eprintln!(
+                "No MCP server named '{}' in {searched} config",
+                fuigo_tty_utils::untrusted(name)
+            );
             std::process::exit(1);
         }
         Err(RemoveError::Ambiguous { project_path }) => {
-            fuigo_tty_utils::cli_eprintln!("MCP server '{}' exists in multiple scopes:", fuigo_tty_utils::untrusted(name));
+            fuigo_tty_utils::cli_eprintln!(
+                "MCP server '{}' exists in multiple scopes:",
+                fuigo_tty_utils::untrusted(name)
+            );
             fuigo_tty_utils::cli_eprintln!(
                 "  user: {}",
-                fuigo_tty_utils::untrusted(display_user_fuigo_path(fuigo_config::USER_CONFIG_FILENAME))
+                fuigo_tty_utils::untrusted(display_user_fuigo_path(
+                    fuigo_config::USER_CONFIG_FILENAME
+                ))
             );
-            fuigo_tty_utils::cli_eprintln!("  project: {}", fuigo_tty_utils::untrusted(project_path.display()));
-            fuigo_tty_utils::cli_eprintln!("Specify which one to remove, e.g.: fuigo mcp remove {} --scope project", fuigo_tty_utils::untrusted(name));
+            fuigo_tty_utils::cli_eprintln!(
+                "  project: {}",
+                fuigo_tty_utils::untrusted(project_path.display())
+            );
+            fuigo_tty_utils::cli_eprintln!(
+                "Specify which one to remove, e.g.: fuigo mcp remove {} --scope project",
+                fuigo_tty_utils::untrusted(name)
+            );
             std::process::exit(1);
         }
     };
@@ -729,12 +788,23 @@ async fn run_remove(name: &str, requested_scope: Option<McpScope>) -> Result<()>
     let existed = delete_mcp_server_config_at(&path, name).await?;
     if !existed {
         // Race guard: the entry vanished between the existence check and the delete.
-        fuigo_tty_utils::cli_eprintln!("No MCP server named '{}' in {} config", fuigo_tty_utils::untrusted(name), scope.label());
+        fuigo_tty_utils::cli_eprintln!(
+            "No MCP server named '{}' in {} config",
+            fuigo_tty_utils::untrusted(name),
+            scope.label()
+        );
         std::process::exit(1);
     }
 
-    fuigo_tty_utils::cli_println!("Removed MCP server '{}' from {} config", fuigo_tty_utils::untrusted(name), scope.label());
-    fuigo_tty_utils::cli_println!("File modified: {}", fuigo_tty_utils::untrusted(scope_display(scope, &path)));
+    fuigo_tty_utils::cli_println!(
+        "Removed MCP server '{}' from {} config",
+        fuigo_tty_utils::untrusted(name),
+        scope.label()
+    );
+    fuigo_tty_utils::cli_println!(
+        "File modified: {}",
+        fuigo_tty_utils::untrusted(scope_display(scope, &path))
+    );
 
     // A scoped delete can leave the name defined in the other scope or an ancestor .fuigo/config.toml, where it still resolves for sessions
     let still_user_defined = mcp_server_defined_at(&user_config_path(), name);
@@ -758,9 +828,15 @@ async fn run_doctor(json: bool, name: Option<String>) -> Result<()> {
     if let Some(ref filter) = name
         && report.servers.is_empty()
     {
-        fuigo_tty_utils::cli_eprintln!("MCP server '{}' not found.", fuigo_tty_utils::untrusted(filter));
+        fuigo_tty_utils::cli_eprintln!(
+            "MCP server '{}' not found.",
+            fuigo_tty_utils::untrusted(filter)
+        );
         if !report.all_server_names.is_empty() {
-            fuigo_tty_utils::cli_eprintln!("Available servers: {}", fuigo_tty_utils::untrusted(report.all_server_names.join(", ")));
+            fuigo_tty_utils::cli_eprintln!(
+                "Available servers: {}",
+                fuigo_tty_utils::untrusted(report.all_server_names.join(", "))
+            );
         }
         std::process::exit(1);
     }

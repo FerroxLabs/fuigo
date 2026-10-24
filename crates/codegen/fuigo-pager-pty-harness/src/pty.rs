@@ -179,6 +179,22 @@ impl PtyController {
             .context("failed to write to PTY stdin")
     }
 
+    /// Whether the PTY line discipline is in raw mode (canonical input and echo both off), read from the slave's
+    /// termios through the master. `None` when the platform or the descriptor cannot say.
+    ///
+    /// A program that left raw mode on at exit leaves the user's shell without echo or line editing.
+    #[cfg(unix)]
+    pub fn is_raw_mode(&self) -> Option<bool> {
+        let fd = self.master.as_raw_fd()?;
+        // SAFETY: `termios` is plain old data; `tcgetattr` fully initialises it when it returns 0.
+        let mut attrs: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: `fd` is the live PTY master descriptor owned by `self.master`; `attrs` is a valid out-pointer.
+        if unsafe { libc::tcgetattr(fd, &mut attrs) } != 0 {
+            return None;
+        }
+        Some(attrs.c_lflag & (libc::ICANON | libc::ECHO) == 0)
+    }
+
     /// Resize the PTY (sends SIGWINCH to the child). Arguments are `(rows, cols)`.
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
         self.master

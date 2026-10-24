@@ -38,7 +38,9 @@ impl WireErrorType {
         match s {
             "auth_transient" => Self::AuthTransient,
             "legacy_auth" => Self::LegacyAuth,
-            s if s == fuigo_shell::extensions::notification::AUTH_DESTINATION_REFUSED_ERROR_TYPE => {
+            s if s
+                == fuigo_shell::extensions::notification::AUTH_DESTINATION_REFUSED_ERROR_TYPE =>
+            {
                 Self::AuthDestinationRefused
             }
             s if s == fuigo_shell::extensions::notification::CONTEXT_LENGTH_ERROR_TYPE => {
@@ -481,14 +483,22 @@ fn retry_action_repeats_detail(action: &str, detail: &str) -> bool {
 
 fn last_sentence_normalized(detail: &str) -> String {
     let trimmed = detail.trim_end().trim_end_matches(['.', '!', '?']);
-    normalize_phrase(trimmed.rsplit(['.', '!', '?', '\n']).next().unwrap_or(trimmed))
+    normalize_phrase(
+        trimmed
+            .rsplit(['.', '!', '?', '\n'])
+            .next()
+            .unwrap_or(trimmed),
+    )
 }
 
 /// True when the last sentence of `detail` is plain retry advice, so the generic retry action would repeat it.
 /// A detail that merely mentions the words ("do not try again; upgrade your plan") does not count.
 fn ends_with_retry_sentence(detail: &str) -> bool {
     let trimmed = detail.trim_end().trim_end_matches(['.', '!', '?']);
-    let last = trimmed.rsplit(['.', '!', '?', '\n']).next().unwrap_or(trimmed);
+    let last = trimmed
+        .rsplit(['.', '!', '?', '\n'])
+        .next()
+        .unwrap_or(trimmed);
     is_retry_phrase(&normalize_phrase(last))
 }
 
@@ -712,24 +722,42 @@ mod tests {
     #[test]
     fn compose_detail_keeps_the_action_unless_both_are_plain_retry_advice() {
         // A provider detail that merely mentions the words keeps Fuigo's own action.
-        let t = compose_detail(Some("do not try again; upgrade your plan."), Some("Try sending again."));
+        let t = compose_detail(
+            Some("do not try again; upgrade your plan."),
+            Some("Try sending again."),
+        );
         assert!(t.contains("Try sending again."), "{t}");
-        let t = compose_detail(Some("try a smaller file, then run again"), Some("Try sending again."));
+        let t = compose_detail(
+            Some("try a smaller file, then run again"),
+            Some("Try sending again."),
+        );
         assert!(t.contains("Try sending again."), "{t}");
         // An action with an extra step is kept after a detail ending in a retry sentence.
-        let t = compose_detail(Some("Something broke. Try again."), Some("Check your network and try again."));
+        let t = compose_detail(
+            Some("Something broke. Try again."),
+            Some("Check your network and try again."),
+        );
         assert!(t.contains("Check your network and try again."), "{t}");
         // Plain retry on both sides: shown once.
-        let t = compose_detail(Some("Something broke. Try again."), Some("Try sending again."));
+        let t = compose_detail(
+            Some("Something broke. Try again."),
+            Some("Try sending again."),
+        );
         assert_eq!(t, "Something broke. Try again.");
     }
 
     #[test]
     fn a_longer_retry_action_is_not_dropped_for_a_plain_try_again_followups2() {
-        let t = compose_detail(Some("Something broke. Try again."), Some("Try again later."));
+        let t = compose_detail(
+            Some("Something broke. Try again."),
+            Some("Try again later."),
+        );
         assert_eq!(t, "Something broke. Try again. Try again later.");
         // the same phrase on both sides is still shown once
-        let t = compose_detail(Some("Something broke. Try again later."), Some("Try again later."));
+        let t = compose_detail(
+            Some("Something broke. Try again later."),
+            Some("Try again later."),
+        );
         assert_eq!(t, "Something broke. Try again later.");
     }
 
@@ -1172,7 +1200,8 @@ mod tests {
                 2,
                 5,
                 "API error (status 429 Too Many Requests): rate limit exceeded",
-                None, None,
+                None,
+                None,
                 RetryLabelStyle::Compact
             ),
             "Rate limited (429) | Retrying (2/5)"
@@ -1186,13 +1215,21 @@ mod tests {
                 1,
                 3,
                 "Re-authenticated after 401; retrying request",
-                None, None,
+                None,
+                None,
                 RetryLabelStyle::Status
             ),
             "Retrying (attempt 1)..."
         );
         assert_eq!(
-            format_retry_activity_label(3, 5, "weird dump", Some("http"), None, RetryLabelStyle::Status),
+            format_retry_activity_label(
+                3,
+                5,
+                "weird dump",
+                Some("http"),
+                None,
+                RetryLabelStyle::Status
+            ),
             "Connection failed | Retrying (attempt 3)..."
         );
         assert_eq!(
@@ -1200,13 +1237,21 @@ mod tests {
                 2,
                 5,
                 "slow down",
-                Some("rate_limited"), None,
+                Some("rate_limited"),
+                None,
                 RetryLabelStyle::Compact
             ),
             "Rate limited | Retrying (2/5)"
         );
         assert_eq!(
-            format_retry_activity_label(1, 3, dns, Some("a_future_kind"), None, RetryLabelStyle::Status),
+            format_retry_activity_label(
+                1,
+                3,
+                dns,
+                Some("a_future_kind"),
+                None,
+                RetryLabelStyle::Status
+            ),
             "Retrying (attempt 1)..."
         );
         assert_eq!(
@@ -1237,14 +1282,30 @@ mod tests {
         let formatted = format_request_failure(None, kind, &raw);
         let message = formatted.message();
         assert_eq!(formatted.status, None, "{message}");
-        assert_eq!(formatted.wire, WireErrorType::AuthDestinationRefused, "{message}");
-        assert!(message.contains(AUTH_DESTINATION_REFUSED_REMEDY), "{message}");
-        assert!(message.contains(AUTH_DESTINATION_REFUSED_SENTENCE), "{message}");
+        assert_eq!(
+            formatted.wire,
+            WireErrorType::AuthDestinationRefused,
+            "{message}"
+        );
+        assert!(
+            message.contains(AUTH_DESTINATION_REFUSED_REMEDY),
+            "{message}"
+        );
+        assert!(
+            message.contains(AUTH_DESTINATION_REFUSED_SENTENCE),
+            "{message}"
+        );
         for leaked in ["Model:", "127.0.0.1", "(401)", "Unauthorized"] {
             assert!(!message.contains(leaked), "{leaked:?} in {message}");
         }
         // The fix is configuration: the banner carries no retry or sign-in advice (no generic "Try sending again").
-        for advice in ["Try sending again", "Try again", "send again", "/login", "Wait a minute"] {
+        for advice in [
+            "Try sending again",
+            "Try again",
+            "send again",
+            "/login",
+            "Wait a minute",
+        ] {
             assert!(!message.contains(advice), "{advice:?} in {message}");
         }
         // With no readable detail the fallback is still the remedy, still with no retry advice.
@@ -1269,11 +1330,15 @@ mod tests {
             http_status: Some(402),
             ..ErrorVerdicts::default()
         };
-        let formatted = format_request_failure_typed(None, Some(WireErrorType::Api), scrubbed, Some(&status));
+        let formatted =
+            format_request_failure_typed(None, Some(WireErrorType::Api), scrubbed, Some(&status));
         assert_eq!(formatted.status, Some(402));
         assert!(formatted.headline.contains("402"), "{}", formatted.headline);
         // Without verdicts the same text carries no status.
-        assert_eq!(format_request_failure(None, Some(WireErrorType::Api), scrubbed).status, None);
+        assert_eq!(
+            format_request_failure(None, Some(WireErrorType::Api), scrubbed).status,
+            None
+        );
 
         let truncated = ErrorVerdicts {
             max_tokens_truncation: true,

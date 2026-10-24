@@ -27,6 +27,7 @@ use fuigo_shell::agent::config::UiConfig;
 const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "compact_mode",
     "screen_mode",
+    "tool_density",
     "show_timestamps",
     "show_timeline",
     "page_flip_on_send",
@@ -37,6 +38,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "vim_mode",
     "remember_tool_approvals",
     "toolset.ask_user_question.timeout_enabled",
+    "features.subagent_model_inheritance",
     "keep_text_selection",
     "theme",
     "auto_dark_theme",
@@ -244,6 +246,15 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
             assert_eq!(
                 b, expected,
                 "SetVoiceKeybindEnabled value differs from expected"
+            )
+        }
+        (
+            "features.subagent_model_inheritance",
+            Action::SetSubagentModelInheritance(b),
+        ) => {
+            assert_eq!(
+                b, expected,
+                "SetSubagentModelInheritance value differs from expected"
             )
         }
         (
@@ -769,6 +780,38 @@ fn mouse_click_on_remember_tool_approvals_indicator_toggles_in_one_click() {
         row_y,
     );
     assert_set_bool_action(outcome, "remember_tool_approvals", false);
+}
+
+/// The Subagent model inheritance row sits in Agent & Approval after Plan Mode and reads the feature default OFF.
+/// Space dispatches the typed setter turning it on.
+#[test]
+fn space_on_subagent_model_inheritance_dispatches_typed_setter() {
+    let mut s = make_state();
+    let row = row_idx_for(&s, "features.subagent_model_inheritance");
+    assert_eq!(
+        row,
+        row_idx_for(&s, "plan_mode") + 1,
+        "Subagent model inheritance must render directly below Plan Mode"
+    );
+    navigate_to(&mut s, "features.subagent_model_inheritance");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    // Default is off, so toggling flips it on
+    assert_set_bool_action(outcome, "features.subagent_model_inheritance", true);
+}
+
+/// Value-column click toggles the Subagent model inheritance row in one click.
+#[test]
+fn mouse_click_on_subagent_model_inheritance_indicator_toggles_in_one_click() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "features.subagent_model_inheritance") as u16;
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        72,
+        row_y,
+    );
+    assert_set_bool_action(outcome, "features.subagent_model_inheritance", true);
 }
 
 /// Value-column click toggles the Ask-Question timeout in one click.
@@ -1865,6 +1908,7 @@ fn registry_kind_membership_through_pr_14() {
             "vim_mode",
             "remember_tool_approvals",
             "toolset.ask_user_question.timeout_enabled",
+            "features.subagent_model_inheritance",
             "auto_update",
             "show_tips",
             "voice_keybind_enabled",
@@ -1902,6 +1946,7 @@ fn registry_kind_membership_through_pr_14() {
             "screen_mode",
             "scroll_mode",
             "theme",
+            "tool_density",
             "voice_capture_mode",
             "voice_stt_language",
         ],
@@ -1972,6 +2017,7 @@ fn enum_settings_membership_through_pr_14() {
             "screen_mode",
             "scroll_mode",
             "theme",
+            "tool_density",
             "voice_capture_mode",
             "voice_stt_language",
         ],
@@ -2009,6 +2055,7 @@ fn defaults_round_trip_through_registry() {
         match key {
             "compact_mode" => SettingValue::Bool(false),
             "screen_mode" => SettingValue::Enum("fullscreen"),
+            "tool_density" => SettingValue::Enum("detailed"),
             "show_timestamps" => SettingValue::Bool(true),
             "show_timeline" => SettingValue::Bool(false),
             "page_flip_on_send" => SettingValue::Bool(true),
@@ -2019,6 +2066,7 @@ fn defaults_round_trip_through_registry() {
             "vim_mode" => SettingValue::Bool(false),
             "remember_tool_approvals" => SettingValue::Bool(true),
             "toolset.ask_user_question.timeout_enabled" => SettingValue::Bool(true),
+            "features.subagent_model_inheritance" => SettingValue::Bool(false),
             "keep_text_selection" => SettingValue::Enum("flash"),
             "theme" => SettingValue::Enum("fuigonight"),
             "auto_dark_theme" => SettingValue::Enum("fuigonight"),
@@ -2121,6 +2169,7 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetVimMode(_))
             | SettingsKeyOutcome::Action(Action::SetRememberToolApprovals(_))
             | SettingsKeyOutcome::Action(Action::SetAskUserQuestionTimeoutEnabled(_))
+            | SettingsKeyOutcome::Action(Action::SetSubagentModelInheritance(_))
             | SettingsKeyOutcome::Action(Action::SetShowTips(_))
             | SettingsKeyOutcome::Action(Action::SetAutoUpdate(_))
             | SettingsKeyOutcome::Action(Action::SetRespectManualFolds(_))

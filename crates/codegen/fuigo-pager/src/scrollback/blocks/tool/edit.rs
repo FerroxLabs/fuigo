@@ -679,7 +679,30 @@ fn render_gutter(
     }
 
     // Gap between gutter and content
-    spans.push(Span::raw(CONTENT_GAP));
+    // With no color to tell them apart, an added or removed line says so with a `+` or `-` in the first column of the gap
+    let marker = match line.tag {
+        ChangeTag::Insert if diff_is_colorless(theme) => Some('+'),
+        ChangeTag::Delete if diff_is_colorless(theme) => Some('-'),
+        _ => None,
+    };
+    match marker {
+        Some(marker) => spans.push(Span::raw(format!("{marker}{}", &CONTENT_GAP[1..]))),
+        None => spans.push(Span::raw(CONTENT_GAP)),
+    }
+}
+
+/// Whether this theme paints added and removed lines identically (`NO_COLOR` and other color-less palettes):
+/// no row bands and no distinct red or green, so a `+` / `-` marker is the only cue left.
+fn diff_is_colorless(theme: &Theme) -> bool {
+    use ratatui::style::Color;
+    [
+        theme.diff_insert_bg,
+        theme.diff_delete_bg,
+        theme.diff_insert_fg,
+        theme.diff_delete_fg,
+    ]
+    .iter()
+    .all(|c| *c == Color::Reset)
 }
 
 /// Span with `style`; empty text paints a single space so the row keeps a visible background band and stays selectable.
@@ -1917,6 +1940,42 @@ mod tests {
         assert_eq!(outputs[1].content_start_col, 5);
     }
 
+    /// Without color, added and removed lines carry a `+` / `-` marker; with color the layout is unchanged.
+    #[test]
+    fn colorless_diff_marks_added_and_removed_lines() {
+        use ratatui::style::Color;
+        let _theme = crate::theme::cache::pin_theme();
+        let hunk = vec![
+            DiffLine { text: "context\n".into(), lo: 4, ln: 4, tag: ChangeTag::Equal },
+            DiffLine { text: "old line\n".into(), lo: 5, ln: 0, tag: ChangeTag::Delete },
+            DiffLine { text: "new line\n".into(), lo: 0, ln: 5, tag: ChangeTag::Insert },
+        ];
+        let config = DiffRenderConfig::default();
+        let path = Path::new("test.txt");
+
+        let colored = Theme::current();
+        let outputs = render_diff_hunk_highlighted(&hunk, path, &colored, 80, &config);
+        assert_eq!(line_to_string(&outputs[1].line), "  5  old line");
+        assert_eq!(line_to_string(&outputs[2].line), "  5  new line");
+
+        let mut plain = Theme::current();
+        plain.diff_insert_bg = Color::Reset;
+        plain.diff_delete_bg = Color::Reset;
+        plain.diff_insert_fg = Color::Reset;
+        plain.diff_delete_fg = Color::Reset;
+        let outputs = render_diff_hunk_highlighted(&hunk, path, &plain, 80, &config);
+        assert_eq!(line_to_string(&outputs[0].line), "  4  context");
+        assert_eq!(line_to_string(&outputs[1].line), "  5- old line");
+        assert_eq!(line_to_string(&outputs[2].line), "  5+ new line");
+        assert_eq!(outputs[1].content_start_col, 5, "the marker does not move the content");
+        // A wrapped line marks only its first row
+        let long = vec![DiffLine { text: "word ".repeat(30), lo: 0, ln: 7, tag: ChangeTag::Insert }];
+        let wrapped = render_diff_hunk_highlighted(&long, path, &plain, 40, &config);
+        assert!(wrapped.len() > 1);
+        assert!(line_to_string(&wrapped[0].line).starts_with("  7+ word"));
+        assert!(!line_to_string(&wrapped[1].line).contains('+'));
+    }
+
     #[test]
     fn test_diff_line_exact_layout_two_digit() {
         let _theme = crate::theme::cache::pin_theme();
@@ -3043,7 +3102,10 @@ class ProcessQueueItem(BaseModel):
         );
 
         // Stale: the same paintable map baked under another theme is skipped
-        let stale = (ThemeKind::FuigoDay, crate::theme::cache::terminal_native_locked());
+        let stale = (
+            ThemeKind::FuigoDay,
+            crate::theme::cache::terminal_native_locked(),
+        );
         assert_ne!(stale, crate::theme::cache::render_key());
         block.highlight = EditHighlightPhase::FileScoped {
             by_new_line: Arc::clone(&by_new_line),

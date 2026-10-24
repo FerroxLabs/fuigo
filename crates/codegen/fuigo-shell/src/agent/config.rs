@@ -1995,6 +1995,31 @@ impl CliAgentOverrides {
     pub(crate) fn has_definition_overrides(&self) -> bool {
         self.tools.is_some() || self.disallowed_tools.is_some() || self.permission_mode.is_some()
     }
+    /// The CLI permission rules the main session's permission manager starts with: the `--allow` / `--deny` rules,
+    /// plus, for `--permission-mode acceptEdits`, an allow for file edits inside the workspace.
+    ///
+    /// The flag used to set only the agent definition's mode, which the permission manager never reads, so headless
+    /// `-p --permission-mode acceptEdits` still asked (and so refused) every edit. The grant is the path-scoped
+    /// `Edit(./**)`, not the unscoped synthetic rule `permissions.defaultMode = "acceptEdits"` appends: the flag's
+    /// promise is edits in the workspace, and `./**` is cwd-rooted, so an absolute path outside it or a `..`
+    /// traversal does not match. Shell commands are untouched, and deny rules still win.
+    pub(crate) fn effective_permission_rules(
+        &self,
+    ) -> Vec<fuigo_workspace::permission::types::PermissionRule> {
+        use fuigo_workspace::permission::types::{
+            PatternMode, PermissionRule, RuleAction, ToolFilter,
+        };
+        let mut rules = self.permission_rules.clone();
+        if self.permission_mode == Some(fuigo_agent::config::PermissionMode::AcceptEdits) {
+            rules.push(PermissionRule {
+                action: RuleAction::Allow,
+                tool: ToolFilter::Edit,
+                pattern: Some("./**".to_string()),
+                pattern_mode: PatternMode::Glob,
+            });
+        }
+        rules
+    }
 }
 /// Parent bypassPermissions/acceptEdits/auto override the subagent's own mode; any other parent mode keeps it.
 fn resolve_subagent_permission_mode(
@@ -4132,6 +4157,51 @@ fn managed_settings_env_flag(key: &str) -> Option<bool> {
         }
     }
 }
+/// `[model.<key>]` overrides for every signed-in subscription's cached models
+/// (`xai/<id>`, `chatgpt/<id>`). Local state only (credential store plus the cache next to
+/// it): a remote catalog row never creates one.
+pub(crate) fn subscription_model_overrides(
+    home: &std::path::Path,
+) -> Vec<(String, ConfigModelOverride)> {
+    let mut out = Vec::new();
+    for signed in crate::auth::subscription::catalog::signed_in(home) {
+        for id in &signed.model_ids {
+            out.push((
+                signed.provider.model_key(id),
+                ConfigModelOverride {
+                    model: Some(id.clone()),
+                    base_url: Some(signed.provider.endpoint().to_string()),
+                    name: Some(format!("{id} ({})", signed.provider.label())),
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+    out
+}
+
+/// The user's own `[model.*]` plus, with no setup, every signed-in subscription's models and every
+/// found provider key's listed models. The user's own tables win on a key clash.
+fn with_signed_in_subscription_models(cfg: &Config) -> IndexMap<String, ConfigModelOverride> {
+    let own = &cfg.config_models;
+    let mut merged = own.clone();
+    if let Some(home) = fuigo_dirs::resolve_fuigo_home() {
+        let home = std::path::Path::new(&home);
+        for (key, entry) in subscription_model_overrides(home) {
+            merged.entry(key).or_insert(entry);
+        }
+        for (key, entry) in crate::auth::key_models::model_overrides(
+            home,
+            |name| std::env::var(name).ok(),
+            |id| cfg.model_providers.get(id).and_then(|p| p.base_url.clone()),
+            own,
+        ) {
+            merged.entry(key).or_insert(entry);
+        }
+    }
+    merged
+}
+
 /// Assemble the final model map. Priority (highest wins):
 /// config.toml `[model.*]` > prefetched (remote) > hardcoded defaults.
 pub(crate) fn resolve_model_list(
@@ -4139,6 +4209,10 @@ pub(crate) fn resolve_model_list(
     prefetched: Option<IndexMap<String, ModelEntry>>,
 ) -> IndexMap<String, ModelEntry> {
     let mut resolved: IndexMap<String, ModelEntry> = IndexMap::new();
+    // A signed-in subscription is a provider: its cached model list is routed exactly as if the
+    // user had written the `[model.*]` tables by hand (same endpoint binding, same transport),
+    // with no TOML step. The user's own tables win on a key clash.
+    let config_models = with_signed_in_subscription_models(cfg);
     let mut explicit_agent_type: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     if cfg.endpoints.has_custom_endpoint() {
@@ -4168,7 +4242,7 @@ pub(crate) fn resolve_model_list(
             // Only the user's file can pin a [model.*] pair on a subscription endpoint: every other
             // layer is stripped of such pairs before the merge (fuigo-config
             // `strip_subscription_authority`), so the merged table here is the user's own.
-            let user_owned = cfg.config_models.get(key).is_some_and(|own| {
+            let user_owned = config_models.get(key).is_some_and(|own| {
                 own.model.is_some() && own.base_url.as_deref().is_some_and(on_endpoint)
             });
             let vendor = !user_owned
@@ -4223,7 +4297,7 @@ pub(crate) fn resolve_model_list(
     // so same-slug propagation below must tell an explicit choice apart from a field that was never set
     let mut explicit_api_backend_keys: std::collections::HashSet<String> =
         std::collections::HashSet::new();
-    for (key, model_override) in &cfg.config_models {
+    for (key, model_override) in &config_models {
         let had_base = resolved.contains_key(key);
         let base = resolved.shift_remove(key);
         if !had_base && model_override.context_window.is_none() {
@@ -4298,8 +4372,7 @@ pub(crate) fn resolve_model_list(
             // Global `[models].extra_headers` land on every entry after this loop; they are
             // the user's own header credential and keep the ordinary transport too.
             if cfg.models.extra_headers.is_empty()
-                && cfg
-                    .config_models
+                && config_models
                     .get(key)
                     .is_some_and(|own| own.model.is_some() && own.base_url.is_some())
             {
@@ -4594,6 +4667,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 notice: None,
                 context_window,
                 context_windows: Vec::new(),
+                max_request_bytes: None,
                 auto_compact_threshold_percent: m.auto_compact_threshold_percent,
                 system_prompt_label: m.system_prompt_label,
                 temperature: m.temperature,
@@ -4620,6 +4694,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 compactions_remaining: m.compactions_remaining,
                 compaction_at_tokens: m.compaction_at_tokens,
                 show_model_fingerprint: m.show_model_fingerprint,
+                price: None,
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
                 rate_limit_retry_threshold: None,
@@ -4694,6 +4769,9 @@ pub struct ModelEntryConfig {
     /// Selectable context windows when the model offers several; empty means only `context_window`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_windows: Vec<NonZeroU64>,
+    /// Provider request-body cap in bytes; unset resolves to the `api_backend` default (30 MB for `messages`, else 50 MiB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_request_bytes: Option<NonZeroU64>,
     /// Per-model auto-compact threshold (0-100).
     /// When the session's token usage exceeds this percentage of `context_window`, the conversation is summarized.
     /// Resolver precedence: requirements > env > user (per-model > global) > managed (per-model > global).
@@ -4755,6 +4833,9 @@ pub struct ModelEntryConfig {
     /// Without this set, Ferrox Labs API models send args as one delta event, defeating the purpose of streaming.
     ///
     /// Per-model opt-in: BYOK endpoints that don't understand the flag should leave this unset to avoid request errors.
+    /// List price per million tokens, when the catalogue publishes one (display only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<ModelPrice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_tool_calls: Option<bool>,
     /// Responses API `reasoning.summary` for this model; unset keeps the built-in `concise`.
@@ -4793,6 +4874,7 @@ impl std::fmt::Debug for ModelEntryConfig {
             extra_headers,
             context_window,
             context_windows,
+            max_request_bytes,
             auto_compact_threshold_percent,
             system_prompt_label,
             api_base_url,
@@ -4809,6 +4891,7 @@ impl std::fmt::Debug for ModelEntryConfig {
             compactions_remaining,
             compaction_at_tokens,
             show_model_fingerprint,
+            price,
             stream_tool_calls,
             reasoning_summary,
             laziness_detector,
@@ -4835,6 +4918,7 @@ impl std::fmt::Debug for ModelEntryConfig {
             .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
             .field("context_window", context_window)
             .field("context_windows", context_windows)
+            .field("max_request_bytes", max_request_bytes)
             .field("auto_compact_threshold_percent", auto_compact_threshold_percent)
             .field("system_prompt_label", system_prompt_label)
             .field("api_base_url", &api_base_url.as_deref().map(fuigo_auth::redact_url))
@@ -4851,6 +4935,7 @@ impl std::fmt::Debug for ModelEntryConfig {
             .field("compactions_remaining", compactions_remaining)
             .field("compaction_at_tokens", compaction_at_tokens)
             .field("show_model_fingerprint", show_model_fingerprint)
+            .field("price", price)
             .field("stream_tool_calls", stream_tool_calls)
             .field("reasoning_summary", reasoning_summary)
             .field("laziness_detector", laziness_detector)
@@ -4923,6 +5008,8 @@ pub struct ConfigModelOverride {
     pub context_window: Option<u64>,
     /// Selectable context windows for this model (`context_windows = [100000, 400000]`); see `context_window_choices`.
     pub context_windows: Option<Vec<NonZeroU64>>,
+    /// Explicit request-body cap from `[model.<id>]`; overrides the provider's and the `api_backend` default.
+    pub max_request_bytes: Option<NonZeroU64>,
     /// Per-model auto-compact threshold override (0-100) from `[model.<id>]`.
     /// Read directly by `resolve_auto_compact_threshold_percent`.
     /// Intentionally NOT merged into `ModelInfo.auto_compact_threshold_percent` so the resolver can keep user-per-model distinct from GB-per-model.
@@ -4978,6 +5065,7 @@ impl std::fmt::Debug for ConfigModelOverride {
             env_http_headers,
             context_window,
             context_windows,
+            max_request_bytes,
             auto_compact_threshold_percent,
             system_prompt_label,
             use_concise,
@@ -5022,6 +5110,7 @@ impl std::fmt::Debug for ConfigModelOverride {
             .field("env_http_headers", env_http_headers)
             .field("context_window", context_window)
             .field("context_windows", context_windows)
+            .field("max_request_bytes", max_request_bytes)
             .field("auto_compact_threshold_percent", auto_compact_threshold_percent)
             .field("system_prompt_label", system_prompt_label)
             .field("use_concise", use_concise)
@@ -5117,6 +5206,9 @@ impl ConfigModelOverride {
             entry.info.context_window = cw;
             entry.info.context_windows = choices;
         }
+        if self.max_request_bytes.is_some() {
+            entry.info.max_request_bytes = self.max_request_bytes;
+        }
         if let Some(v) = self.use_concise {
             entry.info.use_concise = v;
         }
@@ -5195,6 +5287,29 @@ impl ConfigModelOverride {
         entry
     }
 }
+/// US dollars per million tokens, as the model catalogue publishes them.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ModelPrice {
+    pub input_per_million: f64,
+    pub output_per_million: f64,
+}
+
+impl ModelPrice {
+    /// `$2.5 in / $10 out per 1M tokens`.
+    pub fn summary(&self) -> String {
+        fn usd(v: f64) -> String {
+            let s = format!("{v:.2}");
+            let s = s.trim_end_matches('0').trim_end_matches('.');
+            format!("${s}")
+        }
+        format!(
+            "{} in / {} out per 1M tokens",
+            usd(self.input_per_million),
+            usd(self.output_per_million)
+        )
+    }
+}
+
 /// Shared model metadata: the common fields across all model sources.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelInfo {
@@ -5230,6 +5345,9 @@ pub struct ModelInfo {
     /// Selectable context windows when the model offers several (default first when listed); empty means the single `context_window`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_windows: Vec<NonZeroU64>,
+    /// Explicit request-body cap only; `sampling_config_for_model` applies the `api_backend` default so the catalog never persists it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_request_bytes: Option<NonZeroU64>,
     /// Per-model auto-compact threshold (0-100).
     /// `None` defers to the global / default tiers in `resolve_auto_compact_threshold_percent`.
     pub auto_compact_threshold_percent: Option<u8>,
@@ -5279,6 +5397,10 @@ pub struct ModelInfo {
     /// Per-model config for the `x-compaction-at` header; `None` disables it.
     pub compaction_at_tokens: Option<CompactionAtTokens>,
     pub show_model_fingerprint: bool,
+    /// List price per million tokens, when the model catalogue publishes one. Display only: the
+    /// route reasons beside `/model <name> via ...` show it; nothing bills or limits by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<ModelPrice>,
     /// When `Some(true)`, the sampler injects `stream_tool_calls: true`
     pub stream_tool_calls: Option<bool>,
     /// Responses API `reasoning.summary` override (see `ModelEntryConfig`).
@@ -5312,6 +5434,7 @@ impl std::fmt::Debug for ModelInfo {
             env_http_headers,
             context_window,
             context_windows,
+            max_request_bytes,
             auto_compact_threshold_percent,
             system_prompt_label,
             use_concise,
@@ -5333,6 +5456,7 @@ impl std::fmt::Debug for ModelInfo {
             compactions_remaining,
             compaction_at_tokens,
             show_model_fingerprint,
+            price,
             stream_tool_calls,
             reasoning_summary,
             laziness_detector,
@@ -5355,6 +5479,7 @@ impl std::fmt::Debug for ModelInfo {
             .field("env_http_headers", env_http_headers)
             .field("context_window", context_window)
             .field("context_windows", context_windows)
+            .field("max_request_bytes", max_request_bytes)
             .field("auto_compact_threshold_percent", auto_compact_threshold_percent)
             .field("system_prompt_label", system_prompt_label)
             .field("use_concise", use_concise)
@@ -5376,6 +5501,7 @@ impl std::fmt::Debug for ModelInfo {
             .field("compactions_remaining", compactions_remaining)
             .field("compaction_at_tokens", compaction_at_tokens)
             .field("show_model_fingerprint", show_model_fingerprint)
+            .field("price", price)
             .field("stream_tool_calls", stream_tool_calls)
             .field("reasoning_summary", reasoning_summary)
             .field("laziness_detector", laziness_detector)
@@ -5428,6 +5554,7 @@ impl ModelInfo {
             env_http_headers: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
             context_windows: Vec::new(),
+            max_request_bytes: None,
             notice: None,
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
@@ -5448,6 +5575,7 @@ impl ModelInfo {
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
+            price: None,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
             rate_limit_retry_threshold: None,
@@ -5474,6 +5602,7 @@ impl ModelInfo {
             env_http_headers: IndexMap::new(),
             context_window: entry.context_window,
             context_windows: entry.context_windows.clone(),
+            max_request_bytes: entry.max_request_bytes,
             auto_compact_threshold_percent: entry.auto_compact_threshold_percent,
             system_prompt_label: entry.system_prompt_label.clone(),
             use_concise: entry.use_concise,
@@ -5493,6 +5622,7 @@ impl ModelInfo {
             compactions_remaining: entry.compactions_remaining,
             compaction_at_tokens: entry.compaction_at_tokens,
             show_model_fingerprint: entry.show_model_fingerprint,
+            price: entry.price,
             stream_tool_calls: entry.stream_tool_calls,
             laziness_detector: entry.laziness_detector.clone(),
             rate_limit_retry_threshold: entry.rate_limit_retry_threshold,
@@ -6433,6 +6563,7 @@ fn resolve_aux_model_sampling_config_inner(
                 env_http_headers: IndexMap::new(),
                 context_window: NonZeroU64::new(200_000).unwrap(),
                 context_windows: Vec::new(),
+                max_request_bytes: None,
                 notice: None,
                 auto_compact_threshold_percent: None,
                 system_prompt_label: None,
@@ -6453,6 +6584,7 @@ fn resolve_aux_model_sampling_config_inner(
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 show_model_fingerprint: false,
+                price: None,
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
                 rate_limit_retry_threshold: None,
@@ -6724,6 +6856,10 @@ pub(crate) fn sampling_config_for_model(
         query_params: info.query_params.clone(),
         env_http_headers: info.env_http_headers.clone(),
         context_window: info.context_window.get(),
+        max_request_bytes: Some(
+            info.max_request_bytes
+                .unwrap_or_else(|| info.api_backend.default_max_request_bytes()),
+        ),
         client_version,
         reasoning_effort: info.reasoning_effort,
         reasoning_summary: info.reasoning_summary,
@@ -6836,6 +6972,7 @@ fn resolve_hidden_default_web_search_sampling_config(
             env_http_headers: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
             context_windows: Vec::new(),
+            max_request_bytes: None,
             notice: None,
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
@@ -6857,6 +6994,7 @@ fn resolve_hidden_default_web_search_sampling_config(
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
+            price: None,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
             rate_limit_retry_threshold: None,
@@ -6978,6 +7116,16 @@ pub(crate) fn to_acp_model_info(
                 if let Some(notice) = info.notice.clone().and_then(sanitize_model_notice) {
                     map.insert(MODEL_NOTICE_META_KEY.to_owned(), notice.to_meta_value());
                 }
+                // Flux Router is the default route and is what every client already assumes; the wire
+                // shape pinned by the conformance golden is unchanged for it. Only a subscription or a
+                // provider key says so.
+                let route = model.route();
+                if route.kind != crate::auth::provider_status::RouteKind::Flux {
+                    map.insert(
+                    ROUTE_META_KEY.to_owned(),
+                    serde_json::json!({ "label": route.label, "badge": route.badge(), "kind": format!("{:?}", route.kind) }),
+                    );
+                }
                 if map.is_empty() { None } else { Some(map) }
             };
             (
@@ -6992,6 +7140,8 @@ pub(crate) fn to_acp_model_info(
         })
         .collect()
 }
+/// `ModelInfo.meta` key carrying the route Fuigo will use for the model: `{label, badge, kind}`.
+pub const ROUTE_META_KEY: &str = "route";
 pub const MODEL_SWITCH_INCOMPATIBLE_AGENT: &str = "MODEL_SWITCH_INCOMPATIBLE_AGENT";
 /// Error code for model switch failure during the zero-turn full harness rebuild path.
 /// Emitted when `RebuildAgentForDefinition` fails.

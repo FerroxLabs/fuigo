@@ -106,6 +106,15 @@ async fn get_or_refresh_path_cache() -> Arc<PathCacheInner> {
         })
     });
 
+    refresh_path_cache(swap, &PATH_REFRESHING, scan_path_dirs).await
+}
+
+/// The refresh itself, parameterised on its cache, flag and scan so a test can drive it with private ones.
+async fn refresh_path_cache(
+    swap: &ArcSwap<PathCacheInner>,
+    flag: &'static AtomicBool,
+    scan: impl FnOnce() -> Vec<String> + Send + 'static,
+) -> Arc<PathCacheInner> {
     let current = swap.load_full();
     let current_path = std::env::var("PATH").unwrap_or_default();
 
@@ -113,11 +122,11 @@ async fn get_or_refresh_path_cache() -> Arc<PathCacheInner> {
         return current;
     }
 
-    let Some(_refreshing) = RefreshGuard::try_acquire(&PATH_REFRESHING) else {
+    let Some(_refreshing) = RefreshGuard::try_acquire(flag) else {
         return current;
     };
 
-    match tokio::task::spawn_blocking(scan_path_dirs).await {
+    match tokio::task::spawn_blocking(scan).await {
         Ok(executables) => {
             let new = Arc::new(PathCacheInner {
                 executables,
@@ -396,30 +405,35 @@ mod tests {
     }
 
     /// A refresh dropped mid-scan (a cancelled completion) must free its flag, or every later refresh is skipped.
+    ///
+    /// Deterministic: the test owns its cache and flag (the process-wide ones are shared with every test that runs a
+    /// suggestion), and the scan blocks on a channel until released, so the first poll is always parked mid-scan.
     #[tokio::test]
     async fn path_refresh_dropped_mid_scan_frees_its_flag() {
-        for _ in 0..200 {
-            // Make the cache stale so the call takes the refresh path
-            let stale = || PathCacheInner {
-                executables: Vec::new(),
-                updated_at: Instant::now() - CACHE_TTL - Duration::from_secs(1),
-                path_env: String::new(),
-            };
-            PATH_CACHE
-                .get_or_init(|| ArcSwap::from_pointee(stale()))
-                .store(Arc::new(stale()));
-            // Poll once: parked on its blocking scan, the refresh times out and is dropped
-            let outcome = tokio::time::timeout(Duration::ZERO, get_or_refresh_path_cache()).await;
-            if outcome.is_err() {
-                assert!(
-                    !PATH_REFRESHING.load(std::sync::atomic::Ordering::Acquire),
-                    "a dropped refresh left PATH_REFRESHING set"
-                );
-                return;
-            }
-            // Lost the race (the scan finished on the first poll, or another test holds the flag): retry
-            tokio::time::sleep(Duration::from_millis(5)).await;
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let swap = ArcSwap::from_pointee(PathCacheInner {
+            executables: Vec::new(),
+            updated_at: Instant::now() - CACHE_TTL - Duration::from_secs(1),
+            path_env: String::new(),
+        });
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let mut refresh = Box::pin(refresh_path_cache(&swap, &FLAG, move || {
+            let _ = parked.recv();
+            Vec::new()
+        }));
+        tokio::select! {
+            biased;
+            _ = &mut refresh => panic!("the refresh finished before its scan was released"),
+            _ = std::future::ready(()) => {}
         }
-        panic!("never caught the refresh mid-scan");
+        assert!(FLAG.load(std::sync::atomic::Ordering::Acquire), "a parked refresh must hold the flag");
+        drop(refresh);
+        assert!(
+            !FLAG.load(std::sync::atomic::Ordering::Acquire),
+            "a dropped refresh left the refresh flag set"
+        );
+        drop(release);
+        let again = refresh_path_cache(&swap, &FLAG, || vec!["fresh".to_string()]).await;
+        assert_eq!(again.executables, ["fresh"], "a later refresh must run, not be skipped");
     }
 }

@@ -816,7 +816,10 @@ impl CompactionsRemaining {
 }
 
 /// `None`/`Minimal` are omitted on the Anthropic Messages API.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// Serializes lowercase; deserializes through [`FromStr`](std::str::FromStr), so `High` and `XHIGH` are accepted
+/// wherever `high` and `xhigh` are (a hand-edited config, a custom-model definition).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
     None,
@@ -916,6 +919,16 @@ impl std::str::FromStr for ReasoningEffort {
                 "invalid reasoning effort: {s:?} (expected one of: none, minimal, low, medium, high, xhigh, max)"
             )),
         }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ReasoningEffort {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        raw.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -1180,6 +1193,15 @@ impl ApiBackend {
     pub fn forwards_prompt_cache_key(&self) -> bool {
         matches!(self, Self::Responses)
     }
+
+    /// Request-body cap the hosts speaking this protocol enforce; the budget when a model sets no `max_request_bytes`.
+    /// Chat Completions and Responses endpoints are held to 50 MiB; Messages API hosts reject bodies over 30 MB.
+    pub const fn default_max_request_bytes(&self) -> NonZeroU64 {
+        match self {
+            Self::ChatCompletions | Self::Responses => NonZeroU64::new(50 * 1024 * 1024).unwrap(),
+            Self::Messages => NonZeroU64::new(30_000_000).unwrap(),
+        }
+    }
 }
 
 /// Sampling client configuration (API key excluded; that stays in the client).
@@ -1213,6 +1235,9 @@ pub struct SamplingConfig {
     pub env_http_headers: indexmap::IndexMap<String, String>,
     /// Total context window size in tokens; auto-compact thresholds derive from it.
     pub context_window: NonZeroU64,
+    /// Provider request-body cap, already defaulted from `api_backend` by model resolution; `None` budgets to 50 MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_request_bytes: Option<NonZeroU64>,
     /// Reasoning effort level for reasoning models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -1242,6 +1267,7 @@ impl std::fmt::Debug for SamplingConfig {
             query_params,
             env_http_headers,
             context_window,
+            max_request_bytes,
             reasoning_effort,
             reasoning_summary,
             stream_tool_calls,
@@ -1260,6 +1286,7 @@ impl std::fmt::Debug for SamplingConfig {
             .field("query_params", &query_params.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
             .field("env_http_headers", env_http_headers)
             .field("context_window", context_window)
+            .field("max_request_bytes", max_request_bytes)
             .field("reasoning_effort", reasoning_effort)
             .field("reasoning_summary", reasoning_summary)
             .field("stream_tool_calls", stream_tool_calls)
@@ -1285,6 +1312,7 @@ impl Default for SamplingConfig {
             query_params: indexmap::IndexMap::new(),
             env_http_headers: indexmap::IndexMap::new(),
             context_window: NonZeroU64::MIN,
+            max_request_bytes: None,
             reasoning_effort: None,
             reasoning_summary: None,
             stream_tool_calls: None,
@@ -1451,6 +1479,29 @@ mod tests {
             assert_eq!(back, v, "round-trip {v:?}");
         }
         assert!(serde_json::from_str::<ReasoningEffort>("\"BOGUS\"").is_err());
+    }
+
+    /// A hand-edited `config.toml` or a custom-model JSON may spell an effort `High` or `XHIGH`;
+    /// `FromStr` always accepted that, and deserialization must agree with it.
+    #[test]
+    fn reasoning_effort_deserialize_is_case_insensitive() {
+        for (raw, want) in [
+            ("High", ReasoningEffort::High),
+            ("XHIGH", ReasoningEffort::Xhigh),
+            ("Max", ReasoningEffort::Max),
+            ("mEdIuM", ReasoningEffort::Medium),
+            ("NONE", ReasoningEffort::None),
+        ] {
+            let json = serde_json::to_string(raw).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ReasoningEffort>(&json).unwrap(),
+                want,
+                "json {raw}"
+            );
+        }
+        let err = serde_json::from_str::<ReasoningEffort>("\"loud\"").unwrap_err();
+        assert!(err.to_string().contains("invalid reasoning effort"), "{err}");
+        assert!(serde_json::from_str::<ReasoningEffort>("7").is_err());
     }
 
     #[test]

@@ -4263,6 +4263,11 @@ impl MvpAgent {
             .cfg
             .borrow()
             .is_feature_enabled(crate::agent::config::Feature::ActiveAgentMessages);
+        // Latched here, when the session starts: a later config change applies to the next session.
+        let subagent_model_inheritance = self
+            .cfg
+            .borrow()
+            .is_feature_enabled(crate::agent::config::Feature::SubagentModelInheritance);
         let goal_enabled = self.cfg.borrow().resolve_goal().value;
         let background_workflows_enabled = self.cfg.borrow().resolve_workflows().value;
         let subagents_enabled = self.cfg.borrow().subagents_enabled;
@@ -4514,6 +4519,7 @@ impl MvpAgent {
                     app_builder_deployer_config,
                     write_file_enabled,
                     active_agent_messages_enabled,
+                    subagent_model_inheritance,
                     goal_enabled,
                     background_workflows_enabled,
                     subagents_enabled,
@@ -4550,7 +4556,7 @@ impl MvpAgent {
                     workspace_ops.clone(),
                     {
                         let cfg = self.cfg.borrow();
-                        cfg.cli_agent_overrides.permission_rules.clone()
+                        cfg.cli_agent_overrides.effective_permission_rules()
                     },
                     todo_gate,
                     remote_settings_for_spawn,

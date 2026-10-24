@@ -468,6 +468,12 @@ impl WorkspaceSession {
     pub fn yolo_mode(&self) -> bool {
         self.yolo_mode.load(std::sync::atomic::Ordering::Relaxed)
     }
+    /// The ceiling on what an answer to one of this session's sandbox cards may record. Upstream
+    /// takes it from the tenant's hub bind; Fuigo has no tenant, so it is always
+    /// [`crate::sandbox::ToolApprovalPolicy::GrantsAllowed`].
+    pub fn sandbox_approval_policy(&self) -> crate::sandbox::ToolApprovalPolicy {
+        crate::sandbox::ToolApprovalPolicy::GrantsAllowed
+    }
     /// The peer-influenced flag of this hub session.
     /// A clone shares the one atomic.
     pub fn peer_influence(&self) -> crate::permission::PeerInfluence {
@@ -645,6 +651,8 @@ pub struct WorkspaceShared {
     /// See [`crate::config::WorkspaceConfig::confine_fs_to_workspace_root`].
     /// Default `false`; enabled only for remote-sandbox workspace servers.
     pub(crate) confine_fs_to_workspace_root: bool,
+    /// See [`crate::config::WorkspaceConfig::sandbox`].
+    pub(crate) sandbox: Option<Arc<crate::sandbox::WorkspaceSandbox>>,
     /// Workspace root directory. Independent of any session; stored here so it survives session creation/deletion.
     pub(crate) root_cwd: std::path::PathBuf,
     pub(crate) sessions: RwLock<HashMap<String, Arc<WorkspaceSession>>>,
@@ -751,6 +759,10 @@ pub struct WorkspaceShared {
     pub(crate) client_fs_hash_memo: crate::file_system::client_fs::FileHashMemo,
 }
 impl WorkspaceShared {
+    /// The folder's per-command sandbox, when the host built the workspace with one.
+    pub fn sandbox(&self) -> Option<Arc<crate::sandbox::WorkspaceSandbox>> {
+        self.sandbox.clone()
+    }
     /// Workspace root directory.
     pub fn root_cwd(&self) -> &std::path::Path {
         &self.root_cwd

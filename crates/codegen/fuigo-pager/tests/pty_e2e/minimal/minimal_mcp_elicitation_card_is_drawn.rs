@@ -12,7 +12,8 @@ async fn minimal_mcp_elicitation_card_is_drawn() {
     seed_elicit_mcp_server(&content);
     let _turn = expect_elicit_tool_turn(&content);
 
-    let mut harness = spawn_minimal_in_dir(&content, 40, 120, &["--trust", "--yolo"], content.home());
+    let mut harness =
+        spawn_minimal_in_dir(&content, 40, 120, &["--trust", "--yolo"], content.home());
     wait_minimal_ready(&mut harness);
     harness.inject_keys(b"go\r").expect("submit prompt");
     harness
@@ -31,7 +32,9 @@ async fn minimal_mcp_elicitation_card_is_drawn() {
         );
     }
 
-    harness.inject_keys(b"\x03").expect("Ctrl+C cancels the card");
+    harness
+        .inject_keys(b"\x03")
+        .expect("Ctrl+C cancels the card");
     harness
         .wait_for_full_text(
             "Dismissed MCP \u{201c}ptyelicit\u{201d} request for input without answering.",

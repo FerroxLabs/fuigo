@@ -12,7 +12,8 @@ use std::collections::VecDeque;
 use serde_json::{Value, json};
 
 use crate::peer_ui::{
-    PeerDialogOutcome, PeerHold, PeerHoldDialog, PeerNotice, held_row_text, notice_row_text, now_secs, peer_ui_enabled, text_field,
+    PeerDialogOutcome, PeerHold, PeerHoldDialog, PeerNotice, held_row_text, notice_row_text,
+    now_secs, peer_ui_enabled, text_field,
 };
 
 pub const METHOD_CONFIGURE: &str = "fuigo/peer/configure";
@@ -66,7 +67,10 @@ pub enum PeerEvent {
     Refused(Option<String>, bool),
     Expired(Option<String>),
     Reheld(Option<String>),
-    Warning { text: String, subject: String },
+    Warning {
+        text: String,
+        subject: String,
+    },
 }
 
 fn str_of<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -74,7 +78,9 @@ fn str_of<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 fn held_id_of(v: &Value) -> Option<String> {
-    str_of(v, "heldId").filter(|s| is_held_id(s)).map(str::to_owned)
+    str_of(v, "heldId")
+        .filter(|s| is_held_id(s))
+        .map(str::to_owned)
 }
 
 fn cap_chars(s: &str, n: usize) -> String {
@@ -112,12 +118,24 @@ pub fn parse_event(update: &Value) -> Option<PeerEvent> {
     Some(match str_of(update, "sessionUpdate")? {
         "peer_held" => PeerEvent::Held(hold_from(update)?),
         "peer_released" => PeerEvent::Released(id()),
-        "peer_refused" => PeerEvent::Refused(id(), update.get("senderTold").and_then(Value::as_bool).unwrap_or(false)),
+        "peer_refused" => PeerEvent::Refused(
+            id(),
+            update
+                .get("senderTold")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        ),
         "peer_expired" => PeerEvent::Expired(id()),
         "peer_reheld" => PeerEvent::Reheld(id()),
         "peer_warning" => PeerEvent::Warning {
-            text: cap_chars(str_of(update, "text").unwrap_or("a peer messaging notice"), MAX_WARNING_CHARS),
-            subject: cap_chars(str_of(update, "subject").unwrap_or_default(), MAX_NAME_CHARS),
+            text: cap_chars(
+                str_of(update, "text").unwrap_or("a peer messaging notice"),
+                MAX_WARNING_CHARS,
+            ),
+            subject: cap_chars(
+                str_of(update, "subject").unwrap_or_default(),
+                MAX_NAME_CHARS,
+            ),
         },
         _ => return None,
     })
@@ -142,7 +160,11 @@ pub enum PeerCall {
     Configure,
     /// Fetch the held rows and fresh tokens. `reopen`: open the dialog on the first row when it arrives.
     ListHeld { reopen: bool },
-    Decide { held_id: String, token: Token, refuse: bool },
+    Decide {
+        held_id: String,
+        token: Token,
+        refuse: bool,
+    },
 }
 
 impl PeerCall {
@@ -157,9 +179,15 @@ impl PeerCall {
     pub fn params(&self, session_id: &str) -> Value {
         match self {
             // Attended, default policy: the same admission the pager's in-process agent starts with.
-            Self::Configure => json!({ "sessionId": session_id, "optIn": true, "operator": "attended" }),
+            Self::Configure => {
+                json!({ "sessionId": session_id, "optIn": true, "operator": "attended" })
+            }
             Self::ListHeld { .. } => json!({ "sessionId": session_id }),
-            Self::Decide { held_id, token, refuse } => json!({
+            Self::Decide {
+                held_id,
+                token,
+                refuse,
+            } => json!({
                 "sessionId": session_id,
                 "heldId": held_id,
                 "token": token.0,
@@ -182,14 +210,19 @@ fn reason_in(v: &Value, depth: u8) -> Option<String> {
     if depth == 0 {
         return None;
     }
-    v.as_object()?.values().find_map(|c| reason_in(c, depth - 1))
+    v.as_object()?
+        .values()
+        .find_map(|c| reason_in(c, depth - 1))
 }
 
 impl PeerRpcError {
     pub fn from_acp(e: &agent_client_protocol::Error) -> Self {
         let code: i32 = e.code.into();
         let typed = code == PEER_ERROR_CODE;
-        let reason = typed.then(|| e.data.as_ref().and_then(|d| reason_in(d, 3))).flatten().unwrap_or_default();
+        let reason = typed
+            .then(|| e.data.as_ref().and_then(|d| reason_in(d, 3)))
+            .flatten()
+            .unwrap_or_default();
         Self { reason }
     }
 
@@ -202,12 +235,20 @@ impl PeerRpcError {
     pub fn plain_line(&self) -> String {
         match self.reason.as_str() {
             "unavailable" => "Peer messaging is unavailable for this session right now.".to_owned(),
-            "no_operator" => "This session has no operator who can release or refuse held peer messages.".to_owned(),
+            "no_operator" => {
+                "This session has no operator who can release or refuse held peer messages."
+                    .to_owned()
+            }
             "not_opted_in" => "This session is not opted in to peer messaging.".to_owned(),
             "expired" => "That held peer message has expired.".to_owned(),
-            "bad_token" | "not_found" => "That held peer message changed. The list was refreshed; choose again.".to_owned(),
+            "bad_token" | "not_found" => {
+                "That held peer message changed. The list was refreshed; choose again.".to_owned()
+            }
             "" => "Peer messaging request failed.".to_owned(),
-            other => format!("Peer messaging request failed: {}", text_field(other, REASON_COLS)),
+            other => format!(
+                "Peer messaging request failed: {}",
+                text_field(other, REASON_COLS)
+            ),
         }
     }
 }
@@ -215,13 +256,22 @@ impl PeerRpcError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerRpcOutcome {
     Configured(Result<(), PeerRpcError>),
-    Held { reopen: bool, result: Result<Vec<(PeerHold, Token)>, PeerRpcError> },
+    Held {
+        reopen: bool,
+        result: Result<Vec<(PeerHold, Token)>, PeerRpcError>,
+    },
     /// `Ok` carries the shell's result word (`delivered`, `reheld`, `dropped`, `expired`, `refused`).
-    Decided { held_id: String, refuse: bool, result: Result<String, PeerRpcError> },
+    Decided {
+        held_id: String,
+        refuse: bool,
+        result: Result<String, PeerRpcError>,
+    },
 }
 
 fn parse_held_rows(reply: &Value) -> Vec<(PeerHold, Token)> {
-    let Some(rows) = reply.get("held").and_then(Value::as_array) else { return Vec::new() };
+    let Some(rows) = reply.get("held").and_then(Value::as_array) else {
+        return Vec::new();
+    };
     rows.iter()
         .filter_map(|r| {
             let token = str_of(r, "token").filter(|t| !t.is_empty() && t.len() <= MAX_TOKEN)?;
@@ -232,7 +282,11 @@ fn parse_held_rows(reply: &Value) -> Vec<(PeerHold, Token)> {
 }
 
 /// Send one call and parse the reply. Never retries.
-pub async fn perform(tx: &fuigo_acp_lib::AcpAgentTx, session_id: &str, call: PeerCall) -> PeerRpcOutcome {
+pub async fn perform(
+    tx: &fuigo_acp_lib::AcpAgentTx,
+    session_id: &str,
+    call: PeerCall,
+) -> PeerRpcOutcome {
     let params = call.params(session_id);
     let raw = serde_json::value::to_raw_value(&params).expect("serialize peer params");
     let req = agent_client_protocol::ExtRequest::new(call.method(), raw.into());
@@ -243,8 +297,13 @@ pub async fn perform(tx: &fuigo_acp_lib::AcpAgentTx, session_id: &str, call: Pee
     let reply = reply.map_err(|e| PeerRpcError::from_acp(&e));
     match call {
         PeerCall::Configure => PeerRpcOutcome::Configured(reply.map(|_| ())),
-        PeerCall::ListHeld { reopen } => PeerRpcOutcome::Held { reopen, result: reply.map(|v| parse_held_rows(&v)) },
-        PeerCall::Decide { held_id, refuse, .. } => PeerRpcOutcome::Decided {
+        PeerCall::ListHeld { reopen } => PeerRpcOutcome::Held {
+            reopen,
+            result: reply.map(|v| parse_held_rows(&v)),
+        },
+        PeerCall::Decide {
+            held_id, refuse, ..
+        } => PeerRpcOutcome::Decided {
             held_id,
             refuse,
             result: reply.map(|v| str_of(&v, "result").unwrap_or("unknown").to_owned()),
@@ -255,7 +314,8 @@ pub async fn perform(tx: &fuigo_acp_lib::AcpAgentTx, session_id: &str, call: Pee
 /// The opt-in sent once per session, only while a real terminal user is there. `None` with the flag off or without a terminal.
 pub fn startup_call() -> Option<PeerCall> {
     use std::io::IsTerminal;
-    (peer_ui_enabled() && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()).then_some(PeerCall::Configure)
+    (peer_ui_enabled() && std::io::stdin().is_terminal() && std::io::stdout().is_terminal())
+        .then_some(PeerCall::Configure)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -318,8 +378,15 @@ impl PeerUiState {
         }
         let last = self.holds.last()?;
         let more = self.holds.len().saturating_sub(1);
-        let extra = if more > 0 { format!(" (+{more} more)") } else { String::new() };
-        Some(format!("{}{extra}  [{OPEN_KEY_HINT}] review", held_row_text(last, now)))
+        let extra = if more > 0 {
+            format!(" (+{more} more)")
+        } else {
+            String::new()
+        };
+        Some(format!(
+            "{}{extra}  [{OPEN_KEY_HINT}] review",
+            held_row_text(last, now)
+        ))
     }
 
     /// Record that `configure` is about to be sent for `sid`. `None`: already sent for this id, send nothing. `Some(closed)`:
@@ -342,7 +409,12 @@ impl PeerUiState {
 
     fn name_of(&self, id: &Option<String>) -> String {
         let Some(id) = id else { return String::new() };
-        self.holds.iter().chain(self.recent.iter()).find(|h| &h.message_id == id).map(|h| h.from_name.clone()).unwrap_or_default()
+        self.holds
+            .iter()
+            .chain(self.recent.iter())
+            .find(|h| &h.message_id == id)
+            .map(|h| h.from_name.clone())
+            .unwrap_or_default()
     }
 
     fn remove(&mut self, id: &str) {
@@ -405,25 +477,32 @@ impl PeerUiState {
                 None
             }
             PeerEvent::Released(id) => gone(self, id, &|name| PeerNotice::Released { name }),
-            PeerEvent::Refused(id, told) => gone(self, id, &|name| PeerNotice::Refused { name, told }),
+            PeerEvent::Refused(id, told) => {
+                gone(self, id, &|name| PeerNotice::Refused { name, told })
+            }
             PeerEvent::Expired(id) => gone(self, id, &|name| PeerNotice::Expired { name }),
             PeerEvent::Reheld(id) => {
                 let name = self.name_of(&id);
                 if let Some(id) = id {
                     // Its old token is dead; the row returns (from what we last knew, or bare) and the dialog re-lists for a fresh one.
                     if !self.holds.iter().any(|h| h.message_id == id) {
-                        let back = self.recent.iter().find(|h| h.message_id == id).cloned().unwrap_or_else(|| PeerHold {
-                            message_id: id.clone(),
-                            from_name: String::new(),
-                            from_ref: String::new(),
-                            sender_mode: String::new(),
-                            own_mode: String::new(),
-                            reasons: vec!["held_again".to_owned()],
-                            denial_counts: Vec::new(),
-                            expires_at_secs: now_secs() + 60,
-                            first_line: String::new(),
-                            detail: None,
-                        });
+                        let back = self
+                            .recent
+                            .iter()
+                            .find(|h| h.message_id == id)
+                            .cloned()
+                            .unwrap_or_else(|| PeerHold {
+                                message_id: id.clone(),
+                                from_name: String::new(),
+                                from_ref: String::new(),
+                                sender_mode: String::new(),
+                                own_mode: String::new(),
+                                reasons: vec!["held_again".to_owned()],
+                                denial_counts: Vec::new(),
+                                expires_at_secs: now_secs() + 60,
+                                first_line: String::new(),
+                                detail: None,
+                            });
                         self.holds.push(back);
                     }
                     if self.dialog.as_ref().is_some_and(|d| d.dialog.is_for(&id)) {
@@ -432,7 +511,9 @@ impl PeerUiState {
                 }
                 notice_row_text(&PeerNotice::Reheld { name })
             }
-            PeerEvent::Warning { text, subject } => notice_row_text(&PeerNotice::Warning { text, subject }),
+            PeerEvent::Warning { text, subject } => {
+                notice_row_text(&PeerNotice::Warning { text, subject })
+            }
         }
     }
 
@@ -497,7 +578,9 @@ impl PeerUiState {
     /// A key while the dialog is open. Everything is swallowed (the prompt never sees it) except the dialog's own keys.
     /// Dismiss closes the dialog and drops its token.
     pub fn dialog_key(&mut self, key: &crossterm::event::KeyEvent) -> PeerDialogOutcome {
-        let Some(d) = self.dialog.as_mut() else { return PeerDialogOutcome::Ignored };
+        let Some(d) = self.dialog.as_mut() else {
+            return PeerDialogOutcome::Ignored;
+        };
         d.dialog.tick(now_secs());
         let out = d.dialog.handle_key(key);
         if out == PeerDialogOutcome::Dismiss {
@@ -509,14 +592,21 @@ impl PeerUiState {
     /// Consume the dialog's token for the one decision. Closes the dialog. `None` when no dialog is open.
     pub fn take_decision(&mut self, refuse: bool) -> Option<PeerCall> {
         let d = self.dialog.take()?;
-        Some(PeerCall::Decide { held_id: d.dialog.held_id().to_owned(), token: d.token, refuse })
+        Some(PeerCall::Decide {
+            held_id: d.dialog.held_id().to_owned(),
+            token: d.token,
+            refuse,
+        })
     }
 }
 
 /// The fixed note line for a decision that the shell answered with something other than delivered / refused.
 pub fn decision_note(result: &str) -> Option<String> {
     match result {
-        "dropped" => Some("The held peer message was dropped at delivery; it was not added to this session.".to_owned()),
+        "dropped" => Some(
+            "The held peer message was dropped at delivery; it was not added to this session."
+                .to_owned(),
+        ),
         "expired" => Some("That held peer message has expired.".to_owned()),
         _ => None,
     }

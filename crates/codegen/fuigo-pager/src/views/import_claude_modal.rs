@@ -4,8 +4,9 @@
 //! Users review each discovered item, toggle which to import, and confirm. Only checked items are written to `.fuigo/config.toml`.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use fuigo_shell::claude_import::{ImportPlan, ImportableItem, PathKind, find_project_root};
-use fuigo_workspace::permission::types::RuleAction;
+use fuigo_shell::claude_import::{
+    ImportPlan, ImportRuleAction, ImportableItem, PathKind, find_project_root, redacted_env_value,
+};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -995,16 +996,16 @@ fn format_item_label(item: &ImportableItem) -> String {
     match item {
         ImportableItem::Permission(rule) => {
             let action = match rule.action {
-                RuleAction::Allow => "allow",
-                RuleAction::Deny => "deny",
-                RuleAction::Ask => "ask",
+                ImportRuleAction::Allow => "allow",
+                ImportRuleAction::Deny => "deny",
+                ImportRuleAction::Ask => "ask",
             };
             let pattern = rule.pattern.as_deref().unwrap_or("*");
             let tool = format!("{:?}", rule.tool);
             format!("{action:5} {tool}({pattern})")
         }
         ImportableItem::EnvVar { key, value } => {
-            format!("{key} = {value:?}")
+            format!("{key} = {}", redacted_env_value(value))
         }
         ImportableItem::McpServer { name, .. } => name.to_string(),
         ImportableItem::Hook {
@@ -1058,16 +1059,16 @@ fn is_selectable(row: &Row) -> bool {
 mod tests {
     use super::*;
     use fuigo_shell::claude_import::PathKind;
-    use fuigo_workspace::permission::types::{PatternMode, PermissionRule, ToolFilter};
+    use fuigo_shell::claude_import::{ImportPatternMode, ImportPermission, ImportTool};
 
     fn sample_plan() -> ImportPlan {
         ImportPlan {
             global_items: vec![
-                ImportableItem::Permission(PermissionRule {
-                    action: RuleAction::Allow,
-                    tool: ToolFilter::Bash,
+                ImportableItem::Permission(ImportPermission {
+                    action: ImportRuleAction::Allow,
+                    tool: ImportTool::Bash,
                     pattern: Some("cargo test *".into()),
-                    pattern_mode: PatternMode::Glob,
+                    pattern_mode: ImportPatternMode::Glob,
                 }),
                 ImportableItem::EnvVar {
                     key: "RUST_LOG".into(),
@@ -1125,8 +1126,8 @@ mod tests {
     #[test]
     fn filtered_plan_respects_per_item_selection_after_grouping() {
         use fuigo_shell::claude_import::ImportableItem;
+        use fuigo_shell::claude_import::{ImportPatternMode, ImportPermission, ImportTool};
         use fuigo_shell::util::config::{McpServerConfig, McpServerTransportConfig};
-        use fuigo_workspace::permission::types::{PatternMode, PermissionRule, ToolFilter};
 
         // Mix Permissions, MCP servers, and EnvVars in a non-sorted order so the display order (sorted by ItemKind) differs from the source order
         let mcp = |name: &str| ImportableItem::McpServer {
@@ -1151,11 +1152,11 @@ mod tests {
         let plan = ImportPlan {
             global_items: vec![
                 mcp("alpha"),
-                ImportableItem::Permission(PermissionRule {
-                    action: RuleAction::Allow,
-                    tool: ToolFilter::Bash,
+                ImportableItem::Permission(ImportPermission {
+                    action: ImportRuleAction::Allow,
+                    tool: ImportTool::Bash,
                     pattern: Some("true".into()),
-                    pattern_mode: PatternMode::Glob,
+                    pattern_mode: ImportPatternMode::Glob,
                 }),
                 mcp("beta"),
                 ImportableItem::EnvVar {
@@ -1411,5 +1412,64 @@ mod tests {
             "collapsed should have fewer rows"
         );
         assert!(matches!(collapsed_rows[0], Row::ScopeHeader { .. }));
+    }
+
+    fn rendered_text(state: &mut ImportClaudeModalState) -> String {
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::current();
+        render_import_claude_modal(&mut buf, area, state, &theme, false);
+        let mut out = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn secret_plan() -> ImportPlan {
+        ImportPlan {
+            global_items: vec![ImportableItem::EnvVar {
+                key: "FAKE_API_KEY".into(),
+                value: "sk-test-123456".into(),
+            }],
+            project_items: vec![ImportableItem::EnvVar {
+                key: "FAKE_PROJECT_TOKEN".into(),
+                value: "sk-test-123456-project".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn modal_render_never_shows_env_values_but_shows_keys() {
+        let mut m = ImportClaudeModalState::new(secret_plan(), PathBuf::from("/tmp"));
+        let text = rendered_text(&mut m);
+        assert!(
+            !text.contains("sk-test-123456"),
+            "env value leaked:\n{text}"
+        );
+        assert!(text.contains("FAKE_API_KEY"), "key name missing:\n{text}");
+        assert!(
+            text.contains("FAKE_PROJECT_TOKEN"),
+            "key name missing:\n{text}"
+        );
+    }
+
+    #[test]
+    fn modal_env_label_matches_cli_summary_redaction() {
+        let item = ImportableItem::EnvVar {
+            key: "FAKE_API_KEY".into(),
+            value: "sk-test-123456".into(),
+        };
+        let label = format_item_label(&item);
+        assert_eq!(label, "FAKE_API_KEY = <redacted, 14 chars>");
+        let plan = ImportPlan {
+            global_items: vec![item],
+            project_items: vec![],
+        };
+        let summary = plan.summary(std::path::Path::new("/tmp"));
+        assert!(summary.contains(&label), "{summary}");
     }
 }

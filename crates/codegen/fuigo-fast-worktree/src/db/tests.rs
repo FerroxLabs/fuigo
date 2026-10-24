@@ -863,3 +863,28 @@ fn get_set_meta_round_trip() {
     db.set_meta("k", "v2").unwrap();
     assert_eq!(db.get_meta("k").unwrap().as_deref(), Some("v2"));
 }
+
+/// `$FUIGO_HOME` is process-global. A thread that owns no fixture and resolves the home (what `open_default` does
+/// for register/remove/auto-gc) while a fixture is installed must NOT get the fixture's home: it would write its rows
+/// into that test's database, and a GC pass there counts them (`dead_removed` 2 or 3 instead of 1). Resolution waits
+/// for the fixture to go away and then sees the real environment.
+#[test]
+fn a_fixture_less_thread_never_resolves_a_fixture_owners_home() {
+    let fx = FuigoHomeFixture::new();
+    let owned = fx.home.clone();
+    let (reached, reached_rx) = std::sync::mpsc::channel();
+    let outsider = std::thread::spawn(move || {
+        reached.send(()).unwrap();
+        resolve_fuigo_home().unwrap()
+    });
+    reached_rx.recv().unwrap();
+    // Time for the outsider to reach the resolution while the fixture is still installed. A slow host can only make
+    // this test pass vacuously, never fail it.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    drop(fx);
+    assert_ne!(
+        outsider.join().unwrap(),
+        owned,
+        "a thread that owns no fixture resolved the fixture's private home"
+    );
+}

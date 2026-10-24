@@ -3,6 +3,12 @@ description: "Paste one PNG, hammer redraws, verify Kitty graphics use transmit-
 terminal:
   rows: 40
   cols: 120
+# The harness has no terminal brand by default, and the pager then shows the metadata overlay without pixels.
+# A Kitty-graphics brand is what makes the preview send graphics at all.
+environment:
+  env:
+    - key: TERM_PROGRAM
+      value: kitty
 mock:
   response: "unused — scenario does not submit"
   fixture_images:

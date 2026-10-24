@@ -1339,6 +1339,91 @@ fn incompatible_agent_rollback_restores_previous_model() {
     );
 }
 
+/// A switch the shell refuses after the settings modal already moved the footer and queued the saved default:
+/// both go back to the model that was running.
+#[test]
+fn failed_default_model_switch_rolls_back_footer_and_saved_default() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let prev_model = acp::ModelId::new(std::sync::Arc::from("original-model"));
+    let new_model = acp::ModelId::new(std::sync::Arc::from("broken-model"));
+    let agent = app.agents.get_mut(&id).unwrap();
+    for (m, name) in [(&prev_model, "Original"), (&new_model, "Broken")] {
+        agent
+            .session
+            .models
+            .available
+            .insert(m.clone(), acp::ModelInfo::new(m.clone(), name.to_string()));
+    }
+    // The optimistic update `set_default_model_inner` makes before the shell answers.
+    agent.session.models.set_current(new_model.clone(), None);
+    agent.session.model_switch_pending = true;
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: id,
+            model_id: new_model,
+            effort: None,
+            result: Err(SwitchModelError::Other("backend refused".into())),
+            prev_model_id: Some(prev_model.clone()),
+        }),
+        &mut app,
+    );
+
+    assert_eq!(
+        app.agents[&id].session.models.current,
+        Some(prev_model),
+        "a failed switch must leave the footer on the running model",
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::PersistSetting {
+                key: "default_model",
+                value: crate::settings::SettingValue::String(v),
+                ..
+            } if v == "original-model"
+        )),
+        "the saved default must go back to the running model: {effects:?}",
+    );
+}
+
+/// `/model` never moved the footer before the answer, so a refusal changes nothing and saves nothing.
+#[test]
+fn failed_slash_model_switch_changes_nothing() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let running = acp::ModelId::new(std::sync::Arc::from("original-model"));
+    let wanted = acp::ModelId::new(std::sync::Arc::from("broken-model"));
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.models.available.insert(
+        running.clone(),
+        acp::ModelInfo::new(running.clone(), "Original".to_string()),
+    );
+    agent.session.models.current = Some(running.clone());
+    agent.session.model_switch_pending = true;
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: id,
+            model_id: wanted,
+            effort: None,
+            result: Err(SwitchModelError::Other("backend refused".into())),
+            prev_model_id: None,
+        }),
+        &mut app,
+    );
+
+    assert_eq!(app.agents[&id].session.models.current, Some(running));
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::PersistSetting { .. } | Effect::PersistPreferredModel { .. }
+        )),
+        "nothing may be saved after a refused switch: {effects:?}",
+    );
+}
+
 #[test]
 fn incompatible_agent_closes_active_modal() {
     use crate::views::modal::ActiveModal;
@@ -3242,7 +3327,12 @@ fn a_finished_agents_modal_write_updates_the_open_modal() {
     );
     let modal = app.agents[&AgentId(0)].agents_modal.as_ref().unwrap();
     assert_eq!(modal.write_pending, None);
-    assert!(modal.message.as_ref().is_some_and(|m| m.text.contains("busy")));
+    assert!(
+        modal
+            .message
+            .as_ref()
+            .is_some_and(|m| m.text.contains("busy"))
+    );
 }
 
 /// A finished `/provider` write lands in the scrollback of the agent it was
@@ -3273,7 +3363,11 @@ fn context_window_set_records_the_selection_and_reports_it() {
     .as_object()
     .cloned();
     let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.models.available.insert(model_id.clone(), info);
+    agent
+        .session
+        .models
+        .available
+        .insert(model_id.clone(), info);
     agent.session.models.current = Some(model_id);
     agent.session.model_switch_pending = true;
     let before = agent.scrollback.len();

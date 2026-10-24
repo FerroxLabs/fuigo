@@ -1325,7 +1325,15 @@ fn duplicate_load_unbind_invalidates_old_minimal_btw_response() {
         }),
         &mut app,
     );
-    let request_id = match dispatch(Action::SendBtw { question: "old question".into(), images: Vec::new() }, &mut app).as_slice() {
+    let request_id = match dispatch(
+        Action::SendBtw {
+            question: "old question".into(),
+            images: Vec::new(),
+        },
+        &mut app,
+    )
+    .as_slice()
+    {
         [
             Effect::SendBtw {
                 minimal_request_id: Some(id),
@@ -3521,7 +3529,10 @@ fn p152_resuming_an_open_session_says_it_switched() {
         Action::LoadSession("second-session".into(), None, false),
         &mut app,
     );
-    assert!(effects.is_empty(), "no load for an open session: {effects:?}");
+    assert!(
+        effects.is_empty(),
+        "no load for an open session: {effects:?}"
+    );
     assert!(
         matches!(app.active_view, ActiveView::Agent(id) if id == AgentId(1)),
         "the open session's tab is focused"
@@ -3834,7 +3845,10 @@ fn a_late_load_failure_leaves_a_session_a_newer_load_restored() {
         &mut app,
     );
     let agent = &app.agents[&agent_0];
-    assert_eq!(Some(acp::SessionId::new("live-1")), agent.session.session_id);
+    assert_eq!(
+        Some(acp::SessionId::new("live-1")),
+        agent.session.session_id
+    );
     assert!(!agent.load_failed);
     assert!(
         !notes_of(agent).iter().any(|n| n.contains("Couldn't load")),
@@ -3874,7 +3888,10 @@ fn only_the_latest_load_attempt_may_fail_the_tab() {
         })
     };
     dispatch(fail(first), &mut app);
-    assert!(!app.agents[&agent_0].load_failed, "the older attempt is ignored");
+    assert!(
+        !app.agents[&agent_0].load_failed,
+        "the older attempt is ignored"
+    );
     dispatch(fail(second), &mut app);
     assert!(app.agents[&agent_0].load_failed);
 }
@@ -3957,6 +3974,7 @@ fn send_now_and_interject_on_a_failed_tab_give_the_payload_back() {
             Action::SendPromptNow {
                 text: "now please".into(),
                 images: Vec::new(),
+                image_notice: None,
             }
         } else {
             Action::Interject {
@@ -3983,6 +4001,7 @@ fn send_now_during_a_load_is_held() {
         Action::SendPromptNow {
             text: "now please".into(),
             images: Vec::new(),
+            image_notice: None,
         },
         &mut app,
     );
@@ -4021,7 +4040,10 @@ fn load_and_restore_errors_are_shown_without_escape_sequences() {
     for app in [&app, &app2] {
         let joined = notes_of(&app.agents[&agent_0]).join("\n");
         assert!(joined.contains("Couldn't"), "{joined}");
-        assert!(!joined.contains('\u{1b}') && !joined.contains('\u{7}'), "{joined:?}");
+        assert!(
+            !joined.contains('\u{1b}') && !joined.contains('\u{7}'),
+            "{joined:?}"
+        );
     }
 }
 
@@ -4065,7 +4087,10 @@ fn held_btw_is_sent_as_a_side_question_when_the_load_succeeds() {
         .prompt
         .set_text("/btw what happened");
     let held = dispatch(Action::SendPrompt("/btw what happened".into()), &mut app);
-    assert!(!held.iter().any(|e| matches!(e, Effect::SendBtw { .. })), "{held:?}");
+    assert!(
+        !held.iter().any(|e| matches!(e, Effect::SendBtw { .. })),
+        "{held:?}"
+    );
     dispatch(Action::SendPrompt("then do this".into()), &mut app);
     let effects = loaded_ok(&mut app, agent_0, "live-1", attempt);
     let btw: Vec<usize> = effects
@@ -4113,13 +4138,25 @@ fn btw_during_a_remote_restore_is_held_and_returned_when_the_restore_fails() {
         let effects = dispatch(Action::SendPrompt(typed.clone()), &mut app);
         assert!(effects.is_empty(), "image={image}: {effects:?}");
         let agent = app.agents.get_mut(&agent_0).unwrap();
-        assert_eq!(1, agent.session.pending_prompts.len(), "image={image}: held");
+        assert_eq!(
+            1,
+            agent.session.pending_prompts.len(),
+            "image={image}: held"
+        );
         assert_eq!("", agent.prompt.text(), "image={image}");
         restore_failed(&mut app, agent_0);
         let agent = app.agents.get_mut(&agent_0).unwrap();
         assert!(agent.session.pending_prompts.is_empty(), "image={image}");
-        assert_eq!(typed.trim_end(), agent.prompt.text().trim_end(), "image={image}");
-        assert_eq!(usize::from(image), agent.prompt.drain_images().len(), "image={image}");
+        assert_eq!(
+            typed.trim_end(),
+            agent.prompt.text().trim_end(),
+            "image={image}"
+        );
+        assert_eq!(
+            usize::from(image),
+            agent.prompt.drain_images().len(),
+            "image={image}"
+        );
     }
 }
 
@@ -4144,7 +4181,9 @@ fn btw_during_a_remote_restore_is_sent_once_when_the_load_succeeds() {
         let sent: Vec<_> = effects
             .iter()
             .filter_map(|e| match e {
-                Effect::SendBtw { question, blocks, .. } => Some((question.clone(), blocks.is_some())),
+                Effect::SendBtw {
+                    question, blocks, ..
+                } => Some((question.clone(), blocks.is_some())),
                 _ => None,
             })
             .collect();
@@ -4189,16 +4228,25 @@ fn failed_reconnect_refuses_the_tab_and_late_results_are_dropped() {
             );
         }
         let agent = &app.agents[&agent_0];
-        assert!(agent.load_failed, "the older result must not revive or re-refuse the tab");
+        assert!(
+            agent.load_failed,
+            "the older result must not revive or re-refuse the tab"
+        );
         assert!(agent.session.session_id.is_none());
         assert_eq!("held while loading", agent.prompt.text(), "returned once");
-        assert_eq!(notes_before, notes_of(agent).len(), "no second failure line");
+        assert_eq!(
+            notes_before,
+            notes_of(agent).len(),
+            "no second failure line"
+        );
         let effects = dispatch(Action::SendPrompt("again".into()), &mut app);
         assert!(effects.is_empty(), "{effects:?}");
         assert_eq!(LOAD_FAILED_NOTICE, read_toast(&app));
         let effects = dispatch(Action::LoadSession("live-1".into(), None, false), &mut app);
         assert!(
-            effects.iter().any(|e| matches!(e, Effect::LoadSession { .. })),
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadSession { .. })),
             "/resume starts a fresh load: {effects:?}"
         );
     }
@@ -4218,7 +4266,9 @@ fn interject_during_a_load_is_held_and_returned_when_the_load_fails() {
         &mut app,
     );
     assert!(
-        !effects.iter().any(|e| matches!(e, Effect::SendInterject { .. })),
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendInterject { .. })),
         "{effects:?}"
     );
     assert_eq!(1, app.agents[&agent_0].session.pending_prompts.len());
@@ -4233,21 +4283,42 @@ fn interject_during_a_load_is_held_and_returned_when_the_load_fails() {
 fn healthy_session_sends_everything_immediately() {
     let mut app = test_app_with_agent();
     let effects = dispatch(Action::SendPrompt("/btw quick".into()), &mut app);
-    assert!(matches!(effects.as_slice(), [Effect::SendBtw { question, .. }] if question == "quick"), "{effects:?}");
+    assert!(
+        matches!(effects.as_slice(), [Effect::SendBtw { question, .. }] if question == "quick"),
+        "{effects:?}"
+    );
     let effects = dispatch(Action::SendPrompt("hello".into()), &mut app);
-    assert!(matches!(effects.as_slice(), [Effect::SendPrompt { text, .. }] if text == "hello"), "{effects:?}");
+    assert!(
+        matches!(effects.as_slice(), [Effect::SendPrompt { text, .. }] if text == "hello"),
+        "{effects:?}"
+    );
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
     let effects = dispatch(
-        Action::SendPromptNow { text: "now".into(), images: vec![] },
+        Action::SendPromptNow {
+            text: "now".into(),
+            images: vec![],
+            image_notice: None,
+        },
         &mut app,
     );
-    assert!(effects.iter().any(|e| matches!(e, Effect::SendPromptNow { .. })), "{effects:?}");
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPromptNow { .. })),
+        "{effects:?}"
+    );
     let effects = dispatch(
-        Action::Interject { text: "mid".into(), images: vec![] },
+        Action::Interject {
+            text: "mid".into(),
+            images: vec![],
+        },
         &mut app,
     );
-    assert!(matches!(effects.as_slice(), [Effect::SendInterject { .. }]), "{effects:?}");
+    assert!(
+        matches!(effects.as_slice(), [Effect::SendInterject { .. }]),
+        "{effects:?}"
+    );
 }
 
 /// The attempt number the `LoadSession` effect carries.
@@ -4255,7 +4326,9 @@ fn loading_agent_and_attempt(effects: &[Effect]) -> (AgentId, u64) {
     effects
         .iter()
         .find_map(|e| match e {
-            Effect::LoadSession { agent_id, attempt, .. } => Some((*agent_id, *attempt)),
+            Effect::LoadSession {
+                agent_id, attempt, ..
+            } => Some((*agent_id, *attempt)),
             _ => None,
         })
         .expect("a LoadSession effect")
@@ -4299,21 +4372,41 @@ fn refused_resume_of_a_session_open_elsewhere_returns_to_the_own_session() {
         }),
         &mut app,
     );
-    assert!(matches!(app.active_view, ActiveView::Agent(id) if id == own), "back on its own session");
-    assert!(!app.agents.contains_key(&loading), "the refused tab is closed");
     assert!(
-        scrollback_text(&app, own).iter().any(|t| t.contains(HELD_ELSEWHERE)),
+        matches!(app.active_view, ActiveView::Agent(id) if id == own),
+        "back on its own session"
+    );
+    assert!(
+        !app.agents.contains_key(&loading),
+        "the refused tab is closed"
+    );
+    assert!(
+        scrollback_text(&app, own)
+            .iter()
+            .any(|t| t.contains(HELD_ELSEWHERE)),
         "the refusal is shown where the user is"
     );
-    assert_eq!(app.agents[&own].session.session_id.as_ref().map(|s| s.0.to_string()).as_deref(), Some("own-1"));
+    assert_eq!(
+        app.agents[&own]
+            .session
+            .session_id
+            .as_ref()
+            .map(|s| s.0.to_string())
+            .as_deref(),
+        Some("own-1")
+    );
     let effects = dispatch(Action::SendPrompt("hi".into()), &mut app);
     assert!(
-        effects.iter().any(|e| matches!(e, Effect::SendPrompt { .. })),
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. })),
         "a prompt is sent, got {effects:?}"
     );
     let effects = dispatch(Action::SendPrompt("/new".into()), &mut app);
     assert!(
-        effects.iter().any(|e| matches!(e, Effect::CreateSession { .. })),
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::CreateSession { .. })),
         "/new starts a session, got {effects:?}"
     );
 }
@@ -4348,9 +4441,19 @@ fn refused_resume_closes_the_picker_on_the_own_session() {
         }),
         &mut app,
     );
-    assert!(matches!(app.active_view, ActiveView::Agent(id) if id == own), "back on its own session");
-    assert!(app.agents[&own].active_modal.is_none(), "the picker is closed over the refusal");
-    assert!(scrollback_text(&app, own).iter().any(|t| t.contains(HELD_ELSEWHERE)));
+    assert!(
+        matches!(app.active_view, ActiveView::Agent(id) if id == own),
+        "back on its own session"
+    );
+    assert!(
+        app.agents[&own].active_modal.is_none(),
+        "the picker is closed over the refusal"
+    );
+    assert!(
+        scrollback_text(&app, own)
+            .iter()
+            .any(|t| t.contains(HELD_ELSEWHERE))
+    );
 }
 
 /// A content-search pick closes the `/resume` picker, as a row pick does (it stayed open on the tab the load left).
@@ -4369,7 +4472,10 @@ fn pick_content_session_closes_the_picker() {
         },
         &mut app,
     );
-    assert!(app.agents[&origin].active_modal.is_none(), "the picker is closed");
+    assert!(
+        app.agents[&origin].active_modal.is_none(),
+        "the picker is closed"
+    );
 }
 
 /// When the tab the load left was the unused empty session the load dropped, a refused load opens a new session instead.
@@ -4401,7 +4507,11 @@ fn refused_resume_whose_origin_tab_is_gone_opens_a_new_session() {
         .expect("a new session is started");
     assert!(matches!(app.active_view, ActiveView::Agent(id) if id == fresh));
     assert!(!app.agents.contains_key(&loading));
-    assert!(scrollback_text(&app, fresh).iter().any(|t| t.contains(HELD_ELSEWHERE)));
+    assert!(
+        scrollback_text(&app, fresh)
+            .iter()
+            .any(|t| t.contains(HELD_ELSEWHERE))
+    );
 }
 
 /// Any other load failure keeps the failed tab as before (its notice says how to get out).
@@ -4422,4 +4532,146 @@ fn other_load_failures_keep_the_failed_tab() {
     );
     assert!(matches!(app.active_view, ActiveView::Agent(id) if id == loading));
     assert!(app.agents[&loading].load_failed);
+}
+
+/// Three sessions in the active agent's directory for the `/resume <text>` tests.
+fn write_resume_fixture(fx: &mut crate::test_util::FuigoHomeFixture, cwd: &str) {
+    fx.write_summary(
+        cwd,
+        "11111111-1111-4111-8111-111111111111",
+        serde_json::json!({ "generated_title": "Fix login bug", "updated_at": "2026-05-01T00:00:00Z" }),
+    );
+    fx.write_summary(
+        cwd,
+        "22222222-2222-4222-8222-222222222222",
+        serde_json::json!({ "generated_title": "Fix login redirect", "updated_at": "2026-05-02T00:00:00Z" }),
+    );
+    fx.write_summary(
+        cwd,
+        "33333333-3333-4333-8333-333333333333",
+        serde_json::json!({ "generated_title": "Refactor billing", "updated_at": "2026-05-03T00:00:00Z" }),
+    );
+}
+
+#[serial_test::serial(FUIGO_HOME)]
+#[test]
+fn resume_with_text_naming_one_session_opens_it_directly() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let mut fx = crate::test_util::FuigoHomeFixture::new();
+    let mut app = test_app_with_agent();
+    let cwd = app.agents[&AgentId(0)].session.cwd.to_string_lossy().to_string();
+    write_resume_fixture(&mut fx, &cwd);
+    let effects = dispatch(Action::ResumeByQuery("billing refactor".into()), &mut app);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::LoadSession { session_id, .. } if session_id == "33333333-3333-4333-8333-333333333333"
+        )),
+        "exactly one title matches, so it loads without the picker"
+    );
+    assert!(
+        !matches!(app.agents[&AgentId(0)].active_modal, Some(ActiveModal::SessionPicker { .. })),
+        "no picker for a unique match"
+    );
+}
+
+#[serial_test::serial(FUIGO_HOME)]
+#[test]
+fn resume_with_a_session_id_opens_it_directly() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let mut fx = crate::test_util::FuigoHomeFixture::new();
+    let mut app = test_app_with_agent();
+    let cwd = app.agents[&AgentId(0)].session.cwd.to_string_lossy().to_string();
+    write_resume_fixture(&mut fx, &cwd);
+    let id = "11111111-1111-4111-8111-111111111111";
+    let effects = dispatch(Action::ResumeByQuery(id.into()), &mut app);
+    assert!(effects.iter().any(
+        |e| matches!(e, Effect::LoadSession { session_id, .. } if session_id == id)
+    ));
+}
+
+#[serial_test::serial(FUIGO_HOME)]
+#[test]
+fn resume_with_text_naming_several_sessions_opens_the_picker_filtered_by_it() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let mut fx = crate::test_util::FuigoHomeFixture::new();
+    let mut app = test_app_with_agent();
+    let cwd = app.agents[&AgentId(0)].session.cwd.to_string_lossy().to_string();
+    write_resume_fixture(&mut fx, &cwd);
+    let effects = dispatch(Action::ResumeByQuery("login".into()), &mut app);
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::LoadSession { .. })),
+        "two sessions match, so none loads on its own"
+    );
+    match &app.agents[&AgentId(0)].active_modal {
+        Some(ActiveModal::SessionPicker { state, .. }) => {
+            assert_eq!(state.query(), "login", "the picker starts filtered by the text");
+        }
+        _ => panic!("expected the session picker"),
+    }
+}
+
+#[serial_test::serial(FUIGO_HOME)]
+#[test]
+fn resume_with_text_naming_nothing_opens_the_picker_filtered_by_it() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let mut fx = crate::test_util::FuigoHomeFixture::new();
+    let mut app = test_app_with_agent();
+    let cwd = app.agents[&AgentId(0)].session.cwd.to_string_lossy().to_string();
+    write_resume_fixture(&mut fx, &cwd);
+    let effects = dispatch(Action::ResumeByQuery("kubernetes".into()), &mut app);
+    assert!(!effects.iter().any(|e| matches!(e, Effect::LoadSession { .. })));
+    match &app.agents[&AgentId(0)].active_modal {
+        Some(ActiveModal::SessionPicker { state, .. }) => assert_eq!(state.query(), "kubernetes"),
+        _ => panic!("expected the session picker"),
+    }
+}
+
+/// Row 62.2: a cold `/resume` from inside the dashboard session overlay creates a new loading agent and the overlay must follow it,
+/// so the dashboard stays open behind the resumed session instead of closing the moment the load starts.
+#[test]
+fn cold_resume_from_dashboard_overlay_keeps_overlay_open() {
+    let mut app = test_app();
+    dispatch(Action::NewSession, &mut app);
+    let agent_0 = AgentId(0);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionCreated {
+            agent_id: agent_0,
+            session_id: "sess-a".into(),
+            models: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    ensure_dashboard_state(&mut app);
+    app.active_view = ActiveView::Agent(agent_0);
+    app.dashboard.as_mut().unwrap().attached_agent = Some(agent_0);
+
+    let effects = dispatch(
+        Action::LoadSession("sess-never-open".into(), None, false),
+        &mut app,
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::LoadSession { session_id, .. } if session_id == "sess-never-open")),
+        "a session that is not open loads cold"
+    );
+    let ActiveView::Agent(new_id) = app.active_view else {
+        panic!("the resumed session is the visible agent");
+    };
+    assert_ne!(new_id, agent_0);
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().attached_agent,
+        Some(new_id),
+        "the overlay must follow the cold-resumed session"
+    );
 }

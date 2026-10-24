@@ -215,7 +215,11 @@ fn append_bytes<W: std::io::Write>(archive: &mut tar::Builder<W>, path: &str, da
     set_mtime(&mut header);
     if let Err(e) = archive.append_data(&mut header, path, data) {
         tracing::warn!(error = %e, "trace_cmd: failed to add file to archive");
-        fuigo_tty_utils::cli_eprintln!("  Warning: failed to add {}: {}", fuigo_tty_utils::untrusted(path), fuigo_tty_utils::untrusted(e));
+        fuigo_tty_utils::cli_eprintln!(
+            "  Warning: failed to add {}: {}",
+            fuigo_tty_utils::untrusted(path),
+            fuigo_tty_utils::untrusted(e)
+        );
     }
 }
 
@@ -237,9 +241,45 @@ fn set_mtime(header: &mut tar::Header) {
 /// corrupt it (Astra r1, r2). The session directory itself is not changed (K16: local history keeps it).
 fn scrub_export_file(path: &Path, data: Vec<u8>) -> Vec<u8> {
     const TEXT: &[&str] = &[
-        "json", "jsonl", "ndjson", "txt", "log", "md", "toml", "yaml", "yml", "csv", "tsv", "xml", "html", "htm",
-        "sh", "patch", "diff", "lock", "pem", "key", "crt", "cer", "csr", "pub", "env", "cfg", "conf", "ini",
-        "properties", "netrc", "npmrc", "pypirc", "gitconfig", "py", "js", "ts", "rs", "go", "rb",
+        "json",
+        "jsonl",
+        "ndjson",
+        "txt",
+        "log",
+        "md",
+        "toml",
+        "yaml",
+        "yml",
+        "csv",
+        "tsv",
+        "xml",
+        "html",
+        "htm",
+        "sh",
+        "patch",
+        "diff",
+        "lock",
+        "pem",
+        "key",
+        "crt",
+        "cer",
+        "csr",
+        "pub",
+        "env",
+        "cfg",
+        "conf",
+        "ini",
+        "properties",
+        "netrc",
+        "npmrc",
+        "pypirc",
+        "gitconfig",
+        "py",
+        "js",
+        "ts",
+        "rs",
+        "go",
+        "rb",
     ];
     let text = match path.extension().and_then(|e| e.to_str()) {
         Some(ext) => TEXT.iter().any(|t| t.eq_ignore_ascii_case(ext)),
@@ -325,7 +365,11 @@ impl std::fmt::Display for UploadMethodDisplay<'_> {
                 ..
             } => {
                 // P70: no characters of the key (the old head/tail print showed eight, or all of a short key).
-                let deploy = if deployment_key.is_some() { "configured" } else { "none" };
+                let deploy = if deployment_key.is_some() {
+                    "configured"
+                } else {
+                    "none"
+                };
                 writeln!(f, "  Method:   Proxy")?;
                 // P149 (S12): location only (a base URL can carry a password or a query secret).
                 writeln!(f, "  Proxy:    {}", fuigo_auth::redact_url(proxy_base_url))?;
@@ -413,7 +457,10 @@ async fn run_export(
 ) -> Result<()> {
     let session_dir = find_session_dir(session_id)?;
     if !json {
-        fuigo_tty_utils::cli_eprintln!("Found session at: {}", fuigo_tty_utils::untrusted(session_dir.display()));
+        fuigo_tty_utils::cli_eprintln!(
+            "Found session at: {}",
+            fuigo_tty_utils::untrusted(session_dir.display())
+        );
         fuigo_tty_utils::cli_eprintln!("Building session trace archive...");
     }
 
@@ -433,7 +480,10 @@ async fn run_export(
         let size_kb = archive.len() / 1024;
         fuigo_tty_utils::cli_eprintln!("Session trace exported ({size_kb} KB):");
         fuigo_tty_utils::cli_eprintln!("  {}", fuigo_tty_utils::untrusted(output_path.display()));
-        fuigo_tty_utils::cli_println!("{}", fuigo_tty_utils::untrusted_stdout_data(output_path.display()));
+        fuigo_tty_utils::cli_println!(
+            "{}",
+            fuigo_tty_utils::untrusted_stdout_data(output_path.display())
+        );
     }
     Ok(())
 }
@@ -451,7 +501,10 @@ async fn run_upload(
 ) -> Result<()> {
     let session_dir = find_session_dir(session_id)?;
     if !json {
-        fuigo_tty_utils::cli_eprintln!("Found session at: {}", fuigo_tty_utils::untrusted(session_dir.display()));
+        fuigo_tty_utils::cli_eprintln!(
+            "Found session at: {}",
+            fuigo_tty_utils::untrusted(session_dir.display())
+        );
     }
 
     let (upload_method, upload_auth) = resolve_upload_method(agent_config).await;
@@ -581,7 +634,10 @@ impl UploadAttempt<'_> {
 
         let export_path = save_local_bundle(self.archive, self.session_id, self.output)
             .unwrap_or_else(|write_err| {
-                fuigo_tty_utils::cli_eprintln!("Failed to save local bundle: {}", fuigo_tty_utils::untrusted(write_err));
+                fuigo_tty_utils::cli_eprintln!(
+                    "Failed to save local bundle: {}",
+                    fuigo_tty_utils::untrusted(write_err)
+                );
                 export_dir.join(format!("{}.tar.gz", self.session_id))
             });
 
@@ -598,11 +654,26 @@ impl UploadAttempt<'_> {
             fuigo_tty_utils::cli_println!("{}", serde_json::to_string(&result).unwrap_or_default());
         } else {
             fuigo_tty_utils::cli_eprintln!();
-            fuigo_tty_utils::cli_eprintln!("Trace upload failed: {}", fuigo_tty_utils::untrusted(error));
-            fuigo_tty_utils::cli_eprintln!("  Bundle: {}", fuigo_tty_utils::untrusted(export_path.display()));
-            fuigo_tty_utils::cli_eprintln!("  Log:    {}", fuigo_tty_utils::untrusted(log_path.display()));
-            fuigo_tty_utils::cli_eprintln!("  Retry:  fuigo trace {}", fuigo_tty_utils::untrusted(self.session_id));
-            fuigo_tty_utils::cli_println!("{}", fuigo_tty_utils::untrusted_stdout_data(export_path.display()));
+            fuigo_tty_utils::cli_eprintln!(
+                "Trace upload failed: {}",
+                fuigo_tty_utils::untrusted(error)
+            );
+            fuigo_tty_utils::cli_eprintln!(
+                "  Bundle: {}",
+                fuigo_tty_utils::untrusted(export_path.display())
+            );
+            fuigo_tty_utils::cli_eprintln!(
+                "  Log:    {}",
+                fuigo_tty_utils::untrusted(log_path.display())
+            );
+            fuigo_tty_utils::cli_eprintln!(
+                "  Retry:  fuigo trace {}",
+                fuigo_tty_utils::untrusted(self.session_id)
+            );
+            fuigo_tty_utils::cli_println!(
+                "{}",
+                fuigo_tty_utils::untrusted_stdout_data(export_path.display())
+            );
         }
 
         anyhow::anyhow!("Trace upload failed for session {}", self.session_id)
@@ -631,7 +702,11 @@ impl UploadAttempt<'_> {
         let _ = writeln!(log, "{}", self.method_desc);
         let _ = writeln!(log);
         // P149 (S12, Astra r3 #5): a transport error quotes its request URL; location only.
-        let _ = writeln!(log, "Error:\n  {}", fuigo_auth::redact_urls_in_text(&error.to_string()));
+        let _ = writeln!(
+            log,
+            "Error:\n  {}",
+            fuigo_auth::redact_urls_in_text(&error.to_string())
+        );
         let _ = writeln!(log);
         let _ = writeln!(
             log,
@@ -640,7 +715,10 @@ impl UploadAttempt<'_> {
         );
 
         if let Err(e) = std::fs::write(&log_path, &log) {
-            fuigo_tty_utils::cli_eprintln!("  Warning: failed to write debug log: {}", fuigo_tty_utils::untrusted(e));
+            fuigo_tty_utils::cli_eprintln!(
+                "  Warning: failed to write debug log: {}",
+                fuigo_tty_utils::untrusted(e)
+            );
         }
         log_path
     }
@@ -766,18 +844,35 @@ mod p71_gate_tests {
         let err = upload_with_retries(&config, "sess-1/trace_export.tar.gz", ARCHIVE)
             .await
             .expect_err("a third-party proxy must not receive the archive");
-        assert!(fuigo_shell::upload::gcs::is_destination_refusal(&err), "{err:#}");
+        assert!(
+            fuigo_shell::upload::gcs::is_destination_refusal(&err),
+            "{err:#}"
+        );
         assert_eq!(
             config.asked.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "a withheld upload was retried"
         );
-        third_party.settle(std::time::Duration::from_millis(300)).await;
-        assert_eq!(third_party.connections(), 0, "the trace archive reached a third-party proxy");
+        third_party
+            .settle(std::time::Duration::from_millis(300))
+            .await;
+        assert_eq!(
+            third_party.connections(),
+            0,
+            "the trace archive reached a third-party proxy"
+        );
 
         let fluxrouter_class = RecordingEndpoint::fluxrouter_class().await;
-        let _ = upload_with_retries(&config_for(&fluxrouter_class.proxy_base_url()), "sess-1/trace_export.tar.gz", ARCHIVE).await;
-        assert!(fluxrouter_class.received_contains(ARCHIVE), "FluxRouter-class proxy did not receive the archive unchanged");
+        let _ = upload_with_retries(
+            &config_for(&fluxrouter_class.proxy_base_url()),
+            "sess-1/trace_export.tar.gz",
+            ARCHIVE,
+        )
+        .await;
+        assert!(
+            fluxrouter_class.received_contains(ARCHIVE),
+            "FluxRouter-class proxy did not receive the archive unchanged"
+        );
         assert!(fluxrouter_class.received_contains(b"sess-1/trace_export.tar.gz"));
     }
 }
@@ -797,14 +892,24 @@ mod p70_deploy_key_display {
                 deployment_key: Some(key.into()),
                 alpha_test_key: None,
             };
-            let shown = UploadMethodDisplay { method: &method, bucket_url: "gs://p70" }.to_string();
+            let shown = UploadMethodDisplay {
+                method: &method,
+                bucket_url: "gs://p70",
+            }
+            .to_string();
             assert!(shown.contains("Deploy:   configured"), "control: {shown}");
             let chars: Vec<char> = key.chars().collect();
             for w in chars.windows(4) {
                 let frag: String = w.iter().collect();
-                assert!(!shown.contains(&frag), "the summary holds {frag:?} of the deployment key: {shown}");
+                assert!(
+                    !shown.contains(&frag),
+                    "the summary holds {frag:?} of the deployment key: {shown}"
+                );
             }
-            assert!(!format!("{method:?}").contains(key), "Debug holds the deployment key");
+            assert!(
+                !format!("{method:?}").contains(key),
+                "Debug holds the deployment key"
+            );
         }
     }
 
@@ -822,7 +927,12 @@ mod p70_deploy_key_display {
         };
         for out in [format!("{args:?}"), format!("{args:#?}")] {
             assert!(out.contains("<redacted>"), "control: {out}");
-            for secret in ["p70sv-FAKE-1d2e3f4a", "p70rp-FAKE-5b6c7d8e", "p70rq-FAKE-9f0a1b2c", "p70hw-FAKE-3d4e5f6a"] {
+            for secret in [
+                "p70sv-FAKE-1d2e3f4a",
+                "p70rp-FAKE-5b6c7d8e",
+                "p70rq-FAKE-9f0a1b2c",
+                "p70hw-FAKE-3d4e5f6a",
+            ] {
                 assert!(!out.contains(secret), "Debug holds {secret}: {out}");
             }
         }
@@ -841,13 +951,21 @@ mod p70_deploy_key_display {
             leader: false,
             no_leader: false,
             headless: crate::app::cli::HeadlessArgs::default(),
-            cli_chat_proxy_base_url: Some("https://proxy.p70.invalid/v1?key=p70cq-FAKE-7a8b9c0d".into()),
+            cli_chat_proxy_base_url: Some(
+                "https://proxy.p70.invalid/v1?key=p70cq-FAKE-7a8b9c0d".into(),
+            ),
             fuigo_api_base_url: Some("https://u:p70ap-FAKE-1e2f3a4b@api.p70.invalid/v1".into()),
             mode: None,
         };
         for out in [format!("{args:?}"), format!("{args:#?}")] {
-            assert!(out.contains("<redacted>") && out.contains("p70-model"), "control: {out}");
-            assert!(out.contains("proxy.p70.invalid") && out.contains("api.p70.invalid"), "control: hosts print: {out}");
+            assert!(
+                out.contains("<redacted>") && out.contains("p70-model"),
+                "control: {out}"
+            );
+            assert!(
+                out.contains("proxy.p70.invalid") && out.contains("api.p70.invalid"),
+                "control: hosts print: {out}"
+            );
             for secret in ["p70cq-FAKE-7a8b9c0d", "p70ap-FAKE-1e2f3a4b"] {
                 assert!(!out.contains(secret), "Debug holds {secret}: {out}");
             }
@@ -888,18 +1006,23 @@ mod p149_export_scrub {
         let dir = tempfile::tempdir().unwrap();
         let session = dir.path().join("sess-p149");
         std::fs::create_dir_all(session.join("terminal")).unwrap();
-        let pem = format!("-----BEGIN PRIVATE KEY-----\n{PEM_BODY}\n{PEM_BODY}\n-----END PRIVATE KEY-----\n");
+        let pem = format!(
+            "-----BEGIN PRIVATE KEY-----\n{PEM_BODY}\n{PEM_BODY}\n-----END PRIVATE KEY-----\n"
+        );
         let updates = format!(
             "{}\n",
             serde_json::json!({"tool": "run_terminal_command", "command": format!("echo {SENT}; echo {GHP}"),
                 "output": format!("{SENT}\n{pem}")})
         );
         std::fs::write(session.join("updates.jsonl"), &updates).unwrap();
-        let terminal = format!("$ echo $FUIGO_API_KEY\n{SENT}\n$ cat key.pem\n{pem}$ echo {GHP}\n{GHP}\n");
+        let terminal =
+            format!("$ echo $FUIGO_API_KEY\n{SENT}\n$ cat key.pem\n{pem}$ echo {GHP}\n{GHP}\n");
         std::fs::write(session.join("terminal").join("cmd-1.log"), &terminal).unwrap();
         let image: Vec<u8> = [&[0x89u8, b'P', b'N', b'G'][..], SENT.as_bytes()].concat();
         std::fs::write(session.join("shot.png"), &image).unwrap();
-        let pdf = format!("%PDF-1.4\n1 0 obj << /Length 60 >> stream\n{SENT}\nendstream\nstartxref\n420\n%%EOF\n");
+        let pdf = format!(
+            "%PDF-1.4\n1 0 obj << /Length 60 >> stream\n{SENT}\nendstream\nstartxref\n420\n%%EOF\n"
+        );
         std::fs::write(session.join("report.pdf"), &pdf).unwrap();
         // Astra r3 #3: a key file is text and must be scrubbed.
         std::fs::write(session.join("deploy.pem"), &pem).unwrap();
@@ -911,7 +1034,10 @@ mod p149_export_scrub {
             let text = String::from_utf8_lossy(data);
             if name.ends_with("deploy.pem") {
                 seen += 1;
-                assert!(!text.contains(PEM_BODY), "{name} carries the private key: {text}");
+                assert!(
+                    !text.contains(PEM_BODY),
+                    "{name} carries the private key: {text}"
+                );
             }
             if name.ends_with("updates.jsonl") || name.ends_with("cmd-1.log") {
                 seen += 1;
@@ -921,7 +1047,8 @@ mod p149_export_scrub {
                 assert!(text.contains("<redacted>"), "control: {name}: {text}");
             }
             if name.ends_with("updates.jsonl") {
-                serde_json::from_str::<serde_json::Value>(text.trim()).expect("still one JSON record");
+                serde_json::from_str::<serde_json::Value>(text.trim())
+                    .expect("still one JSON record");
             }
             if name.ends_with("shot.png") {
                 seen += 1;
@@ -929,12 +1056,28 @@ mod p149_export_scrub {
             }
             if name.ends_with("report.pdf") {
                 seen += 1;
-                assert_eq!(data, pdf.as_bytes(), "an ASCII PDF is packed as it is (offsets must stay valid)");
+                assert_eq!(
+                    data,
+                    pdf.as_bytes(),
+                    "an ASCII PDF is packed as it is (offsets must stay valid)"
+                );
             }
         }
-        assert_eq!(seen, 5, "control: the five files were packed: {:?}", files.iter().map(|f| &f.0).collect::<Vec<_>>());
-        assert_eq!(std::fs::read_to_string(session.join("updates.jsonl")).unwrap(), updates, "local file changed");
-        assert_eq!(std::fs::read_to_string(session.join("terminal").join("cmd-1.log")).unwrap(), terminal);
+        assert_eq!(
+            seen,
+            5,
+            "control: the five files were packed: {:?}",
+            files.iter().map(|f| &f.0).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            std::fs::read_to_string(session.join("updates.jsonl")).unwrap(),
+            updates,
+            "local file changed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(session.join("terminal").join("cmd-1.log")).unwrap(),
+            terminal
+        );
     }
 
     /// P149 (S12, Astra r1 #4): the upload-method summary `fuigo trace` prints (and writes into its failure log)
@@ -950,7 +1093,11 @@ mod p149_export_scrub {
             deployment_key: None,
             alpha_test_key: None,
         };
-        let shown = UploadMethodDisplay { method: &proxy, bucket_url: "gs://p149" }.to_string();
+        let shown = UploadMethodDisplay {
+            method: &proxy,
+            bucket_url: "gs://p149",
+        }
+        .to_string();
         assert!(shown.contains("proxy.p149.invalid/v1"), "control: {shown}");
         for secret in [PASS, QUERY] {
             assert!(!shown.contains(secret), "{secret} shown: {shown}");

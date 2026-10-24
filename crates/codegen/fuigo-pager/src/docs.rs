@@ -482,7 +482,10 @@ mod tests {
             "| `enabled` | `false` | Enable automatic Dream consolidation |",
             "| `enabled` | `false` | Enable the pre-compaction memory flush |",
         ] {
-            assert!(c.contains(row), "13-memory.md lost the corrected row: {row}");
+            assert!(
+                c.contains(row),
+                "13-memory.md lost the corrected row: {row}"
+            );
         }
         assert!(
             c.contains("| `idle_timeout_secs` | unset |"),

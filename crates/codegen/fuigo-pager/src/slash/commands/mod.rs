@@ -6,6 +6,7 @@ pub mod btw;
 pub mod cd;
 pub mod compact;
 pub mod compact_mode;
+pub mod density;
 pub mod config_agents;
 pub mod context;
 pub mod context_window;
@@ -56,6 +57,7 @@ pub mod scroll_debug;
 pub mod session_info;
 pub mod settings_cmd;
 pub mod share;
+pub mod stoke;
 pub mod tasks;
 pub mod theme;
 pub mod timeline;
@@ -131,6 +133,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(vim_mode::VimModeCommand),
         Arc::new(multiline::MultilineCommand),
         Arc::new(compact_mode::CompactModeCommand),
+        Arc::new(density::DensityCommand),
         Arc::new(timestamps::TimestampsCommand),
         Arc::new(toggle_mouse_reporting::ToggleMouseReportingCommand),
         // Screen-mode switchers: visible only in the opposite mode.
@@ -157,6 +160,8 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(exit::ExitCommand),
         // Hidden easter egg: never listed, runs on bare `/gboom`.
         Arc::new(gboom::GboomCommand),
+        // Hidden easter egg: never listed, runs on bare `/stoke`.
+        Arc::new(stoke::StokeCommand),
         // Hidden diagnostic: never listed, toggles the scroll-debug HUD.
         Arc::new(scroll_debug::ScrollDebugCommand),
         // Debug toggles: always registered, listed only on debug binaries.
@@ -464,7 +469,7 @@ mod tests {
         assert!(
             items
                 .iter()
-                .any(|i| i.display == "Grok 4.3" && i.insert_text == "Grok 4.3")
+                .any(|i| i.display.starts_with("Grok 4.3") && i.insert_text == "Grok 4.3")
         );
     }
     #[test]

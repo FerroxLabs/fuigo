@@ -72,6 +72,38 @@ fn worktree_session_header_keeps_badge_and_omits_main_repo_suffix() {
         "no leftover main-repo suffix, row = {row:?}"
     );
 }
+/// Clicking the branch label in the header copies the full branch name, not the label as painted.
+#[test]
+fn clicking_the_header_branch_copies_the_full_branch_name() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    let _theme = crate::theme::cache::pin_theme();
+    let registry = ActionRegistry::defaults();
+    let mut agent = agent_at(120);
+    agent.current_branch = Some("feature/a-rather-long-branch-name".into());
+    let buf = draw(&mut agent, &registry);
+    let rect = agent
+        .hit_branch
+        .rect
+        .expect("the branch label is a click target");
+    let row = header_row(&agent, &buf);
+    assert!(row.contains("feature/a-rather-long-branch-name"), "row = {row:?}");
+    assert_eq!(
+        agent.header_branch_name().as_deref(),
+        Some("feature/a-rather-long-branch-name")
+    );
+    agent.toast = None;
+    let _ = agent.handle_mouse(&MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: rect.x,
+        row: rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(agent.toast.is_some(), "the click reports the copy");
+    // The path is a separate target and does not overlap the branch
+    let cwd_rect = agent.hit_cwd.rect.unwrap();
+    assert!(cwd_rect.x >= rect.x + rect.width);
+}
+
 /// Deep cwds are always middle-shortened (last two components stay full), not only when the row is tight.
 #[test]
 fn session_header_always_shortens_deep_cwd() {

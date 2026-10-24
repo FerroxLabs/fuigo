@@ -74,3 +74,5 @@ mod up_focuses_queue_bottom_row;
 mod verify_bashq_claim2_force_interject;
 #[path = "pty_e2e/verify_bashq_claim3_edit_keeps_bash.rs"]
 mod verify_bashq_claim3_edit_keeps_bash;
+#[path = "pty_e2e/tmux_key_decoding.rs"]
+mod tmux_key_decoding;

@@ -99,9 +99,7 @@ fn set_hint_at(path: &Path, key: &str, value: impl Into<toml_edit::Value>) -> st
     let value: toml_edit::Value = value.into();
     fuigo_config::fs_atomic::edit_locked(
         path,
-        |bytes| {
-            fuigo_config::fs_atomic::stage_atomically_from_existing(path, bytes, 0o600)
-        },
+        |bytes| fuigo_config::fs_atomic::stage_atomically_from_existing(path, bytes, 0o600),
         |current| {
             let Some(mut doc) = config_document_for_edit(path, current) else {
                 return Ok::<_, std::io::Error>(Edit::Keep(()));

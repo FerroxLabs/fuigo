@@ -1,6 +1,7 @@
 use crate::agent::Agent;
 use crate::compaction::CompactionPolicy;
 use crate::config::{AGENT_TASK_CLASSIFIER_RE, short_tool_name, tool_id_eq, tool_id_matches};
+use fuigo_tools::implementations::fuigo_build::task::model_policy::TaskModelSelection;
 use crate::config::{AgentDefinition, BuiltinAgentName, PermissionMode, PromptMode};
 use crate::discovery::{SubagentEntry, SubagentSource};
 use crate::error::AgentBuildError;
@@ -103,6 +104,7 @@ pub struct AgentBuilder {
     ask_user_question_enabled: bool,
     subagent_toggle: HashMap<String, bool>,
     task_model_slugs: Vec<String>,
+    task_model_selection: TaskModelSelection,
     skills_config: crate::prompt::skills::SkillsConfig,
     /// Resolved vendor-compat config governing which vendor (`.claude`/`.cursor`) dirs are scanned for skills / rules / AGENTS.md.
     /// Defaults to all-on, which reproduces the historical behavior.
@@ -251,6 +253,7 @@ impl AgentBuilder {
             ask_user_question_enabled: true,
             subagent_toggle: HashMap::new(),
             task_model_slugs: Vec::new(),
+            task_model_selection: TaskModelSelection::default(),
             skills_config: Default::default(),
             compat: Default::default(),
             bash_params_json: None,
@@ -576,6 +579,13 @@ impl AgentBuilder {
         self.task_model_slugs = slugs;
         self
     }
+    /// Whether subagents may be given an explicit model. [`TaskModelSelection::Inherited`] locks every subagent to the
+    /// parent model: the `task` tool does not advertise `model`, its description stops offering model slugs, and a
+    /// call that names a model is refused. Latched at build time, so a session keeps one answer.
+    pub fn with_task_model_selection(mut self, selection: TaskModelSelection) -> Self {
+        self.task_model_selection = selection;
+        self
+    }
     /// Enable or disable the `ask_user_question` tool for a primary agent.
     ///
     /// Subagents never receive this tool.
@@ -894,8 +904,11 @@ impl AgentBuilder {
                 .iter_mut()
                 .find(|tc| tc.id == task_tool_id)
             {
-                task_tc.description_override =
-                    Some(build_task_description(&subagents, &self.task_model_slugs));
+                task_tc.description_override = Some(build_task_description_with(
+                    &subagents,
+                    &self.task_model_slugs,
+                    self.task_model_selection,
+                ));
             }
         }
         if task_stripped {
@@ -1106,6 +1119,15 @@ impl AgentBuilder {
                 {
                     allowed.retain(|t| !denied_types.iter().any(|d| d.eq_ignore_ascii_case(t)));
                 }
+            }
+        }
+        {
+            let mut task_params = serde_json::Map::new();
+            if self.task_model_selection == TaskModelSelection::Inherited {
+                task_params.insert("model_selection".into(), "inherited".into());
+            }
+            if !task_params.is_empty() {
+                merge_tool_params(&mut tool_config, &["FuigoBuild:task"], &task_params);
             }
         }
         if definition.allowed_subagent_types.as_deref() == Some(&[]) {
@@ -1392,6 +1414,10 @@ fn builtin_tools_fragment(name: BuiltinAgentName) -> String {
         )
 }
 const TASK_MODEL_PARAM: &str = "${{ params.task.model }}";
+/// Under [`TaskModelSelection::Inherited`] the description offers no slugs and names no `model` argument.
+fn inherited_model_guidance() -> String {
+    "\n\nEvery subagent runs on the same model as the parent agent in this session.".to_string()
+}
 fn task_model_guidance(model_slugs: &[String]) -> String {
     let mut model_slugs = model_slugs.to_vec();
     model_slugs.sort_unstable();
@@ -1413,15 +1439,25 @@ fn task_model_guidance(model_slugs: &[String]) -> String {
          If the user does not explicitly request a model, omit `{TASK_MODEL_PARAM}` to inherit the parent model."
     )
 }
-/// Build the Task tool description with the effective subagent list.
+/// [`build_task_description_with`] for a session whose subagents may be given an explicit model.
+#[cfg(test)]
+pub(crate) fn build_task_description(
+    subagents: &[SubagentEntry],
+    model_slugs: &[String],
+) -> String {
+    build_task_description_with(subagents, model_slugs, TaskModelSelection::Selectable)
+}
+/// Build the Task tool description with the effective subagent list, for a session whose subagent model choice is
+/// `selection`.
 ///
 /// Maps each [`SubagentEntry`] to the shared [`fuigo_tool_types::SubagentDescriptor`].
 /// Defers to [`fuigo_tool_types::build_task_description`] so the CLI and the prod chat stack share one builder.
 /// Built-in (unshadowed) entries carry the hardcoded tool-name fragment.
 /// User-defined entries carry `None` so their raw `description` is used verbatim (markdown is fine; it's model-facing text).
-pub(crate) fn build_task_description(
+pub(crate) fn build_task_description_with(
     subagents: &[SubagentEntry],
     model_slugs: &[String],
+    selection: TaskModelSelection,
 ) -> String {
     let descriptors: Vec<fuigo_tool_types::SubagentDescriptor> = subagents
         .iter()
@@ -1438,7 +1474,10 @@ pub(crate) fn build_task_description(
         })
         .collect();
     let mut description = fuigo_tool_types::build_task_description(&descriptors, &TASK_TOOL_NAMING);
-    description.push_str(&task_model_guidance(model_slugs));
+    description.push_str(&match selection {
+        TaskModelSelection::Selectable => task_model_guidance(model_slugs),
+        TaskModelSelection::Inherited => inherited_model_guidance(),
+    });
     description
 }
 /// Resolve the shell name for the system prompt.
@@ -3029,6 +3068,100 @@ mod tests {
                 }),
             "definition tool_overrides must be applied to HostedTool options"
         );
+    }
+    /// The `task` definition as the model sees it, for an agent built with the given allowlist/denylist and selection.
+    async fn task_definition(
+        tools: Vec<String>,
+        disallowed: Vec<String>,
+        selection: TaskModelSelection,
+    ) -> (crate::agent::Agent, Option<fuigo_tools::types::definition::ToolDefinition>) {
+        use fuigo_tools::computer::local::LocalTerminalBackend;
+        use fuigo_tools::notification::ToolNotificationHandle;
+        let mut def = crate::config::AgentDefinition::default_fuigo_build();
+        def.tools = tools;
+        def.disallowed_tools = disallowed;
+        let agent = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(def)
+        .with_subagents_enabled(true)
+        .with_task_model_slugs(vec!["alpha-model".into(), "beta-model".into()])
+        .with_task_model_selection(selection)
+        .build()
+        .await
+        .expect("agent should build");
+        let task = agent
+            .tool_definitions()
+            .await
+            .into_iter()
+            .find(|d| d.function.name == "task" || d.function.name == "spawn_subagent");
+        (agent, task)
+    }
+
+    fn property_names(def: &fuigo_tools::types::definition::ToolDefinition) -> Vec<String> {
+        def.function.parameters["properties"]
+            .as_object()
+            .map(|props| props.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn selectable_task_advertises_model_and_offers_slugs() {
+        let (_agent, task) = task_definition(vec![], vec![], TaskModelSelection::Selectable).await;
+        let task = task.expect("the default toolset has a task tool");
+        assert!(property_names(&task).iter().any(|name| name == "model"), "{:?}", property_names(&task));
+        let description = task.function.description.unwrap_or_default();
+        assert!(description.contains("alpha-model") && description.contains("beta-model"), "{description}");
+    }
+
+    #[tokio::test]
+    async fn inherited_task_withdraws_the_model_argument_and_the_slug_list() {
+        let (_agent, task) = task_definition(vec![], vec![], TaskModelSelection::Inherited).await;
+        let task = task.expect("the default toolset has a task tool");
+        let props = property_names(&task);
+        assert!(!props.iter().any(|name| name == "model"), "{props:?}");
+        assert!(props.iter().any(|name| name == "prompt"), "{props:?}");
+        let description = task.function.description.unwrap_or_default();
+        assert!(!description.contains("alpha-model") && !description.contains("beta-model"), "{description}");
+        assert!(description.contains("same model as the parent agent"), "{description}");
+        // The roster is the normal one: a model lock changes only the model part.
+        assert!(description.contains("**explore**"), "{description}");
+    }
+
+    #[tokio::test]
+    async fn no_allowlist_leaves_the_task_params_at_their_defaults() {
+        use fuigo_tools::implementations::fuigo_build::task::model_policy::TaskParams;
+        use fuigo_tools::types::resources::Params;
+        let (agent, _task) = task_definition(vec![], vec![], TaskModelSelection::Selectable).await;
+        let params = agent
+            .tool_bridge()
+            .read_resource::<Params<TaskParams>>()
+            .await
+            .expect("task params are registered");
+        assert_eq!(params.0, TaskParams::default());
+    }
+
+    /// An allowlist or denylist trims the toolset without touching the description the task tool carries, and a
+    /// denied tool is absent from the schema list the model receives.
+    #[tokio::test]
+    async fn allowlist_and_denylist_keep_the_task_description_and_hide_denied_tools() {
+        let mut tools: Vec<String> = AGENT_TOOLS_BASE.iter().map(|s| s.to_string()).collect();
+        tools.push("Agent(explore, plan)".into());
+        let (agent, task) =
+            task_definition(tools, vec!["run_terminal_cmd".into()], TaskModelSelection::Selectable).await;
+        let names: Vec<String> = agent
+            .tool_definitions()
+            .await
+            .iter()
+            .map(|d| d.function.name.clone())
+            .collect();
+        assert!(names.contains(&"read_file".to_string()), "{names:?}");
+        assert!(!names.contains(&"run_terminal_command".to_string()), "denied tool in schema: {names:?}");
+        assert!(!names.contains(&"search_replace".to_string()), "{names:?}");
+        let description = task.expect("task kept").function.description.unwrap_or_default();
+        assert!(description.contains("**explore**") && description.contains("alpha-model"), "{description}");
     }
 }
 

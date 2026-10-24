@@ -36,6 +36,7 @@ fn test_config_with_window(context_window: u64) -> SamplingConfig {
         mtls_cert_dir: None,
         rate_limit_retry_threshold: None,
         reasoning_summary: None,
+        max_request_bytes: None,
     }
 }
 
@@ -1443,6 +1444,7 @@ async fn update_sampling_config_is_queryable() {
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: NonZeroU64::new(200_000).unwrap(),
+        max_request_bytes: None,
         reasoning_effort: None,
         stream_tool_calls: None,
         mtls_cert_dir: None,
@@ -1863,6 +1865,7 @@ async fn build_request_uses_sampling_config() {
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: NonZeroU64::new(128_000).unwrap(),
+        max_request_bytes: None,
         reasoning_effort: None,
         stream_tool_calls: None,
         mtls_cert_dir: None,
@@ -3111,7 +3114,8 @@ async fn turn_capture_survives_integrity_repair_prefix_shrink() {
     // conversation to len 5 while the un-rebased offset stays at 7 (offset 7 >
     // len 5). Without the fix the later take_turn_messages slice is out of range,
     // panics the actor, and the query comes back as None.
-    h.handle.repair_dangling_after_harness_halt("test-halt");
+    h.handle
+        .repair_dangling_after_harness_halt("test-halt", Default::default());
 
     // Second turn item lands after the rebase — it must still be captured.
     h.handle
@@ -3147,7 +3151,8 @@ async fn integrity_repair_does_not_flag_compaction() {
 
     // An in-place integrity repair goes through `snapshot_turn_slice` like
     // compaction does, but it is NOT compaction — the flag must stay unset.
-    h.handle.repair_dangling_after_harness_halt("test-halt");
+    h.handle
+        .repair_dangling_after_harness_halt("test-halt", Default::default());
 
     let capture = h
         .handle
@@ -3543,6 +3548,53 @@ async fn get_trailing_assistant_report_skips_empty_assistant_items() {
 }
 
 #[tokio::test]
+async fn halt_repair_writes_the_callers_answer_for_the_call_it_names() {
+    use fuigo_sampling_types::ToolCall;
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant_tool_calls(
+            vec![
+                ToolCall {
+                    id: "spawn-1".into(),
+                    name: "spawn_subagent".to_string(),
+                    arguments: "{}".into(),
+                },
+                ToolCall {
+                    id: "read-1".into(),
+                    name: "read_file".to_string(),
+                    arguments: "{}".into(),
+                },
+            ],
+        ));
+    h.handle.repair_dangling_after_harness_halt(
+        "user_cancel",
+        [("spawn-1".to_owned(), "Subagent was moved to the background".to_owned())].into(),
+    );
+    let conv = h.handle.get_conversation().await;
+    let results: Vec<(String, String)> = conv
+        .iter()
+        .filter_map(|item| match item {
+            ConversationItem::ToolResult(tr) => {
+                Some((tr.tool_call_id.to_string(), tr.content.to_string()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(2, results.len(), "{results:?}");
+    assert_eq!(
+        ("spawn-1", "Subagent was moved to the background"),
+        (results[0].0.as_str(), results[0].1.as_str())
+    );
+    assert_eq!("read-1", results[1].0);
+    assert!(
+        results[1].1.contains("halted by the harness (user_cancel)") && results[1].1.contains("read_file"),
+        "a call with no answer keeps the generic text: {}",
+        results[1].1
+    );
+}
+
+#[tokio::test]
 async fn cancel_integrity_repair_drops_stranded_continue_reminder() {
     let h = TestHarness::new();
     h.handle.push_user_message(ConversationItem::user("q"));
@@ -3552,7 +3604,8 @@ async fn cancel_integrity_repair_drops_stranded_continue_reminder() {
     h.handle
         .push_user_message(ConversationItem::length_continue_reminder("continue"));
 
-    h.handle.repair_dangling_after_harness_halt("test-cancel");
+    h.handle
+        .repair_dangling_after_harness_halt("test-cancel", Default::default());
     let conv = h.handle.get_conversation().await;
     assert!(
         !matches!(
@@ -4523,6 +4576,7 @@ async fn sampling_config_survives_compaction_replacement() {
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: NonZeroU64::new(500_000).unwrap(),
+        max_request_bytes: None,
         reasoning_effort: None,
         stream_tool_calls: None,
         mtls_cert_dir: None,
@@ -4613,6 +4667,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: NonZeroU64::new(500_000).unwrap(),
+        max_request_bytes: None,
         reasoning_effort: None,
         stream_tool_calls: None,
         mtls_cert_dir: None,
@@ -4709,6 +4764,7 @@ async fn context_window_downgrade_triggers_auto_compact() {
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: NonZeroU64::new(500_000).unwrap(),
+        max_request_bytes: None,
         reasoning_effort: None,
         stream_tool_calls: None,
         mtls_cert_dir: None,
@@ -5344,6 +5400,70 @@ async fn build_request_budgets_tool_images_on_request_copy_only() {
     };
     assert_eq!(canonical_result.images.len(), 1);
     assert_eq!(canonical_result.content.as_ref(), "tool text");
+}
+
+/// The request body is budgeted against the model's own cap, not a fixed 50 MiB: 40 MB of images is far under
+/// the default trigger but over a 30 MB Messages-style cap, so only the capped model evicts.
+#[tokio::test]
+async fn build_request_budgets_images_against_the_models_request_cap() {
+    use fuigo_sampling_types::ContentPart;
+
+    let history = || {
+        (0..2)
+            .map(|n| {
+                ConversationItem::user_with_parts(vec![
+                    ContentPart::Text {
+                        text: format!("shot {n}").into(),
+                    },
+                    ContentPart::Image {
+                        url: format!("data:image/png;base64,{}", "A".repeat(20_000_000)).into(),
+                    },
+                ])
+            })
+            .collect::<Vec<_>>()
+    };
+    let run = |cap: Option<NonZeroU64>| async move {
+        let mut config = test_config();
+        config.max_request_bytes = cap;
+        let mut h = TestHarness::with_config(history(), config);
+        h.handle
+            .build_request(vec![], None, false, None, "c".into(), "r".into())
+            .await
+            .unwrap();
+        h.next_event().await
+    };
+
+    let ChatStateEvent::ImageBudget {
+        trigger_bytes,
+        needs_image_compaction,
+        evicted,
+        ..
+    } = run(None).await
+    else {
+        panic!("expected image budget event");
+    };
+    assert_eq!(trigger_bytes, crate::image_budget::IMAGE_COMPACT_TRIGGER_BYTES);
+    assert!(!needs_image_compaction, "40 MB is under the default 47 MiB trigger");
+    assert_eq!(evicted, 0);
+
+    let cap = NonZeroU64::new(30_000_000);
+    let ChatStateEvent::ImageBudget {
+        trigger_bytes,
+        reclaim_target_bytes,
+        needs_image_compaction,
+        evicted,
+        ..
+    } = run(cap).await
+    else {
+        panic!("expected image budget event");
+    };
+    assert_eq!(
+        (trigger_bytes, reclaim_target_bytes),
+        crate::image_budget::image_budget_limits(cap),
+        "the event reports the limits actually applied"
+    );
+    assert!(needs_image_compaction);
+    assert!(evicted >= 1);
 }
 
 /// Prefix stability after tool result pruning. When context utilization

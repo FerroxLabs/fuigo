@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# windows-check.sh [--src <dir>] [--target-dir <dir>] [--keep-target] [pkg...]
+# windows-check.sh [--src <dir>] [--target-dir <dir>] [--keep-target] [--workspace | pkg...]
 #
 # Type-check the TEST targets for Windows (x86_64-pc-windows-gnu) on the build box, so a Unix-only test that
 # forgot #[cfg(unix)] fails here instead of on a Windows CI runner. HARD RULE: runs on hetzner-dsm, never on a Mac.
 #
-#   default pkgs : fuigo-shell fuigo-pager
+#   default pkgs : fuigo-shell fuigo-pager fuigo-fast-worktree
+#   --workspace  : check EVERY package of the workspace instead of the default list (the release gate runs this)
 #   --src        : checkout to check (default: the repo this script lives in)
 #   --target-dir : private CARGO_TARGET_DIR (default <src>/../target-win-gnu); ~6 GB, deleted afterwards unless --keep-target
 #
@@ -15,16 +16,18 @@
 set -uo pipefail
 case "$(uname -s)" in Linux) ;; *) echo "windows-check.sh: run this on the Linux build box (ssh hetzner-dsm), not here" >&2; exit 2;; esac
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-SRC=$(cd "$HERE/../.." && pwd); TD=""; KEEP=0; PKGS=()
+SRC=$(cd "$HERE/../.." && pwd); TD=""; KEEP=0; WS=0; PKGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --src) SRC=$(cd "$2" && pwd); shift 2;;
     --target-dir) TD=$2; shift 2;;
     --keep-target) KEEP=1; shift;;
+    --workspace) WS=1; shift;;
     *) PKGS+=("$1"); shift;;
   esac
 done
-[ ${#PKGS[@]} -gt 0 ] || PKGS=(fuigo-shell fuigo-pager)
+[ ${#PKGS[@]} -gt 0 ] || PKGS=(fuigo-shell fuigo-pager fuigo-fast-worktree)
+[ "$WS" = 1 ] && PKGS=(--workspace)
 TARGET=x86_64-pc-windows-gnu
 [ -n "$TD" ] || TD=$(dirname "$SRC")/target-win-gnu
 command -v x86_64-w64-mingw32-gcc >/dev/null || { echo "windows-check.sh: mingw-w64 gcc missing (x86_64-w64-mingw32-gcc)" >&2; exit 2; }
@@ -38,6 +41,7 @@ echo "windows-check: src=$(git rev-parse --short HEAD) toolchain=$(rustc --versi
 rustup target add "$TARGET" || exit 2
 START=$(date +%s)
 ARGS=(); for p in "${PKGS[@]}"; do ARGS+=(-p "$p"); done
+[ "$WS" = 1 ] && { ARGS=(--workspace); PKGS=(--workspace); }
 nice -n 10 cargo check --locked --tests --target "$TARGET" "${ARGS[@]}"
 RC=$?
 echo "windows-check: exit=$RC secs=$(( $(date +%s) - START )) end=$(date -u +%FT%TZ)"

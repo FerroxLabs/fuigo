@@ -19,7 +19,10 @@ fn supported_window_selects_on_the_current_model() {
     let mut ctx = exec_ctx(&state, Some(&sid));
 
     match ContextWindowCommand.run(&mut ctx, "500k") {
-        CommandResult::Action(Action::SetContextWindow { model_id: id, window }) => {
+        CommandResult::Action(Action::SetContextWindow {
+            model_id: id,
+            window,
+        }) => {
             assert_eq!(model_id(), id);
             assert_eq!(NonZeroU64::new(500_000), Some(window));
         }

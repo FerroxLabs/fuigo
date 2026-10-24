@@ -2687,7 +2687,11 @@ fn cancel_resend_due_mirrors_the_resend_conditions() {
     // The read-only twin must not consume the attempt.
     assert!(cancel_resend_due(&app));
     assert_eq!(
-        app.agents[&id].pending_cancel_resend.as_ref().unwrap().attempts,
+        app.agents[&id]
+            .pending_cancel_resend
+            .as_ref()
+            .unwrap()
+            .attempts,
         1
     );
     assert!(reconcile_overdue_cancels(&mut app).is_some());
@@ -2701,20 +2705,25 @@ fn stale_state_due_covers_an_overdue_turn_end_reconcile() {
     use crate::app::event_loop::stale_state_due;
     let mut app = test_app_with_agent();
     assert!(!stale_state_due(&app));
-    app.agents.get_mut(&AgentId(0)).unwrap().pending_turn_end_reconcile =
-        Some(crate::app::agent_view::PendingTurnEnd {
-            prompt_id: "pid".into(),
-            stop_reason: Some("cancelled".into()),
-            agent_result: None,
-            cancel_trigger: None,
-            cancellation_category: None,
-            cancellation_context: None,
-            error_kind: None,
-            verdicts: None,
-            received_at: std::time::Instant::now()
-                - (TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1)),
-        });
-    assert!(stale_state_due(&app), "an overdue turn-end reconcile must be fenced");
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .pending_turn_end_reconcile = Some(crate::app::agent_view::PendingTurnEnd {
+        prompt_id: "pid".into(),
+        stop_reason: Some("cancelled".into()),
+        agent_result: None,
+        cancel_trigger: None,
+        cancellation_category: None,
+        cancellation_context: None,
+        error_kind: None,
+        verdicts: None,
+        received_at: std::time::Instant::now()
+            - (TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1)),
+    });
+    assert!(
+        stale_state_due(&app),
+        "an overdue turn-end reconcile must be fenced"
+    );
 }
 
 /// P196 round 4: re-issuing a cancel (which resets `sent_at`) changes the request's fence key.
@@ -2732,8 +2741,13 @@ fn a_reissued_cancel_has_a_new_stale_request_key() {
     }
     let _ = dispatch(Action::CancelTurn, &mut app);
     let set = |app: &mut AppView, d: std::time::Duration| {
-        app.agents.get_mut(&id).unwrap().pending_cancel_resend.as_mut().unwrap().sent_at =
-            std::time::Instant::now() - CANCEL_RESEND_GRACE - d;
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .pending_cancel_resend
+            .as_mut()
+            .unwrap()
+            .sent_at = std::time::Instant::now() - CANCEL_RESEND_GRACE - d;
     };
     set(&mut app, std::time::Duration::from_millis(5));
     let first = stale_request_keys(&app);
@@ -2741,5 +2755,8 @@ fn a_reissued_cancel_has_a_new_stale_request_key() {
     set(&mut app, std::time::Duration::from_millis(1));
     let second = stale_request_keys(&app);
     assert_eq!(second.len(), 1);
-    assert_ne!(first[0], second[0], "a re-issued cancel must be a different request");
+    assert_ne!(
+        first[0], second[0],
+        "a re-issued cancel must be a different request"
+    );
 }

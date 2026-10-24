@@ -3632,6 +3632,72 @@ impl ShellWriteFacts {
             })
         })
     }
+
+    /// Whether every write of this script is a concrete path that `within` accepts, each resolved like the
+    /// protected floor resolves it and judged from every cwd it can run in. For the sandbox card: it vouches
+    /// for a write only when it can name it, so these are all "no": a script that runs git (a switch, a pull
+    /// or a clean rewrites files no target names), a symbolic link, a write nothing can pin (`> "$X"`, a
+    /// computed `cd`, `~user`, a glob), a destination kind that is more than a plain path, and a script with
+    /// no concrete write at all.
+    pub(crate) fn writes_stay_within(
+        &self,
+        real_cwd: &Path,
+        resolve: impl Fn(&Path, &str) -> std::path::PathBuf,
+        within: impl Fn(&Path) -> bool,
+    ) -> bool {
+        if !self.git_starts.is_empty() || !self.symlinks.is_empty() {
+            return false;
+        }
+        let mut concrete = 0_usize;
+        self.writes_stay_within_in(real_cwd, &resolve, &within, &mut concrete) && concrete > 0
+    }
+
+    fn writes_stay_within_in(
+        &self,
+        real_cwd: &Path,
+        resolve: &dyn Fn(&Path, &str) -> std::path::PathBuf,
+        within: &dyn Fn(&Path) -> bool,
+        concrete: &mut usize,
+    ) -> bool {
+        if self.opaque_write {
+            return false;
+        }
+        for target in &self.targets {
+            if is_safe_write_sink(&target.path) {
+                continue;
+            }
+            match target.destination {
+                None | Some(DestinationKind::TargetDirectory) => {}
+                // Watching or reading metadata writes nothing.
+                Some(DestinationKind::Watch | DestinationKind::HookMetadata { .. }) => continue,
+                Some(_) => return false,
+            }
+            if peer_unpinnable_word(&target.path) || target.path.contains(['$', '`']) {
+                return false;
+            }
+            let (spelled, pinned) = match tilde_word(&target.path) {
+                TildeWord::Cwd(tail) => (format!(".{tail}"), false),
+                TildeWord::Unknown => return false,
+                TildeWord::Home => (home_spelling(&target.path), true),
+                TildeWord::NotTilde => (target.path.clone(), Path::new(&target.path).is_absolute()),
+            };
+            let Ok(bases) = self.bases(real_cwd, target.at, target.scope, pinned, resolve) else {
+                return false;
+            };
+            *concrete += 1;
+            if !bases.iter().all(|base| within(&resolve(base, &spelled))) {
+                return false;
+            }
+        }
+        self.nested.iter().all(|nested| {
+            let Ok(bases) = self.bases(real_cwd, nested.at, nested.scope, false, resolve) else {
+                return false;
+            };
+            bases
+                .iter()
+                .all(|base| nested.facts.writes_stay_within_in(base, resolve, within, concrete))
+        })
+    }
 }
 
 /// `path` with `.` and `..` folded lexically (no filesystem access).
@@ -4872,7 +4938,7 @@ fn unwrap_invocation_checked(invocation: &ShellInvocation) -> CheckedInvocationP
     }
 }
 
-enum ArgText {
+pub(crate) enum ArgText {
     /// Literal path/word, no runtime expansion.
     Literal(String),
     /// Runtime expansion; unpinnable, so callers prompt.
@@ -4955,7 +5021,7 @@ fn decode_double_quoted_content(content: &str) -> Option<String> {
     Some(out)
 }
 
-fn shell_node_arg(node: Node<'_>, src: &str) -> Option<ArgText> {
+pub(crate) fn shell_node_arg(node: Node<'_>, src: &str) -> Option<ArgText> {
     shell_node_arg_with(node, src, false)
 }
 

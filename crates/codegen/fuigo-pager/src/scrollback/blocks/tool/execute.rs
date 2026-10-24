@@ -126,6 +126,16 @@ impl ExecuteToolCallBlock {
             .unwrap_or_default()
     }
 
+    /// The Label-style header verb: `Running ` while the command executes, `Ran ` once it has finished, and `Run ` for a
+    /// command that has no timing yet (not started, or a block restored without timing).
+    fn run_word(&self) -> &'static str {
+        match (self.started_at, self.elapsed_ms) {
+            (_, Some(_)) => "Ran ",
+            (Some(_), None) => "Running ",
+            (None, None) => "Run ",
+        }
+    }
+
     /// Display form of the command for the header (may peel `cd &&` prefix).
     ///
     /// Preserves physical newlines so soft-wrap / copy can keep line structure.
@@ -203,8 +213,9 @@ impl ExecuteToolCallBlock {
                 } else {
                     theme.primary().add_modifier(Modifier::BOLD)
                 };
-                let mut spans = vec![Span::styled("Run ".to_string(), label_style)];
-                let mut hang = UnicodeWidthStr::width("Run ");
+                let word = self.run_word();
+                let mut spans = vec![Span::styled(word.to_string(), label_style)];
+                let mut hang = UnicodeWidthStr::width(word);
                 if self.bash_mode {
                     spans.push(Span::styled("(user) ".to_string(), theme.muted()));
                     hang += UnicodeWidthStr::width("(user) ");
@@ -247,6 +258,12 @@ impl ExecuteToolCallBlock {
             crate::views::permission_view::render_bash_command_display_lines(command, cmd_width)
         };
 
+        // A row that only continues its line copies back as a space; the command's own newlines stay newlines
+        let soft_wrapped: Vec<bool> = if muted_command || command == "\u{2026}" {
+            vec![true; cmd_rows.len()]
+        } else {
+            crate::views::permission_view::bash_row_soft_wrap_flags(command, &cmd_rows)
+        };
         let hang_indent: String = " ".repeat(hang);
         if cmd_rows.is_empty() {
             lines.push(BlockLine {
@@ -273,8 +290,12 @@ impl ExecuteToolCallBlock {
             lines.push(BlockLine {
                 selectable: Selectable::Spans(select_start..total),
                 selection_range: Some(TOOL_HEADER_RANGE),
-                // Preserve physical/soft-wrap structure as newlines when copying.
-                joiner: if i == 0 { None } else { Some("\n".to_string()) },
+                // The command's own newlines copy as newlines; a soft wrap copies as the space it replaced
+                joiner: match (i, soft_wrapped.get(i)) {
+                    (0, _) => None,
+                    (_, Some(true)) => Some(" ".to_string()),
+                    _ => Some("\n".to_string()),
+                },
                 content: Line::from(spans),
                 ..Default::default()
             });
@@ -296,7 +317,7 @@ impl ExecuteToolCallBlock {
         } else {
             theme.primary().add_modifier(Modifier::BOLD)
         };
-        let mut spans = vec![Span::styled("Run ", label_style)];
+        let mut spans = vec![Span::styled(self.run_word(), label_style)];
         if self.bash_mode {
             // Same style as session event messages (e.g. "Worked for 2.3s")
             spans.push(Span::styled("(user) ", theme.muted()));
@@ -834,6 +855,55 @@ mod tests {
         assert_eq!(line_text(&headers[0].0), "Run the unit test suite");
     }
 
+    /// A command the header wraps to fit the width copies as the one line it is; only the command's own newlines stay newlines.
+    #[test]
+    fn wrapped_command_copies_as_one_line() {
+        let theme = Theme::current();
+        let block = ExecuteToolCallBlock::new(
+            "cargo build --release --workspace && cargo test --workspace && cargo clippy --workspace",
+        );
+        let mut lines = Vec::new();
+        block.push_command_soft_wrap(&mut lines, &theme, ExecuteHeaderStyle::Shell, false, 30, 0);
+        assert!(lines.len() >= 3, "narrow width wraps the command: {}", lines.len());
+        let copied: String = lines
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                let text = line_text(&l.content);
+                let text = if i == 0 { text[2..].to_string() } else { text.trim_start().to_string() };
+                match (&l.joiner, i) {
+                    (_, 0) => text,
+                    (Some(j), _) => format!("{j}{text}"),
+                    (None, _) => text,
+                }
+            })
+            .collect();
+        assert_eq!(
+            copied,
+            "cargo build --release --workspace && cargo test --workspace && cargo clippy --workspace"
+        );
+
+        let multi = ExecuteToolCallBlock::new("echo one\necho two");
+        let mut lines = Vec::new();
+        multi.push_command_soft_wrap(&mut lines, &theme, ExecuteHeaderStyle::Shell, false, 80, 0);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1].joiner.as_deref(), Some("\n"), "a real newline stays a newline");
+    }
+
+    #[test]
+    fn label_header_verb_follows_the_run_state() {
+        let theme = Theme::current();
+        let first = |b: &ExecuteToolCallBlock| {
+            line_text(&b.header_lines(&theme, ExecuteHeaderStyle::Label, false, false)[0].0)
+        };
+        let mut b = ExecuteToolCallBlock::new("cargo test");
+        assert!(first(&b).starts_with("Run cargo test"), "idle: {}", first(&b));
+        b.started_at = Some(std::time::Instant::now());
+        assert!(first(&b).starts_with("Running cargo test"), "running: {}", first(&b));
+        b.finish();
+        assert!(first(&b).starts_with("Ran cargo test"), "finished: {}", first(&b));
+    }
+
     #[test]
     fn strip_leading_run_word_handles_run_and_running() {
         assert_eq!(strip_leading_run_word("Run the tests"), "the tests");
@@ -929,8 +999,8 @@ mod tests {
         );
         assert_eq!(
             lines[1].joiner.as_deref(),
-            Some("\n"),
-            "copy must preserve line breaks between soft-wrap rows"
+            Some(" "),
+            "a soft wrap copies as the space it replaced, so the command copies as one line"
         );
     }
 

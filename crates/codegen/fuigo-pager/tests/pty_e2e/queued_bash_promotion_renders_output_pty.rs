@@ -74,8 +74,8 @@ async fn queued_bash_promotion_renders_output_pty() {
         harness.screen_contents()
     );
     harness
-        .wait_for_text("Run (user)", Duration::from_secs(15))
-        .expect("Run (user) chrome for the drained bash turn");
+        .wait_for_text("Ran (user)", Duration::from_secs(15))
+        .expect("Ran (user) chrome for the drained bash turn");
 
     let users = all_user_message_blobs(&content);
     assert!(

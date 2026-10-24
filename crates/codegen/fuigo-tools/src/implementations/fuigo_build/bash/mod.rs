@@ -999,6 +999,62 @@ fn self_matching_pkill_pattern(command: &str) -> Option<SelfMatchingPkill> {
     None
 }
 
+/// Trailing redirections that leave a lone `pkill`/`pgrep` a single simple command (`2>/dev/null`, `>/dev/null 2>&1`).
+static TRAILING_REDIRECTS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:\s*(?:\d*>>?&?\s*\S+|&>>?\s*\S+))*\s*$").expect("valid redirect regex")
+});
+
+/// Detect a `pkill -f <pat>` / `pgrep -f <pat>` whose pattern matches the command line of the shell that runs it.
+///
+/// The command runs as `sh -c '<the whole command>'`, so that shell's argv holds the command text, `<pat>` included.
+/// `-f` matches against every process's full command line, so the shell itself is matched: `pkill` terminates it
+/// before the rest of the script runs, and `pgrep` reports the shell's own pid as a hit. The one case that is safe
+/// is a lone `pkill -f x` (optionally with redirections): the shell executes its last command in its own place,
+/// so no wrapper outlives it. A pattern that cannot match its own spelling, such as `[x]server`, is safe too.
+///
+/// The pattern is read as a regular expression (what `pkill` does); one that does not compile is compared literally.
+/// Patterns built by shell expansion are skipped, as in [`self_matching_pkill_pattern`].
+fn wrapper_matching_pkill_pattern(command: &str) -> Option<SelfMatchingPkill> {
+    for caps in PKILL_RE.captures_iter(command) {
+        let pat_str: &str = caps
+            .name("sq")
+            .or_else(|| caps.name("dq"))
+            .or_else(|| caps.name("bare"))
+            .map(|m| m.as_str())?;
+        if pat_str.len() < MIN_PKILL_PATTERN_LEN
+            || pat_str.contains("$(")
+            || pat_str.contains("$`")
+            || pat_str.starts_with('`')
+            || pat_str.contains("${")
+            || pat_str.contains('$')
+        {
+            continue;
+        }
+        let cmd: &'static str = match caps.name("cmd").map(|m| m.as_str()) {
+            Some("pkill") => "pkill",
+            Some("pgrep") => "pgrep",
+            _ => continue,
+        };
+        let m = caps.get(0).expect("group 0 always present");
+        let lone = command[..m.start()].trim().is_empty()
+            && TRAILING_REDIRECTS_RE.is_match(&command[m.end()..]);
+        if lone {
+            continue;
+        }
+        let matches_wrapper = match Regex::new(pat_str) {
+            Ok(re) => re.is_match(command),
+            Err(_) => command.contains(pat_str),
+        };
+        if matches_wrapper {
+            return Some(SelfMatchingPkill {
+                cmd,
+                pattern: pat_str.to_owned(),
+            });
+        }
+    }
+    None
+}
+
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 const BACKGROUND_TIMEOUT: Duration = Duration::from_secs(86400); // 24 hours
 
@@ -2124,7 +2180,9 @@ impl fuigo_tool_runtime::Tool for BashTool {
         // before the rest of the script runs. Reject obvious cases at
         // parse time. See `self_matching_pkill_pattern` for the precise
         // detection rules.
-        if let Some(hit) = self_matching_pkill_pattern(&input.command) {
+        if let Some(hit) = self_matching_pkill_pattern(&input.command)
+            .or_else(|| wrapper_matching_pkill_pattern(&input.command))
+        {
             let SelfMatchingPkill { cmd, pattern } = hit;
             let message = format!(
                 "self-matching {cmd}/-f: `{cmd} -f <pat>` matches against the full \
@@ -2132,8 +2190,9 @@ impl fuigo_tool_runtime::Tool for BashTool {
                  runs this command (its argv contains `{pattern}`). The wrapper would \
                  be killed by the resulting signal before the rest of the script runs. \
                  Use one of: `pkill -x <basename>` (no `-f`), `pgrep -f <pat> | xargs \
-                 -r kill` invoked from a separate command, a fully-qualified path that \
-                 does not appear later in the script, or kill by PID file."
+                 -r kill` invoked from a separate command, a pattern that cannot match \
+                 its own spelling (`[m]yserver` instead of `myserver`), a fully-qualified \
+                 path that does not appear later in the script, or kill by PID file."
             );
             return Err(fuigo_tool_runtime::ToolError::invalid_arguments(message));
         }
@@ -3373,6 +3432,54 @@ mod tests {
             err
         );
         assert!(err.contains("&"), "Error should mention &: {}", err);
+    }
+
+    /// `pkill -f` / `pgrep -f` match every process's full command line, and the shell that runs a compound command
+    /// keeps the whole command text in its own argv. A pattern in that text matches the shell itself, so the command is
+    /// refused up front (a lone `pkill -f x` is exec'd in place of the shell and is not affected).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pattern_matching_the_shell_wrapper_is_rejected_before_it_runs() {
+        for command in [
+            "pkill -f myserver || true",
+            "pkill -f myserver; sleep 1",
+            "pkill -f ./otherserver && ./clavitor-web",
+            "cd /tmp && pkill -f myserver",
+            "pgrep -f myserver && echo found",
+            "pgrep -f myserver | head -1",
+        ] {
+            let resources = make_resources(MockTerminal::success("", 0));
+            let result = fuigo_tool_runtime::Tool::run(
+                &BashTool,
+                test_ctx(resources.into_shared()),
+                make_input(command),
+            )
+            .await;
+            let err = result.expect_err(command).to_string();
+            assert!(err.contains("self-matching"), "{command}: {err}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pattern_that_cannot_match_the_shell_wrapper_runs() {
+        for command in [
+            "pkill -f myserver",
+            "pkill -f myserver 2>/dev/null",
+            "pkill -f '[m]yserver' && sleep 1",
+            "pgrep -f '[m]yserver' | head -1",
+            "pkill -x myserver || true",
+            "pkill -f \"$(cat pidpat)\" || true",
+        ] {
+            let resources = make_resources(MockTerminal::success("", 0));
+            let result = fuigo_tool_runtime::Tool::run(
+                &BashTool,
+                test_ctx(resources.into_shared()),
+                make_input(command),
+            )
+            .await;
+            assert!(result.is_ok(), "{command}: {:?}", result.err());
+        }
     }
 
     #[cfg(unix)]
@@ -4861,6 +4968,64 @@ mod tests {
             assert!(props.contains_key("block_until_ms"));
             assert!(!props.contains_key("is_background"));
             assert!(props.contains_key("timeout") && props.contains_key("command"));
+        }
+    }
+
+
+    // ─── wrapper_matching_pkill_pattern unit tests ───
+
+    mod wrapper_matching_pkill_tests {
+        use super::super::wrapper_matching_pkill_pattern;
+
+        fn hit(command: &str) -> Option<(&'static str, String)> {
+            wrapper_matching_pkill_pattern(command).map(|h| (h.cmd, h.pattern))
+        }
+
+        #[test]
+        fn pattern_in_a_compound_command_matches_the_wrapper() {
+            assert_eq!(
+                hit("pkill -f myserver || true"),
+                Some(("pkill", "myserver".into()))
+            );
+            assert_eq!(
+                hit("cd /tmp && pkill -f 'my server'"),
+                Some(("pkill", "my server".into()))
+            );
+            assert_eq!(
+                hit("pgrep -f myserver | head -1"),
+                Some(("pgrep", "myserver".into()))
+            );
+        }
+
+        #[test]
+        fn regex_pattern_matching_the_command_text_is_flagged() {
+            assert_eq!(
+                hit("pkill -f 'node.*server' ; sleep 1"),
+                Some(("pkill", "node.*server".into()))
+            );
+        }
+
+        #[test]
+        fn a_lone_command_is_executed_in_place_of_the_shell() {
+            assert!(hit("pkill -f myserver").is_none());
+            assert!(hit("  pkill -f myserver  ").is_none());
+            assert!(hit("pkill -f myserver 2>/dev/null").is_none());
+            assert!(hit("pkill -f myserver >/dev/null 2>&1").is_none());
+        }
+
+        #[test]
+        fn a_pattern_that_cannot_match_its_own_spelling_is_safe() {
+            assert!(hit("pkill -f '[m]yserver' && sleep 1").is_none());
+            assert!(hit("pgrep -f '[m]yserver' | head -1").is_none());
+        }
+
+        #[test]
+        fn expanded_short_and_flagless_patterns_are_skipped() {
+            assert!(hit("pkill -f \"$(cat pidpat)\" || true").is_none());
+            assert!(hit("pkill -f \"$PAT\" || true").is_none());
+            assert!(hit("pkill -f ab || true").is_none());
+            assert!(hit("pkill -x myserver || true").is_none());
+            assert!(hit("echo done").is_none());
         }
     }
 

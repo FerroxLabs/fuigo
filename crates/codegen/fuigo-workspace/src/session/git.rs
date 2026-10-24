@@ -206,8 +206,8 @@ pub enum GitDiscoveryResult {
 /// [`GitDiscoveryResult::DiscoveryFailed`] means libgit2 errored unexpectedly, so callers can avoid false-positive "not a repo" decisions.
 pub fn discover_git_root(path: &Path) -> GitDiscoveryResult {
     match Repository::discover(path) {
-        Ok(repo) => match repo.workdir() {
-            Some(root) => GitDiscoveryResult::Found(root.to_path_buf()),
+        Ok(repo) => match repo_workdir(&repo, path) {
+            Some(root) => GitDiscoveryResult::Found(root),
             None => GitDiscoveryResult::DiscoveryFailed(anyhow::anyhow!(
                 "bare git repository: {}",
                 path.display()
@@ -419,10 +419,58 @@ pub fn find_git_root_from_path(path: &Path) -> Result<PathBuf> {
 /// Use this for worktree management operations (create/remove/apply).
 pub fn find_main_repo_root_from_path(path: &Path) -> Result<PathBuf> {
     let repo = Repository::discover(path)?;
-    repo.commondir()
-        .parent()
-        .map(|p| p.to_path_buf())
+    main_worktree_root(&repo, path)
         .ok_or_else(|| anyhow::anyhow!("Invalid git repository: {}", path.display()))
+}
+/// The root of the main working tree of an opened repository that was found from `start`.
+/// A repository's own working tree is [`repo_workdir`]; the git directory's parent only stands for it when the git
+/// directory is named `.git` and sits inside the tree, which a `--separate-git-dir` repository does not. A linked
+/// worktree's main tree is the parent of the common git directory.
+pub fn main_worktree_root(repo: &Repository, start: &Path) -> Option<PathBuf> {
+    if !repo.is_worktree()
+        && let Some(workdir) = repo_workdir(repo, start)
+    {
+        return Some(workdir);
+    }
+    repo.commondir().parent().map(Path::to_path_buf)
+}
+/// The working tree of `repo`, which was found from `start`, without a trailing separator.
+/// libgit2 reports the PARENT OF THE GIT DIRECTORY when a repository made with `git init --separate-git-dir` has no
+/// `core.worktree`, which is the directory holding the git directory, not the checkout. A reported tree with no `.git`
+/// entry is doubted, and the checkout is found by following the `.git` file from `start` upward.
+pub fn repo_workdir(repo: &Repository, start: &Path) -> Option<PathBuf> {
+    let reported: Option<PathBuf> = repo.workdir().map(|w| w.components().collect());
+    if let Some(workdir) = &reported
+        && workdir.join(".git").exists()
+    {
+        return reported;
+    }
+    gitlink_checkout(start, repo).or(reported)
+}
+/// The directory above `start` whose `.git` FILE points at `repo`'s git directory.
+fn gitlink_checkout(start: &Path, repo: &Repository) -> Option<PathBuf> {
+    use std::io::Read;
+    let git_dir = dunce::canonicalize(repo.path()).ok()?;
+    let start = if start.is_absolute() {
+        start.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(start)
+    };
+    for dir in start.ancestors() {
+        let link = dir.join(".git");
+        let Ok(meta) = std::fs::symlink_metadata(&link) else {
+            continue;
+        };
+        if !meta.is_file() {
+            return None;
+        }
+        let mut text = String::new();
+        std::fs::File::open(&link).ok()?.take(4096).read_to_string(&mut text).ok()?;
+        let target = Path::new(text.lines().next()?.strip_prefix("gitdir:")?.trim());
+        let target = if target.is_relative() { dir.join(target) } else { target.to_path_buf() };
+        return (dunce::canonicalize(target).ok()? == git_dir).then(|| dir.to_path_buf());
+    }
+    None
 }
 pub fn change_type_from_git2_delta(delta: git2::Delta) -> ChangeType {
     match delta {
@@ -1370,9 +1418,7 @@ async fn status_ungated(
         let root = repo
             .workdir()
             .map(|p| p.to_string_lossy().trim_end_matches('/').to_string());
-        let main_root = repo
-            .commondir()
-            .parent()
+        let main_root = main_worktree_root(&repo, &cwd)
             .map(|p| p.to_string_lossy().trim_end_matches('/').to_string());
         let commit = head_sha(&repo);
         let (ahead, behind) = compute_ahead_behind(&repo)
@@ -1781,11 +1827,44 @@ pub fn check_diff_size_limits(
     }
     Ok(())
 }
+/// `git add -A`, except that a submodule which is not checked out keeps its gitlink.
+/// `add -A` reads a gitlink path that is absent (fuigo's worktrees do not create the
+/// directory) as a deletion, so a turn commit or stage-all would record the submodule
+/// as removed. The same rule as a worktree snapshot, shared from `fuigo-fast-worktree`.
+async fn add_all_keeping_uninitialised_gitlinks(git_root: &Path) -> Result<String> {
+    let before = fuigo_fast_worktree::parse_gitlinks(
+        &git_cli(git_root, &["ls-files", "-s", "-z"])
+            .await
+            .unwrap_or_default(),
+    );
+    let out = git_cli_mut(git_root, &["add", "-A"]).await?;
+    if before.is_empty() {
+        return Ok(out);
+    }
+    let after = fuigo_fast_worktree::parse_gitlinks(
+        &git_cli(git_root, &["ls-files", "-s", "-z"]).await?,
+    );
+    for (commit, path) in
+        fuigo_fast_worktree::dropped_uninitialised_gitlinks(git_root, &before, &after)
+    {
+        git_cli_mut(
+            git_root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{commit},{path}"),
+            ],
+        )
+        .await?;
+    }
+    Ok(out)
+}
 pub async fn stage(git_root: &Path, paths: Option<Vec<String>>) -> Result<StageData> {
     let start = std::time::Instant::now();
     let paths_to_stage = paths.unwrap_or_default();
     let result = if paths_to_stage.is_empty() {
-        git_cli_mut(git_root, &["add", "-A"]).await
+        add_all_keeping_uninitialised_gitlinks(git_root).await
     } else {
         let mut args = vec!["add", "--"];
         args.extend(paths_to_stage.iter().map(String::as_str));
@@ -2476,7 +2555,7 @@ pub async fn commit_turn_if_dirty(cwd: &Path, turn_number: u64) -> Option<String
             return None;
         }
     };
-    if let Err(e) = git_cli_mut(&git_root, &["add", "-A"]).await {
+    if let Err(e) = add_all_keeping_uninitialised_gitlinks(&git_root).await {
         tracing::warn!(
             error = %e,
             turn_number,
@@ -2874,7 +2953,7 @@ pub async fn commit(git_root: &Path, req: &GitCommitReq) -> Result<CommitResult>
         seed_default_excludes(git_root).await?;
     }
     if req.stage_all {
-        git_cli_mut(git_root, &["add", "-A"]).await?;
+        add_all_keeping_uninitialised_gitlinks(git_root).await?;
     }
     let clean = req.stage_all
         && !req.amend

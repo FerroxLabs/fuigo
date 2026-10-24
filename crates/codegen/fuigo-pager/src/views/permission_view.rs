@@ -416,7 +416,11 @@ fn clean_text(text: &str) -> String {
 /// [`clean_text`] over every span of a line, keeping each span's style.
 fn clean_line(line: &mut Line<'_>) {
     for span in &mut line.spans {
-        if span.content.chars().any(fuigo_tty_utils::is_unsafe_display_char) {
+        if span
+            .content
+            .chars()
+            .any(fuigo_tty_utils::is_unsafe_display_char)
+        {
             span.content = clean_text(&span.content).into();
         }
     }
@@ -836,6 +840,40 @@ pub(crate) fn render_bash_command_display_lines(
     content_width: usize,
 ) -> Vec<Line<'static>> {
     build_raw_bash_lines(command, content_width, usize::MAX)
+}
+
+/// For each row [`render_bash_command_display_lines`] produced for `command`: `true` when the row only continues the line before it
+/// (the command line was wider than the area), `false` when it starts a line of the command itself.
+/// A soft wrap copies back as the space it replaced; a real newline stays a newline.
+pub(crate) fn bash_row_soft_wrap_flags(command: &str, rows: &[Line<'static>]) -> Vec<bool> {
+    let visible = |text: &str| text.chars().filter(|c| !c.is_whitespace()).count();
+    let mut flags = Vec::with_capacity(rows.len());
+    let mut next = 0usize;
+    for physical in prepare_bash_display_text(command).split('\n') {
+        if next >= rows.len() {
+            break;
+        }
+        let target = visible(physical);
+        if target == 0 {
+            flags.push(false);
+            next += 1;
+            continue;
+        }
+        let mut seen = 0usize;
+        let mut first = true;
+        while seen < target && next < rows.len() {
+            seen += rows[next]
+                .spans
+                .iter()
+                .map(|s| visible(&s.content))
+                .sum::<usize>();
+            flags.push(!first);
+            first = false;
+            next += 1;
+        }
+    }
+    flags.resize(rows.len(), false);
+    flags
 }
 
 fn build_permission_bash_lines(
@@ -2967,7 +3005,9 @@ mod tests {
         let area = Rect::new(0, 0, 100, 20);
         let text = render_to_text(&state, area);
         assert!(
-            !text.chars().any(|c| c != '\n' && fuigo_tty_utils::is_unsafe_display_char(c)),
+            !text
+                .chars()
+                .any(|c| c != '\n' && fuigo_tty_utils::is_unsafe_display_char(c)),
             "unsafe character painted:\n{text:?}"
         );
         assert!(text.contains("Allow `ls`? Press 1 to allow"), "{text}");

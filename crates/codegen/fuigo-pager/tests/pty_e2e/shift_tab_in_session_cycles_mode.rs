@@ -29,6 +29,10 @@ async fn shift_tab_in_session_cycles_mode() {
     harness
         .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
         .expect("turn rendered");
+    // Let the turn finish first: Shift+Tab during a running turn takes a different (immediate) plan-mode path.
+    harness
+        .wait_for_turn_idle(Duration::from_secs(60))
+        .expect("turn finished");
 
     harness.inject_keys(b"\x1b[Z").expect("inject BackTab");
     harness

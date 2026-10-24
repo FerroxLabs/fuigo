@@ -95,6 +95,35 @@ async fn subagent_spawn_context_shares_active_message_parent_prompt_index() {
         6,
     );
 }
+/// A fork starts from the parent's MCP servers as they are when it is spawned (a config reload, plugin reload or agent
+/// switch publishes into the handle's shared list), and keeps that copy: a later change does not rewrite it.
+#[tokio::test]
+async fn subagent_spawn_context_forks_the_parents_current_mcp_servers() {
+    let http = |name: &str, url: &str| {
+        acp::McpServer::Http(acp::McpServerHttp::new(name, url).headers(vec![]))
+    };
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("parent-mcp");
+    let handle = make_test_handle("test-model", false, None);
+    let published = handle.mcp_servers.clone();
+    published.replace(vec![http("at-spawn", "https://spawn.example/mcp")]);
+    agent.insert_resident(&sid, handle);
+    published.replace(vec![http("after-switch", "https://switch.example/mcp")]);
+
+    let ctx = agent.build_subagent_spawn_context(sid.0.as_ref());
+    assert_eq!(
+        ctx.parent_mcp_configs,
+        vec![http("after-switch", "https://switch.example/mcp")],
+        "the fork sees what the parent publishes now, not what it spawned with"
+    );
+
+    published.replace(vec![http("later", "https://later.example/mcp")]);
+    assert_eq!(
+        ctx.parent_mcp_configs,
+        vec![http("after-switch", "https://switch.example/mcp")],
+        "a fork keeps its copy"
+    );
+}
 #[tokio::test]
 async fn subagent_spawn_context_shares_parent_goal_loop_gate() {
     use std::sync::atomic::Ordering::Relaxed;

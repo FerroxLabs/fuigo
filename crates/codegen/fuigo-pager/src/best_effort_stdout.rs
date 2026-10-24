@@ -26,6 +26,13 @@ mod tests {
             "src/worktree_cmd/mod.rs",
             "src/completions_cmd.rs",
             "src/app/session_startup.rs",
+            "src/export_cmd.rs",
+            "src/login_cmd.rs",
+            "src/usage_cmd.rs",
+            "src/share_cmd.rs",
+            "src/docs.rs",
+            "src/doctor_cmd/mod.rs",
+            "src/disk_usage_cmd/mod.rs",
         ];
         // The composition-root binary dispatches the subcommands and prints too; the shell owns
         // the subscription CLI printers (`fuigo login --provider … --status`, `fuigo models
@@ -35,6 +42,9 @@ mod tests {
             "../fuigo-shell/src/auth/subscription/mod.rs",
             "../fuigo-shell/src/auth/subscription/inference.rs",
             "../fuigo-shell/src/mcp_doctor.rs",
+            "../fuigo-update/src/auto_update.rs",
+            "../fuigo-update/src/version.rs",
+            "../fuigo-update/src/version_policy.rs",
         ];
         let mut offenders = Vec::new();
         for rel in own {
@@ -116,8 +126,15 @@ mod tests {
                     offenders.push(format!("{rel}:{}: {}", n + 1, line.trim()));
                 }
             }
-            assert!(code.contains("display_stdout()"), "{rel} no longer writes through display_stdout()");
+            assert!(
+                code.contains("display_stdout()"),
+                "{rel} no longer writes through display_stdout()"
+            );
         }
-        assert!(offenders.is_empty(), "unfiltered stdout handle:\n{}", offenders.join("\n"));
+        assert!(
+            offenders.is_empty(),
+            "unfiltered stdout handle:\n{}",
+            offenders.join("\n")
+        );
     }
 }

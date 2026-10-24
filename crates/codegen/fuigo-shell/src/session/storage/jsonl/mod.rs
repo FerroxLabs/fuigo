@@ -1705,6 +1705,47 @@ impl StorageAdapter for JsonlStorageAdapter {
             .map(Some)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
+    async fn update_usage(
+        &self,
+        info: &Info,
+        update: Box<
+            dyn FnOnce(
+                    Option<crate::session::usage_file::SessionUsageFile>,
+                ) -> crate::session::usage_file::SessionUsageFile
+                + Send,
+        >,
+    ) -> io::Result<crate::session::usage_file::SessionUsageFile> {
+        use fs2::FileExt;
+        let path = self.usage_file(info);
+        let lock_path = path.with_file_name(format!("{}.lock", super::USAGE_FILE));
+        tokio::task::spawn_blocking(move || {
+            let lock = super::owner_only::open(
+                OpenOptions::new().read(true).write(true).create(true).truncate(false),
+                &lock_path,
+            )?;
+            lock.lock_exclusive()?;
+            let result = (|| {
+                let current = match std::fs::read(&path) {
+                    Ok(data) if data.iter().all(u8::is_ascii_whitespace) => None,
+                    Ok(data) => Some(
+                        serde_json::from_slice(&data)
+                            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+                    ),
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                    Err(e) => return Err(e),
+                };
+                let updated = update(current);
+                let json = serde_json::to_vec_pretty(&updated)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                super::write_bytes_atomic(&path, &json)?;
+                Ok(updated)
+            })();
+            let _ = lock.unlock();
+            result
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
     async fn write_usage(
         &self,
         info: &Info,

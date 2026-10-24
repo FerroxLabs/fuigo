@@ -553,6 +553,9 @@ pub(crate) struct HubCallFacts {
     pub(crate) patch_targets: Option<Result<Vec<String>, String>>,
     /// The files the call's reader opens (P198), judged in every spelling as a local read is.
     pub(crate) read_targets: Option<crate::permission::ReadTargets>,
+    /// The sandbox's cover for this call, read afresh as the call was classified: `Some` only while its command
+    /// is really wrapped by a backend under `enforce` (see `permission::sandbox_card`).
+    pub(crate) sandbox_cover: Option<crate::permission::SandboxCover>,
 }
 /// P173: a hub-routed call answers to the workspace's local permission policy (the same rules, protected paths and
 /// side-effecting-tool floor as a local call), with or without `FUIGO_HITL_PERMISSION_LIVE`. See
@@ -754,6 +757,7 @@ async fn enforce_hub_policy_inner(
         session.yolo_mode() && crate::permission::resolution::yolo_disabled_by_policy().is_none();
     let default_prompts = crate::permission::hitl_permission_live_enabled();
     let judged = accesses.to_vec();
+    let sandbox_cover = facts.sandbox_cover.clone();
     let excludes = deny_read_globs.clone();
     // A `workdir` is judged as well as, never instead of, the session cwd: a tool that ignores the argument runs in the
     // session cwd, so the call must pass in both.
@@ -788,6 +792,7 @@ async fn enforce_hub_policy_inner(
                 walk_searches,
                 patch_targets: &patch_targets,
                 read_spellings: &read_spellings,
+                sandbox_cover: sandbox_cover.as_ref(),
             };
             let verdict = hub_policy_verdict_all(&judged, &ctx);
             if verdict.denied.is_some() {
@@ -1064,6 +1069,41 @@ impl ToolServerHandler for SessionRoutedToolHandler {
             search_excludes_applied: input.search_excludes_applied,
             patch_targets: input.patch_targets,
             read_targets: input.read_targets,
+            sandbox_cover: None,
+        };
+        // The folder's sandbox: engaged (its mode resolved afresh) before the call is classified
+        let (sandbox, mode) = match self.workspace.shared.sandbox() {
+            Some(sandbox) => match sandbox.engage_unless_off().await {
+                crate::sandbox::SandboxMode::Off => (None, None),
+                mode => (Some(sandbox), Some(mode)),
+            },
+            None => (None, None),
+        };
+        let tool = toolset
+            .get_tool_metadata(self.name())
+            .map(|tool| (tool.kind(), tool.tool_namespace()));
+        let path = crate::permission::SandboxPath::for_tool(tool, mode)
+            .for_call(&session, self.name(), &real_args)
+            .await;
+        // Under `enforce` a file tool never writes a sandbox mode layer: refused before the
+        // permission policy can ask the owner to approve what would be refused anyway
+        if path == crate::permission::SandboxPath::None
+            && let Some(sandbox) = &sandbox
+            && let Err(refused) = crate::permission::refuse_mode_layer_write(
+                sandbox,
+                &session,
+                self.name(),
+                &real_args,
+            )
+            .await
+        {
+            return terminal_only(Err(refused));
+        }
+        // The sandbox's cover for this call, from the mode and path just read for it (the same mode the call is
+        // pinned to below): only a command really wrapped under `enforce` gets one.
+        let facts = HubCallFacts {
+            sandbox_cover: crate::permission::SandboxCover::for_call(sandbox.as_deref(), mode, path),
+            ..facts
         };
         let deny_read_globs = match enforce_hub_policy(
             &self.workspace,
@@ -1081,6 +1121,39 @@ impl ToolServerHandler for SessionRoutedToolHandler {
             Err(e) => return terminal_only(Err(e)),
         };
         let args = real_args;
+        // Pin the call's mode before it dispatches, so a flip of the folder's mode between here and
+        // the spawn cannot lower it. A call the table has no room for runs unpinned only when
+        // that is no weaker than its dispatch mode.
+        if path.follows_result_path()
+            && let (Some(sandbox), Some(mode)) = (&sandbox, mode)
+            && let Err(error) = sandbox.pin_mode(
+                &fuigo_sandbox::command::CallId::tool(call_id.as_str()),
+                mode,
+            )
+        {
+            if path == crate::permission::SandboxPath::Gated
+                || !matches!(error, crate::sandbox::WorkspaceSandboxError::CallTableFull)
+            {
+                return terminal_only(Err(ToolError::new(
+                    ToolErrorKind::ConcurrencyLimit,
+                    error.to_string(),
+                )));
+            }
+            if !sandbox.floor_mode(
+                &fuigo_sandbox::command::CallId::tool(call_id.as_str()),
+                mode,
+            ) {
+                return terminal_only(Err(ToolError::new(
+                    ToolErrorKind::ConcurrencyLimit,
+                    error.to_string(),
+                )));
+            }
+            tracing::warn!(
+                call_id = %call_id,
+                %error,
+                "no room to pin the call; it runs unpinned, no weaker than its dispatch mode"
+            );
+        }
         tracing::debug!(
             tool = %self.name(),
             call_id = %call_id,
@@ -1090,12 +1163,37 @@ impl ToolServerHandler for SessionRoutedToolHandler {
         tracker.tool_call_started(&call_id, self.name(), hub_session.as_deref());
         // Search tools skip what Read rules deny (grep under a permitted root), as in a local session. The policy's
         // globs ride on this call only (Grok #9): nothing shared is written, so a concurrent call cannot replace them.
-        let inner =
-            toolset.call_streaming_with_deny_read_globs(self.name(), args, &call_id, deny_read_globs);
         let tracker = self.workspace.shared.activity_tracker.clone();
         let name = self.name().to_owned();
         let session_label = session_id.to_owned();
-        let guard = CallCompletedGuard::new(tracker, call_id, Some(session_label.clone()));
+        let guard = CallCompletedGuard::new(tracker, call_id.clone(), Some(session_label.clone()));
+        let inner = if path.follows_result_path() {
+            let command = args
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            // The same toolset snapshot the permission check judged serves the replay too
+            let dispatch_toolset = toolset.clone();
+            let dispatch_name = name.clone();
+            let dispatch_call_id = call_id.clone();
+            crate::sandbox::result_path::run_shell_call_with_replay(
+                self.workspace.clone(),
+                session,
+                call_id,
+                command,
+                path == crate::permission::SandboxPath::Gated,
+                move || {
+                    dispatch_toolset.call_streaming_with_deny_read_globs(
+                        &dispatch_name,
+                        args.clone(),
+                        &dispatch_call_id,
+                        deny_read_globs.clone(),
+                    )
+                },
+            )
+        } else {
+            toolset.call_streaming_with_deny_read_globs(self.name(), args, &call_id, deny_read_globs)
+        };
         Box::pin(async_stream::stream! {
             use futures::StreamExt;
             let mut _guard = guard;

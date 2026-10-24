@@ -5,10 +5,10 @@
 pub mod leader_bridge;
 pub mod meta;
 pub mod model_state;
+mod relay_refused;
 pub mod spawn;
 mod subagent_message;
 pub mod tracker;
-mod relay_refused;
 mod version_mismatch;
 
 pub(crate) use relay_refused::{RelayRefusal, relay_refusal};
@@ -161,6 +161,10 @@ pub struct ConnectFlags {
     /// CLI permission rules from the --allow and --deny flags.
     /// Not supported in leader mode (agent config is set at leader startup).
     pub permission_rules: Vec<fuigo_workspace::permission::types::PermissionRule>,
+    /// Built-in tools to allow, from `--tools`. Not supported in leader mode (agent config is set at leader startup).
+    pub cli_tools: Option<Vec<String>>,
+    /// Built-in tools to remove, from `--disallowed-tools`. Not supported in leader mode.
+    pub cli_disallowed_tools: Option<Vec<String>>,
     /// Seed agent sessions with always-approve (YOLO) permission mode.
     pub default_yolo_mode: bool,
     /// Seed agent sessions with auto (classifier) permission mode.
@@ -204,6 +208,7 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
     if !flags.permission_rules.is_empty() {
         agent_config.cli_agent_overrides.permission_rules = flags.permission_rules.clone();
     }
+    apply_cli_tool_overrides(&mut agent_config, &flags);
 
     apply_config_writes(&flags);
 
@@ -432,6 +437,16 @@ fn warn_unsupported_leader_flags(flags: &ConnectFlags) {
     }
 }
 
+/// `--tools` and `--disallowed-tools` restrict the built-in tools of every session this agent creates, as they do with `-p`.
+fn apply_cli_tool_overrides(agent_config: &mut AgentConfig, flags: &ConnectFlags) {
+    if let Some(tools) = &flags.cli_tools {
+        agent_config.cli_agent_overrides.tools = Some(tools.clone());
+    }
+    if let Some(disallowed) = &flags.cli_disallowed_tools {
+        agent_config.cli_agent_overrides.disallowed_tools = Some(disallowed.clone());
+    }
+}
+
 fn unsupported_leader_flags(flags: &ConnectFlags) -> Vec<&'static str> {
     let mut out = Vec::new();
     if let Some(flag) = flags.memory_override_flag {
@@ -449,6 +464,12 @@ fn unsupported_leader_flags(flags: &ConnectFlags) -> Vec<&'static str> {
     if !flags.permission_rules.is_empty() {
         out.push("--allow/--deny permission rules");
     }
+    if flags.cli_tools.is_some() {
+        out.push("--tools");
+    }
+    if flags.cli_disallowed_tools.is_some() {
+        out.push("--disallowed-tools");
+    }
     out
 }
 
@@ -464,7 +485,9 @@ fn apply_config_writes(flags: &ConnectFlags) {
     match fuigo_config::fs_atomic::edit_locked(
         &config_path,
         |bytes| fuigo_config::fs_atomic::stage_atomically_from_existing(&config_path, bytes, 0o600),
-        |current| Ok::<_, std::convert::Infallible>(connect_flags_edit(flags, &config_path, current)),
+        |current| {
+            Ok::<_, std::convert::Infallible>(connect_flags_edit(flags, &config_path, current))
+        },
     ) {
         Ok(()) => {}
         Err(EditError::Lock(e)) => {
@@ -546,7 +569,6 @@ fn connect_flags_edit(
         Edit::Keep(())
     }
 }
-
 
 /// Build the per-session `_meta` for `InitializeRequest` (TUI and leader).
 fn build_initialize_meta(flags: &ConnectFlags) -> serde_json::Value {
@@ -1168,6 +1190,31 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(unsupported_leader_flags(&flags), vec!["--no-memory"]);
+    }
+
+    #[test]
+    fn cli_tool_flags_reach_the_agent_config() {
+        let mut cfg = AgentConfig::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
+        assert!(cfg.cli_agent_overrides.tools.is_none() && cfg.cli_agent_overrides.disallowed_tools.is_none());
+        let flags = ConnectFlags {
+            cli_tools: Some(vec!["read_file".into(), "grep".into()]),
+            cli_disallowed_tools: Some(vec!["run_terminal_command".into()]),
+            ..Default::default()
+        };
+        apply_cli_tool_overrides(&mut cfg, &flags);
+        assert_eq!(cfg.cli_agent_overrides.tools, Some(vec!["read_file".to_string(), "grep".to_string()]));
+        assert_eq!(cfg.cli_agent_overrides.disallowed_tools, Some(vec!["run_terminal_command".to_string()]));
+    }
+
+    #[test]
+    fn tool_flags_are_not_supported_by_a_shared_leader() {
+        let flags = ConnectFlags {
+            cli_tools: Some(vec!["grep".into()]),
+            cli_disallowed_tools: Some(vec!["run_terminal_command".into()]),
+            ..Default::default()
+        };
+        let detected = unsupported_leader_flags(&flags);
+        assert!(detected.contains(&"--tools") && detected.contains(&"--disallowed-tools"), "{detected:?}");
     }
 
     #[test]

@@ -190,6 +190,8 @@ fn p188_failed_retry_state_and_its_agent_error_hook_run_on_the_caller() {
                     enabled: true,
                     command: Some(std::path::PathBuf::from(&command)),
                     command_raw: Some(command.clone()),
+                    args: None,
+                    shell: None,
                     url: None,
                     url_raw: None,
                     timeout_ms: 30_000,

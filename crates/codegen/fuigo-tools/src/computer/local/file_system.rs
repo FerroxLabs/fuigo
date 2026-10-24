@@ -53,9 +53,26 @@ fn is_test_transient_write_lock_error(e: &io::Error) -> bool {
     is_windows_transient_write_lock_raw_os_error(e.raw_os_error())
 }
 
+/// Replace the file's contents without ever exposing a truncated one: the new bytes go to a temp file beside it, which
+/// is renamed over the target only once written. A write that fails (disk full, size limit, permission) leaves the previous
+/// file exactly as it was. Symlinks are written through and the existing mode is kept (see `fuigo_config::write_through`).
+async fn replace_file(path: &Path, data: &[u8]) -> io::Result<()> {
+    let path = path.to_path_buf();
+    let data = data.to_vec();
+    tokio::task::spawn_blocking(move || {
+        fuigo_config::write_through::replace_file_contents(
+            &path,
+            &data,
+            fuigo_config::write_through::NewFileMode::Default,
+        )
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
 async fn write_file_with_transient_lock_retries(path: &Path, data: &[u8]) -> io::Result<()> {
     write_file_with_retry_hooks(
-        || fs::write(path, data),
+        || replace_file(path, data),
         |delay| sleep(delay),
         |retry_count| {
             tracing::debug!(
@@ -211,6 +228,57 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::rc::Rc;
+
+    /// A write that fails part way leaves the previous contents in place, not an empty or half-written file.
+    /// The failure is forced with a 8 byte file-size limit (`RLIMIT_FSIZE`), which makes the write fail with EFBIG after
+    /// 8 bytes went out; the limit is process-wide, so the test runs in a process of its own.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn failed_write_keeps_the_previous_contents() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        let previous = "previous contents that must survive a failed write";
+        std::fs::write(&path, previous).unwrap();
+        let limit = libc::rlimit {
+            rlim_cur: 8,
+            rlim_max: libc::RLIM_INFINITY,
+        };
+        // SAFETY: plain libc calls in a test process of its own; SIGXFSZ is ignored so the failed write returns EFBIG
+        unsafe {
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+        }
+        let outcome = LocalFs
+            .write_file(&path, "replacement contents that are too large to be written".as_bytes())
+            .await;
+        assert!(outcome.is_err(), "the write must fail under the size limit");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), previous);
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("notes.txt")], "no temp file is left behind");
+    }
+
+    /// A successful write replaces the contents and keeps what the file already had: its mode, and the symlink it is reached through.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn successful_write_keeps_mode_and_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.sh");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let link = dir.path().join("link.sh");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        LocalFs.write_file(&link, b"new contents").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new contents");
+        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o750);
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    }
 
     #[test]
     fn classifies_windows_transient_write_lock_errors() {

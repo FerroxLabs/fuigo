@@ -4,7 +4,7 @@ use std::path::Path;
 use agent_client_protocol as acp;
 use tokio::task::JoinSet;
 use fuigo_acp_lib::{AcpAgentTx, acp_send};
-use super::actions::{PermissionModePersist, SubagentKillOutcome, TaskResult};
+use super::actions::{PermissionModePersist, ProbedAttachment, SubagentKillOutcome, TaskResult};
 use super::agent::AgentId;
 use crate::unified_log as ulog;
 use fuigo_shell::sampling::error::{
@@ -78,6 +78,24 @@ pub(super) fn log_prompt_result(
 pub(super) const CTA_MCP_RETRY_DELAY_MS: u64 = 1000;
 /// How long the CTA shows its "installed" confirmation before auto-dismissing.
 pub(super) const CTA_INSTALLED_DISMISS_MS: u64 = 4000;
+/// Origin check for a bracketed paste, run for every terminal: IME commits and a diverged tmux buffer arrive as
+/// bracketed text that is not the clipboard text, and attaching the (unrelated) clipboard image for them is wrong.
+/// `None` means the probe may continue; `Some` is the verdict that ends it.
+pub(super) fn bracketed_origin_verdict<E>(
+    bracketed: bool,
+    payload: Option<&str>,
+    came_from_clipboard: impl FnOnce(&str) -> Result<bool, E>,
+) -> Option<ProbedAttachment> {
+    if !bracketed {
+        return None;
+    }
+    match came_from_clipboard(payload.unwrap_or("")) {
+        Ok(true) => None,
+        Ok(false) => Some(ProbedAttachment::ProbeDropped),
+        Err(_) => Some(ProbedAttachment::ProbeFailed),
+    }
+}
+
 /// Upper bound on the off-thread clipboard-attachment probe.
 /// A wedged osascript read must not pin `paste_probe_in_flight` and silently stash every later send.
 pub(super) const CLIPBOARD_PROBE_TIMEOUT_SECS: u64 = 10;
@@ -1225,6 +1243,18 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "features.subagent_model_inheritance" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "features.subagent_model_inheritance",
+                    "Bool",
+                    &value,
+                ));
+            };
+            fuigo_shell::util::config::set_subagent_model_inheritance(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "show_thinking_blocks" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("show_thinking_blocks", "Bool", &value));
@@ -1297,6 +1327,14 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("screen_mode", "Enum", &value));
             };
             fuigo_shell::util::config::set_screen_mode(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "tool_density" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("tool_density", "Enum", &value));
+            };
+            fuigo_shell::util::config::set_tool_density(s.to_string())
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -1739,5 +1777,34 @@ mod elapsed_tests {
             format_restore_elapsed(Duration::from_secs(194 * 60 + 4)),
             "3h14m"
         );
+    }
+}
+
+#[cfg(test)]
+mod bracketed_origin_tests {
+    use super::{ProbedAttachment, bracketed_origin_verdict};
+
+    fn run(bracketed: bool, came: Result<bool, ()>) -> Option<ProbedAttachment> {
+        bracketed_origin_verdict(bracketed, Some("typed"), |_| came)
+    }
+
+    #[test]
+    fn a_bracketed_payload_that_is_not_the_clipboard_text_drops_the_probe() {
+        assert!(matches!(run(true, Ok(false)), Some(ProbedAttachment::ProbeDropped)));
+    }
+
+    #[test]
+    fn a_bracketed_payload_that_is_the_clipboard_text_keeps_probing() {
+        assert!(run(true, Ok(true)).is_none());
+    }
+
+    #[test]
+    fn an_unreadable_clipboard_fails_the_probe() {
+        assert!(matches!(run(true, Err(())), Some(ProbedAttachment::ProbeFailed)));
+    }
+
+    #[test]
+    fn a_plain_paste_is_never_gated_and_never_reads_the_clipboard_text() {
+        assert!(bracketed_origin_verdict::<()>(false, Some("x"), |_| panic!("must not read")).is_none());
     }
 }

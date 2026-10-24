@@ -21,6 +21,8 @@ fn prompt_gate_registry(script: &str) -> fuigo_hooks::discovery::HookRegistry {
         enabled: true,
         command: Some(std::path::PathBuf::from(script)),
         command_raw: Some(script.to_string()),
+        args: None,
+        shell: None,
         url: None,
         url_raw: None,
         timeout_ms: 5000,

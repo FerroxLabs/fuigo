@@ -39,6 +39,8 @@
 use std::path::{Path, PathBuf};
 
 use fuigo_shell::agent::key_discovery::{self, Provider};
+use fuigo_shell::auth::provider_status::ProviderStatus;
+use fuigo_shell::auth::subscription::SubscriptionProvider;
 
 use crate::provider_config_edit::{ProviderWrite, ProviderWriteOutcome, write_provider_at};
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
@@ -57,11 +59,25 @@ impl SlashCommand for ProviderCommand {
         arg_placeholder: "<provider> <model-id>",
     }
 
-    fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+    fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         let mut parts = args.split_whitespace();
         let Some(id) = parts.next() else {
             return CommandResult::Message(list_providers());
         };
+        // A subscription is a provider too: `chatgpt-subscription` / `grok-subscription` bind a
+        // signed-in account's model with no TOML.
+        if let Some(subscription) = SubscriptionProvider::from_provider_slug(id) {
+            let model = parts.next();
+            if parts.next().is_some() {
+                return CommandResult::Error(format!("Usage: /provider {id} [model-id]"));
+            }
+            return bind_subscription_model(
+                ctx,
+                &ProviderStatus::current(false),
+                subscription,
+                model,
+            );
+        }
         // The id is checked BEFORE the missing-model check. `/provider nonsense`
         // would otherwise print `Usage: /provider nonsense <model-id>`, which
         // reads as "that provider is fine, name a model" for a provider that
@@ -96,30 +112,58 @@ fn known_provider(id: &str) -> Result<&'static Provider, String> {
         })
 }
 
-/// The provider table, with whichever keys are visible in this environment.
+/// Every connection, read from the one status source `/login`, `/model` and the welcome screen share.
 fn list_providers() -> String {
-    let discovered = key_discovery::discover();
-    let mut out = String::from("Providers Fuigo can route a model to:\n\n");
-    for provider in key_discovery::PROVIDERS {
-        let found = discovered.iter().find(|d| d.provider.id == provider.id);
-        let status = match found {
-            // The masked form, never the key: `Discovered` has no `Debug` for
-            // exactly this reason, and `masked()` is its only renderable view.
-            Some(d) => format!("{} = {}", d.env_var, d.masked()),
-            None => format!("set {}", provider.env_vars.join(" or ")),
-        };
-        out.push_str(&format!(
-            "  {:<12} {:<16} {}\n",
-            provider.id, provider.label, status
-        ));
-    }
+    let mut out = ProviderStatus::current(false).provider_list_text();
     out.push_str(
         "\nUsage: /provider <provider> <model-id>\n\
-         Writes [model_providers.<provider>] and binds <model-id> to it. \
-         The API key itself is never written to config.toml — only the name of \
-         the environment variable it lives in.\n",
+         For a provider key, writes [model_providers.<provider>] and binds <model-id> to it. \
+         The API key itself is never written to config.toml: only the name of \
+         the environment variable it lives in.\n\
+         For a subscription: /provider grok-subscription [model-id] lists the account's models \
+         or switches to one. Sign in with /login.\n",
     );
     out
+}
+
+/// `/provider chatgpt-subscription|grok-subscription [model-id]`. No model lists the account's models;
+/// a model switches to it (and saves it as the default) through the same path as `/model`.
+/// The model must be one the account's own model list returned: Fuigo never invents an id.
+fn bind_subscription_model(
+    ctx: &CommandExecCtx,
+    status: &ProviderStatus,
+    subscription: SubscriptionProvider,
+    model: Option<&str>,
+) -> CommandResult {
+    let label = subscription.label();
+    let slug = subscription.provider_slug();
+    let Some(signed_in) = status.subscription(subscription) else {
+        return CommandResult::Error(format!("{label}: not signed in: /login"));
+    };
+    let Some(model) = model else {
+        if signed_in.model_ids.is_empty() {
+            return CommandResult::Message(format!(
+                "{label} (signed in): the model list has not been fetched yet. \
+                 It refreshes when Fuigo starts, or run `fuigo models --provider {}`.",
+                subscription.name()
+            ));
+        }
+        return CommandResult::Message(format!(
+            "{label} (signed in) models, best first:\n  {}\n\nPick one: /provider {slug} <model-id>",
+            signed_in.model_ids.join("\n  ")
+        ));
+    };
+    if !signed_in.model_ids.iter().any(|id| id == model) {
+        return CommandResult::Error(format!(
+            "{model} is not in the {label} model list. Run /provider {slug} to see it."
+        ));
+    }
+    match ctx.models.resolve_by_name_or_id(&subscription.model_key(model)) {
+        Some(id) => CommandResult::Action(crate::app::actions::Action::SetDefaultModel(id)),
+        None => CommandResult::Error(format!(
+            "{model} is not in this session's model list yet. Restart Fuigo to pick up the {label} models."
+        )),
+    }
 }
 
 /// Write the provider entry and the model binding.
@@ -160,7 +204,11 @@ fn apply(provider: &'static Provider, model_id: &str) -> CommandResult {
 
 /// The write waits for `config.toml.lock`, so it runs as an effect off the
 /// input thread (P49); its result is reported where the command was typed.
-fn request_write(provider: &'static Provider, model_id: &str, env_key: &'static str) -> CommandResult {
+fn request_write(
+    provider: &'static Provider,
+    model_id: &str,
+    env_key: &'static str,
+) -> CommandResult {
     CommandResult::Action(crate::app::actions::Action::WriteProviderConfig(
         ProviderWriteRequest {
             provider,
@@ -348,6 +396,7 @@ fn env_var_for(provider: &Provider) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol as acp;
     use crate::acp::model_state::ModelState;
     use crate::app::bundle::BundleState;
 
@@ -486,6 +535,137 @@ mod tests {
                 .any(|(name, _)| *name == "anthropic-version"),
             "the Messages API requires an anthropic-version header"
         );
+    }
+
+    // ---- subscriptions are providers: listed with their state, bound with no TOML ----
+
+    use fuigo_shell::auth::provider_status::FluxState;
+    use fuigo_shell::auth::subscription::catalog::SignedIn;
+
+    fn status_with_xai(models: &[&str]) -> ProviderStatus {
+        ProviderStatus {
+            flux: FluxState::NotSet,
+            subscriptions: vec![SignedIn {
+                provider: SubscriptionProvider::Xai,
+                accounts: vec!["acct-42".into()],
+                model_ids: models.iter().map(|m| (*m).to_string()).collect(),
+            }],
+            env_keys: vec![],
+            sso_configured: false,
+        }
+    }
+
+    fn model_state_with(ids: &[&str]) -> ModelState {
+        let mut models = ModelState::default();
+        for id in ids {
+            models.available.insert(
+                acp::ModelId::new(*id),
+                acp::ModelInfo::new(acp::ModelId::new(*id), (*id).to_string()),
+            );
+        }
+        models
+    }
+
+    fn bind(
+        status: &ProviderStatus,
+        models: &ModelState,
+        sub: SubscriptionProvider,
+        model: Option<&str>,
+    ) -> CommandResult {
+        let bundle = BundleState::default();
+        let ctx = CommandExecCtx {
+            models,
+            session_id: None,
+            bundle_state: &bundle,
+            screen_mode: crate::app::ScreenMode::Inline,
+            billing_surface_visible: true,
+            usage_command_visible: true,
+            pager_state: crate::settings::PagerLocalSnapshot::default(),
+        };
+        bind_subscription_model(&ctx, status, sub, model)
+    }
+
+    #[test]
+    fn a_signed_in_subscription_with_no_model_lists_the_accounts_models() {
+        let out = message(bind(
+            &status_with_xai(&["grok-4.7", "grok-3"]),
+            &ModelState::default(),
+            SubscriptionProvider::Xai,
+            None,
+        ));
+        assert!(out.contains("Grok subscription") && !out.contains("acct-42"), "{out}");
+        assert!(out.find("grok-4.7").unwrap() < out.find("grok-3").unwrap(), "best first: {out}");
+        assert!(out.contains("/provider grok-subscription <model-id>"), "{out}");
+    }
+
+    #[test]
+    fn a_subscription_that_is_not_signed_in_says_how_to_fix_it() {
+        let out = message(bind(
+            &status_with_xai(&["grok-4.7"]),
+            &ModelState::default(),
+            SubscriptionProvider::Chatgpt,
+            None,
+        ));
+        assert_eq!(out, "ChatGPT subscription: not signed in: /login");
+    }
+
+    /// Binding needs no TOML: the signed-in account's model is switched to and saved as the default.
+    #[test]
+    fn binding_a_signed_in_model_switches_to_it_with_no_config_file() {
+        let models = model_state_with(&["xai/grok-4.7"]);
+        let result = bind(
+            &status_with_xai(&["grok-4.7"]),
+            &models,
+            SubscriptionProvider::Xai,
+            Some("grok-4.7"),
+        );
+        match result {
+            CommandResult::Action(crate::app::actions::Action::SetDefaultModel(id)) => {
+                assert_eq!(id.0.as_ref(), "xai/grok-4.7");
+            }
+            other => panic!("expected SetDefaultModel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_model_the_account_never_listed_is_refused_not_invented() {
+        let models = model_state_with(&["xai/grok-4.7"]);
+        let out = message(bind(
+            &status_with_xai(&["grok-4.7"]),
+            &models,
+            SubscriptionProvider::Xai,
+            Some("grok-99"),
+        ));
+        assert!(out.contains("not in the Grok subscription model list"), "{out}");
+    }
+
+    #[test]
+    fn a_listed_model_missing_from_this_sessions_catalog_asks_for_a_restart() {
+        let out = message(bind(
+            &status_with_xai(&["grok-4.7"]),
+            &ModelState::default(),
+            SubscriptionProvider::Xai,
+            Some("grok-4.7"),
+        ));
+        assert!(out.contains("Restart Fuigo"), "{out}");
+    }
+
+    #[test]
+    fn the_subscription_names_are_accepted_by_the_command_before_the_key_table() {
+        let out = message(run("grok-subscription"));
+        assert!(
+            out.contains("Grok subscription"),
+            "the subscription slug must not fall through to the unknown-provider error: {out}"
+        );
+        assert!(!out.contains("Unknown provider"), "{out}");
+    }
+
+    #[test]
+    fn the_listing_shows_both_subscriptions_with_their_state() {
+        let out = message(run(""));
+        assert!(out.contains("chatgpt-subscription") && out.contains("grok-subscription"), "{out}");
+        assert!(out.contains("fluxrouter"), "{out}");
+        assert!(out.contains("Recommended"), "{out}");
     }
 
     fn provider_named(id: &str) -> &'static Provider {
@@ -739,8 +919,15 @@ mod tests {
         assert_eq!(req.provider.id, "anthropic");
         assert_eq!(req.model_id, "claude-x");
         assert_eq!(req.env_key, provider.env_vars[0]);
-        assert!(req.config_path.is_absolute(), "{}", req.config_path.display());
-        assert!(req.config_path.ends_with(fuigo_config::USER_CONFIG_FILENAME));
+        assert!(
+            req.config_path.is_absolute(),
+            "{}",
+            req.config_path.display()
+        );
+        assert!(
+            req.config_path
+                .ends_with(fuigo_config::USER_CONFIG_FILENAME)
+        );
     }
 
     /// The destination is fixed when the command is accepted: a relative
@@ -766,9 +953,15 @@ mod tests {
             config_path: path.clone(),
         };
         let msg = req.run().expect("written");
-        assert!(msg.starts_with("Wrote [model_providers.anthropic]"), "{msg}");
+        assert!(
+            msg.starts_with("Wrote [model_providers.anthropic]"),
+            "{msg}"
+        );
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("[model.claude-x]") || text.contains("claude-x"), "{text}");
+        assert!(
+            text.contains("[model.claude-x]") || text.contains("claude-x"),
+            "{text}"
+        );
 
         std::fs::write(&path, "this is = = not toml").unwrap();
         let err = req.run().expect_err("unparseable config");

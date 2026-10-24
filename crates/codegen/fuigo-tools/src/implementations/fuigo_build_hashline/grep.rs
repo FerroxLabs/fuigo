@@ -158,6 +158,10 @@ Usage:
 pub struct HashlineGrepTool;
 
 impl crate::types::tool_metadata::ToolMetadata for HashlineGrepTool {
+    fn lock_path_param(&self) -> Option<&'static str> {
+        Some("path")
+    }
+
     fn kind(&self) -> ToolKind {
         ToolKind::Search
     }

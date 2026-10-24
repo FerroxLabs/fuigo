@@ -10,6 +10,20 @@ pub fn response_to_conversation_items(
     response: rs::Response,
     is_client_tool: impl Fn(&str) -> bool,
 ) -> Vec<ConversationItem> {
+    response_to_conversation_items_with_custom(response, is_client_tool, |_| false)
+}
+
+/// Same as [`response_to_conversation_items`], also told which advertised tools are declared `custom` (freeform).
+///
+/// Some providers return a freeform call downgraded to `{"type":"function_call","arguments":"{\"input\":\"...\"}"}`.
+/// A `function_call` naming a custom tool whose arguments are a JSON object with exactly one string field `input` is
+/// read as that freeform call: the tool sees the text, and the call replays as it arrived (`function_call` plus
+/// `function_call_output`), so the provider that downgraded it accepts the next turn. Any other shape is unchanged.
+pub fn response_to_conversation_items_with_custom(
+    response: rs::Response,
+    is_client_tool: impl Fn(&str) -> bool,
+    is_custom_tool: impl Fn(&str) -> bool,
+) -> Vec<ConversationItem> {
     let model_id = response.model.clone();
     let model_fingerprint = response
         .metadata
@@ -47,6 +61,26 @@ pub fn response_to_conversation_items(
                 content.push_str(&text);
                 order.push(OutputSlot::Message {
                     text: Arc::<str>::from(text),
+                });
+            }
+            rs::OutputItem::FunctionCall(fc)
+                if is_custom_tool(&fc.name) && downgraded_custom_input(&fc.arguments).is_some() =>
+            {
+                static LOGGED: std::sync::Once = std::sync::Once::new();
+                LOGGED.call_once(|| {
+                    tracing::info!(
+                        tool = %fc.name,
+                        "provider returned a custom tool call as a function_call; mapping it to the freeform call"
+                    );
+                });
+                let input = downgraded_custom_input(&fc.arguments).unwrap_or_default();
+                order.push(OutputSlot::DowngradedCustomCall {
+                    call_id: fc.call_id.clone(),
+                });
+                tool_calls.push(ToolCall {
+                    id: Arc::<str>::from(fc.call_id),
+                    name: fc.name,
+                    arguments: Arc::<str>::from(input),
                 });
             }
             rs::OutputItem::FunctionCall(fc) => {
@@ -131,6 +165,17 @@ pub fn response_to_conversation_items(
     }));
 
     items
+}
+
+/// The freeform text of a downgraded custom call: arguments that are a JSON object with exactly one field, `input`, a string.
+fn downgraded_custom_input(arguments: &str) -> Option<String> {
+    let serde_json::Value::Object(obj) = serde_json::from_str::<serde_json::Value>(arguments).ok()? else {
+        return None;
+    };
+    match (obj.len(), obj.get("input")) {
+        (1, Some(serde_json::Value::String(text))) => Some(text.clone()),
+        _ => None,
+    }
 }
 
 /// Whether replaying `[siblings..., message?, function_calls...]` reproduces `order` exactly.
@@ -380,6 +425,21 @@ fn assistant_to_input_items(
                         CallWire::Function,
                         custom_call_ids,
                     ));
+                }
+            }
+            OutputSlot::DowngradedCustomCall { call_id } => {
+                if let Some(tc) = take_tool_call(a, &mut call_used, call_id) {
+                    // Echo the shape the provider sent; its result goes back as `function_call_output`
+                    ordered.push(rs::InputItem::Item(rs::Item::FunctionCall(
+                        rs::FunctionToolCall {
+                            call_id: tc.id.as_ref().to_owned(),
+                            name: tc.name.clone(),
+                            arguments: serde_json::json!({ "input": tc.arguments.as_ref() })
+                                .to_string(),
+                            id: None,
+                            status: None,
+                        },
+                    )));
                 }
             }
             OutputSlot::CustomToolCall { call_id, id } => {

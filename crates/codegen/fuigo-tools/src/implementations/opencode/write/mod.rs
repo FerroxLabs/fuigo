@@ -43,6 +43,10 @@ pub struct WriteTool;
 type WriteOutput = SearchReplaceOutput;
 
 impl crate::types::tool_metadata::ToolMetadata for WriteTool {
+    fn lock_path_param(&self) -> Option<&'static str> {
+        Some("file_path")
+    }
+
     fn kind(&self) -> ToolKind {
         ToolKind::Write
     }

@@ -455,7 +455,12 @@ impl AgentView {
             let crate::scrollback::render::DiagramAffordancePlacement {
                 screen_rect: rect,
                 source,
+                copy,
             } = aff;
+            if let Some(copy) = copy {
+                self.paint_copy_row(buf, rect, &copy, theme);
+                continue;
+            }
             // The transient `rendering…` hint shows only while an on-click render for this diagram is in flight
             let rendering = self.diagram_is_rendering(&source);
             let row = affordance_row(rendering);
@@ -527,6 +532,55 @@ impl AgentView {
         }
     }
 
+    /// Paint a `[Copy]` row under a code block or table and register its click hit-rects.
+    ///
+    /// The leading label (language, file name or `table`) is dim and inert; each button is clickable and, like the Mermaid buttons,
+    /// highlights under the mouse.
+    /// A click copies the text registered for that button (kept verbatim, tabs included).
+    /// A segment is drawn only if it fits wholly within the row width.
+    fn paint_copy_row(
+        &mut self,
+        buf: &mut Buffer,
+        rect: ratatui::layout::Rect,
+        copy: &crate::scrollback::blocks::mermaid_content::CopyRow,
+        theme: &Theme,
+    ) {
+        use crate::scrollback::blocks::mermaid_content::{AffordanceKind, copy_row_button_cols};
+        use ratatui::style::Modifier;
+        use unicode_width::UnicodeWidthStr;
+
+        let (hover_col, hover_row) = self.last_mouse_pos;
+        let fits = |col: u16, label: &str| col + UnicodeWidthStr::width(label) as u16 <= rect.width;
+        if fits(0, &copy.label) {
+            buf.set_string_safe(rect.x, rect.y, &copy.label, Style::default().fg(theme.gray_dim));
+        }
+        for (button, col) in copy.buttons.iter().zip(copy_row_button_cols(copy)) {
+            if !fits(col, &button.label) {
+                continue;
+            }
+            let bx = rect.x.saturating_add(col);
+            let hit = Rect {
+                x: bx,
+                y: rect.y,
+                width: UnicodeWidthStr::width(button.label.as_str()) as u16,
+                height: 1,
+            };
+            let style = if hit.contains((hover_col, hover_row).into()) {
+                Style::default()
+                    .fg(theme.text_primary)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(theme.gray)
+            };
+            buf.set_string_safe(bx, rect.y, &button.label, style);
+            let idx = self.inline_media_hits.mermaid_sources.len();
+            self.inline_media_hits.mermaid_sources.push(button.text.clone());
+            self.inline_media_hits
+                .mermaid_buttons
+                .push((hit, AffordanceKind::CopyText, idx));
+        }
+    }
+
     /// Whether the diagram with `source` has an on-click render in flight (drives the affordance row's transient `rendering…` hint).
     fn diagram_is_rendering(&self, source: &str) -> bool {
         self.mermaid_is_rendering(source)
@@ -587,6 +641,17 @@ impl AgentView {
         self.inline_media_iterm_emitted.clear();
         self.last_placed_ids.clear();
         (!clear_esc.is_empty()).then_some(clear_esc)
+    }
+
+    /// Forget which Kitty images the terminal holds, so the next frame re-transmits them instead of placing ids that no longer exist.
+    /// Call after a full screen clear: Ghostty drops image data on `ESC[2J`, and a place-only frame with `q=2` then fails silently and draws nothing.
+    pub(crate) fn forget_transmitted_inline_media(&mut self) {
+        self.inline_media_ids.clear();
+        self.inline_media_iterm_emitted.clear();
+        self.last_placed_ids.clear();
+        for child in self.subagent_views.values_mut() {
+            child.forget_transmitted_inline_media();
+        }
     }
 
     /// Stop inline video playback, dropping the pre-extracted frame set (~50-300 MB), and request a post-draw purge for it.
@@ -651,10 +716,23 @@ impl AgentView {
         }
     }
 
+    /// Whether a video can play inside the terminal: it needs a graphics protocol to draw frames and ffmpeg to extract them.
+    pub(crate) fn inline_video_playback_available() -> bool {
+        crate::terminal::image::detect_graphics_protocol().supports_images()
+            && crate::inline_media_ffmpeg::ffmpeg_available()
+    }
+
     /// Start or restart inline video playback.
     /// If already playing for this path, playback restarts from the beginning.
     /// Frames are extracted via ffmpeg in a background thread so the UI never blocks.
+    ///
+    /// When the terminal cannot draw frames or ffmpeg is missing there is nothing to extract, so the file opens in the system's default
+    /// player straight away (no "Loading video" toast, no extraction thread, no dead end).
     pub(crate) fn start_inline_video_playback(&mut self, path: &std::path::Path) {
+        if !Self::inline_video_playback_available() {
+            self.open_media_natively(path);
+            return;
+        }
         // If already loaded for this path, restart
         if let Some(ref mut video) = self.inline_video
             && video.path == path
@@ -784,7 +862,7 @@ impl AgentView {
     ) {
         use crate::scrollback::blocks::mermaid_content::AffordanceKind;
         match kind {
-            AffordanceKind::CopySource => {
+            AffordanceKind::CopySource | AffordanceKind::CopyText => {
                 if !self.copy_to_clipboard(&source).success() {
                     crate::unified_log::error(
                         "mermaid.copy_source.failed",

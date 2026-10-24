@@ -58,6 +58,15 @@ fn script_one_tool_call(
     server: &MockInferenceServer,
     arguments: &str,
 ) -> Vec<InferenceExpectation> {
+    script_tool_call(server, TOOL, arguments)
+}
+
+/// [`script_one_tool_call`] for any tool.
+fn script_tool_call(
+    server: &MockInferenceServer,
+    tool: &str,
+    arguments: &str,
+) -> Vec<InferenceExpectation> {
     vec![
         server.expect_response(
             "denied tool call (responses)",
@@ -65,7 +74,7 @@ fn script_one_tool_call(
             ScriptedResponse::sse(sse::responses_api_reasoning_then_tool_call_events(
                 "",
                 "call-1",
-                TOOL,
+                tool,
                 arguments,
                 "test-model",
             )),
@@ -76,7 +85,7 @@ fn script_one_tool_call(
             ScriptedResponse::sse(sse::chat_completions_reasoning_then_tool_call_events(
                 "",
                 "call-1",
-                TOOL,
+                tool,
                 arguments,
                 "test-model",
             )),
@@ -147,10 +156,13 @@ async fn a_denied_headless_run_exits_three_and_says_why() {
         "stderr must name the rule: {}",
         result.stderr
     );
+    // One line per refusal, carrying the per-tool remedy: not a "refused" line followed by a "blocked" one.
+    let fuigo_lines: Vec<&str> = result.stderr.lines().filter(|l| l.starts_with("fuigo: ")).collect();
+    assert_eq!(fuigo_lines.len(), 1, "exactly one stderr line per refusal: {}", result.stderr);
     assert!(
-        result.stderr.contains("blocked"),
-        "stderr must say the run was blocked: {}",
-        result.stderr
+        fuigo_lines[0].contains("acceptEdits") && fuigo_lines[0].contains("refused"),
+        "the one line carries the edit remedy: {}",
+        fuigo_lines[0]
     );
     // D.2.2: the reason is on the document a machine reads, not only in the prose.
     let doc: serde_json::Value = serde_json::from_str(result.stdout.trim())
@@ -214,5 +226,173 @@ async fn the_same_turn_approved_exits_zero() {
         "new line\n",
         "the approved edit must have been applied\nrequests:\n{}",
         fx.server.request_log_summary()
+    );
+}
+
+// HEADLESS-PERM: `--permission-mode acceptEdits` must approve file edits in the workspace in a headless
+// run, as `permissions.defaultMode = "acceptEdits"` does; shell commands and edits outside the workspace
+// stay refused. Before the fix the flag only set the agent definition's mode, which the permission manager
+// never reads, so `-p --permission-mode acceptEdits` refused the edit and exited 3.
+
+/// A run with `--permission-mode acceptEdits` (plus `extra` flags), against the fixture's scripted call.
+async fn run_accept_edits(fx: &Fixture, extra: &[&str]) -> fuigo_test_support::HeadlessResult {
+    let mut args = vec![
+        "-p",
+        "edit the fixture",
+        "--trust",
+        "--permission-mode",
+        "acceptEdits",
+        "--output-format",
+        "json",
+    ];
+    args.extend_from_slice(extra);
+    let result = run_headless(&fx.server, &args, fx.sandbox.workspace()).await;
+    assert!(
+        !result.timed_out,
+        "the run must end on its own\nstderr:\n{}\nrequests:\n{}",
+        result.stderr,
+        fx.server.request_log_summary()
+    );
+    result
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accept_edits_approves_an_edit_inside_the_workspace_headless() {
+    let fx = fixture().await;
+    let _expectations = script_one_tool_call(&fx.server, &fx.arguments);
+
+    let result = run_accept_edits(&fx, &[]).await;
+
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "acceptEdits approves the edit, so the run is an ordinary success\nstdout:\n{}\nstderr:\n{}\nrequests:\n{}",
+        result.stdout,
+        result.stderr,
+        fx.server.request_log_summary()
+    );
+    assert!(
+        !result.stderr.contains("headless_never_approves") && !result.stderr.contains("refused"),
+        "nothing was refused: {}",
+        result.stderr
+    );
+    assert_eq!(
+        std::fs::read_to_string(fx.sandbox.workspace().join("edit_me.txt")).unwrap(),
+        "new line\n",
+        "the approved edit must have been applied\nrequests:\n{}",
+        fx.server.request_log_summary()
+    );
+}
+
+/// A shell command is not a file edit: acceptEdits leaves it refused, and the refusal's remedy fits a shell
+/// command (an `--allow` rule), not an edit and not a redirect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accept_edits_still_refuses_a_shell_command_headless() {
+    let fx = fixture().await;
+    // `rm -rf` of a directory the run owns: the same shape as the E2E that found the defect.
+    let victim = fx.sandbox.workspace().join("victim");
+    std::fs::create_dir(&victim).unwrap();
+    std::fs::write(victim.join("keep.txt"), "keep\n").unwrap();
+    let arguments = serde_json::json!({
+        "command": "rm -rf ./victim",
+        "description": "remove the victim directory",
+    })
+    .to_string();
+    let _expectations = script_tool_call(&fx.server, "run_terminal_command", &arguments);
+
+    let result = run_accept_edits(&fx, &[]).await;
+
+    assert_eq!(
+        result.status.code(),
+        Some(3),
+        "a shell command is still refused under acceptEdits\nstdout:\n{}\nstderr:\n{}\nrequests:\n{}",
+        result.stdout,
+        result.stderr,
+        fx.server.request_log_summary()
+    );
+    assert!(victim.join("keep.txt").exists(), "a refused command must not run");
+    assert!(
+        result.stderr.contains("headless_never_approves"),
+        "stderr: {}",
+        result.stderr
+    );
+    assert!(
+        result.stderr.contains("--allow"),
+        "a shell refusal's remedy names an --allow rule: {}",
+        result.stderr
+    );
+    assert!(
+        !result.stderr.contains("redirect") && !result.stderr.contains("> file"),
+        "a plain command's remedy must not talk about redirects: {}",
+        result.stderr
+    );
+}
+
+/// An edit outside the workspace is not covered by acceptEdits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accept_edits_still_refuses_an_edit_outside_the_workspace_headless() {
+    let fx = fixture().await;
+    let outside_dir = tempfile::tempdir().expect("create a directory outside the workspace");
+    let outside = outside_dir.path().join("outside.txt");
+    std::fs::write(&outside, "old line\n").unwrap();
+    let arguments = serde_json::json!({
+        "file_path": outside.to_string_lossy(),
+        "old_string": "old line",
+        "new_string": "new line",
+    })
+    .to_string();
+    let _expectations = script_one_tool_call(&fx.server, &arguments);
+
+    let result = run_accept_edits(&fx, &[]).await;
+
+    assert_eq!(
+        result.status.code(),
+        Some(3),
+        "an edit outside the workspace is still refused\nstdout:\n{}\nstderr:\n{}\nrequests:\n{}",
+        result.stdout,
+        result.stderr,
+        fx.server.request_log_summary()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside).unwrap(),
+        "old line\n",
+        "the refused edit must leave the file untouched"
+    );
+}
+
+/// DEFECT 3: an edit refusal's remedy fits an edit (acceptEdits), not a shell redirect, and the refusal is
+/// one stderr line (no second `blocked` summary).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_edit_refusal_remedy_names_accept_edits_not_redirects() {
+    let fx = fixture().await;
+    let _expectations = script_one_tool_call(&fx.server, &fx.arguments);
+
+    let result = run_headless(
+        &fx.server,
+        &["-p", "edit the fixture", "--trust", "--output-format", "json"],
+        fx.sandbox.workspace(),
+    )
+    .await;
+
+    assert_eq!(result.status.code(), Some(3), "stderr:\n{}", result.stderr);
+    let lines: Vec<&str> = result.stderr.lines().filter(|l| l.starts_with("fuigo: ")).collect();
+    assert_eq!(lines.len(), 1, "exactly one stderr line: {}", result.stderr);
+    assert!(lines[0].starts_with("fuigo: refused"), "the one line is the refusal: {}", lines[0]);
+    assert!(
+        lines[0].contains("acceptEdits"),
+        "an edit refusal's remedy names acceptEdits: {}",
+        lines[0]
+    );
+    assert!(
+        !lines[0].contains("redirect") && !lines[0].contains("> file"),
+        "an edit refusal's remedy must not talk about redirects: {}",
+        lines[0]
+    );
+    let doc: serde_json::Value = serde_json::from_str(result.stdout.trim()).unwrap();
+    assert!(
+        doc["permissionDenied"]["remedy"]
+            .as_str()
+            .is_some_and(|r| r.contains("acceptEdits") && !r.contains("redirect")),
+        "the record's remedy fits the tool too: {doc}"
     );
 }

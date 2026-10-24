@@ -51,6 +51,19 @@ pub struct MarkdownContent {
     state: RefCell<RenderState>,
     current_raw: bool,
     generation: u64,
+    /// The text exactly as it arrived. The renderer is fed a tab-expanded copy (a tab cannot be drawn), so copies of the
+    /// source and of code blocks are taken from this one and keep their tabs.
+    original: String,
+}
+
+/// The tail of `original` whose tab expansion is `expanded`, if there is one: the line as written, minus any container prefix.
+fn restore_tail<'a>(original: &'a str, expanded: &str) -> Option<&'a str> {
+    original
+        .char_indices()
+        .map(|(at, _)| at)
+        .chain(std::iter::once(original.len()))
+        .map(|at| &original[at..])
+        .find(|tail| fuigo_pager_render::appearance::expand_tabs(tail) == expanded)
 }
 
 /// Borrowed view of cached wrapped lines and joiners.
@@ -91,7 +104,7 @@ impl MarkdownContent {
         let mut renderer = StreamingMarkdownRenderer::new(md_style::style(), true);
         renderer.set_max_table_width(max_table_width);
         renderer.set_collapse_soft_breaks(collapse_soft_breaks);
-        let text = text.into();
+        let text: String = text.into();
         let expanded = fuigo_pager_render::appearance::expand_tabs(&text);
         renderer.push(&expanded);
         // finish() (not render()) so the streaming LaTeX-delimiter normalizer flushes any trailing held-back delimiter bytes
@@ -110,6 +123,7 @@ impl MarkdownContent {
             }),
             current_raw: false,
             generation: 1,
+            original: text,
         }
     }
 
@@ -128,12 +142,14 @@ impl MarkdownContent {
             }),
             current_raw: false,
             generation: 0,
+            original: String::new(),
         }
     }
 
     /// Append a streaming chunk and re-render.
     pub fn push_chunk(&mut self, chunk: &str) {
         let expanded = fuigo_pager_render::appearance::expand_tabs(chunk);
+        self.original.push_str(chunk);
         self.state
             .get_mut()
             .renderer
@@ -146,6 +162,7 @@ impl MarkdownContent {
     /// Used for historical replay during `session/load` so the pager can batch markdown work and render once after replay completes.
     pub fn push_chunk_deferred(&mut self, chunk: &str) {
         let expanded = fuigo_pager_render::appearance::expand_tabs(chunk);
+        self.original.push_str(chunk);
         self.state.get_mut().renderer.push(&expanded);
         self.generation += 1;
     }
@@ -160,9 +177,45 @@ impl MarkdownContent {
         self.generation += 1;
     }
 
-    /// Get the source markdown text.
+    /// Get the source markdown text, tabs included.
     pub fn text(&self) -> String {
-        self.state.borrow().renderer.source().to_string()
+        self.original.clone()
+    }
+
+    /// The body of every fenced code block, parallel to [`Self::with_code_blocks`], with the tabs the author wrote.
+    ///
+    /// Tab expansion keeps every line break, so a block's body lines are the same source lines in the original text.
+    /// Each body line is matched to the tail of its original line whose expansion equals it.
+    pub fn code_block_texts(&self) -> Vec<String> {
+        let state = self.state.borrow();
+        let view = state.renderer.view();
+        let expanded_src = state.renderer.source();
+        if !self.original.contains('\t') || self.original.len() == expanded_src.len() {
+            return view.code_blocks.iter().map(|b| b.body.clone()).collect();
+        }
+        let original_lines: Vec<&str> = self.original.split('\n').collect();
+        view.code_blocks
+            .iter()
+            .map(|block| {
+                let first_line = expanded_src
+                    .get(..block.source_byte_range.start)
+                    .map_or(0, |head| head.matches('\n').count());
+                let mut out = String::with_capacity(block.body.len());
+                let mut lines = block.body.split('\n').peekable();
+                let mut i = 0usize;
+                while let Some(line) = lines.next() {
+                    let restored = original_lines
+                        .get(first_line + i)
+                        .and_then(|orig| restore_tail(orig, line));
+                    out.push_str(restored.unwrap_or(line));
+                    if lines.peek().is_some() {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+                out
+            })
+            .collect()
     }
 
     /// Whether the source markdown is empty (zero-alloc, unlike `text()`).
@@ -173,19 +226,30 @@ impl MarkdownContent {
     /// Get the rendered text as plain text (all ratatui styles stripped).
     ///
     /// Useful for copy-to-clipboard in pretty mode.
+    /// Code block lines come out with the tabs the author wrote, not the spaces they are drawn with.
     pub fn rendered_plain_text(&self) -> String {
+        let bodies = self.code_block_texts();
         let state = self.state.borrow();
         let view = state.renderer.view();
-        let mut result = String::new();
-        for (i, line) in view.lines.iter().enumerate() {
-            if i > 0 {
-                result.push('\n');
+        let mut texts: Vec<String> = view
+            .lines
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        for (block, restored) in view.code_blocks.iter().zip(&bodies) {
+            if restored == &block.body {
+                continue;
             }
-            for span in &line.spans {
-                result.push_str(&span.content);
+            for (offset, (drawn, original)) in block.body.split('\n').zip(restored.split('\n')).enumerate() {
+                if let Some(text) = texts.get_mut(block.output_line_range.start + offset)
+                    && drawn != original
+                    && let Some(head) = text.strip_suffix(drawn)
+                {
+                    *text = format!("{head}{original}");
+                }
             }
         }
-        result
+        texts.join("\n")
     }
 
     /// Get the line source map (rendered line index to source line number).
@@ -208,6 +272,29 @@ impl MarkdownContent {
     pub fn with_hyperlinks<R>(&self, f: impl FnOnce(&[fuigo_markdown::HyperlinkTarget]) -> R) -> R {
         let state = self.state.borrow();
         f(state.renderer.view().hyperlinks)
+    }
+
+    /// Access the fenced code blocks of the current rendered output via a closure, avoiding allocation.
+    pub fn with_code_blocks<R>(&self, f: impl FnOnce(&[fuigo_markdown::CodeBlockSpan]) -> R) -> R {
+        let state = self.state.borrow();
+        f(state.renderer.view().code_blocks)
+    }
+
+    /// The `[Copy]` rows this content earns: one per copyable fenced code block and per exportable table, in document order.
+    pub fn copy_row_specs(
+        &self,
+    ) -> Vec<(std::ops::Range<usize>, super::mermaid_content::CopyRow)> {
+        let bodies = self.code_block_texts();
+        let state = self.state.borrow();
+        let view = state.renderer.view();
+        super::copy_rows::copy_row_specs(view.code_blocks, &bodies, view.tables)
+    }
+
+    /// How many `[Copy]` rows [`Self::copy_row_specs`] would return, without building their text.
+    pub fn copy_row_count(&self) -> usize {
+        let state = self.state.borrow();
+        let view = state.renderer.view();
+        super::copy_rows::copy_row_count(view.code_blocks, view.tables)
     }
 
     pub fn with_table_copy_meta<R>(

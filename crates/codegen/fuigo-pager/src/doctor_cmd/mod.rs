@@ -37,7 +37,10 @@ pub struct FixArgs {
 
 pub fn run(args: DoctorArgs) -> Result<()> {
     match args.command {
-        None => run_report(args.json, &mut fuigo_tty_utils::best_effort_stdout::display_stdout()),
+        None => run_report(
+            args.json,
+            &mut fuigo_tty_utils::best_effort_stdout::display_stdout(),
+        ),
         Some(DoctorCommand::Fix(fix)) => run_fix(
             fix,
             std::io::stdin().is_terminal(),
@@ -56,7 +59,20 @@ pub fn run_with_writer(args: DoctorArgs, writer: &mut impl Write) -> Result<()> 
 
 fn run_report(json_output: bool, writer: &mut impl Write) -> Result<()> {
     let report = collect_report();
-    write_report(&report, json_output, writer)
+    write_report(&report, json_output, writer)?;
+    // The JSON report is a pinned contract; the hooks listing is for people, so it follows the human report only.
+    if !json_output {
+        write!(writer, "{}", human::format_hooks_section(&collect_hooks()))?;
+    }
+    Ok(())
+}
+
+/// Every hook visible from the current directory, with its source, state, reason and fix hint.
+fn collect_hooks() -> Vec<fuigo_hooks_plugins_types::HookInfo> {
+    match std::env::current_dir() {
+        Ok(cwd) => fuigo_shell::extensions::hooks::standalone_hook_infos(&cwd),
+        Err(_) => Vec::new(),
+    }
 }
 
 pub fn collect_report() -> DiagnosticReport {
@@ -108,8 +124,33 @@ fn write_report(
         json::write(report, writer)
     } else {
         write!(writer, "{}", human::format(report))?;
+        write!(
+            writer,
+            "{}",
+            install_section(&crate::install_check::other_installs_on_path())
+        )?;
         Ok(())
     }
+}
+
+/// The human report's note about another `fuigo` on PATH; empty when there is none.
+fn install_section(others: &[crate::install_check::OtherInstall]) -> String {
+    if others.is_empty() {
+        return String::new();
+    }
+    let exe = std::env::current_exe().unwrap_or_default();
+    let mut out = String::from("\nInstalls\n");
+    for other in others {
+        out.push_str(&format!(
+            "  warning  {}\n",
+            fuigo_tty_utils::untrusted(crate::install_check::warning_text(
+                &exe,
+                fuigo_version::VERSION,
+                other
+            ))
+        ));
+    }
+    out
 }
 
 fn run_fix(

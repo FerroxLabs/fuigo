@@ -109,6 +109,7 @@ impl SessionActor {
                 query_params: sampling_config.query_params.clone(),
                 env_http_headers: sampling_config.env_http_headers.clone(),
                 context_window: new_context_window,
+                max_request_bytes: sampling_config.max_request_bytes,
                 reasoning_effort: sampling_config.reasoning_effort,
                 stream_tool_calls: Some(sampling_config.stream_tool_calls),
                 mtls_cert_dir: sampling_config.mtls_cert_dir.clone(),
@@ -305,6 +306,7 @@ impl SessionActor {
             }
         }
         let new_agent_name = definition.name.clone();
+        let previous_mcp_servers = self.agent.borrow().definition().mcp_servers.clone();
         // A rebuilt harness advertises its own tools; side calls preview them until the next main turn records what it sent
         self.last_sent_tool_specs.replace(None);
         tracing::info!(
@@ -347,6 +349,8 @@ impl SessionActor {
         {
             let hooks = crate::extensions::hooks::current_hook_infos(
                 self.hook_registry.borrow().as_deref(),
+                &self.session_info.id.0,
+                &self.hook_resolved_workspace_root,
             );
             let load_errors = self.hook_load_errors.borrow().clone();
             let project_trusted =
@@ -421,6 +425,9 @@ impl SessionActor {
             }
             self.inject_deny_read_globs().await;
         }
+        // The new seat's own `mcpServers` replace the previous seat's before the handshake wait below.
+        self.switch_agent_seat_mcp_servers(&previous_mcp_servers)
+            .await;
         {
             let notified = self.mcp_handshakes_done.notified();
             tokio::pin!(notified);

@@ -17,7 +17,9 @@ use fuigo_acp_lib::{
     acp_channels,
 };
 use fuigo_shell::{
-    agent::{MvpAgent, MvpAgentHandle, activity::SESSION_FLUSH_GRACE, config::Config as AgentConfig},
+    agent::{
+        MvpAgent, MvpAgentHandle, activity::SESSION_FLUSH_GRACE, config::Config as AgentConfig,
+    },
     auth::AuthManager,
     util::fuigo_home::fuigo_home,
 };
@@ -406,9 +408,8 @@ mod tests {
     /// "Credit limit reached for key <key>"). The trait is `async_trait(?Send)`; it is implemented in its expanded
     /// form so this crate needs no `async-trait` dependency for one test.
     struct EchoingAgent(&'static str);
-    type Reply<'a, T> = std::pin::Pin<
-        Box<dyn std::future::Future<Output = agent_client_protocol::Result<T>> + 'a>,
-    >;
+    type Reply<'a, T> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = agent_client_protocol::Result<T>> + 'a>>;
     fn refuse<'a, T: 'a>() -> Reply<'a, T> {
         Box::pin(async { Err(agent_client_protocol::Error::internal_error()) })
     }
@@ -503,8 +504,14 @@ mod tests {
             .expect_err("the agent fails the prompt")
         });
         let wire = serde_json::to_string(&err).unwrap();
-        assert!(!wire.contains(SENT), "the in-process reply carried the sent key: {wire}");
-        assert!(wire.contains("<redacted>"), "control: the text is kept around the key: {wire}");
+        assert!(
+            !wire.contains(SENT),
+            "the in-process reply carried the sent key: {wire}"
+        );
+        assert!(
+            wire.contains("<redacted>"),
+            "control: the text is kept around the key: {wire}"
+        );
         assert!(wire.contains("Credit limit reached"), "control: {wire}");
     }
 
@@ -546,11 +553,18 @@ mod tests {
             )
             .await
             .expect_err("the agent fails the prompt");
-            assert!(!err.message.contains(SENT), "message carried the key: {}", err.message);
+            assert!(
+                !err.message.contains(SENT),
+                "message carried the key: {}",
+                err.message
+            );
             let data = err.data.as_ref().expect("error data");
             let text = data["message"].as_str().expect("data.message is a string");
             assert!(!text.contains(SENT), "data.message carried the key: {text}");
-            assert!(text.contains("Credit limit reached for key <redacted>"), "{text}");
+            assert!(
+                text.contains("Credit limit reached for key <redacted>"),
+                "{text}"
+            );
             assert!(
                 data["verdicts"].is_object(),
                 "the reply did not cross ScrubSentCredentials: {data}"

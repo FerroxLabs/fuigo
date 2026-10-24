@@ -224,7 +224,12 @@ fn p120_wrapped_command_does_not_inherit_fuigo_secrets() {
     let dir = probe::scratch_dir("p120-wrapcmd");
     let out = dir.join("env.txt");
     let args = vec!["-c".to_string(), format!("env > '{}'", out.display())];
-    assert!(super::wrapped_command("sh", &args).status().unwrap().success());
+    assert!(
+        super::wrapped_command("sh", &args)
+            .status()
+            .unwrap()
+            .success()
+    );
     let dump = std::fs::read_to_string(&out).unwrap();
     probe::assert_clean(&dump, &[]);
     probe::assert_kept(&dump, REGISTERED);

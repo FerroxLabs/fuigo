@@ -27,6 +27,10 @@ mod fullscreen_external_editor_round_trip;
 mod initial_prompt_positional_auto_submits;
 #[path = "pty_e2e/input_echoes_at_idle_prompt.rs"]
 mod input_echoes_at_idle_prompt;
+#[path = "pty_e2e/login_picker_first_run.rs"]
+mod login_picker_first_run;
+#[path = "pty_e2e/model_list_routes.rs"]
+mod model_list_routes;
 #[path = "pty_e2e/plan_revise_empty_enter_does_not_approve.rs"]
 mod plan_revise_empty_enter_does_not_approve;
 #[path = "pty_e2e/question_tab_cycles_answers.rs"]

@@ -9,9 +9,9 @@ pub const INTERRUPT_NOTE: &str = "The user interrupted the previous turn:";
 /// user's own words: a parent agent may not speak with user authority.
 pub const PARENT_AGENT_NOTE: &str = "Your parent agent sent a message while you were working:";
 
-/// Trailing reminder so a mid-turn steer or post-cancel follow-up does not drop in-flight work.
-const UNFINISHED_TASKS_REMINDER: &str =
-    "Make sure to complete any unfinished tasks from previous turns.";
+/// Trailing reminder so a mid-turn steer or post-cancel follow-up answers the user before
+/// resuming in-flight work (and still does not drop it).
+pub const UNFINISHED_TASKS_REMINDER: &str = "If the user is asking for a response, address the user first. After replying, complete any unfinished tasks from previous turns.";
 
 /// Wrap a user message in the canonical `<user_query>` envelope.
 pub fn user_query(user_message: &str) -> String {
@@ -83,6 +83,18 @@ pub fn format_interrupt(text: String) -> String {
 mod tests {
     use super::*;
 
+    /// P5 / upstream 1.0.41: a steer that asks a question must be answered before the model resumes its work.
+    #[test]
+    fn reminder_has_the_model_reply_before_resuming_prior_tasks() {
+        let out = format_interjection("what does this function do?".into());
+        let reply = out.find("address the user first").expect("reply-first cue");
+        let resume = out
+            .find("complete any unfinished tasks from previous turns")
+            .expect("resume cue");
+        assert!(reply < resume, "reply cue must come first: {out}");
+        assert!(out.ends_with(UNFINISHED_TASKS_REMINDER), "{out}");
+    }
+
     #[test]
     fn wraps_in_user_query_with_midturn_note() {
         let out = format_interjection("stop and fix the test first".into());
@@ -121,7 +133,8 @@ mod tests {
         let s = "é".repeat(LARGE_PROMPT_THRESHOLD);
         let out = format_interjection(s);
         assert!(out.contains("... [truncated]"));
-        assert!(out.len() < LARGE_PROMPT_THRESHOLD + 200);
+        let envelope = format_interjection(String::new()).len();
+        assert!(out.len() <= LARGE_PROMPT_THRESHOLD + envelope + "... [truncated]".len());
     }
 
     #[test]

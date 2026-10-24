@@ -41,6 +41,24 @@ async fn script_is_handed_the_payload_on_stdin_and_the_terminal_size() {
     assert!(row.ends_with("137 24"), "got {row}");
 }
 
+/// 52.7: a script learns which turn is running (the prompt id) and when it started, so it can show elapsed time or
+/// tell one turn's output from the next. Both are in the payload on stdin while a turn runs.
+#[tokio::test]
+async fn script_is_handed_the_running_turns_prompt_id_and_start_time() {
+    let mut ctx = ctx();
+    ctx.prompt_id = Some("97135ed2-71a5-4581-b959-3341bbd03e5f".to_string());
+    ctx.turn = Some(fuigo_status_line::StatusLineTurn { started_at_ms: 1_730_000_123_456 });
+    let row = run_command("cat", &ctx, ROW, COMMAND_TIMEOUT).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_str(row.trim()).expect("the payload is JSON");
+    assert_eq!(payload["prompt_id"], "97135ed2-71a5-4581-b959-3341bbd03e5f");
+    assert_eq!(payload["turn"]["started_at_ms"], 1_730_000_123_456_i64);
+
+    // Between turns both are absent, not zero or empty.
+    let idle = run_command("cat", &crate::app::status_line::test_context("/tmp"), ROW, COMMAND_TIMEOUT).await.unwrap();
+    let idle: serde_json::Value = serde_json::from_str(idle.trim()).unwrap();
+    assert!(idle.get("prompt_id").is_none() && idle.get("turn").is_none(), "{idle}");
+}
+
 #[tokio::test]
 async fn payload_past_a_pipe_buffer_survives_a_script_that_writes_first() {
     let mut ctx = ctx();
@@ -177,7 +195,8 @@ async fn capped_runaway_still_has_its_process_group_killed() {
 #[test]
 fn p120_status_line_commands_do_not_inherit_fuigo_secrets() {
     use fuigo_secrets::test_probe as probe;
-    const NAME: &str = "app::status_line::command::tests::p120_status_line_commands_do_not_inherit_fuigo_secrets";
+    const NAME: &str =
+        "app::status_line::command::tests::p120_status_line_commands_do_not_inherit_fuigo_secrets";
     const REGISTERED: &str = "P120_STATUS_BEARER";
     if probe::in_parent(NAME, &[REGISTERED]) {
         return;
@@ -185,9 +204,17 @@ fn p120_status_line_commands_do_not_inherit_fuigo_secrets() {
     fuigo_tools::util::shell_env_policy::register_credential_env_names([REGISTERED]);
     let dir = probe::scratch_dir("p120-status");
     let out = dir.join("env.txt");
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let row = runtime
-        .block_on(run_command(&format!("env > '{}'; printf done", out.display()), &ctx(), ROW, COMMAND_TIMEOUT))
+        .block_on(run_command(
+            &format!("env > '{}'; printf done", out.display()),
+            &ctx(),
+            ROW,
+            COMMAND_TIMEOUT,
+        ))
         .unwrap();
     assert_eq!(row, "done");
     let dump = std::fs::read_to_string(&out).expect("the command ran");

@@ -2,6 +2,36 @@ use std::path::{Path, PathBuf};
 
 use fuigo_test_utils::git::run_git;
 
+std::thread_local! {
+    /// How many grove-env holders (`GroveEnvGuard`, `FuigoHomeFixture`) this
+    /// thread owns. Lets [`grove_env_fence`] avoid self-deadlock.
+    static GROVE_ENV_HELD: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn grove_env_held() -> bool {
+    GROVE_ENV_HELD.with(|c| c.get()) > 0
+}
+
+pub(crate) fn grove_env_held_adjust(delta: i32) {
+    GROVE_ENV_HELD.with(|c| c.set(c.get().saturating_add_signed(delta)));
+}
+
+/// Fence for code that READS the process-global grove env
+/// (`candidate_data_dirs`: `GROVE_DATA_DIR`, `XDG_DATA_HOME`, `HOME`) inside a
+/// test. A thread that does not own the env would otherwise sweep the grove a
+/// fixture-owning test installed and race its orphan-pin prune. Returns the
+/// lock guard when this thread does not already hold the env, else `None`.
+pub(crate) fn grove_env_fence() -> Option<std::sync::MutexGuard<'static, ()>> {
+    if GROVE_ENV_HELD.with(std::cell::Cell::get) > 0 {
+        return None;
+    }
+    Some(
+        crate::nfs::GROVE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    )
+}
+
 #[cfg(feature = "metadata")]
 use crate::git::{Safety, safe_to_delete_worktree};
 

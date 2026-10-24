@@ -142,8 +142,8 @@ async fn responses_large_tool_result_images_fit_transport_limit() {
     assert!(unbudgeted_bytes.0 > TRANSPORT_LIMIT_BYTES);
     drop(unbudgeted_request);
 
-    let prepared = build_compaction_chat_history(source.clone(), Some(LARGE_CONTEXT), true, 0);
-    let repeated = build_compaction_chat_history(source.clone(), Some(LARGE_CONTEXT), true, 0);
+    let prepared = build_compaction_chat_history(source.clone(), Some(LARGE_CONTEXT), true, None, 0);
+    let repeated = build_compaction_chat_history(source.clone(), Some(LARGE_CONTEXT), true, None, 0);
     assert!(prepared.image_budget.body_bytes >= IMAGE_COMPACT_TRIGGER_BYTES);
     assert!(prepared.image_budget.body_bytes_after <= IMAGE_COMPACT_RECLAIM_TARGET_BYTES);
     assert_eq!(prepared.image_budget.evicted, EVICTED_MARKERS.len());

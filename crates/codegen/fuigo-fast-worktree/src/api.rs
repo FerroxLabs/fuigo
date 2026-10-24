@@ -1485,6 +1485,14 @@ pub(crate) fn register_worktree(
     // /var vs /private/var (and other symlink roots) do not create duplicate rows.
     let path = dunce::canonicalize(worktree_path).unwrap_or_else(|_| worktree_path.to_path_buf());
     let source = dunce::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+    // A worktree made from a folder inside a repository belongs to that repository: record its root, not the folder
+    let source = if source.join(".git").exists() {
+        source
+    } else {
+        crate::git::find_worktree_root(&source)
+            .map(|root| dunce::canonicalize(&root).unwrap_or(root))
+            .unwrap_or(source)
+    };
     let record = db::WorktreeRecord {
         id: worktree_id.unwrap_or_else(|| db::id_from_path(&path)),
         path,

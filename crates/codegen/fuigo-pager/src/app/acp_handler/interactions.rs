@@ -42,29 +42,19 @@ pub(crate) fn handle_mcp_elicit(
         return false;
     };
 
-    let waiting = agent
-        .elicitation_view
-        .as_ref()
-        .is_some_and(|ev| ev.is_url_waiting());
-    if waiting {
-        if let Some((_, old_tx)) = agent.pending_elicitation.take() {
-            cancel_elicitation_request(old_tx);
+    // A card is already on screen (or waiting on a URL): this request takes its place in line, and none is cancelled
+    let card_open = agent.elicitation_view.is_some();
+    if card_open {
+        let waiting = agent
+            .elicitation_view
+            .as_ref()
+            .is_some_and(|ev| ev.is_url_waiting());
+        if waiting && agent.pending_elicitation.is_none() {
+            agent.pending_elicitation = Some((ext_req, ext.response_tx));
+        } else {
+            agent.queued_elicitations.push_back((ext_req, ext.response_tx));
         }
-        agent.pending_elicitation = Some((ext_req, ext.response_tx));
         return is_active;
-    }
-
-    if let Some((_, old_tx)) = agent.pending_elicitation.take() {
-        cancel_elicitation_request(old_tx);
-    }
-
-    if let Some(mut old) =
-        agent.take_unanswered_elicitation(crate::app::agent_view::UnansweredElicitation::Superseded)
-    {
-        if let Some(old_tx) = old.take_response_tx() {
-            cancel_elicitation_request(old_tx);
-        }
-        agent.restore_elicitation_prompt(old.stashed_prompt);
     }
 
     let stashed = agent.stash_prompt_for_elicitation();

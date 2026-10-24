@@ -269,6 +269,40 @@ Sandbox events are logged to `~/.fuigo/sessions` for debugging. Events include:
 
 ---
 
+## Per-command sandbox (workspace sessions)
+
+Separately from the whole-process profiles above, the workspace the leader exposes to a hub can confine **each shell command** a hub session runs. It is **off by default**: nothing changes until you ask for it.
+
+| Mode | What it does |
+| --- | --- |
+| `off` (default) | Commands run exactly as before. The folder probes nothing and opens no grant store. |
+| `observe` | Commands run unwrapped and are counted. Nothing is blocked and nothing is asked; no card is ever shown. |
+| `enforce` | Each command runs inside an OS sandbox (macOS Seatbelt): writes limited to the workspace and temp directories, the network only through a local exact-origin proxy, protected paths (Fuigo's own settings, `.git/hooks`, the daemon's control socket) never writable. A denial raises a card; allowing it records a grant and re-runs the command once. |
+
+The mode is the first of, highest to lowest: the `FUIGO_SANDBOX_MODE` environment variable, `[sandbox] mode = "…"` in `<fuigo home>/managed_config.toml` (an administrator's switch), `[sandbox] mode = "…"` in `<fuigo home>/workspaced.toml`, then `off`. A folder's own `.fuigo/workspaced.toml` may only **raise** the mode, never lower it. A layer file that is present but unreadable or refused (a symlink into a place a command can write, another user's file, not TOML) counts as `enforce`, never as absent.
+
+**An unsupported platform is a warning, not a refusal.** Only macOS has an OS backend today. On Linux and Windows `enforce` runs as `off`, with a loud warning that names the platform and the layer that asked for it, and commands are never refused for want of a backend. `sandbox.status` reports the mode as degraded (`enforce_without_backend`).
+
+### Which prompts the sandbox card replaces
+
+When a shell command really runs inside the sandbox (`enforce` with an OS backend, a foreground command whose output Fuigo reads back), the sandbox already confines what the command can do, and anything it blocks is settled by a card. In that case, and only then, the sandbox card takes the place of exactly these prompts for that command:
+
+1. **Unparseable shell**: the script could not be broken into commands to check.
+2. **Unvetted environment**: the command sets an environment variable outside the known-safe set.
+3. **Unresolved argument**: argument values that depend on shell expansion (`"$LOG"`).
+4. **Network egress**: a plain network client (`curl`, `wget`) and nothing else wrong with the command, only while the folder's egress proxy is serving it; the proxy asks per host.
+5. **File write inside the sandbox's write scope**: a broad allow rule that Fuigo defers to a prompt only because the command writes a file, when the file is a concrete path inside the workspace or the temporary directories and not inside a `.git` directory.
+
+Every other prompt stays: writes to protected targets (`.git/hooks`, shell startup files, Fuigo's own configuration, anything persistent outside the sandbox's scope), commands that can run code or change the host (`DangerousCommand`, execution callbacks and ambient git configuration, environment injection, nested or dynamic shells, special executable surfaces), your own deny and ask rules, hook prompts, the peer guard and every tool that is not a shell. A command with even one reason that is not on the list keeps its prompt as a whole. The prompt for `dontAsk` mode is a refusal, and it stays a refusal.
+
+The condition is checked for each command when it is decided, from the sandbox's state at that moment. If the mode is `off` or `observe`, if `enforce` fell back to `off` because the host has no backend, if the command is not run through the wrapper (a background run, or a shell tool whose output Fuigo cannot read back), or if you turned the sandbox off since the last command, every prompt comes back at once. With the default configuration (`off`) nothing changes.
+
+### IP addresses in tool URLs
+
+The upstream-vendor egress guard refuses *names*, and an IP address has none. A tool that takes a URL from the model (`web_fetch`) therefore refuses every **public** IP-address URL — `https://8.8.8.8/`, `http://134744072/`, `https://[2606:4700:4700::1111]/`, however it is spelled — because a bare address cannot be told from an upstream vendor's. Use the hostname. Private, loopback and link-local addresses keep their existing handling (blocked, except `127.0.0.0/8` and `::1` when `allow_local` is on). The only way to allow a public address is the guard's own full lift, `FUIGO_ALLOW_UPSTREAM_HOSTS=1`, which lifts the guard for every connection in the process; an exact-hostname list cannot name an address. Commands running under the per-command sandbox cannot reach an address at all: the local proxy only accepts hostnames.
+
+---
+
 ## When to Use Sandbox Mode
 
 **Use `workspace` when:**

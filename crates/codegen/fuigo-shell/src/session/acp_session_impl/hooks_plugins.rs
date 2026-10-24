@@ -77,9 +77,7 @@ impl SessionActor {
         fuigo_hooks::discovery::HookRegistry,
         Vec<fuigo_hooks::error::HookError>,
     ) {
-        let git_root = fuigo_workspace::session::git::find_git_root_from_path(cwd).ok();
-        let (mut registry, errors) =
-            crate::util::hooks::discover_hooks(git_root.as_deref(), compat, project_trusted);
+        let (mut registry, errors) = crate::util::hooks::discover_hooks_for_cwd(cwd, compat, project_trusted);
         registry.append_specs(Self::plugin_hook_specs(plugins, project_trusted));
         (registry, errors)
     }
@@ -1004,6 +1002,8 @@ impl SessionActor {
         // Reconcile folder-trust so a mid-session /hooks-trust (or --trust) grant counts on reload, then gate project hook sources on the verdict
         let cwd = std::path::Path::new(&self.session_info.cwd);
         let is_trusted = Self::session_hook_trust(cwd, None);
+        // The configuration may have been fixed: forget which hooks were found unable to start, and re-check below
+        fuigo_hooks::health::reset_session(&self.session_info.id.0);
         // The same builder as session spawn, so all vendors (compat and native), custom hook-paths and plugin hooks match the session-startup sites
         // Defense in depth: a subagent's reload never installs plugin hooks itself, whatever registry it holds (see `plugins_for_hook_reload`)
         let plugins_now = if self.startup_hints.is_subagent {
@@ -1040,12 +1040,15 @@ impl SessionActor {
         }
         self.publish_hook_registry();
         tracing::info!(hook_count, "hooks reloaded mid-session");
+        self.check_hooks_after_load().await;
 
         // Notify pager about hooks change.
         // Extract all RefCell borrows into locals before the .await so no Ref guard is alive across the suspension point
         {
             let hooks = crate::extensions::hooks::current_hook_infos(
                 self.hook_registry.borrow().as_deref(),
+                &self.session_info.id.0,
+                &self.hook_resolved_workspace_root,
             );
             let load_errors = self.hook_load_errors.borrow().clone();
             let project_trusted = is_trusted;
@@ -1226,12 +1229,19 @@ impl SessionActor {
         // The order-sensitive `update_configs` would tear everything down instead, because merge order is non-deterministic
         // This mirrors the `UpdateMcpServers` command handler
         let t_mcp = std::time::Instant::now();
-        let new_mcp_servers = crate::session::managed_mcp::merge_managed_mcp_servers(
-            self.initial_client_mcp_servers.borrow().clone(),
-            session_cwd,
-            new_registry_snapshot.as_deref(),
-            &self.rebuild_spec.compat,
+        let (new_mcp_servers, overlay_notices) = crate::session::agent_mcp::rematerialize_with_agent_overlay(
+            crate::session::agent_mcp::RematerializeParams {
+                initial_client_mcp_servers: self.initial_client_mcp_servers.borrow().clone(),
+                cwd: session_cwd,
+                parent_cwd: self.startup_hints.parent_cwd.as_deref(),
+                plugin_registry: new_registry_snapshot.as_deref(),
+                compat: &self.rebuild_spec.compat,
+                definition: self.agent.borrow().definition(),
+            },
         );
+        for notice in overlay_notices {
+            self.send_fuigo_notification_transient(FuigoSessionUpdate::ConfigNotice { message: notice });
+        }
         let (mcp_diff, dispatch_event_tx) = {
             let mut mcp_state = self.mcp_state.lock().await;
             let diff = mcp_state.update_configs_diff(new_mcp_servers);
@@ -1298,6 +1308,8 @@ impl SessionActor {
         {
             let hooks = crate::extensions::hooks::current_hook_infos(
                 self.hook_registry.borrow().as_deref(),
+                &self.session_info.id.0,
+                &self.hook_resolved_workspace_root,
             );
             let load_errors = self.hook_load_errors.borrow().clone();
             // Report the folder-trust verdict so the flag matches the gated registry.
@@ -1713,6 +1725,49 @@ mod p07_plugin_hook_tests {
             .await;
     }
 
+    /// 52.5: a session launched from a subfolder of the repository loads the hooks kept in that subfolder too, beside the
+    /// repository-root ones, and the subfolder's win a tie by coming later.
+    #[test]
+    fn hooks_kept_in_a_repo_subfolder_load_when_launched_from_that_folder() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
+        let repo = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo.path()).unwrap();
+        let sub = repo.path().join("services").join("api");
+        let write_hook = |dir: &std::path::Path, file: &str, command: &str| {
+            let hooks = dir.join(".fuigo").join("hooks");
+            std::fs::create_dir_all(&hooks).unwrap();
+            std::fs::write(
+                hooks.join(file),
+                format!(r#"{{"hooks": {{"SessionStart": [{{"hooks": [{{"type": "command", "command": "{command}"}}]}}]}}}}"#),
+            )
+            .unwrap();
+        };
+        write_hook(repo.path(), "root.json", "echo root-hook");
+        write_hook(&sub, "sub.json", "echo sub-hook");
+        // A sibling folder's hooks are not this session's.
+        write_hook(&repo.path().join("services").join("web"), "sibling.json", "echo sibling-hook");
+
+        let compat = fuigo_tools::types::compat::CompatConfig::default();
+        let commands = |cwd: &std::path::Path| -> Vec<String> {
+            let (registry, errors) = SessionActor::build_session_hook_registry(cwd, &compat, None, true);
+            assert!(errors.is_empty(), "{errors:?}");
+            registry
+                .all_hooks()
+                .iter()
+                .filter_map(|h| h.command_raw.clone())
+                .filter(|c| c.ends_with("-hook"))
+                .collect()
+        };
+        assert_eq!(commands(&sub), vec!["echo root-hook".to_string(), "echo sub-hook".to_string()]);
+        assert_eq!(commands(repo.path()), vec!["echo root-hook".to_string()], "the root session does not see subfolder hooks");
+        // Untrusted: no repo-local hooks at all, subfolder or not.
+        let (untrusted, _) = SessionActor::build_session_hook_registry(&sub, &compat, None, false);
+        assert!(untrusted.all_hooks().iter().all(|h| !h.command_raw.as_deref().unwrap_or("").ends_with("-hook")));
+    }
+
     /// The session builder is the initial load: plugin hooks sit beside the disk hooks from the start.
     #[test]
     fn build_session_hook_registry_includes_plugin_hooks() {
@@ -1740,6 +1795,9 @@ mod p07_plugin_hook_tests {
 #[cfg(test)]
 #[path = "hooks_plugins_p141_tests.rs"]
 mod p141_tests;
+#[cfg(test)]
+#[path = "hooks_plugins_agent_mcp_tests.rs"]
+mod agent_mcp_tests;
 
 #[cfg(test)]
 mod p169_managed_hooks_only_tests {

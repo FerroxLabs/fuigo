@@ -71,9 +71,6 @@ pub(crate) enum EscStep {
     DiscardPatternEdit,
     /// Unmark this question's answer.
     ClearSelection,
-    /// Return to the dashboard, leaving the card pending.
-    /// Owned by the dashboard overlay's own cascade, which runs ahead of the router.
-    BackOutOverlay,
     /// Hand the keyboard to the scrollback with the card still drawn.
     ParkFocus,
     /// Dismiss the cancel-turn panel and leave the turn (and subagents) running.
@@ -90,7 +87,6 @@ impl EscStep {
             Self::SkipFeedbackTrace => "skip",
             Self::DiscardPatternEdit => "cancel",
             Self::ClearSelection => "unselect",
-            Self::BackOutOverlay => "dashboard",
             Self::ParkFocus => "scrollback",
             Self::KeepRunning => "keep running",
             Self::DismissElicitWaiting => "dismiss",
@@ -210,10 +206,9 @@ impl AgentView {
                     EscStep::DismissFeedbackPane
                 } else if qv.active_tab_has_selection() {
                     EscStep::ClearSelection
-                } else if self.in_dashboard_overlay && qv.active_tab == 0 {
-                    // On later questions `Left` still walks back, so `Esc` stays in the card
-                    EscStep::BackOutOverlay
                 } else {
+                    // Also the first question of a session opened from the dashboard: the first press parks the keyboard on the scrollback
+                    // (the context behind the question can be read), and the next press leaves the overlay (see `overlay_esc_backs_out`)
                     EscStep::ParkFocus
                 }
             }
@@ -262,9 +257,6 @@ impl AgentView {
                     qv.clear_selection(active);
                 }
             }
-            // The dashboard overlay's cascade runs ahead of the router and takes this rung itself
-            // Reaching it here means the overlay declined, and the card keeps the key rather than letting it fall through to the turn-cancel policy
-            EscStep::BackOutOverlay => {}
             EscStep::ParkFocus => self.park_focused_card(),
             EscStep::KeepRunning => {
                 // The bar promises "keep running"

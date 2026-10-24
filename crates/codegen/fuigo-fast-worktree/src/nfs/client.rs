@@ -907,6 +907,10 @@ mod tests {
     #[derive(Clone)]
     struct Script {
         ping_delay: Duration,
+        /// How long a create stays in flight before its reply (if any) is written. The create is parked on its own
+        /// thread, so the daemon keeps answering ping/query meanwhile, as the real one does. It must be far longer
+        /// than any client timeout in these tests: a reply that could land inside the client's window would make the
+        /// outcome depend on how fast the host schedules the threads.
         create_hold: Duration,
         create_reply: Option<String>,
         query_replies: Arc<Mutex<Vec<String>>>,
@@ -980,9 +984,21 @@ mod tests {
                     }
                     "create_worktree" => {
                         script.creates.fetch_add(1, Ordering::SeqCst);
-                        if !script.create_hold.is_zero() {
-                            thread::sleep(script.create_hold);
+                        if !script.die_after_create && !script.create_hold.is_zero() {
+                            let hold = script.create_hold;
+                            let reply = script.create_reply.clone();
+                            if let Ok(mut parked) = stream.try_clone() {
+                                thread::spawn(move || {
+                                    thread::sleep(hold);
+                                    if let Some(r) = reply {
+                                        let _ = writeln!(parked, "{r}");
+                                    }
+                                });
+                            }
+                            continue;
                         }
+                        // A daemon that dies mid-create does so on receipt: the client reads EOF and polls a dead
+                        // socket. Dying after a sleep raced the client's poll window.
                         if script.die_after_create {
                             drop(lock_guard.take());
                             let _ = std::fs::remove_file(&sock);
@@ -1043,22 +1059,32 @@ mod tests {
             control_sock: Some(sock.to_path_buf()),
             data_dir: None,
             runtime_dir: Some(runtime.to_path_buf()),
-            ping_timeout: Duration::from_millis(80),
-            create_timeout: Duration::from_millis(80),
+            // Ceilings for answers a prompt daemon gives at once; nothing here waits them out. A tight ceiling only
+            // fails the test when the host is slow to schedule the mock daemon.
+            ping_timeout: Duration::from_secs(5),
+            create_timeout: Duration::from_secs(5),
             query_timeout: Duration::from_millis(400),
             query_interval: Duration::from_millis(15),
         }
     }
 
-    fn timeout_opts(sock: &Path, runtime: &Path) -> NfsWorktreeOpts {
+    /// Options for a create whose reply never arrives: the create times out after 80ms of real waiting, which is
+    /// deterministic because the mock holds the reply for seconds.
+    fn lost_reply_opts(sock: &Path, runtime: &Path) -> NfsWorktreeOpts {
         let mut o = opts(sock, runtime);
+        o.create_timeout = Duration::from_millis(80);
+        o
+    }
+
+    fn timeout_opts(sock: &Path, runtime: &Path) -> NfsWorktreeOpts {
+        let mut o = lost_reply_opts(sock, runtime);
         o.query_timeout = Duration::from_millis(80);
         o
     }
 
     fn lost_create_script() -> Script {
         Script {
-            create_hold: Duration::from_millis(300),
+            create_hold: Duration::from_secs(3),
             ..Default::default()
         }
     }
@@ -1110,7 +1136,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let sock = tmp.path().join("c.sock");
         let script = Script {
-            ping_delay: Duration::from_millis(300),
+            ping_delay: Duration::from_secs(3),
             create_reply: Some(
                 r#"{"status":"ok","data":{"v":1,"create_phase":"committed","mount":{"port":1,"mount_id":"1","transport":"nfs"}}}"#
                     .into(),
@@ -1119,7 +1145,8 @@ mod tests {
         };
         let _h = spawn_server(sock.clone(), script.clone());
         thread::sleep(Duration::from_millis(20));
-        let o = opts(&sock, tmp.path());
+        let mut o = opts(&sock, tmp.path());
+        o.ping_timeout = Duration::from_millis(80);
         let client = NfsWorktreeClient::from_opts(&o);
         let plan = plan_at(&tmp, "d", o);
         match client.create_worktree(&plan).unwrap() {
@@ -1191,7 +1218,7 @@ mod tests {
         let sock = tmp.path().join("c.sock");
         let committed = r#"{"status":"ok","data":{"v":1,"create_phase":"committed","resolved_strategy":"nfs","mount":{"port":12345,"mount_id":"99","transport":"nfs"}}}"#;
         let script = Script {
-            create_hold: Duration::from_millis(300),
+            create_hold: Duration::from_secs(3),
             query_replies: Arc::new(Mutex::new(vec![
                 r#"{"status":"ok","data":{"v":1,"create_phase":"index_ready"}}"#.into(),
                 committed.into(),
@@ -1200,7 +1227,7 @@ mod tests {
         };
         let _h = spawn_server(sock.clone(), script.clone());
         thread::sleep(Duration::from_millis(20));
-        let o = opts(&sock, tmp.path());
+        let o = lost_reply_opts(&sock, tmp.path());
         let client = NfsWorktreeClient::from_opts(&o);
         let plan = plan_at(&tmp, "d", o);
         match client.create_worktree(&plan).unwrap() {
@@ -1246,7 +1273,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let sock = tmp.path().join("c.sock");
         let script = Script {
-            create_hold: Duration::from_millis(300),
+            create_hold: Duration::from_secs(3),
             query_replies: Arc::new(Mutex::new(vec![
                 r#"{"status":"ok","data":{"v":1,"create_phase":"committed"}}"#.into(),
             ])),
@@ -1254,7 +1281,7 @@ mod tests {
         };
         let _h = spawn_server(sock.clone(), script);
         thread::sleep(Duration::from_millis(20));
-        let o = opts(&sock, tmp.path());
+        let o = lost_reply_opts(&sock, tmp.path());
         let client = NfsWorktreeClient::from_opts(&o);
         let plan = plan_at(&tmp, "d", o);
         match client.create_worktree(&plan).unwrap() {
@@ -1270,7 +1297,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let sock = tmp.path().join("c.sock");
         let script = Script {
-            create_hold: Duration::from_millis(300),
+            create_hold: Duration::from_secs(3),
             query_replies: Arc::new(Mutex::new(vec![
                 r#"{"status":"ok","data":{"v":1,"create_phase":"rolling_back"}}"#.into(),
                 r#"{"status":"ok","data":{"v":1,"create_phase":"aborted"}}"#.into(),
@@ -1279,7 +1306,7 @@ mod tests {
         };
         let _h = spawn_server(sock.clone(), script.clone());
         thread::sleep(Duration::from_millis(20));
-        let o = opts(&sock, tmp.path());
+        let o = lost_reply_opts(&sock, tmp.path());
         let client = NfsWorktreeClient::from_opts(&o);
         let plan = plan_at(&tmp, "d", o);
         match client.create_worktree(&plan).unwrap() {
@@ -1295,7 +1322,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let sock = tmp.path().join("c.sock");
         let script = Script {
-            create_hold: Duration::from_millis(300),
+            create_hold: Duration::from_secs(3),
             query_replies: Arc::new(Mutex::new(vec![
                 r#"{"status":"ok","data":{"v":1,"create_phase":"cancelling"}}"#.into(),
                 r#"{"status":"ok","data":{"v":1,"create_phase":"cancelled"}}"#.into(),
@@ -1304,7 +1331,11 @@ mod tests {
         };
         let _h = spawn_server(sock.clone(), script.clone());
         thread::sleep(Duration::from_millis(20));
-        let o = opts(&sock, tmp.path());
+        let mut o = lost_reply_opts(&sock, tmp.path());
+        // The poll must see `cancelling` and then `cancelled`; the deadline is wall-clock, so on a starved host a
+        // tight one expires after the first answer and the create (rightly) fails closed as in flight. Give it a
+        // ceiling the prompt mock daemon never waits out.
+        o.query_timeout = Duration::from_secs(30);
         let client = NfsWorktreeClient::from_opts(&o);
         let plan = plan_at(&tmp, "d", o);
         match client.create_worktree(&plan).unwrap() {
@@ -1342,7 +1373,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let sock = tmp.path().join("c.sock");
         let script = Script {
-            create_hold: Duration::from_millis(300),
+            create_hold: Duration::from_secs(3),
             query_replies: Arc::new(Mutex::new(vec![
                 r#"{"status":"ok","data":{"v":1,"create_phase":"mounted"}}"#.into(),
             ])),
@@ -1370,7 +1401,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let sock = tmp.path().join("c.sock");
         let script = Script {
-            create_hold: Duration::from_millis(300),
+            create_hold: Duration::from_secs(3),
             query_replies: Arc::new(Mutex::new(vec![
                 r#"{"status":"ok","data":{"v":1,"create_phase":"cancelling"}}"#.into(),
             ])),
@@ -1447,7 +1478,11 @@ mod tests {
         };
         let _h = spawn_server(sock.clone(), script.clone());
         thread::sleep(Duration::from_millis(20));
-        let o = opts(&sock, tmp.path());
+        let mut o = opts(&sock, tmp.path());
+        // The poll must see `cancelling` and then `cancelled`; the deadline is wall-clock, so on a starved host a
+        // tight one expires after the first answer and the create (rightly) fails closed as in flight. Give it a
+        // ceiling the prompt mock daemon never waits out.
+        o.query_timeout = Duration::from_secs(30);
         let client = NfsWorktreeClient::from_opts(&o);
         let plan = plan_at(&tmp, "d", o);
         match client.create_worktree(&plan).unwrap() {

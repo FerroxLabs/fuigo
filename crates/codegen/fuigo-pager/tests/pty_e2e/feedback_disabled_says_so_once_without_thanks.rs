@@ -49,7 +49,9 @@ async fn feedback_disabled_says_so_once_without_thanks() {
         .expect("type + submit the report");
     harness.update(Duration::from_millis(400));
     if harness.contains_text(TRACE_QUESTION_SENTINEL) {
-        harness.inject_keys(b"\x1b").expect("skip the trace question");
+        harness
+            .inject_keys(b"\x1b")
+            .expect("skip the trace question");
     }
     harness
         .wait_for_text(DISABLED_SENTINEL, Duration::from_secs(20))
@@ -67,7 +69,9 @@ async fn feedback_disabled_says_so_once_without_thanks() {
         "the disabled state is said once\nscreen:\n{screen}"
     );
     assert!(
-        !screen.to_lowercase().contains("couldn't send feedback: couldn't send feedback"),
+        !screen
+            .to_lowercase()
+            .contains("couldn't send feedback: couldn't send feedback"),
         "no doubled prefix\nscreen:\n{screen}"
     );
     assert!(

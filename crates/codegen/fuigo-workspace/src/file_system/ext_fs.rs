@@ -127,7 +127,12 @@ impl WorkspaceOp for FsWriteFileReq {
             if create_dirs && let Some(parent) = abs.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&abs, content.as_bytes())
+            // A failed write leaves the previous contents in place instead of a truncated file
+            fuigo_config::write_through::replace_file_contents(
+                &abs,
+                content.as_bytes(),
+                fuigo_config::write_through::NewFileMode::Default,
+            )
         })
         .await
         .map_err(|e| WorkspaceError::HubError(e.to_string()))?

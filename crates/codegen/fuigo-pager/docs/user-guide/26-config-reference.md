@@ -222,6 +222,7 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | `features.repo_status_in_system_prompt` | `boolean` | `pin` | `user` | Enable or disable `repo_status_in_system_prompt`. Default true. Also `FUIGO_REPO_STATUS_IN_SYSTEM_PROMPT`. |
 | `features.session_recap` | `boolean` | `pin` | `user` | Enable or disable `session_recap`. Default true. Also `FUIGO_SESSION_RECAP`. |
 | `features.session_search` | `boolean` | `pin` | `user` | Enable or disable `session_search`. Default true. Also `FUIGO_SESSION_SEARCH`. |
+| `features.subagent_model_inheritance` | `boolean` | `pin` | `user` | Every subagent uses the parent model: the `task` tool no longer offers a `model` argument and refuses one. Default false. Also `FUIGO_SUBAGENT_MODEL_INHERITANCE`. Applies to sessions started after the change. |
 | `features.subagent_worktree_snapshot` | `boolean` | `pin` | `user` | Enable or disable `subagent_worktree_snapshot`. Default false. Also `FUIGO_SUBAGENT_WORKTREE_SNAPSHOT`. |
 | `features.support_permission` | `boolean` | `yes` | `user` | Allow the agent to ask permission for tool executions. |
 | `features.telemetry` | `boolean / session_metrics / off` | `pin` | `user` | Product telemetry mode. Enterprise default is off. |
@@ -355,7 +356,7 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | `model.<id>` | `table` | `yes` | `user` | Per-model override or BYOK definition. Prefer `env_key` over inline `api_key`. |
 | `model.<id>.agent_type` | `string` | `yes` | `user` | Agent definition type associated with this model. |
 | `model.<id>.api_backend` | `chat_completions / responses / messages` | `yes` | `user` | Wire protocol for this model. |
-| `model.<id>.api_base_url` | `string` | `yes` | `user` | Alternate API base used with FUIGO_API_KEY resolution. |
+| `model.<id>.api_base_url` | `string` | `yes` | `user` | Alternate API base used with the Flux key (`FUIGO_API_KEY`, else `FUIGO_CODE_API_KEY`, else `FLUX_API_KEY`). |
 | `model.<id>.api_key` | `string` | `yes` | `user` | Inline API key. Prefer `env_key`. Not a secret to put in a shared repo. |
 | `model.<id>.auth_provider` | `string` | `yes` | `user` | Name of a `[auth_provider.<name>]` helper that mints this model's bearer token. |
 | `model.<id>.auto_compact_threshold_percent` | `integer` | `yes` | `user` | Per-model auto-compact threshold (0-100). |
@@ -364,6 +365,7 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | `model.<id>.compactions_remaining` | `string / table` | `yes` | `user` | How compaction leftover context is sent. Alias `send_compactions_remaining`. |
 | `model.<id>.context_window` | `number` | `yes` | `user` | Context window tokens; drives auto-compact timing. |
 | `model.<id>.context_windows` | `array<number>` | `yes` | `user` | Context window sizes `/context-window` can select (at most 16, each 1 to 16,000,000 tokens). |
+| `model.<id>.max_request_bytes` | `number` | `yes` | `user` | Provider request-body cap that inline images are evicted to stay under. Unset inherits the `[model_providers.<id>]` value, then the `api_backend` default: 30 MB for `messages`, 50 MiB otherwise. |
 | `model.<id>.notice` | `string` or `table` | `yes` | `user` | Short plain-text message (at most 160 characters, one line) shown in a banner above the prompt while the model is selected; the table form takes `text`, `severity` (`info`, `warning`, `critical`) and `label`. Sent to ACP clients as `_meta.notice`. |
 | `model.<id>.description` | `string` | `yes` | `user` | Optional description shown in the picker. |
 | `model.<id>.env_http_headers` | `map<string,string>` | `yes` | `user` | HTTP headers populated from environment variables when set. |
@@ -554,9 +556,12 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 
 | Key | Type / Values | Requirements | Managed | Details |
 | --- | --- | --- | --- | --- |
+| `ui.animations` | `boolean` | `yes` | `user` | Master switch for decorative animation (default true). False shows the settled background mark from the first frame, whatever `ui.background_mark_animate` says. |
 | `ui.approval_mode` | `string` | `yes` | `user` | Deprecated; use `ui.permission_mode`. |
 | `ui.auto_dark_theme` | `string` | `yes` | `user` | Theme when `theme = auto` and the OS is dark. |
 | `ui.auto_light_theme` | `string` | `yes` | `user` | Theme when `theme = auto` and the OS is light. |
+| `ui.background_mark` | `boolean` | `yes` | `user` | Faint dot-matrix Wind mark above the text column of the welcome screen (default true). It takes only the rows the text leaves and never overlaps the text. Hidden under 70x24 (the welcome layout itself starts at 60 columns), when too few rows are spare, with `NO_COLOR`, and while the prompt holds text. |
+| `ui.background_mark_animate` | `boolean` | `yes` | `user` | One 3D spin of the background mark when the welcome screen opens, easing to rest with an ember gust (default true). Off shows the settled mark from the first frame. Any key press snaps it to rest. Also off over SSH, with `NO_COLOR`, and when `ui.animations` is false. |
 | `ui.cancel_subagents_on_turn_cancel` | `ask / always_stop / always_continue` | `yes` | `user` | What to do with running subagents when cancelling a parent turn. |
 | `ui.collapsed_edit_blocks` | `boolean` | `yes` | `user` | Show edits as one-line +N/-M summaries. Also FUIGO_COLLAPSED_EDIT_BLOCKS. |
 | `ui.combine_queued_prompts` | `boolean` | `yes` | `user` | Merge consecutive plain follow-ups into one turn. |

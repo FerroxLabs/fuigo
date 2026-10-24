@@ -1382,12 +1382,30 @@ fn trust_folder_grants_and_resolves() {
 fn p167_trust_gate_outcome_maps_each_resolution() {
     use crate::app::dispatch::session::lifecycle::{TrustGateOutcome, trust_gate_outcome};
     use fuigo_workspace::folder_trust::GrantResolution;
-    assert_eq!(trust_gate_outcome(GrantResolution::Trusted, false), TrustGateOutcome::Finish);
-    assert_eq!(trust_gate_outcome(GrantResolution::Trusted, true), TrustGateOutcome::Finish);
-    assert_eq!(trust_gate_outcome(GrantResolution::SessionLocal, false), TrustGateOutcome::FinishSessionLocal);
-    assert_eq!(trust_gate_outcome(GrantResolution::SessionLocal, true), TrustGateOutcome::StayPending);
-    assert_eq!(trust_gate_outcome(GrantResolution::Unrecorded, false), TrustGateOutcome::StayPending);
-    assert_eq!(trust_gate_outcome(GrantResolution::Unrecorded, true), TrustGateOutcome::StayPending);
+    assert_eq!(
+        trust_gate_outcome(GrantResolution::Trusted, false),
+        TrustGateOutcome::Finish
+    );
+    assert_eq!(
+        trust_gate_outcome(GrantResolution::Trusted, true),
+        TrustGateOutcome::Finish
+    );
+    assert_eq!(
+        trust_gate_outcome(GrantResolution::SessionLocal, false),
+        TrustGateOutcome::FinishSessionLocal
+    );
+    assert_eq!(
+        trust_gate_outcome(GrantResolution::SessionLocal, true),
+        TrustGateOutcome::StayPending
+    );
+    assert_eq!(
+        trust_gate_outcome(GrantResolution::Unrecorded, false),
+        TrustGateOutcome::StayPending
+    );
+    assert_eq!(
+        trust_gate_outcome(GrantResolution::Unrecorded, true),
+        TrustGateOutcome::StayPending
+    );
 }
 fn p167_welcome_toast(app: &AppView) -> String {
     app.welcome_toast
@@ -1423,11 +1441,17 @@ fn p167_trust_folder_over_unreadable_store_reports_and_stays_pending() {
         matches!(app.trust_state, TrustState::Pending { .. }),
         "a grant that recorded nothing must not resolve the question"
     );
-    assert_eq!(std::fs::read(&store_path).unwrap(), before, "the store must not be rewritten");
+    assert_eq!(
+        std::fs::read(&store_path).unwrap(),
+        before,
+        "the store must not be rewritten"
+    );
     let toast = p167_welcome_toast(&app);
     assert!(toast.contains("trust store could not be read"), "{toast}");
     assert!(
-        app.trust_error.as_deref().is_some_and(|e| e.contains("trust store could not be read")),
+        app.trust_error
+            .as_deref()
+            .is_some_and(|e| e.contains("trust store could not be read")),
         "the reason stays with the question for views without a welcome toast"
     );
     // Fixed and answered again: the question resolves and the reason clears.
@@ -1461,14 +1485,22 @@ fn p167_trust_folder_with_denied_store_write_continues_for_this_session() {
         workspace: workspace.clone(),
     };
     let _ = dispatch(Action::TrustFolder, &mut app);
-    assert!(matches!(app.trust_state, TrustState::Done), "a session-local grant must not quit or block");
-    assert!(!TrustStore::load().is_trusted(&workspace), "nothing durable was written");
+    assert!(
+        matches!(app.trust_state, TrustState::Done),
+        "a session-local grant must not quit or block"
+    );
+    assert!(
+        !TrustStore::load().is_trusted(&workspace),
+        "nothing durable was written"
+    );
     assert!(
         fuigo_workspace::folder_trust::is_trusted_this_process(&workspace),
         "the folder is trusted for this session"
     );
     assert!(
-        app.leader_notices.iter().any(|n| n.contains("this session only")),
+        app.leader_notices
+            .iter()
+            .any(|n| n.contains("this session only")),
         "the session-only warning is queued as a one-off note for the session (shown in both views): {:?}",
         app.leader_notices
     );

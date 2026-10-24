@@ -49,6 +49,25 @@ fn tool_packs() -> &'static Mutex<Vec<ToolPack>> {
 pub fn register_tool_pack(pack: ToolPack) {
     tool_packs().lock().push(pack);
 }
+/// Input-schema property names that, across the harnesses served here, hold the file a tool
+/// touches. A registered tool exposing one of these without a
+/// [`ToolMetadata::lock_path_param`] is flagged by
+/// [`ToolRegistryBuilder::unclassified_path_tools`].
+pub const LOCK_PATH_SHAPED_PROPERTIES: &[&str] = &[
+    "file_path",
+    "path",
+    "target_file",
+    "filePath",
+    "target_notebook",
+];
+/// Registered tools with a path-shaped property that deliberately declare no
+/// [`ToolMetadata::lock_path_param`]. Every entry needs a reason; the audit skips these ids.
+pub const LOCK_PATH_UNLOCKED_BY_DESIGN: &[&str] = &[
+    // `glob`'s `path` is the directory it searches, never a file it writes.
+    "OpenCode:glob",
+    // `memory_get`'s `path` names a read-only entry of the memory store, not a workspace file.
+    "FuigoBuild:memory_get",
+];
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolConfig {
     pub id: String,
@@ -532,6 +551,9 @@ pub struct ToolRegistryBuilder {
     tools: HashMap<String, ToolEntry>,
     reminders: Vec<ReminderEntry>,
     shared_local_registry: Option<fuigo_computer_hub_sdk::LocalRegistry>,
+    /// The daemon's per-command sandbox hook, put in the built `Resources` where a spawn site
+    /// finds it (`crate::sandbox_launch`).
+    sandbox_launch: Option<crate::sandbox_launch::SandboxLaunchHook>,
     /// Whether the client delivers system reminders (completion
     /// notifications for backgrounded commands/subagents) to the model.
     /// Exposed to description templates as `system_reminders_enabled` so
@@ -540,6 +562,9 @@ pub struct ToolRegistryBuilder {
     /// behavior); the tools server sets it from
     /// `FinalizeToolServerConfigRequest.system_reminders_enabled`.
     system_reminders_enabled: bool,
+    /// User tool-guidance overrides keyed by unqualified tool id (`read_file`). Empty by default,
+    /// which leaves every definition byte-identical to the stock one.
+    tool_guidance: HashMap<String, crate::tool_guidance::ToolGuidance>,
 }
 impl Default for ToolRegistryBuilder {
     fn default() -> Self {
@@ -657,6 +682,55 @@ impl ToolRegistryBuilder {
             .map(|(name, entry)| (name.clone(), entry.kind))
             .collect()
     }
+    /// Registry-wide audit of [`ToolMetadata::lock_path_param`]. Returns one message per
+    /// registered tool that violates either rule:
+    ///
+    /// 1. A declared `lock_path_param` must name a property of the tool's canonical input schema.
+    /// 2. A tool whose schema has a path-shaped property ([`LOCK_PATH_SHAPED_PROPERTIES`]) must
+    ///    declare a `lock_path_param`, unless its qualified id is in `unlocked_by_design` (tools
+    ///    whose path property is deliberately not a lock key: a directory to list, a memory-store
+    ///    path). Each allowlisted id should carry a one-line reason at the call site.
+    ///
+    /// This is the guard that keeps a new harness from landing with an unclassified edit tool,
+    /// which would otherwise silently lose per-path serialization of parallel calls.
+    pub fn unclassified_path_tools(&self, unlocked_by_design: &[&str]) -> Vec<String> {
+        let mut problems = Vec::new();
+        let mut ids: Vec<&String> = self.tools.keys().collect();
+        ids.sort();
+        for id in ids {
+            let Some(entry) = self.tools.get(id) else {
+                continue;
+            };
+            let properties = entry
+                .input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object);
+            let has_property =
+                |name: &str| properties.is_some_and(|props| props.contains_key(name));
+            match entry.metadata.lock_path_param() {
+                Some(param) if !has_property(param) => problems.push(format!(
+                    "{id}: lock_path_param() = {param:?} is not a property of its input schema"
+                )),
+                Some(_) => {}
+                None => {
+                    if unlocked_by_design.contains(&id.as_str()) {
+                        continue;
+                    }
+                    if let Some(shaped) = LOCK_PATH_SHAPED_PROPERTIES
+                        .iter()
+                        .find(|name| has_property(name))
+                    {
+                        problems.push(format!(
+                            "{id}: input schema has path-shaped property {shaped:?} but \
+                             lock_path_param() is None; declare it on the tool's ToolMetadata \
+                             or allowlist the tool with a reason"
+                        ));
+                    }
+                }
+            }
+        }
+        problems
+    }
     /// Register a cross-cutting reminder.
     ///
     /// Cross-cutting reminders fire after every tool call. They inspect
@@ -679,7 +753,9 @@ impl ToolRegistryBuilder {
             tools: HashMap::new(),
             reminders: Vec::new(),
             shared_local_registry: None,
+            sandbox_launch: None,
             system_reminders_enabled: true,
+            tool_guidance: HashMap::new(),
         };
         b.register_with_params::<fuigo_build::BashTool, fuigo_build::bash::BashParams>();
         b.register_with_params::<fuigo_build::ReadFileTool, fuigo_build::read_file::ReadFileParams>();
@@ -697,7 +773,7 @@ impl ToolRegistryBuilder {
         b.register::<fuigo_build::TaskOutputTool>();
         b.register::<fuigo_build::GetTerminalCommandOutputTool>();
         b.register::<fuigo_build::WaitTasksTool>();
-        b.register::<fuigo_build::TaskTool>();
+        b.register_with_params::<fuigo_build::TaskTool, fuigo_build::task::model_policy::TaskParams>();
         b.register::<fuigo_build::SendSubagentMessageTool>();
         b.register::<fuigo_build::ListAgentsTool>();
         b.register::<fuigo_build::SendMessageTool>();
@@ -773,6 +849,25 @@ impl ToolRegistryBuilder {
     pub fn with_local_registry(mut self, registry: fuigo_computer_hub_sdk::LocalRegistry) -> Self {
         self.shared_local_registry = Some(registry);
         self
+    }
+    /// The daemon's per-command sandbox hook, installed in the built `Resources`
+    /// (`crate::sandbox_launch`). Without it every command runs unwrapped.
+    pub fn with_sandbox_launch(mut self, hook: crate::sandbox_launch::SandboxLaunchHook) -> Self {
+        self.sandbox_launch = Some(hook);
+        self
+    }
+    /// Install user tool-guidance overrides, keyed by unqualified tool id (e.g. `read_file`).
+    /// Applied to the finalized definition, so it reaches every provider wire.
+    pub fn with_tool_guidance(
+        mut self,
+        guidance: HashMap<String, crate::tool_guidance::ToolGuidance>,
+    ) -> Self {
+        self.tool_guidance = guidance;
+        self
+    }
+    /// Unqualified ids of every registered tool (`read_file`, not `FuigoBuild:read_file`).
+    pub fn known_tool_names(&self) -> std::collections::HashSet<String> {
+        self.tools.values().map(|e| e.id.clone()).collect()
     }
     /// Dump tools manifest as JSON for the client.
     pub fn get_tools_config_raw(&self) -> serde_json::Value {
@@ -998,7 +1093,8 @@ impl ToolRegistryBuilder {
             }
         }
         let renderer = TemplateRenderer::new(kind_to_name.clone(), kind_params.clone())
-            .with_system_reminders_enabled(self.system_reminders_enabled);
+            .with_system_reminders_enabled(self.system_reminders_enabled)
+            .with_whole_read(truncation_config.whole_read);
         let mut tools = Vec::new();
         let mut resources = Resources::new();
         resources.insert(crate::types::resources::Terminal(ctx.backend));
@@ -1007,6 +1103,9 @@ impl ToolRegistryBuilder {
         resources.insert(crate::types::resources::Cwd(cwd.clone()));
         resources.insert(crate::types::resources::SessionFolder(ctx.session_folder));
         resources.insert(crate::types::resources::SessionEnv(ctx.session_env));
+        if let Some(hook) = self.sandbox_launch.take() {
+            resources.insert(hook);
+        }
         if let Some(owner_session_id) = ctx.owner_session_id.clone() {
             resources.insert(crate::types::resources::OwnerSessionId(owner_session_id));
         }
@@ -1175,6 +1274,10 @@ impl ToolRegistryBuilder {
                     crate::DEFAULT_TOOL_OUTPUT_BYTES,
                     fuigo_tool_types::max_wait_block_ms(),
                 ));
+            }
+            if let Some(g) = self.tool_guidance.get(&entry.id) {
+                definition.function.description =
+                    Some(g.apply(definition.function.description.as_deref()));
             }
             renderer.render_schema_descriptions(&mut definition.function.parameters);
             truncation_config.apply_to_schema(
@@ -1448,6 +1551,33 @@ impl FinalizedToolset {
             .iter()
             .find(|t| t.client_name == tool_name)
             .map(|t| t.metadata.clone())
+    }
+    /// The canonical name of the argument a tool's [`ToolMetadata::lock_path_param`] declares, for a
+    /// tool looked up by its client-facing name. Applies to arguments already mapped back to canonical
+    /// names (see [`FinalizedToolset::remap_params`]). `None` for unknown tools and tools that declare no path.
+    pub fn lock_path_canonical_param(&self, tool_name: &str) -> Option<&'static str> {
+        self.tools
+            .read()
+            .iter()
+            .find(|t| t.client_name == tool_name)?
+            .metadata
+            .lock_path_param()
+    }
+    /// The client-facing name of the argument a tool's [`ToolMetadata::lock_path_param`] refers
+    /// to, for a tool looked up by its client-facing name. The declaration names the canonical
+    /// parameter; a session may have renamed it for the model, and a client keying a per-path
+    /// lock must look at the name it actually sends. `None` for unknown tools and tools that
+    /// declare no path.
+    pub fn lock_path_client_param(&self, tool_name: &str) -> Option<String> {
+        let tools = self.tools.read();
+        let tool = tools.iter().find(|t| t.client_name == tool_name)?;
+        let canonical = tool.metadata.lock_path_param()?;
+        Some(
+            tool.reverse_params
+                .iter()
+                .find_map(|(client, canon)| (canon == canonical).then(|| client.clone()))
+                .unwrap_or_else(|| canonical.to_string()),
+        )
     }
     /// Resolve canonical [`ToolIdentity`] (kind, namespace, presentation label)
     /// for a tool by its client-facing wire name. Drives the first-party
@@ -2282,6 +2412,154 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use tempfile::TempDir;
+    /// Built-in half of the `lock_path_param` guard (a pack that lives in its own crate runs the
+    /// same audit next to its tools): every built-in tool with a path-shaped input either
+    /// declares the field it locks or is allowlisted with a reason.
+    #[test]
+    fn every_builtin_path_tool_declares_its_lock_path_param() {
+        let problems =
+            ToolRegistryBuilder::new().unclassified_path_tools(LOCK_PATH_UNLOCKED_BY_DESIGN);
+        assert!(
+            problems.is_empty(),
+            "unclassified path tools:\n{}",
+            problems.join("\n")
+        );
+    }
+    /// The audit catches both failure modes: a missing declaration and a declaration naming a
+    /// field the schema does not have.
+    #[test]
+    fn unclassified_path_tools_flags_missing_and_misnamed_declarations() {
+        #[derive(Debug, Default)]
+        struct Undeclared;
+        impl ToolMetadata for Undeclared {
+            fn kind(&self) -> ToolKind {
+                ToolKind::Edit
+            }
+            fn tool_namespace(&self) -> ToolNamespace {
+                ToolNamespace::MCP
+            }
+            fn description_template(&self) -> &str {
+                "edits a file"
+            }
+        }
+        #[derive(Debug, Default)]
+        struct Misnamed;
+        impl ToolMetadata for Misnamed {
+            fn kind(&self) -> ToolKind {
+                ToolKind::Edit
+            }
+            fn tool_namespace(&self) -> ToolNamespace {
+                ToolNamespace::MCP
+            }
+            fn description_template(&self) -> &str {
+                "edits a file"
+            }
+            fn lock_path_param(&self) -> Option<&'static str> {
+                Some("no_such_field")
+            }
+        }
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"file_path": {"type": "string"}}
+        });
+        let mut builder = ToolRegistryBuilder::new();
+        for (id, metadata) in [
+            (
+                "Audit:undeclared",
+                Box::new(Undeclared) as Box<dyn ToolMetadata>,
+            ),
+            ("Audit:misnamed", Box::new(Misnamed)),
+        ] {
+            builder.tools.insert(
+                id.to_string(),
+                ToolEntry {
+                    namespace: "Audit".to_string(),
+                    id: id.to_string(),
+                    kind: ToolKind::Edit,
+                    requires: Expr::True,
+                    default_params: serde_json::Value::Null,
+                    input_schema: schema.clone(),
+                    metadata,
+                    output_converter: Box::new(serde_json::from_value),
+                    validate_params: Box::new(|_| Ok(())),
+                    apply_params: Box::new(|_, _| {}),
+                    register_params: Box::new(|_| {}),
+                    parse_input: Box::new(|_| {
+                        Err(fuigo_tool_runtime::ToolError::invalid_arguments("audit only"))
+                    }),
+                    register_in_local: Box::new(|_| {}),
+                },
+            );
+        }
+        let problems = builder.unclassified_path_tools(LOCK_PATH_UNLOCKED_BY_DESIGN);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.starts_with("Audit:undeclared:") && p.contains("\"file_path\"")),
+            "{problems:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.starts_with("Audit:misnamed:") && p.contains("\"no_such_field\"")),
+            "{problems:?}"
+        );
+        let allowlisted = builder.unclassified_path_tools(&["Audit:undeclared"]);
+        assert!(
+            !allowlisted
+                .iter()
+                .any(|p| p.starts_with("Audit:undeclared:"))
+        );
+        assert!(allowlisted.iter().any(|p| p.starts_with("Audit:misnamed:")));
+    }
+    /// The declaration names the canonical field; the client-facing name follows a session rename.
+    #[tokio::test]
+    async fn lock_path_param_follows_a_params_name_override() {
+        let config = |overrides: Option<std::collections::HashMap<String, String>>| ToolServerConfig {
+            tools: vec![
+                ToolConfig {
+                    id: "FuigoBuild:read_file".to_string(),
+                    params: None,
+                    name_override: None,
+                    params_name_overrides: None,
+                    description_override: None,
+                    behavior_version: None,
+                    kind: None,
+                },
+                ToolConfig {
+                    id: "FuigoBuild:search_replace".to_string(),
+                    params: None,
+                    name_override: None,
+                    params_name_overrides: overrides,
+                    description_override: None,
+                    behavior_version: None,
+                    kind: None,
+                },
+            ],
+            behavior_preset: None,
+        };
+        let tmp = TempDir::new().unwrap();
+        let plain = ToolRegistryBuilder::new()
+            .finalize(config(None), test_session_context(&tmp))
+            .expect("finalize should succeed");
+        assert_eq!(Some("file_path"), plain.lock_path_canonical_param("search_replace"));
+        assert_eq!(Some("file_path".to_owned()), plain.lock_path_client_param("search_replace"));
+        assert_eq!(None, plain.lock_path_client_param("no_such_tool"));
+        let renamed = ToolRegistryBuilder::new()
+            .finalize(
+                config(Some(std::collections::HashMap::from([(
+                    "file_path".to_string(),
+                    "target".to_string(),
+                )]))),
+                test_session_context(&tmp),
+            )
+            .expect("finalize should succeed");
+        assert_eq!(Some("file_path"), renamed.lock_path_canonical_param("search_replace"));
+        assert_eq!(Some("target".to_owned()), renamed.lock_path_client_param("search_replace"));
+        // A client sends `target`; remapping gives the canonical field the declaration names.
+        let canonical = renamed.remap_params("search_replace", serde_json::json!({"target": "a.rs"}));
+        assert_eq!(serde_json::json!({"file_path": "a.rs"}), canonical);
+    }
     /// Build a `SessionContext` for tests using a temp dir and real local
     /// filesystem/terminal backends.
     fn test_session_context(tmp: &TempDir) -> SessionContext {
@@ -2844,6 +3122,135 @@ mod tests {
             field_off.contains("get_task_output"),
             "reminders off: block_until_ms description should name get_task_output: {field_off}"
         );
+    }
+    /// The `read_file` definition as the model sees it, finalized with the given guidance.
+    fn read_file_description(
+        guidance: HashMap<String, crate::tool_guidance::ToolGuidance>,
+    ) -> Option<String> {
+        let tmp = TempDir::new().unwrap();
+        let toolset = ToolRegistryBuilder::new()
+            .with_tool_guidance(guidance)
+            .finalize(
+                ToolServerConfig {
+                    tools: vec![ToolConfig::from_id("FuigoBuild:read_file")],
+                    behavior_preset: None,
+                },
+                test_session_context(&tmp),
+            )
+            .expect("finalize");
+        toolset
+            .tool_definitions()
+            .into_iter()
+            .find(|d| d.function.name == "read_file")
+            .and_then(|d| d.function.description)
+    }
+    fn guidance(
+        mode: crate::tool_guidance::GuidanceMode,
+        text: &str,
+    ) -> HashMap<String, crate::tool_guidance::ToolGuidance> {
+        HashMap::from([(
+            "read_file".to_owned(),
+            crate::tool_guidance::ToolGuidance {
+                mode,
+                text: text.to_owned(),
+            },
+        )])
+    }
+    #[tokio::test]
+    async fn tool_guidance_absent_leaves_description_byte_identical() {
+        let stock = read_file_description(HashMap::new()).expect("stock description");
+        let unrelated = HashMap::from([(
+            "grep".to_owned(),
+            crate::tool_guidance::ToolGuidance {
+                mode: crate::tool_guidance::GuidanceMode::Replace,
+                text: "other tool".to_owned(),
+            },
+        )]);
+        assert_eq!(read_file_description(unrelated).as_deref(), Some(stock.as_str()));
+        assert!(!stock.is_empty());
+    }
+    #[tokio::test]
+    async fn tool_guidance_append_follows_stock_description() {
+        use crate::tool_guidance::GuidanceMode;
+        let stock = read_file_description(HashMap::new()).unwrap();
+        let got = read_file_description(guidance(GuidanceMode::Append, "GUIDE-APPEND")).unwrap();
+        assert_eq!(got, format!("{stock}\n\nGUIDE-APPEND"));
+    }
+    #[tokio::test]
+    async fn tool_guidance_replace_discards_stock_description() {
+        use crate::tool_guidance::GuidanceMode;
+        let got = read_file_description(guidance(GuidanceMode::Replace, "GUIDE-REPLACE")).unwrap();
+        assert_eq!(got, "GUIDE-REPLACE");
+    }
+    /// Definitions finalized for `tools` under `guidance`, as (name, description) pairs in config order.
+    fn finalized_definitions(
+        tools: Vec<ToolConfig>,
+        guidance: HashMap<String, crate::tool_guidance::ToolGuidance>,
+    ) -> Vec<(String, Option<String>)> {
+        let tmp = TempDir::new().unwrap();
+        let toolset = ToolRegistryBuilder::new()
+            .with_tool_guidance(guidance)
+            .finalize(
+                ToolServerConfig {
+                    tools,
+                    behavior_preset: None,
+                },
+                test_session_context(&tmp),
+            )
+            .expect("finalize");
+        toolset
+            .tool_definitions()
+            .into_iter()
+            .map(|d| (d.function.name, d.function.description))
+            .collect()
+    }
+    /// An allowlist or denylist trims the config before finalize. Guidance addressed to a tool that was trimmed adds
+    /// no definition for it, so a denied tool never reaches the schema through the guidance layer.
+    #[tokio::test]
+    async fn tool_guidance_never_adds_a_tool_the_config_left_out() {
+        use crate::tool_guidance::{GuidanceMode, ToolGuidance};
+        let guidance = HashMap::from([
+            (
+                "grep".to_owned(),
+                ToolGuidance { mode: GuidanceMode::Replace, text: "GREP-GUIDE".to_owned() },
+            ),
+            (
+                "read_file".to_owned(),
+                ToolGuidance { mode: GuidanceMode::Replace, text: "READ-GUIDE".to_owned() },
+            ),
+        ]);
+        let defs = finalized_definitions(vec![ToolConfig::from_id("FuigoBuild:read_file")], guidance);
+        let names: Vec<&str> = defs.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["read_file"], "{defs:?}");
+        assert_eq!(defs[0].1.as_deref(), Some("READ-GUIDE"));
+    }
+    /// Guidance layers on top of a per-tool description override (what the agent builder sets on `task`): Replace
+    /// wins, Append follows the override, and the surviving tools keep their own text.
+    #[tokio::test]
+    async fn tool_guidance_layers_over_a_description_override() {
+        use crate::tool_guidance::{GuidanceMode, ToolGuidance};
+        let mut read = ToolConfig::from_id("FuigoBuild:read_file");
+        read.description_override = Some("OVERRIDE-TEXT".to_owned());
+        let append = HashMap::from([(
+            "read_file".to_owned(),
+            ToolGuidance { mode: GuidanceMode::Append, text: "GUIDE".to_owned() },
+        )]);
+        let defs = finalized_definitions(vec![read.clone()], append);
+        assert_eq!(defs[0].1.as_deref(), Some("OVERRIDE-TEXT\n\nGUIDE"));
+        let replace = HashMap::from([(
+            "read_file".to_owned(),
+            ToolGuidance { mode: GuidanceMode::Replace, text: "GUIDE".to_owned() },
+        )]);
+        let defs = finalized_definitions(vec![read.clone()], replace);
+        assert_eq!(defs[0].1.as_deref(), Some("GUIDE"));
+        let defs = finalized_definitions(vec![read], HashMap::new());
+        assert_eq!(defs[0].1.as_deref(), Some("OVERRIDE-TEXT"));
+    }
+    #[test]
+    fn known_tool_names_are_unqualified() {
+        let names = ToolRegistryBuilder::new().known_tool_names();
+        assert!(names.contains("read_file") && names.contains("grep"));
+        assert!(names.iter().all(|n| !n.contains(':')));
     }
     /// Each assertion pattern-matches on the exact `ToolOutput::SearchReplace`
     /// variant so the test fails if the renderer silently returns empty strings

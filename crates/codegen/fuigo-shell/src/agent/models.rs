@@ -903,6 +903,25 @@ impl ModelsManager {
         }
     }
 
+    /// Whether the credential held now would fetch the catalogue a different way than the fetch in place.
+    ///
+    /// The fetch kind is chosen when the manager is built (bootstrap), before `initialize` loads the key the
+    /// picker saved to `auth.json`: a start with only a saved key resolves `Session`, skips the fetch and stays
+    /// on the bundled models, where the same key in `FUIGO_API_KEY` is seen at bootstrap and fetches the live
+    /// catalogue. Anything that brings the key in later asks this.
+    pub(crate) fn fetch_credential_changed(&self) -> bool {
+        let session = self.inner.auth_manager.current_or_expired().is_some();
+        ModelFetchAuth::resolve(&self.inner.cfg.read().endpoints, session) != *self.inner.fetch_auth.read()
+    }
+
+    /// [`Self::on_auth_changed`] when [`Self::fetch_credential_changed`]: a no-op for a start whose credential
+    /// was already in place.
+    pub(crate) async fn refresh_if_fetch_credential_changed(&self) {
+        if self.fetch_credential_changed() {
+            self.on_auth_changed().await;
+        }
+    }
+
     /// Auth identity changed: invalidate the disk cache and refresh the catalog.
     ///
     /// A different credential now present (a `fuigo login` in another window picked up by the auth watcher, a
@@ -1129,7 +1148,24 @@ impl ModelsManager {
         self.notify_models_updated();
     }
 
+    /// Whether a catalog fetch has any credential to send. Mirrors [`ModelFetchAuth::resolve`], whose last
+    /// arm falls back to `Session` when nothing is set up: that fetch can only be refused, so retrying it
+    /// every few seconds (5 s up to 60 s) is a loop that cannot succeed. The list is built from the
+    /// connections that exist instead (signed-in subscriptions and the user's own `[model.*]` tables).
+    pub(crate) fn catalog_fetch_has_credential(&self) -> bool {
+        match *self.inner.fetch_auth.read() {
+            ModelFetchAuth::Session => self.inner.auth_manager.current_or_expired().is_some(),
+            ModelFetchAuth::ApiKey
+            | ModelFetchAuth::Deployment
+            | ModelFetchAuth::CustomEndpoint => true,
+        }
+    }
+
     fn spawn_catalog_retry(&self, remote_fetch_enabled: bool) {
+        if !self.catalog_fetch_has_credential() {
+            tracing::debug!("model catalog retry skipped: no Flux credential to fetch with");
+            return;
+        }
         self.spawn_catalog_retry_with_backoff(
             remote_fetch_enabled,
             crate::tools::retry::BackoffConfig::new(5, 5_000, 60_000),
@@ -1216,7 +1252,34 @@ impl ModelsManager {
 
     /// One-shot background catalog refresh after readiness; no-op when a fresh disk cache already loaded a real catalog.
     pub fn spawn_background_refresh(&self) {
+        self.spawn_provider_model_refresh();
         self.spawn_background_refresh_inner(crate::util::config::resolve_remote_fetch_enabled());
+    }
+
+    /// Ask each provider whose API key is in the environment for its model list (at most once a day
+    /// per provider; failures keep the cached list), then rebuild the catalogue so the models join
+    /// the ranked list. No key, no request.
+    pub fn spawn_provider_model_refresh(&self) {
+        let mgr = self.clone();
+        tokio::spawn(async move {
+            let base_urls: std::collections::HashMap<String, Option<String>> = mgr
+                .inner
+                .cfg
+                .read()
+                .model_providers
+                .iter()
+                .map(|(id, p)| (id.clone(), p.base_url.clone()))
+                .collect();
+            let changed = crate::auth::key_models::refresh_stale(|id| {
+                base_urls.get(id).cloned().flatten()
+            })
+            .await;
+            if changed {
+                let cfg = mgr.inner.cfg.read().clone();
+                mgr.apply_config(cfg);
+                mgr.notify_models_updated();
+            }
+        });
     }
 
     fn spawn_background_refresh_inner(&self, remote_fetch_enabled: bool) {
@@ -1643,6 +1706,7 @@ mod cache;
 mod endpoint;
 mod fetch;
 mod resolution;
+pub(crate) mod ranking;
 mod settings_cache;
 pub mod startup_prefetch;
 

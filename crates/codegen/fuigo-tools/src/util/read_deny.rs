@@ -8,11 +8,18 @@
 use std::path::{Path, PathBuf};
 
 use crate::util::path_match::{
-    RuleBase, literal_dir_prefix, path_match_forms, path_pattern_matches, physical_alias_pattern_string_bounded,
+    AliasResolution, RuleBase, literal_dir_prefix, path_match_forms, path_pattern_matches,
+    physical_alias_resolution_bounded,
 };
 
-/// Total time `ReadDenyFilter::new` may spend resolving physical aliases across all rules.
-const ALIAS_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+/// Total time `ReadDenyFilter::new` may spend resolving physical aliases across all rules. It exists only so a rule
+/// prefix on a hung mount cannot stall a search forever: resolving a prefix takes microseconds, so a budget this long is
+/// never reached by a busy machine, and running out of it is NOT treated as "no alias" (see `alias_unresolved`).
+/// Under test the budget is out of reach of a whole-suite stall (a process spawn alone took seconds on a saturated host).
+#[cfg(not(test))]
+const ALIAS_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+#[cfg(test)]
+const ALIAS_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// A path filter built from Read-deny globs. Built only when there is something to deny, so a session with no read
 /// rules does no matching at all (no filter object, no per-file work).
@@ -28,25 +35,49 @@ pub struct ReadDenyFilter {
     /// The walked root as given and with symlinks resolved, when they differ: a root that is a symlink into a denied tree
     /// is judged by where its children really are.
     root: Option<(PathBuf, PathBuf)>,
+    /// Some rule's physical alias could not be resolved within the budget (a hung mount, or a resolver still parked
+    /// behind one). Whether that rule also covers a physical spelling is then unknown, and "unknown" must not read as
+    /// "no": a rule spelled through a symlink would stop hiding the real path, and a denied file would be shown. So the
+    /// filter fails closed and denies every path until a later build resolves cleanly.
+    alias_unresolved: bool,
 }
 
 impl ReadDenyFilter {
     /// `None` when `globs` is empty (nothing to filter) or none of them compiles.
     pub fn new(cwd: &Path, globs: &[String]) -> Option<Self> {
+        Self::new_with(cwd, globs, ALIAS_BUDGET, physical_alias_resolution_bounded)
+    }
+
+    /// [`Self::new`] with the alias budget and resolver injected (tests).
+    pub(crate) fn new_with(
+        cwd: &Path,
+        globs: &[String],
+        budget: std::time::Duration,
+        resolve: impl Fn(&str, &str, std::time::Duration) -> AliasResolution,
+    ) -> Option<Self> {
         // P175f: a rule spelled through a symlinked directory also applies to the physical spelling, which is what
         // `ResultFilter` judges a result by. The extra rules are added next to the written ones, never instead.
         // The resolution is bounded by ONE budget for the whole build (a rule prefix on a hung mount must not stall
         // a search): once it is spent, the remaining rules get no alias, as before P175f.
-        let deadline = std::time::Instant::now() + ALIAS_BUDGET;
+        let deadline = std::time::Instant::now() + budget;
+        let mut alias_unresolved = false;
         let aliases: Vec<String> = globs
             .iter()
             .filter_map(|g| {
                 let (prefix, rest) = literal_dir_prefix(g)?;
                 let left = deadline.saturating_duration_since(std::time::Instant::now());
                 if left.is_zero() {
+                    alias_unresolved = true;
                     return None;
                 }
-                physical_alias_pattern_string_bounded(&prefix, &rest, left)
+                match resolve(&prefix, &rest, left) {
+                    AliasResolution::Alias(alias) => Some(alias),
+                    AliasResolution::NoAlias => None,
+                    AliasResolution::Unresolved => {
+                        alias_unresolved = true;
+                        None
+                    }
+                }
             })
             .collect();
         let globs: Vec<String> = globs.iter().cloned().chain(aliases).collect();
@@ -72,6 +103,7 @@ impl ReadDenyFilter {
             patterns,
             totals,
             root: None,
+            alias_unresolved,
         })
     }
 
@@ -100,6 +132,9 @@ impl ReadDenyFilter {
     /// the matcher on its own path. Deciding "total" parses the rule text and never samples child names, so a rule
     /// like `**/*[0-9]` or `**/[!.]*` cannot hide a directory of allowed files.
     pub fn denies(&self, path: &Path, is_dir: bool) -> bool {
+        if self.alias_unresolved {
+            return true;
+        }
         let judge = |p: &Path| {
             if is_dir {
                 self.total_under(p)
@@ -374,6 +409,44 @@ mod tests {
         assert!(rf.denies(Path::new("/")), "a path with no parent or name is dropped");
         let mut none = ResultFilter::new(&cwd, &[]);
         assert!(!none.denies(Path::new("no-such-dir/ok.txt")), "no rules: nothing is dropped");
+    }
+
+    /// A rule written through a symlink (`<base>/link/secrets/**`) also hides the physical path (`<base>/real/secrets/key`)
+    /// only if its alias was resolved. When the resolution does not finish inside the budget the answer is unknown, and
+    /// an unknown must fail closed: previously it was read as "no alias" and a denied file was printed (seen once in a
+    /// whole-crate run on a saturated host: the count mode listed `secrets/key_material.txt` while the other modes hid it).
+    #[cfg(unix)]
+    #[test]
+    fn an_alias_that_cannot_be_resolved_in_time_fails_closed() {
+        use std::time::Duration;
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(base.join("real/secrets")).unwrap();
+        std::fs::write(base.join("real/secrets/key"), "k").unwrap();
+        std::fs::write(base.join("real/public.txt"), "p").unwrap();
+        std::os::unix::fs::symlink(base.join("real"), base.join("link")).unwrap();
+        let rule = vec![format!("{}/link/secrets/**", base.display())];
+        let secret = base.join("real/secrets/key");
+        let public = base.join("real/public.txt");
+
+        // Resolved: the physical spelling is hidden, the sibling is not.
+        let f = ReadDenyFilter::new_with(&base, &rule, Duration::from_secs(60), physical_alias_resolution_bounded).unwrap();
+        assert!(f.denies(&secret, false), "resolved alias hides the physical path");
+        assert!(!f.denies(&public, false), "resolved alias leaves the sibling");
+
+        // The resolver ran out of time, or another one is still parked: unknown, so everything is denied.
+        let f = ReadDenyFilter::new_with(&base, &rule, Duration::from_secs(60), |_, _, _| AliasResolution::Unresolved).unwrap();
+        assert!(f.denies(&secret, false), "unresolved alias must not let the physical path through");
+        assert!(f.denies(&public, false), "unresolved alias fails closed for every path");
+        assert!(f.denies(&base.join("real/secrets"), true), "and for directories");
+
+        // A budget already spent before a rule is reached is the same unknown.
+        let f = ReadDenyFilter::new_with(&base, &rule, Duration::ZERO, |_, _, _| unreachable!("no budget left")).unwrap();
+        assert!(f.denies(&secret, false), "spent budget must not let the physical path through");
+
+        // A rule with nothing to alias is not an unknown: the rest of the tree stays visible.
+        let f = ReadDenyFilter::new_with(&base, &rule, Duration::from_secs(60), |_, _, _| AliasResolution::NoAlias).unwrap();
+        assert!(!f.denies(&public, false), "NoAlias is a known answer");
     }
 
     #[cfg(unix)]

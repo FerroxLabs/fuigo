@@ -848,6 +848,7 @@ impl SessionActor {
         let turn_number = self.chat_state_handle.get_prompt_index().await as u64;
         self.current_turn_number.set(turn_number);
         self.transient_retries_prompt_total.set(0);
+        self.compaction.overflow_compactions_since_response.set(0);
         self.transient_episode_start.set(None);
         let yolo_mode = self.permissions.is_yolo_mode();
         let msg_count = self.chat_state_handle.get_conversation_len().await;
@@ -972,6 +973,13 @@ impl SessionActor {
             .hide_user_echo_from_scrollback()
         {
             chunk_meta.insert("hideFromScrollback".into(), serde_json::json!(true));
+        }
+        // A turn the runtime started on its own is not offered by the rewind picker (it lists what the user typed)
+        if input_origin.is_synthetic() {
+            chunk_meta.insert(
+                crate::session::storage::AUTOMATIC_TURN_META_KEY.into(),
+                serde_json::json!(true),
+            );
         }
         let user_chunk_meta = Some(chunk_meta);
         let text = prompt_blocks.iter().fold(String::new(), |mut acc, b| {
@@ -1226,7 +1234,6 @@ impl SessionActor {
             }
             self.await_inherited_mcp_registration().await;
             self.maybe_inject_mcp_reminder().await;
-            self.maybe_inject_mcp_connecting_reminder().await;
             self.maybe_inject_date_rollover_reminder().await;
             self.inject_plan_mode_reminders().await;
             self.inject_resumed_tasks_reminder();
@@ -2747,6 +2754,10 @@ impl SessionActor {
         let tool_prep_start = std::time::Instant::now();
         let (tool_definitions, mcp_wait_ms) = self.prepare_tool_definitions_timed().await;
         let total_prep_ms = tool_prep_start.elapsed().as_millis() as u64;
+        // After the tool-definition wait, so a Blocking turn has already waited out the handshakes it would
+        // otherwise announce as "connecting"; a Progressive turn still hears about the ones that are not up yet.
+        self.maybe_inject_mcp_connecting_reminder().await;
+        self.maybe_inject_mcp_reminder().await;
         if let Some(ref mut pt) = prompt_timing {
             pt.record_tool_prep(mcp_wait_ms, total_prep_ms);
         }
@@ -3276,6 +3287,7 @@ impl SessionActor {
                 .await
             {
                 Ok(SamplerTurnOutcome::Response(r, latency)) => {
+                    self.compaction.overflow_compactions_since_response.set(0);
                     salvage.response_arrived();
                     (r, latency)
                 }
@@ -4112,6 +4124,21 @@ impl SessionActor {
                     });
                 }
                 Ok(ToolLoop::HookDenied { .. }) => {}
+                Ok(ToolLoop::HookStop { hook_name, reason }) => {
+                    let reason = reason.unwrap_or_else(|| "continue: false".to_owned());
+                    self.send_hook_annotation(&format!(
+                        "\u{26a0} Hook `{hook_name}` stopped the agent: {reason}"
+                    ))
+                    .await;
+                    return Ok(TurnOutcome::Cancelled {
+                        category: Some(crate::session::events::CancellationCategory::HookDenied),
+                        context: Some(crate::session::commands::CancellationContext {
+                            hook_name: Some(hook_name),
+                            reason: Some(reason),
+                            ..Default::default()
+                        }),
+                    });
+                }
                 Ok(ToolLoop::Cancelled) => {
                     return Ok(TurnOutcome::Cancelled {
                         category: Some(

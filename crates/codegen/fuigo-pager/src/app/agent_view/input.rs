@@ -4,7 +4,7 @@ use super::paste::paste_key_tests;
 #[cfg(test)]
 use super::test_fixtures;
 use super::{
-    AgentPane, AgentView, BlockingCard, CtaPhase, EscStep, InputMode, KeyOwner,
+    AgentPane, AgentView, BlockingCard, CtaPhase, InputMode, KeyOwner,
     MULTI_CLICK_TIMEOUT_MS, PromptInputMode, active_contexts_for_pane, format_key_for_log,
     is_link_modifier_for_key, is_mouse_reporting_toggle_chord, resolve_action,
 };
@@ -41,13 +41,13 @@ impl AgentView {
             || self.video_viewer.is_some()
             || self.block_viewer.is_some()
             || self.gboom.is_some()
+            || self.stoke.is_some()
             || self.show_goal_detail
             || self.btw_focused
             || self.blocking_card().is_some()
             || self.plan_approval_view.is_some()
             || self.casual_commenting_range.is_some()
             || self.rewind_state.is_some()
-            || self.inline_edit.is_some()
             || self.jump_state.is_some()
             || self.prompt.any_dropdown_open();
         if owned_elsewhere {
@@ -71,6 +71,7 @@ impl AgentView {
             && self.image_viewer.is_none()
             && self.video_viewer.is_none()
             && self.gboom.is_none()
+            && self.stoke.is_none()
             && self.extensions_modal.is_none()
             && self.agents_modal.is_none()
             && self.persona_detail.is_none()
@@ -101,6 +102,7 @@ impl AgentView {
         self.extensions_modal.is_some()
             || self.active_modal.is_some()
             || self.gboom.is_some()
+            || self.stoke.is_some()
             || self.video_viewer.is_some()
             || self.image_viewer.is_some()
             || self.agents_modal.is_some()
@@ -187,10 +189,9 @@ impl AgentView {
         {
             return true;
         }
-        if self.plan_approval_view.is_some() {
-            return self.plan_overlay_at_back_out_top();
-        }
-        self.card_esc() == Some(EscStep::BackOutOverlay)
+        // A question card never backs out from the prompt: its first Esc parks on the scrollback (`EscStep::ParkFocus`), and the bare-scrollback
+        // branch above takes the next one
+        self.plan_approval_view.is_some() && self.plan_overlay_at_back_out_top()
     }
     /// Whether the pending plan-approval overlay is at a state where `Esc` / `Left` have nothing else to do, so they back out to the dashboard:
     ///   - `Preview` line viewer: no-ops once the input bar, accepted search matcher, and visual selection are all cleared
@@ -508,6 +509,22 @@ impl AgentView {
                         return InputOutcome::Unchanged;
                     }
                     self.handle_video_viewer_key(key)
+                }
+                _ => InputOutcome::Changed,
+            };
+        }
+        if self.stoke.is_some() {
+            return match ev {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    if key!('q', CONTROL).matches(key) {
+                        return InputOutcome::Unchanged;
+                    }
+                    if crate::stoke::StokeState::handle_key(key)
+                        == crate::stoke::StokeKeyOutcome::Close
+                    {
+                        self.stoke = None;
+                    }
+                    InputOutcome::Changed
                 }
                 _ => InputOutcome::Changed,
             };
@@ -973,24 +990,6 @@ impl AgentView {
                     self.handle_rewind_key(key)
                 }
                 Event::Mouse(mouse) => self.handle_rewind_mouse(mouse),
-                _ => InputOutcome::Unchanged,
-            };
-        }
-        if self.inline_edit.is_some() {
-            return match ev {
-                Event::Key(key) if key.kind != crossterm::event::KeyEventKind::Release => {
-                    if key!('q', CONTROL).matches(key) {
-                        return InputOutcome::Unchanged;
-                    }
-                    self.handle_inline_edit_key(key)
-                }
-                Event::Mouse(mouse) => self.handle_inline_edit_mouse(mouse),
-                Event::Paste(text) => {
-                    if let Some(ref mut edit) = self.inline_edit {
-                        edit.textarea.insert_str(text);
-                    }
-                    InputOutcome::Changed
-                }
                 _ => InputOutcome::Unchanged,
             };
         }
@@ -2490,41 +2489,6 @@ mod voice_stop_click_during_plan_review_tests {
             matches!(outcome, InputOutcome::Action(Action::VoiceToggle)),
             "[stop] click during plan feedback must dispatch VoiceToggle, got {outcome:?}"
         );
-    }
-}
-#[cfg(test)]
-mod rich_textarea_paste_routing_tests {
-    use super::test_fixtures::make_agent;
-    use crate::actions::ActionRegistry;
-    use crate::app::inline_edit::InlineEditState;
-    use crate::scrollback::entry::EntryId;
-    use crossterm::event::Event;
-    use fuigo_ratatui_textarea::{TextArea, TextAreaState};
-    #[test]
-    fn inline_edit_receives_raw_multiline_paste_without_touching_prompt() {
-        let mut agent = make_agent();
-        agent.prompt.set_text("hidden prompt");
-        let mut textarea = TextArea::new();
-        textarea.set_text("ab");
-        textarea.set_cursor(1);
-        agent.inline_edit = Some(InlineEditState {
-            entry_id: EntryId::new(1),
-            prompt_index: 0,
-            original: "ab".to_owned(),
-            textarea,
-            textarea_state: TextAreaState::default(),
-            last_text_area: None,
-            last_rect: None,
-        });
-        let _ = agent.handle_input(
-            &Event::Paste("中\nline".to_owned()),
-            &ActionRegistry::defaults(),
-        );
-        assert_eq!(
-            agent.inline_edit.as_ref().map(|edit| edit.textarea.text()),
-            Some("a中\nlineb")
-        );
-        assert_eq!(agent.prompt.text(), "hidden prompt");
     }
 }
 /// Pasting while the scrollback pane holds the keyboard (prompt unfocused) must land in the composer.

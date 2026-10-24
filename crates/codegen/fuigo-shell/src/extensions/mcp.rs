@@ -68,6 +68,9 @@ fn default_true() -> bool {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct McpListResponse {
     pub servers: Vec<McpServerEntry>,
+    /// Session-scoped: true when `is_initialized` is set. A missing client is then a failed handshake.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_mcp_resolved: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -259,6 +262,8 @@ pub struct McpStatusSnapshot {
     pub configs: Vec<acp::McpServer>,
     pub clients: Vec<McpClientStatus>,
     pub auth_required: std::collections::HashSet<String>,
+    /// Mirrors `McpState::is_initialized`. A missing client then means the handshake failed.
+    pub is_resolved: bool,
     /// The recorded cause of each server's failed start or handshake (P152; `McpState::init_failed`).
     pub init_failed: HashMap<String, String>,
     /// Why the last automatic OAuth token request of each HTTP server was refused (K7), by server name.
@@ -657,7 +662,7 @@ pub(crate) async fn build_mcp_status(
     let (
         configs,
         clients,
-        _is_initializing,
+        is_initialized,
         initializing_servers,
         mcp_tool_meta,
         mcp_tool_icons,
@@ -673,7 +678,7 @@ pub(crate) async fn build_mcp_status(
                 .all_clients()
                 .map(|(_, c)| c.clone())
                 .collect::<Vec<_>>(),
-            state.is_initializing(),
+            state.is_initialized(),
             state.handshaking_servers_cloned(),
             state.mcp_tool_meta.clone(),
             state.mcp_tool_icons.clone(),
@@ -792,6 +797,7 @@ pub(crate) async fn build_mcp_status(
         configs,
         clients: client_statuses,
         auth_required,
+        is_resolved: is_initialized,
         init_failed: init_failed.into_iter().collect(),
         auth_refusals,
         acp_servers,
@@ -1160,6 +1166,9 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         }
     }
 
+    let session_mcp_resolved = session_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.is_resolved);
     // Carry the verdict for policy-dropped servers so the pager can say "blocked by policy"
     // instead of a generic "unavailable"; computed only with a session snapshot.
     let blocked_reasons: HashMap<String, String> = match (&session_snapshot, &definition_index) {
@@ -1302,7 +1311,10 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             }
         }
     }
-    to_ext_response(Ok(McpListResponse { servers }))
+    to_ext_response(Ok(McpListResponse {
+        servers,
+        session_mcp_resolved,
+    }))
 }
 
 // ── mcp/call handler ────────────────────────────────────────────────
@@ -2456,6 +2468,51 @@ async fn handle_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 mod tests {
     use super::*;
 
+    /// `sessionMcpResolved` lets a client tell "no client yet" (still starting) from "no client" (handshake failed).
+    /// It follows `McpState::is_initialized`, which stays false until every handshake has reported.
+    #[tokio::test]
+    async fn status_snapshot_resolves_only_after_every_handshake_reports() {
+        let state = Arc::new(TokioMutex::new(McpState::new(vec![acp::McpServer::Stdio(
+            acp::McpServerStdio::new("slow", "true"),
+        )])));
+        let bridge = Arc::new(crate::tools::bridge::ToolBridge::for_test());
+
+        let before = build_mcp_status(&state, &bridge, None).await;
+        assert!(!before.is_resolved, "init has not started");
+
+        {
+            let mut guard = state.lock().await;
+            assert!(guard.try_start_init());
+            guard.mark_servers_initializing(vec!["slow".to_string()]);
+            guard.finish_init();
+        }
+        let handshaking = build_mcp_status(&state, &bridge, None).await;
+        assert!(
+            !handshaking.is_resolved,
+            "finish_init fires early: a handshake still in flight is not resolved"
+        );
+
+        state.lock().await.mark_server_ready("slow");
+        let settled = build_mcp_status(&state, &bridge, None).await;
+        assert!(settled.is_resolved, "every handshake has reported");
+    }
+
+    #[test]
+    fn list_response_omits_session_mcp_resolved_without_a_session() {
+        let bare = serde_json::to_value(McpListResponse {
+            servers: vec![],
+            session_mcp_resolved: None,
+        })
+        .unwrap();
+        assert!(bare.get("sessionMcpResolved").is_none(), "{bare}");
+        let session = serde_json::to_value(McpListResponse {
+            servers: vec![],
+            session_mcp_resolved: Some(false),
+        })
+        .unwrap();
+        assert_eq!(session["sessionMcpResolved"], serde_json::json!(false));
+    }
+
     /// The emit-only reverse method (`fuigo/mcp/sdk_call`) shares the `fuigo/mcp/` prefix.
     /// `mvp_agent`'s dispatcher therefore routes an inbound copy of it to this module's `handle`.
     /// It must NOT collide with any forward route, so it has no `McpRoute`.
@@ -2646,6 +2703,7 @@ mod tests {
                     }),
                 },
             ],
+            session_mcp_resolved: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         // [0] local HTTP

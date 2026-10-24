@@ -49,6 +49,8 @@ fn reseed_agent_screen_mode(agent: &mut AgentView, mode: ScreenMode) {
     if !mode.is_minimal() {
         agent.scrollback.reapply_thinking_fold_policy();
     }
+    // The `[Copy]` and diagram rows exist only in fullscreen, so every cached entry height is stale after a switch
+    agent.scrollback.invalidate_heights();
     for child in agent.subagent_views.values_mut() {
         reseed_agent_screen_mode(child, mode);
     }
@@ -232,6 +234,7 @@ fn dismiss_agent_surfaces(agent: &mut AgentView, writer: &crate::render::draw::E
         // Pop the game's kitty layer or later keys carry unexpected release events.
         super::pop_gboom_keyboard_flags(writer);
     }
+    agent.stoke = None;
     agent.image_viewer = None;
     agent.video_viewer = None;
     agent.line_viewer = None;
@@ -299,6 +302,40 @@ mod tests {
 
         // Leave the fullscreen baseline other tests expect.
         reseed_screen_mode(&mut app, ScreenMode::Fullscreen);
+    }
+
+    /// The `[Copy]` rows under code blocks are reserved in fullscreen only: a switch to minimal drops their rows
+    /// and the switch back restores them, instead of leaving heights measured for the other mode.
+    #[test]
+    fn reseed_relayouts_copy_rows_across_the_mode_switch() {
+        use crate::scrollback::block::RenderBlock;
+
+        let _guard = crate::theme::cache::pin_theme();
+        mark_theme_resolved();
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = *app.agents.keys().next().expect("agent present");
+        reseed_screen_mode(&mut app, ScreenMode::Fullscreen);
+        let agent = app.agents.get_mut(&agent_id).expect("agent present");
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "intro\n\n```rust\nlet a = 1;\n```\n\nbye\n",
+        ));
+        agent.scrollback.prepare_layout(80, 40);
+        let fullscreen_rows = agent.scrollback.content_height_for_test();
+
+        reseed_screen_mode(&mut app, ScreenMode::Minimal);
+        let agent = app.agents.get_mut(&agent_id).expect("agent present");
+        agent.scrollback.prepare_layout(80, 40);
+        let minimal_rows = agent.scrollback.content_height_for_test();
+        assert_eq!(minimal_rows + 1, fullscreen_rows, "minimal drops the copy row");
+
+        reseed_screen_mode(&mut app, ScreenMode::Fullscreen);
+        let agent = app.agents.get_mut(&agent_id).expect("agent present");
+        agent.scrollback.prepare_layout(80, 40);
+        assert_eq!(
+            agent.scrollback.content_height_for_test(),
+            fullscreen_rows,
+            "fullscreen shows the copy row again"
+        );
     }
 
     /// After fullscreen → minimal → fullscreen, thinking folds must fold

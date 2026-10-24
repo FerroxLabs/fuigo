@@ -44,10 +44,11 @@ pub(super) fn handle_permission_request(
         .notification_service
         .should_suppress_permission_notification()
     {
+        let body = permission_notification_body(agent, &perm.request.session_id);
         app.notification_service.notify(NotificationEvent {
             kind: NotificationEventKind::ApprovalRequired,
             title: "Fuigo".into(),
-            body: NotificationEventKind::ApprovalRequired.as_str().into(),
+            body,
             session_id: Some(perm.request.session_id.0.to_string()),
         });
         app.notification_service.mark_permission_notified();
@@ -57,7 +58,21 @@ pub(super) fn handle_permission_request(
     needs_redraw && is_active
 }
 
-fn enqueue_permission(
+/// Notification text for an approval request: names the subagent or titled session that is asking, so a card waiting in a background session is identifiable.
+pub(super) fn permission_notification_body(agent: &AgentView, session_id: &acp::SessionId) -> String {
+    let base = NotificationEventKind::ApprovalRequired.as_str();
+    let sid = session_id.0.as_ref();
+    let who = match agent.subagent_sessions.get(sid) {
+        Some(info) => Some(info.description.to_string()),
+        None => agent.generated_session_title.clone(),
+    };
+    match who.map(|w| w.trim().to_owned()).filter(|w| !w.is_empty()) {
+        Some(who) => format!("{base}: {who}"),
+        None => base.to_owned(),
+    }
+}
+
+pub(super) fn enqueue_permission(
     perm: fuigo_acp_lib::AcpArgs<acp::RequestPermissionRequest>,
     agent: &mut AgentView,
 ) -> bool {
@@ -110,8 +125,11 @@ fn enqueue_permission(
 
     let subagent_label = resolve_subagent_label(agent, &perm.request.session_id);
 
-    let (title, description, bash_command_raw) =
+    let (title, mut description, bash_command_raw) =
         build_permission_display(&perm.request, bash_highlights.as_ref());
+    if let Some(raw) = perm.request.tool_call.fields.raw_input.as_ref() {
+        description.extend(existing_contents_lines(raw, &agent.session.cwd));
+    }
 
     let perm_id = agent.next_perm_req_id;
     agent.next_perm_req_id += 1;
@@ -255,6 +273,72 @@ pub(super) fn build_permission_display(
     let description = permission_description_lines(req, ask.as_ref());
     let bash_cmd = if is_execute { raw_command } else { None };
     (title, description, bash_cmd)
+}
+
+/// Most lines of an existing file a write approval card previews.
+const EXISTING_PREVIEW_LINES: usize = 12;
+/// Longest line (in chars) the preview shows before cutting it.
+const EXISTING_PREVIEW_LINE_CHARS: usize = 160;
+/// Largest file read for the preview; a bigger one is only named.
+const EXISTING_PREVIEW_MAX_BYTES: u64 = 256 * 1024;
+
+/// What a whole-file write is about to replace: a preview of the file as it is now.
+///
+/// Only a request that carries `file_path` and the full `content` is a whole-file write (an edit, which carries `old_string`, shows its own diff).
+/// A path that does not exist yet replaces nothing and adds no lines.
+/// A relative path is resolved against `cwd`.
+pub(super) fn existing_contents_lines(
+    raw_input: &serde_json::Value,
+    cwd: &std::path::Path,
+) -> Vec<String> {
+    let Some(object) = raw_input.as_object() else {
+        return Vec::new();
+    };
+    if object.contains_key("old_string") || !object.contains_key("content") {
+        return Vec::new();
+    }
+    let Some(file_path) = object.get("file_path").and_then(|v| v.as_str()) else {
+        return Vec::new();
+    };
+    let path = cwd.join(file_path);
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return Vec::new();
+    };
+    if !meta.is_file() {
+        return Vec::new();
+    }
+    if meta.len() == 0 {
+        return vec!["Replaces an empty file.".to_string()];
+    }
+    if meta.len() > EXISTING_PREVIEW_MAX_BYTES {
+        return vec![format!(
+            "Replaces an existing file ({} bytes, too large to preview)",
+            meta.len()
+        )];
+    }
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let total = text.lines().count();
+    let noun = if total == 1 { "line" } else { "lines" };
+    let mut out = vec![format!("Replaces existing contents ({total} {noun}):")];
+    for line in text.lines().take(EXISTING_PREVIEW_LINES) {
+        let mut shown: String = line
+            .replace('\t', "    ")
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(EXISTING_PREVIEW_LINE_CHARS)
+            .collect();
+        if line.chars().count() > EXISTING_PREVIEW_LINE_CHARS {
+            shown.push('\u{2026}');
+        }
+        out.push(shown);
+    }
+    if total > EXISTING_PREVIEW_LINES {
+        out.push(format!("\u{2026} (+{} more lines)", total - EXISTING_PREVIEW_LINES));
+    }
+    out
 }
 
 fn permission_description_lines(
@@ -456,19 +540,34 @@ pub(super) fn apply_recap_block(agent: &mut AgentView, auto: bool, recap_block: 
             .take()
             .filter(|&id| agent.scrollback.get_by_id(id).is_some())
     };
+    // Compact mode keeps recaps to their one-line preview
+    let mode = agent
+        .prompt
+        .compact()
+        .then_some(crate::scrollback::DisplayMode::Collapsed);
+    let fresh_entry = |block: RenderBlock| {
+        let mut entry = crate::scrollback::entry::ScrollbackEntry::new(block);
+        if let Some(mode) = mode {
+            entry.set_display_mode(mode);
+        }
+        entry
+    };
     match fill_id {
         Some(id) if agent.scrollback.is_committed(id) => {
             agent.scrollback.remove_entry(id);
-            agent.scrollback.push_block(recap_block);
+            agent.scrollback.push(fresh_entry(recap_block));
         }
         Some(id) => {
             if let Some(entry) = agent.scrollback.get_by_id_mut(id) {
                 entry.block = recap_block;
+                if let Some(mode) = mode {
+                    entry.set_display_mode(mode);
+                }
             }
             agent.scrollback.finish_running(id);
         }
         None => {
-            agent.scrollback.push_block(recap_block);
+            agent.scrollback.push(fresh_entry(recap_block));
         }
     }
 }

@@ -47,7 +47,11 @@ pub(crate) fn relay_refusal(params: &str) -> Option<RelayRefusal> {
         None => "Relay refused: its URL is not usable. Details are in the session".to_owned(),
     };
     Some(RelayRefusal {
-        session_id: parsed.session_id.as_deref().map(scrub_id).filter(|s| !s.is_empty()),
+        session_id: parsed
+            .session_id
+            .as_deref()
+            .map(scrub_id)
+            .filter(|s| !s.is_empty()),
         text: message,
         toast,
     })
@@ -70,6 +74,10 @@ mod tests {
         assert_eq!(refusal.text, "badtext");
         // The id routes by exact match: controls go, a joiner a valid id may hold stays
         assert_eq!(refusal.session_id.as_deref(), Some("s\u{200d}1"));
-        assert!(refusal.toast.contains("https://r.example"), "{}", refusal.toast);
+        assert!(
+            refusal.toast.contains("https://r.example"),
+            "{}",
+            refusal.toast
+        );
     }
 }

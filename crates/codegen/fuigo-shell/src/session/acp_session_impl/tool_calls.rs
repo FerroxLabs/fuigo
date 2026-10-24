@@ -1,6 +1,7 @@
 //! Tool-call execution for `SessionActor`: a `#[path]` child of `acp_session`.
 use super::hooks::RewriteProblem;
 use super::*;
+use super::mcp_argument_coercion;
 use fuigo_hooks::result::HookDecision;
 use futures::StreamExt;
 use tracing::Instrument;
@@ -114,6 +115,16 @@ fn is_interruptible_wait_tool(tool_name: &str, args: &serde_json::Value) -> bool
         "Await" | "AwaitShell" => true,
         _ => false,
     }
+}
+/// A wait tool is about to block while follow-ups sit in the held queue. In steer mode those are sendable now:
+/// promote them as interjections so the wait aborts at once instead of the user's follow-up sitting behind a
+/// long wait. Queue mode keeps follow-ups held, and an active goal's wait is not sendable (promoting would abort it immediately).
+fn should_flush_held_queue_before_wait(
+    has_interruptible_wait: bool,
+    steer: bool,
+    goal_loop_active: bool,
+) -> bool {
+    has_interruptible_wait && steer && !goal_loop_active
 }
 async fn wait_for_pending_interjection(buf: &InterjectionBuffer<acp::ImageContent>) {
     loop {
@@ -309,6 +320,39 @@ fn resume_action_for(outcome: PlanApprovalOutcome, feedback: Option<String>) -> 
         PlanApprovalOutcome::Abandoned => ResumeAction::LeaveOnly,
     }
 }
+/// Test seam: make `handle_bridge_tool_success` report an ACP error for one named call, after it has done its work
+/// (it pushes the call's tool result before it can return). Thread-local, one-shot, absent from release builds.
+#[cfg(test)]
+pub(crate) mod bridge_fault {
+    use agent_client_protocol as acp;
+    use super::ConversationItem;
+    thread_local! {
+        static FAIL_CALL_ID: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    }
+    #[allow(dead_code)] // used by the unix-only shell batch tests
+    pub(crate) fn arm(call_id: &str) {
+        FAIL_CALL_ID.with(|c| *c.borrow_mut() = Some(call_id.to_owned()));
+    }
+    pub(crate) fn apply(
+        call_id: &str,
+        result: Result<Vec<ConversationItem>, acp::Error>,
+    ) -> Result<Vec<ConversationItem>, acp::Error> {
+        let hit = FAIL_CALL_ID.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.as_deref() == Some(call_id) {
+                c.take();
+                true
+            } else {
+                false
+            }
+        });
+        if hit {
+            Err(acp::Error::internal_error().data("injected ACP error after tool result"))
+        } else {
+            result
+        }
+    }
+}
 pub(super) struct BridgeToolSuccess<'a> {
     pub tool_call_id: &'a acp::ToolCallId,
     pub call_id: &'a str,
@@ -316,6 +360,7 @@ pub(super) struct BridgeToolSuccess<'a> {
     pub effective_tool_name: &'a str,
     pub drained: DrainedToolSuccess,
     pub concatenated_json_count: usize,
+    pub coercion_note: Option<&'a str>,
     pub model_id: &'a str,
     pub tool_parsed_args: &'a serde_json::Value,
     pub model_output_override: Option<String>,
@@ -369,25 +414,43 @@ impl SessionActor {
         let mut final_result: Option<ToolLoop> = None;
         let mut deferred_followups: Vec<ConversationItem> = Vec::new();
         let tool_calls = self.reject_excess_media_gen_calls(tool_calls).await?;
+        // A batch that fails still answers every call it was given and still hands over its follow-ups; the error is
+        // returned after that, so no tool_use is left without a tool_result.
+        let mut batch_error: Option<acp::Error> = None;
         if !tool_calls.is_empty() {
             if tool_calls.len() > 1 {
                 let kind_of = |name: &str| self.agent.borrow().tool_bridge().tool_kind(name);
                 let (body, tail) = split_exit_plan_tail(tool_calls, kind_of);
-                if !body.is_empty() {
-                    self.execute_tool_calls_batch(body, &mut deferred_followups, &mut final_result)
-                        .await?;
+                if !body.is_empty()
+                    && let Err(error) = self
+                        .execute_tool_calls_batch(body, &mut deferred_followups, &mut final_result)
+                        .await
+                {
+                    batch_error = Some(error);
                 }
                 if !tail.is_empty() {
-                    self.execute_tool_calls_batch(tail, &mut deferred_followups, &mut final_result)
-                        .await?;
+                    if batch_error.is_some() {
+                        for call in tail {
+                            self.chat_state_handle.push_tool_result(ConversationItem::tool_result(
+                                call.id.clone(),
+                                format!(
+                                    "Tool execution cancelled because an earlier tool call in this batch failed, for tool `{}`",
+                                    call.function.name
+                                ),
+                            ));
+                        }
+                    } else if let Err(error) = self
+                        .execute_tool_calls_batch(tail, &mut deferred_followups, &mut final_result)
+                        .await
+                    {
+                        batch_error = Some(error);
+                    }
                 }
-            } else {
-                self.execute_tool_calls_batch(
-                    tool_calls,
-                    &mut deferred_followups,
-                    &mut final_result,
-                )
-                .await?;
+            } else if let Err(error) = self
+                .execute_tool_calls_batch(tool_calls, &mut deferred_followups, &mut final_result)
+                .await
+            {
+                batch_error = Some(error);
             }
         }
         {
@@ -405,6 +468,9 @@ impl SessionActor {
             for chat in deferred_followups {
                 self.chat_state_handle.push_user_message(chat);
             }
+        }
+        if let Some(error) = batch_error {
+            return Err(error);
         }
         self.recheck_peer_integrity().await;
         self.persist_peer_state().await;
@@ -581,6 +647,12 @@ impl SessionActor {
                             call.function.name
                         )
                     }
+                    Some(ToolLoop::HookStop { hook_name, .. }) => {
+                        format!(
+                            "Tool execution cancelled because hook `{hook_name}` stopped the turn, for tool `{}`",
+                            call.function.name
+                        )
+                    }
                     _ => {
                         format!("Tool execution cancelled for tool `{}`", call.function.name)
                     }
@@ -640,6 +712,7 @@ impl SessionActor {
                         ToolLoop::PermissionReject { .. }
                             | ToolLoop::Cancelled
                             | ToolLoop::FollowupMessage(_)
+                            | ToolLoop::HookStop { .. }
                     ) && final_result.is_none()
                     {
                         *final_result = Some(tool_loop);
@@ -659,7 +732,10 @@ impl SessionActor {
             approved
                 .iter()
                 .map(|prepared| {
-                    toolset.remap_params(&prepared.tool_name, prepared.parsed_args.clone())
+                    (
+                        toolset.remap_params(&prepared.tool_name, prepared.parsed_args.clone()),
+                        toolset.lock_path_canonical_param(&prepared.tool_name),
+                    )
                 })
                 .collect()
         };
@@ -668,7 +744,7 @@ impl SessionActor {
         let lock_paths = tokio::task::spawn_blocking(move || {
             lock_args
                 .iter()
-                .map(|args| lock_path_for_args(args, &lock_cwd))
+                .map(|(args, declared)| lock_path_for_call(args, *declared, &lock_cwd))
                 .collect::<Vec<_>>()
         })
         .await
@@ -749,6 +825,15 @@ impl SessionActor {
         let workflow_smoke_check_permits = Arc::new(tokio::sync::Semaphore::new(
             workflow_write_smoke_check::MAX_CONCURRENT_CHECKS,
         ));
+        if should_flush_held_queue_before_wait(
+            approved
+                .iter()
+                .any(|prepared| is_interruptible_wait_tool(&prepared.tool_name, &prepared.parsed_args)),
+            crate::util::config::follow_up_steer_enabled().await,
+            self.goal_loop_active(),
+        ) {
+            self.promote_queued_as_interjections().await;
+        }
         let pending_interjections = self.pending_interjections.clone();
         let session_id: Arc<str> = Arc::from(&*self.session_info.id.0);
         let dispatch_futures: Vec<_> = approved
@@ -999,6 +1084,10 @@ impl SessionActor {
             .in_current_span(),
         );
         let _drainer_guard = crate::util::AbortOnDrop(drainer);
+        // An ACP error while delivering one call's result must not abandon the calls still running: leaving this loop early
+        // drops `_drainer_guard`, which drops every sibling future with its command and its tool result. The first error is
+        // kept, every sibling is drained to its own result, and the error is returned once the batch is complete.
+        let mut batch_error: Option<acp::Error> = None;
         while let Some((idx, result, duration_ms)) = dispatch_rx.recv().await {
             let prepared = approved_slots[idx]
                 .take()
@@ -1079,22 +1168,46 @@ impl SessionActor {
                             effective_tool_name: &effective_tool_name,
                             drained,
                             concatenated_json_count: prepared.concatenated_json_count,
+                            coercion_note: prepared.coercion_note.as_deref(),
                             model_id: &prepared.model_id,
                             tool_parsed_args: &prepared.parsed_args,
                             model_output_override,
                         })
                         .await;
+                    #[cfg(test)]
+                    let bridge_result = bridge_fault::apply(&prepared.call_id, bridge_result);
                     if let Some(scrollback) = deferred_hook_scrollback {
                         self.emit_post_tool_use_scrollback(scrollback).await;
                     }
-                    let followups = bridge_result?;
-                    deferred_followups.extend(followups);
+                    let hook_stop = post_tool_use_delivery
+                        .as_ref()
+                        .and_then(|delivery| delivery.stop.clone());
+                    // `handle_bridge_tool_success` has pushed this call's tool result before it can fail, so the call is answered.
+                    match bridge_result {
+                        Ok(followups) => deferred_followups.extend(followups),
+                        Err(error) => {
+                            tracing::error!(
+                                session_id = %self.session_info.id.0,
+                                tool = %prepared.tool_name,
+                                call_id = %prepared.call_id,
+                                error = %crate::sampling::error::acp_error_text(&error),
+                                "delivering a tool result failed; letting the sibling calls finish before returning the error"
+                            );
+                            batch_error.get_or_insert(error);
+                        }
+                    }
                     if prepared.tool_name == "search_tool" && prepared.parsed_args.get("scope").and_then(|v| v.as_str()) != Some("native") {
                         let pi = self.chat_state_handle.get_prompt_index().await as i64;
                         self.last_search_prompt_index
                             .store(pi, std::sync::atomic::Ordering::Relaxed);
                     }
-                    ToolLoop::Continue
+                    match hook_stop {
+                        Some(stop) => ToolLoop::HookStop {
+                            hook_name: stop.hook_name,
+                            reason: stop.reason,
+                        },
+                        None => ToolLoop::Continue,
+                    }
                 }
                 Err(err) => {
                     let err: anyhow::Error = err.into();
@@ -1106,6 +1219,7 @@ impl SessionActor {
                             prepared.dispatch_target_name.as_deref(),
                             &err,
                             &prepared.model_id,
+                            prepared.coercion_note.as_deref(),
                         )
                         .await;
                     deferred_followups.extend(err_followups);
@@ -1163,7 +1277,9 @@ impl SessionActor {
             self.events.tool_finished();
             let tool_outcome = match &tool_loop {
                 _ if tool_failed => crate::session::events::ToolOutcome::Error,
-                ToolLoop::Continue => crate::session::events::ToolOutcome::Success,
+                ToolLoop::Continue | ToolLoop::HookStop { .. } => {
+                    crate::session::events::ToolOutcome::Success
+                }
                 ToolLoop::PermissionReject { .. } => {
                     crate::session::events::ToolOutcome::PermissionRejected
                 }
@@ -1239,7 +1355,8 @@ impl SessionActor {
             match &tool_loop {
                 ToolLoop::PermissionReject { .. }
                 | ToolLoop::Cancelled
-                | ToolLoop::FollowupMessage(_) => {
+                | ToolLoop::FollowupMessage(_)
+                | ToolLoop::HookStop { .. } => {
                     if final_result.is_none() {
                         *final_result = Some(tool_loop);
                     }
@@ -1248,7 +1365,10 @@ impl SessionActor {
             }
         }
         self.finish_read_dedupe_batch(dedupe_batch_mutates);
-        Ok(())
+        match batch_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
     async fn apply_pre_tool_use_gate(
         &self,
@@ -1283,6 +1403,17 @@ impl SessionActor {
                 HookDecision::Deny { reason, hook_name } => {
                     return Ok(Err(self
                         .deny_tool(
+                            &call.id,
+                            tool_call_id,
+                            resolved_tool_name,
+                            hook_name,
+                            reason,
+                        )
+                        .await?));
+                }
+                HookDecision::Stop { reason, hook_name } => {
+                    return Ok(Err(self
+                        .stop_turn_at_tool(
                             &call.id,
                             tool_call_id,
                             resolved_tool_name,
@@ -1448,6 +1579,7 @@ impl SessionActor {
                             None,
                             &err,
                             &model_id_str,
+                            None,
                         )
                         .await;
                     deferred_followups.extend(followups);
@@ -1552,7 +1684,9 @@ impl SessionActor {
         let mut rewriting_hook: Option<String> = None;
         let mut hook_ask: Option<HookAsk> = None;
         let mut hook_additional_context = Vec::new();
-        if self.may_have_hooks_for(fuigo_hooks::event::HookEventName::PreToolUse) {
+        let has_pre_tool_use_hooks =
+            self.may_have_hooks_for(fuigo_hooks::event::HookEventName::PreToolUse);
+        if has_pre_tool_use_hooks {
             let gate = match self
                 .apply_pre_tool_use_gate(
                     &call,
@@ -1574,6 +1708,57 @@ impl SessionActor {
                 raw_input = rewrite.raw_input;
                 concatenated_json_count = 0;
                 rewriting_hook = Some(rewrite.hook_name);
+            }
+        }
+        // Hooks saw the model's arguments; coercion runs after them and a changed value is gated again.
+        let input_before_coercion = has_pre_tool_use_hooks.then(|| raw_input.clone());
+        let reminder_tag = self.reminder_wrapper_tag();
+        let mut coercion_note =
+            mcp_argument_coercion::target_name(&call.function.name, &tool_input).and_then(
+                |qualified_name| {
+                    let schema = {
+                        let snapshot = self.tool_metadata_snapshot.lock().unwrap();
+                        mcp_argument_coercion::input_schema_for(&snapshot.tools, &qualified_name)
+                            .cloned()
+                    }?;
+                    mcp_argument_coercion::apply_mcp_argument_coercion(
+                        mcp_argument_coercion::CoercionRequest {
+                            schema: &schema,
+                            wire_name: &call.function.name,
+                            qualified_name: &qualified_name,
+                            tool_input: &mut tool_input,
+                            raw_input: &mut raw_input,
+                            reminder_tag,
+                        },
+                    )
+                },
+            );
+        if input_before_coercion.is_some_and(|before| before != raw_input) {
+            let gate = match self
+                .apply_pre_tool_use_gate(
+                    &call,
+                    &tool_call_id,
+                    &resolved_tool_name,
+                    &dispatch_target_name,
+                    &raw_input,
+                )
+                .await?
+            {
+                Ok(gate) => gate,
+                Err(blocked) => return Ok(Err(blocked)),
+            };
+            hook_ask = gate.hook_ask;
+            hook_additional_context = gate.additional_context;
+            if let Some(rewrite) = gate.rewrite {
+                let sent_coerced_value = rewrite.raw_input == raw_input;
+                tool_input = rewrite.tool_input;
+                raw_arguments = rewrite.raw_arguments;
+                raw_input = rewrite.raw_input;
+                concatenated_json_count = 0;
+                rewriting_hook = Some(rewrite.hook_name);
+                if !sent_coerced_value {
+                    coercion_note = None;
+                }
             }
         }
         let access_kind = AccessKind::from(&tool_input);
@@ -1970,6 +2155,7 @@ impl SessionActor {
             tool_call_id,
             tool_name: call.function.name.clone(),
             raw_arguments,
+            coercion_note,
             parsed_args: raw_input.clone(),
             model_id: model_id_str,
             concatenated_json_count,
@@ -2775,6 +2961,7 @@ impl SessionActor {
             effective_tool_name,
             drained,
             concatenated_json_count,
+            coercion_note,
             model_id,
             tool_parsed_args,
             model_output_override,
@@ -2900,6 +3087,8 @@ impl SessionActor {
             )
             .await
         };
+        let prompt_text =
+            mcp_argument_coercion::append_coercion_reminder(prompt_text, coercion_note);
         let tool_chat = if inline_images.is_empty() {
             ConversationItem::tool_result(call_id.to_string(), prompt_text)
         } else {
@@ -3058,6 +3247,7 @@ impl SessionActor {
         effective_tool_name: Option<&str>,
         err: &anyhow::Error,
         model_id: &str,
+        coercion_note: Option<&str>,
     ) -> Vec<ConversationItem> {
         // A hub-routed refusal arrives here as an error: report the hits it queued and store its denial now.
         self.persist_peer_state().await;
@@ -3083,6 +3273,7 @@ impl SessionActor {
             }
             _ => format!("Tool `{requested_tool_name}` failed: {err_str}"),
         };
+        let message = mcp_argument_coercion::append_coercion_reminder(message, coercion_note);
         self.send_update(
             acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
                 tool_call_id.clone(),
@@ -3443,6 +3634,7 @@ mod plan_mode_edit_gate_tests {
                     prompt: "p".into(),
                     description: "d".into(),
                     subagent_type: "general-purpose".into(),
+                    subagent_type_specified: false,
                     run_in_background: false,
                     capability_mode: None,
                     isolation: None,
@@ -3560,7 +3752,23 @@ mod plan_approval_helper_tests {
 }
 #[cfg(test)]
 mod wait_interrupt_tests {
-    use super::{BlockingWaitGuard, is_interruptible_wait_tool, wait_for_pending_interjection};
+    use super::{
+        BlockingWaitGuard, is_interruptible_wait_tool, should_flush_held_queue_before_wait,
+        wait_for_pending_interjection,
+    };
+    #[test]
+    fn wait_start_flush_skips_queue_mode_and_active_goals() {
+        assert!(should_flush_held_queue_before_wait(true, true, false));
+        assert!(
+            !should_flush_held_queue_before_wait(true, false, false),
+            "queue mode must keep follow-ups held across a wait"
+        );
+        assert!(
+            !should_flush_held_queue_before_wait(true, true, true),
+            "an active goal wait is not sendable; promoting would abort it immediately"
+        );
+        assert!(!should_flush_held_queue_before_wait(false, true, false));
+    }
     /// The interruptible-wait select arms: a pending interjection aborts an in-flight wait.
     /// `biased` prefers an already-completed wait result over the abort.
     /// (Unit-level: tests cannot drive the full dispatch loop.)

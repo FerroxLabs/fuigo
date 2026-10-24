@@ -933,7 +933,7 @@ mod tests {
         let theme = Theme::current();
         let cases = [
             (WaitingReason::Model, "Waiting for response…"),
-            (WaitingReason::subagent(), "Waiting on subagent…"),
+            (WaitingReason::subagent(), "Waiting for subagent…"),
             (
                 WaitingReason::Subagent {
                     display: Some("fix flaky test: Running: cargo test".into()),
@@ -1516,7 +1516,7 @@ mod tests {
         args.held_queue_top_sendable = true;
         let text = render_row_text(args, 80);
         assert!(
-            text.contains("Waiting on subagent… 5m59s · 1 queued, Enter to send now"),
+            text.contains("Waiting for subagent… 5m59s · 1 queued, Enter to send now"),
             "phase timer must sit between the wait label and the queued hint, got: {text:?}"
         );
     }

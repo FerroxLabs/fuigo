@@ -591,6 +591,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // Booleans.
             "compact_mode",
             "screen_mode",
+            "tool_density",
             "show_timestamps",
             "show_timeline",
             // PAGER-owned page_flip_on_send (Appearance).
@@ -642,6 +643,8 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "toolset.ask_user_question.timeout_enabled",
             // PAGER-owned plan_mode (Agent category).
             "plan_mode",
+            // SHELL-owned `[features].subagent_model_inheritance` (Agent category, registered after plan_mode)
+            "features.subagent_model_inheritance",
             // SHELL-owned coding_data_sharing (Privacy category).
             "coding_data_sharing",
             // SHELL-owned default_model (Models category).

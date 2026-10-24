@@ -193,7 +193,10 @@ fn welcome_enter_reveals_home_session_and_carries_the_draft() {
     let effects = dispatch(Action::LeaveHome, &mut app);
     assert!(!creates_session(&effects), "got {effects:?}");
     assert!(matches!(app.active_view, ActiveView::Agent(id) if id == home));
-    assert_eq!(app.agents.get(&home).map(|a| a.prompt.text()), Some("hello"));
+    assert_eq!(
+        app.agents.get(&home).map(|a| a.prompt.text()),
+        Some("hello")
+    );
     assert_eq!(app.welcome_prompt.text(), "");
 }
 
@@ -332,9 +335,9 @@ fn explicit_new_session_from_welcome_abandons_home() {
     assert!(app.home_session_agent.is_none());
     assert!(creates_session(&effects), "got {effects:?}");
     assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::DeleteSession { session_id, .. } if session_id == "home-sid")),
+        effects.iter().any(
+            |e| matches!(e, Effect::DeleteSession { session_id, .. } if session_id == "home-sid")
+        ),
         "got {effects:?}"
     );
 }

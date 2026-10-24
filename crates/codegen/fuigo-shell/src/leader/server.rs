@@ -1817,6 +1817,15 @@ async fn drain_and_disconnect(handle: &WorkspaceHandle) {
     }
     handle.shutdown_hub().await;
 }
+/// [`drain_and_disconnect`] for an exposure that is going away for good (stopped, replaced, or
+/// the leader exiting): the folder's egress proxy is stopped too. A paused exposure keeps it; the
+/// folder's `WorkspaceHandle` outlives the exposure, so dropping it is no teardown.
+async fn retire_exposure(handle: &WorkspaceHandle) {
+    drain_and_disconnect(handle).await;
+    if let Some(sandbox) = handle.sandbox() {
+        sandbox.stop_network().await;
+    }
+}
 fn build_workspace_status(
     metadata: &LeaderServerMetadata,
     exposure: Option<&WorkspaceExposure>,
@@ -1935,11 +1944,29 @@ async fn handle_workspace_start(
         std::env::var("FUIGO_WORKSPACE_UPLOAD_QUEUE_ENABLED").as_deref() != Ok("false");
     crate::agent::folder_trust::resolve_and_record(&cwd_path, None, false);
     let project_lsp_trusted = crate::agent::folder_trust::project_scope_allowed(&cwd_path);
+    // The folder's per-command shell sandbox. Its mode is `off` (commands run as before, the
+    // folder probes and scans nothing) unless FUIGO_SANDBOX_MODE, the managed config or a
+    // `workspaced.toml` says `observe` or `enforce`. The leader's socket directory is its control
+    // endpoint: protected from, and denied to, every sandboxed command.
+    let control_socket_dir = control_state
+        .metadata
+        .socket_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let sandbox = fuigo_workspace::sandbox::WorkspaceSandbox::serve(
+        fuigo_workspace::sandbox::WorkspaceSandboxConfig::for_root(
+            cwd_path.clone(),
+            control_socket_dir,
+        ),
+    )
+    .await;
     let handle = fuigo_workspace::connect_local_workspace(
         cwd_path.clone(), url, auth,
         fuigo_workspace::LocalWorkspaceConnectOptions {
             metadata: Some(metadata), server_id: Some(server_id), alpha_test_key,
             allow_insecure_ws, status_config, upload_queue_enabled, project_lsp_trusted,
+            sandbox: Some(sandbox),
             ..Default::default()
         },
     )
@@ -1954,7 +1981,7 @@ async fn handle_workspace_start(
     });
     let payload = build_workspace_status(&control_state.metadata, Some(exposure.as_ref()));
     if let Some(old) = ws.exposure.swap(Some(exposure)) {
-        drain_and_disconnect(&old.handle).await;
+        retire_exposure(&old.handle).await;
     }
     Ok(payload)
 }
@@ -2002,7 +2029,7 @@ async fn handle_workspace_stop(
     let ws = &control_state.workspace;
     let _serialize = ws.lock.lock().await;
     if let Some(exp) = ws.exposure.swap(None) {
-        drain_and_disconnect(&exp.handle).await;
+        retire_exposure(&exp.handle).await;
     }
     Ok(build_workspace_status(&control_state.metadata, None))
 }
@@ -2020,7 +2047,7 @@ async fn finalize_workspace_on_shutdown(control_state: LeaderServerControlState)
     let _serialize = ws.lock.lock().await;
     if let Some(exp) = ws.exposure.swap(None) {
         info!("Draining workspace exposure on leader shutdown");
-        drain_and_disconnect(&exp.handle).await;
+        retire_exposure(&exp.handle).await;
     }
 }
 fn handle_control_command(

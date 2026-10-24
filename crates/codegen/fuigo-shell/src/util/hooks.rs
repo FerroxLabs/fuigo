@@ -72,6 +72,35 @@ fn discover_hook_source_paths_in(
     git_root: Option<&Path>,
     compat: &fuigo_tools::types::compat::CompatConfig,
 ) -> HookSourcePaths {
+    discover_hook_source_paths_with_dirs(fuigo, home, git_root, &[], compat)
+}
+
+/// The folders between the repository root (exclusive) and `cwd` (inclusive), outermost first: the places a launch from a
+/// subfolder keeps project hooks besides the root's. Empty when `cwd` is the root or is not inside it.
+pub(crate) fn project_hook_subdirs(cwd: &Path, git_root: &Path) -> Vec<PathBuf> {
+    let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (cwd, root) = (canon(cwd), canon(git_root));
+    let Ok(relative) = cwd.strip_prefix(&root) else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    let mut current = root;
+    for part in relative.components() {
+        current = current.join(part);
+        dirs.push(current.clone());
+    }
+    dirs
+}
+
+/// [`discover_hook_source_paths_in`] with the folders from [`project_hook_subdirs`]: each adds its own project sources after
+/// the root's, so a nearer folder's hooks come later.
+fn discover_hook_source_paths_with_dirs(
+    fuigo: Option<&Path>,
+    home: Option<&Path>,
+    git_root: Option<&Path>,
+    subdirs: &[PathBuf],
+    compat: &fuigo_tools::types::compat::CompatConfig,
+) -> HookSourcePaths {
     let include_claude = include_claude_hooks(compat);
     let include_cursor = include_cursor_hooks(compat);
 
@@ -119,6 +148,16 @@ fn discover_hook_source_paths_in(
         if include_cursor {
             project.push(root.join(".cursor").join("hooks.json"));
         }
+        for dir in subdirs {
+            if include_claude {
+                project.push(dir.join(".claude").join("settings.json"));
+                project.push(dir.join(".claude").join("settings.local.json"));
+            }
+            project.push(dir.join(".fuigo").join("hooks"));
+            if include_cursor {
+                project.push(dir.join(".cursor").join("hooks.json"));
+            }
+        }
     }
 
     HookSourcePaths { global, project }
@@ -135,6 +174,26 @@ pub(crate) fn discover_hooks(
     // This is lighter than `ConfigLayers::load` (only the small per-layer files, no campaigns, version overrides, or MDM)
     let config_layers = fuigo_config::hook_config_layers();
     assemble_hooks(&config_layers, git_root, compat, trusted)
+}
+
+/// [`discover_hooks`] for a session launched in `cwd`: the repository root's project hooks, then those kept in each
+/// folder down to `cwd`.
+pub(crate) fn discover_hooks_for_cwd(
+    cwd: &Path,
+    compat: &fuigo_tools::types::compat::CompatConfig,
+    trusted: bool,
+) -> (fuigo_hooks::discovery::HookRegistry, Vec<HookError>) {
+    let git_root = fuigo_workspace::session::git::find_git_root_from_path(cwd).ok();
+    let subdirs = git_root.as_deref().map(|root| project_hook_subdirs(cwd, root)).unwrap_or_default();
+    let config_layers = fuigo_config::hook_config_layers();
+    let sources = discover_hook_source_paths_with_dirs(
+        fuigo_config::user_fuigo_home().as_deref(),
+        fuigo_dirs::home_dir().as_deref(),
+        git_root.as_deref(),
+        &subdirs,
+        compat,
+    );
+    assemble_hooks_from_sources(&config_layers, &sources, trusted)
 }
 
 /// Combine config-layer hooks with the file-source hooks discovered under the user's home and

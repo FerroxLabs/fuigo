@@ -303,6 +303,27 @@ fn validate_path_length(file_path: &str) -> Option<SearchReplaceOutput> {
     }
     None
 }
+/// What the model reads when the file an edit targets cannot be used as a text source.
+fn unreadable_source_message(
+    error: &crate::computer::types::ComputerError,
+    file_path: &str,
+) -> Option<String> {
+    use crate::computer::types::ComputerError;
+    match error {
+        ComputerError::IOError(msg, Some(std::io::ErrorKind::InvalidInput))
+            if msg.starts_with(crate::util::file_reader::NOT_REGULAR_FILE) =>
+        {
+            Some(format!(
+                "Error: {file_path} is {msg}. search_replace edits regular text files only."
+            ))
+        }
+        ComputerError::IOError(_, Some(std::io::ErrorKind::FileTooLarge)) => Some(format!(
+            "Error: {file_path} is larger than 256 MB, which is more than search_replace will load. \
+             Edit it with a shell command (sed, patch) instead."
+        )),
+        _ => None,
+    }
+}
 /// Handle new file creation when `old_string` is empty.
 async fn handle_new_file_creation(
     input: &SearchReplaceInput,
@@ -545,9 +566,12 @@ async fn handle_replacement(
     is_legacy: bool,
     include_user_edit_hint: bool,
 ) -> Result<SearchReplaceOutput, fuigo_tool_runtime::ToolError> {
-    let bytes = match fs.read_file(path).await {
+    let bytes = match crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), path).await {
         Ok(bytes) => bytes,
         Err(e) => {
+            if let Some(msg) = unreadable_source_message(&e, &input.file_path) {
+                return Ok(SearchReplaceOutput::InvalidInput(msg));
+            }
             let output = match e.io_error_kind() {
                 Some(std::io::ErrorKind::NotFound) => {
                     let display_dcwd = display_cwd_or_cwd(cwd, display_cwd);
@@ -584,7 +608,16 @@ async fn handle_replacement(
             return Ok(output);
         }
     };
-    let old_text = String::from_utf8_lossy(&bytes).into_owned();
+    // Writing the edit back would replace every undecodable byte with U+FFFD, so a binary file is refused, not rewritten
+    let old_text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) => {
+            return Ok(SearchReplaceOutput::InvalidInput(format!(
+                "Error: {} is not valid UTF-8 text (it looks like a binary file), so search_replace cannot edit it without corrupting it.",
+                input.file_path
+            )));
+        }
+    };
     let has_crlf = old_text.contains("\r\n");
     let match_text: std::borrow::Cow<'_, str> = if has_crlf {
         std::borrow::Cow::Owned(old_text.replace("\r\n", "\n"))
@@ -787,6 +820,10 @@ async fn handle_replacement(
     ))
 }
 impl crate::types::tool_metadata::ToolMetadata for SearchReplaceTool {
+    fn lock_path_param(&self) -> Option<&'static str> {
+        Some("file_path")
+    }
+
     fn kind(&self) -> ToolKind {
         ToolKind::Edit
     }
@@ -1118,6 +1155,71 @@ mod tests {
             }
             other => panic!("Expected EditsApplied, got {:?}", other),
         }
+    }
+    fn skip_read_resources(cwd: &std::path::Path) -> Resources {
+        let mut resources = test_resources(cwd);
+        resources.insert(Params(SearchReplaceParams {
+            skip_read_before_edit: true,
+            empty_old_string_does_not_override: false,
+            ..Default::default()
+        }));
+        resources
+    }
+    /// 48.3: a FIFO used to surface as a failed tool call; the model now reads why the edit was refused.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn editing_a_fifo_is_a_clear_refusal() {
+        let tmp = TempDir::new().unwrap();
+        let fifo = tmp.path().join("pipe");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR)
+            .unwrap();
+        let resources = skip_read_resources(tmp.path());
+        let run = fuigo_tool_runtime::Tool::run(
+            &SearchReplaceTool,
+            test_ctx(resources.into_shared()),
+            make_input("pipe", "a", "b"),
+        );
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+            .await
+            .expect("editing a FIFO must not hang");
+        match result {
+            Ok(SearchReplaceOutput::InvalidInput(msg)) => {
+                assert!(msg.contains("not a regular file"), "{msg}");
+                assert!(msg.contains("pipe"), "{msg}");
+            }
+            other => panic!("expected a refusal the model can read, got {other:?}"),
+        }
+    }
+    /// 48.3: writing text back over a binary file would replace its undecodable bytes with U+FFFD.
+    #[tokio::test]
+    async fn editing_a_binary_file_is_refused_and_leaves_it_untouched() {
+        let tmp = TempDir::new().unwrap();
+        let original: Vec<u8> = b"\x00\x01hello\xff\xfe world".to_vec();
+        std::fs::write(tmp.path().join("blob.bin"), &original).unwrap();
+        let resources = skip_read_resources(tmp.path());
+        let result = fuigo_tool_runtime::Tool::run(
+            &SearchReplaceTool,
+            test_ctx(resources.into_shared()),
+            make_input("blob.bin", "hello", "bye"),
+        )
+        .await;
+        match result {
+            Ok(SearchReplaceOutput::InvalidInput(msg)) => {
+                assert!(msg.contains("not valid UTF-8"), "{msg}");
+                assert!(msg.contains("blob.bin"), "{msg}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(tmp.path().join("blob.bin")).unwrap(), original);
+    }
+    #[test]
+    fn oversized_source_is_reported_with_its_limit() {
+        let err = crate::computer::types::ComputerError::IOError(
+            "file exceeds the 268435456 byte read limit".to_string(),
+            Some(std::io::ErrorKind::FileTooLarge),
+        );
+        let msg = unreadable_source_message(&err, "huge.log").expect("a size refusal");
+        assert!(msg.contains("huge.log") && msg.contains("256 MB"), "{msg}");
     }
     #[tokio::test]
     async fn file_not_found() {

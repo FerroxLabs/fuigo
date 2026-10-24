@@ -740,3 +740,86 @@ fn block_viewer_enter_from_fullscreen_child_quotes_into_parent() {
         assert_eq!(child.prompt.text(), "child-draft");
     }
 }
+
+// ── Block viewer: Shift+Y copies the code block under the cursor ───────────
+
+const CODE_REPLY: &str =
+    "intro text\n\n```rust\nfn main() {}\nlet x = 1;\n```\n\nbetween\n\n```\nplain body\n```\n\noutro";
+
+fn shift_y() -> crossterm::event::KeyEvent {
+    crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('Y'), KeyModifiers::SHIFT)
+}
+
+/// Move the cursor onto pre-wrap line `line`, press Shift+Y, and return what the viewer asks to copy.
+fn copy_code_at(agent: &mut AgentView, line: usize) -> Option<String> {
+    let id = agent.block_viewer.as_ref().unwrap().entry_id;
+    agent
+        .block_viewer
+        .as_mut()
+        .unwrap()
+        .list_state
+        .select_by_id(line as u64);
+    agent
+        .block_viewer
+        .as_mut()
+        .unwrap()
+        .handle_key(&shift_y());
+    let entry = agent.scrollback.get_by_id(id).unwrap();
+    agent.block_viewer.as_mut().unwrap().process_pending_copy(entry)
+}
+
+fn code_block_lines(agent: &AgentView) -> Vec<std::ops::Range<usize>> {
+    let id = agent.block_viewer.as_ref().unwrap().entry_id;
+    agent
+        .scrollback
+        .get_by_id(id)
+        .unwrap()
+        .block
+        .with_code_blocks(|blocks| blocks.iter().map(|b| b.output_line_range.clone()).collect())
+}
+
+#[test]
+fn shift_y_in_the_markdown_viewer_copies_the_code_block_under_the_cursor() {
+    let mut agent = agent_with_markdown_viewer(CODE_REPLY);
+    let ranges = code_block_lines(&agent);
+    assert_eq!(ranges.len(), 2, "two fenced blocks: {ranges:?}");
+    assert_eq!(
+        copy_code_at(&mut agent, ranges[0].start).as_deref(),
+        Some("fn main() {}\nlet x = 1;\n")
+    );
+    assert_eq!(
+        copy_code_at(&mut agent, ranges[0].end - 1).as_deref(),
+        Some("fn main() {}\nlet x = 1;\n"),
+        "any line of the body selects the block"
+    );
+    assert_eq!(
+        copy_code_at(&mut agent, ranges[1].start).as_deref(),
+        Some("plain body\n")
+    );
+}
+
+/// Copying a code block keeps the tabs it was written with.
+#[test]
+fn shift_y_keeps_tabs_in_the_copied_code_block() {
+    let mut agent = agent_with_markdown_viewer("intro\n\n```go\nfunc main() {\n\tfmt.Println(1)\n}\n```\n");
+    let ranges = code_block_lines(&agent);
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(
+        copy_code_at(&mut agent, ranges[0].start).as_deref(),
+        Some("func main() {\n\tfmt.Println(1)\n}\n")
+    );
+}
+
+#[test]
+fn shift_y_outside_a_code_block_copies_nothing() {
+    let mut agent = agent_with_markdown_viewer(CODE_REPLY);
+    assert_eq!(copy_code_at(&mut agent, 0), None);
+    let ranges = code_block_lines(&agent);
+    assert_eq!(copy_code_at(&mut agent, ranges[1].end + 2), None);
+}
+
+#[test]
+fn shift_y_is_consumed_so_it_does_not_reach_the_list() {
+    let mut agent = agent_with_markdown_viewer(CODE_REPLY);
+    assert!(agent.block_viewer.as_mut().unwrap().handle_key(&shift_y()));
+}

@@ -543,6 +543,9 @@ pub struct StartupHints {
     pub non_interactive: bool,
     #[serde(default)]
     pub skip_git_status: bool,
+    /// Parent project cwd for a child/worktree seat's overlay kill switch. Not on the wire.
+    #[serde(skip)]
+    pub parent_cwd: Option<std::path::PathBuf>,
     /// Leading conversation items to preserve verbatim across compaction (the immutable head).
     /// A fresh subagent's head is its spawn-injected items; a `resume_from` subagent's is just the System head so the resumed body stays compactable.
     #[serde(default)]

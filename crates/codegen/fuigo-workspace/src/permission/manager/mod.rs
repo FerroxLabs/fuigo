@@ -17,6 +17,7 @@ use crate::permission::auto_mode::{
 use crate::permission::bash_command_splitting::{
     is_setup_command, try_parse_shell, try_parse_word_only_commands_sequence, unwrap_wrappers,
 };
+use crate::permission::bash_permission_script::PermissionScript;
 use crate::permission::branch_switch::{BranchSwitchPlan, GitTreeLister, TreeLister, plan_keeps_floor};
 use crate::permission::exec_risk::{
     AmbientScanPlan, SAFE_GIT_SUBCOMMANDS, ambient_exec_risk_from_plan,
@@ -88,8 +89,13 @@ pub(crate) mod p166_r13b_branch_tests;
 mod p175_tests;
 mod bash_grants;
 pub mod reasons;
+mod bash_policy_allow;
 mod request_classification;
 
+mod sandbox_card_causes;
+use bash_policy_allow::{
+    broad_allow_deferred, configured_filename_allow, requires_recovered_classification,
+};
 pub use bash_grants::{always_allow_row_is_effective, always_allow_scope_persists};
 use bash_grants::{
     bash_glob_covers_script, bash_grant_segments, persist_bash_always_allow, whole_script_grant,
@@ -265,7 +271,7 @@ pub(crate) fn web_fetch_deny_key_from_url(url: &str) -> Option<String> {
 /// A deny covers the exact host and its subdomains, but never a parent of the entry.
 /// That is broader than the exact-match allow lookup on purpose: denies fail safe.
 /// Returns the matched entry so the rejection reason names the persisted key.
-fn denied_web_fetch_domain<'a>(host: &str, disallowed: &'a HashSet<String>) -> Option<&'a str> {
+pub(crate) fn denied_web_fetch_domain<'a>(host: &str, disallowed: &'a HashSet<String>) -> Option<&'a str> {
     if disallowed.is_empty() {
         return None;
     }
@@ -698,6 +704,8 @@ struct BashEvaluation {
     /// position and the script's cwd changes, for the manager's protected-target floor.
     /// P166/S5: before, only `mkdir`/`touch` operands reached it, so `echo … > ~/.fuigo/mcp.json` was not a protected edit.
     write_facts: crate::permission::shell_access::ShellWriteFacts,
+    /// Strict decomposition failed but every command is a reviewed reader with understood filename positions.
+    recovered_eligible: bool,
 }
 
 fn unparseable_exec_risk(cmd: &str) -> bool {
@@ -765,6 +773,7 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             redirect_write: true,
             ambient_segments: None,
             write_facts: Default::default(),
+            recovered_eligible: false,
         };
     };
     let writes = command_write_paths_split(tree.root_node(), cmd);
@@ -799,8 +808,29 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         assessment.insert(finding);
     }
     let Some(segments) = segments else {
+        // Recover the shape of a quoted-filename-variable script: unknown argv positions are kept as written and
+        // never guessed, and a dangerous or exec-capable projection is flagged exactly as a decomposed segment is.
+        let recovery = PermissionScript::analyze(&tree, cmd);
+        if recovery.has_unresolved() {
+            assessment.insert(Finding::UnresolvedArgument);
+        }
+        let projections = recovery.projections();
+        for words in &projections {
+            let words = unwrap_wrappers(words);
+            if is_dangerous_command_words(words) {
+                assessment.insert(Finding::DangerousCommand);
+            }
+            if rg_has_unsafe_flag(words) {
+                assessment.insert(Finding::SpecialExecSurface);
+            }
+            if segment_exec_facts(words).exec_risk {
+                assessment.insert(Finding::ExecOrAmbientGit);
+            }
+        }
         // WHY: undecomposable dynamic `bash -c "$X"`/`eval` is still opaque shell.
-        assessment.insert(Finding::UnparseableShell);
+        if !recovery.is_eligible() {
+            assessment.insert(Finding::UnparseableShell);
+        }
         if tree_has_opaque_shell(tree.root_node(), cmd) {
             assessment.insert(Finding::OpaqueShell);
         }
@@ -808,14 +838,22 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             assessment.insert(Finding::ExecOrAmbientGit);
         }
         return BashEvaluation {
-            segments: raw_deny_rejection(cmd, state).unwrap_or(SegmentEvaluation::Unparseable),
+            // A persisted deny also matches each recovered command (a wrapped `timeout 5 rm "$LOG"` included).
+            segments: raw_deny_rejection(cmd, state)
+                .or_else(|| {
+                    projections.iter().find_map(|words| {
+                        raw_deny_rejection(&unwrap_wrappers(words).join(" "), state)
+                    })
+                })
+                .unwrap_or(SegmentEvaluation::Unparseable),
             exact_grant,
             all_segments_granted: false,
             assessment,
-            redirect_write: true,
+            redirect_write: redirect_write || !recovery.is_eligible(),
             ambient_segments: None,
             // The tree parsed, so its write targets are known even though word-level decomposition failed (`cd "$X" && …`).
             write_facts,
+            recovered_eligible: recovery.is_eligible(),
         };
     };
     // Upgrade the raw-string compare with the dequoted single-command form now that the parse is available (see `whole_script_grant`)
@@ -866,6 +904,7 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
                 redirect_write,
                 ambient_segments: None,
                 write_facts: Default::default(),
+                recovered_eligible: false,
             };
         }
 
@@ -946,6 +985,7 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         redirect_write,
         ambient_segments,
         write_facts,
+        recovered_eligible: false,
     }
 }
 
@@ -1021,9 +1061,31 @@ pub(crate) fn hub_needs_default_prompt(
     policy_allows: bool,
     cwd: &std::path::Path,
 ) -> bool {
+    hub_default_prompt(access, policy, policy_allows, cwd, None).needs
+}
+
+/// What [`hub_needs_default_prompt`] decided, and why when `cover` (the sandbox's cover for this call, if any)
+/// was supplied: the reasons the sandbox-card rule weighs. Without a cover `causes` stays empty and `needs`
+/// is exactly what `hub_needs_default_prompt` always answered.
+pub(crate) struct HubDefaultPrompt {
+    pub(crate) needs: bool,
+    pub(crate) causes: Vec<crate::permission::AskCause>,
+}
+
+pub(crate) fn hub_default_prompt(
+    access: &AccessKind,
+    policy: Option<&CompiledPolicy>,
+    policy_allows: bool,
+    cwd: &std::path::Path,
+    cover: Option<&crate::permission::SandboxCover>,
+) -> HubDefaultPrompt {
+    let plain = |needs: bool| HubDefaultPrompt {
+        needs,
+        causes: Vec::new(),
+    };
     match access {
-        AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_) => false,
-        AccessKind::Tool(name) if is_auto_allowed_tool(name) => false,
+        AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_) => plain(false),
+        AccessKind::Tool(name) if is_auto_allowed_tool(name) => plain(false),
         AccessKind::Bash(cmd) => {
             let mut evaluation = evaluate_bash(cmd, &PermissionState::default(), true);
             // The same ambient git scan the manager runs before any grant or allow decision (`git status` in a repo
@@ -1038,20 +1100,31 @@ pub(crate) fn hub_needs_default_prompt(
                 }
             }
             let floor = bash_request_floor_requires_prompt(Some(&evaluation));
-            if policy_allows {
+            let needs = if policy_allows {
                 // P166 r13B: the same branch-switch check as the local manager (shared pair of functions).
                 let kept = floor
                     && branch_switch_floor_kept_blocking(&branch_plan, &evaluation, policy, access, &GitTreeLister);
-                floor && !narrow_allow_clears_write_floor(Some(&evaluation), policy, access, kept)
+                broad_allow_deferred(Some(&evaluation), policy, access, true, kept)
             } else {
                 floor || !matches!(evaluation.segments, SegmentEvaluation::AutoAllow { .. })
-            }
+            };
+            let causes = match cover {
+                Some(cover) if needs => sandbox_card_causes::bash_ask_causes(
+                    &evaluation,
+                    policy_allows,
+                    &branch_plan,
+                    cwd,
+                    cover,
+                ),
+                _ => Vec::new(),
+            };
+            HubDefaultPrompt { needs, causes }
         }
         AccessKind::Edit(_)
         | AccessKind::MCPTool { .. }
         | AccessKind::WebFetch(_)
         | AccessKind::AgentMessage { .. }
-        | AccessKind::Tool(_) => !policy_allows,
+        | AccessKind::Tool(_) => plain(!policy_allows),
     }
 }
 
@@ -2325,6 +2398,11 @@ fn spawn_permission_manager_with_pin(
                         }
                         _ => None,
                     };
+                    // A recovered filename script (`LOG=/x; ls "$LOG"`) must be classified in auto mode unless an exact
+                    // whole-script grant already authorizes it: no blanket, prefix, glob, sandbox or prompt-policy allow
+                    // may vouch for argument values nobody resolved.
+                    let recovered_classification =
+                        auto_mode && requires_recovered_classification(bash_evaluation.as_ref());
                     // P184: each patch target as the tool writes it (`cwd.join(path)`, uncollapsed, as
                     // `ApplyPatchTool` resolves it) and as the model spelled it.
                     let patch_spellings: Option<Vec<EditTargetSpellings>> =
@@ -2432,6 +2510,7 @@ fn spawn_permission_manager_with_pin(
                             !(auto_mode && web_fetch_allowlist_is_default),
                             yolo_pin,
                         )
+                        && (!recovered_classification || !matches!(decision, Decision::Allow))
                     {
                         tracing::debug!(
                             tool = %tool_name,
@@ -2446,11 +2525,15 @@ fn spawn_permission_manager_with_pin(
                         continue;
                     }
 
+                    let covering_filename_allow =
+                        configured_filename_allow(bash_evaluation.as_ref());
                     if auto_mode
+                        && (covering_filename_allow || !recovered_classification)
                         && !pre_classifier_forced_prompt
                         && protected_edit.is_none()
                         && matches!(policy_decision, Some(Decision::Allow))
-                        && (bash_assessment_is_clear(bash_evaluation.as_ref())
+                        && (covering_filename_allow
+                            || bash_assessment_is_clear(bash_evaluation.as_ref())
                             || (!bash_request_floor_requires_prompt(bash_evaluation.as_ref())
                                 && compiled_policy
                                     .as_ref()
@@ -2717,6 +2800,7 @@ fn spawn_permission_manager_with_pin(
                     }
 
                     if matches!(&access, AccessKind::Bash(_))
+                        && !recovered_classification
                         && sandbox_may_auto_allow_bash(
                             bash_evaluation.as_ref(),
                             fuigo_sandbox::should_auto_allow_bash(),
@@ -2767,14 +2851,14 @@ fn spawn_permission_manager_with_pin(
                             if protected_edit.is_some()
                                 || auto_forced_prompt
                                 || hook_forced_prompt
-                                || (bash_request_floor_requires_prompt(
-                                    bash_evaluation.as_ref(),
-                                ) && !narrow_allow_clears_write_floor(
+                                || recovered_classification
+                                || broad_allow_deferred(
                                     bash_evaluation.as_ref(),
                                     compiled_policy.as_ref(),
                                     &access,
+                                    prompt_policy != PromptPolicy::Deny,
                                     branch_floor_kept,
-                                )) =>
+                                ) =>
                         {
                             tracing::info!(
                                 tool = ?tool_name,
@@ -2814,6 +2898,8 @@ fn spawn_permission_manager_with_pin(
                             None
                         }
                         AccessKind::Read(_) => Some((Decision::Allow, reasons::SAFE_COMMAND)),
+                        // An ask rule binds over the built-in safe-listing, as it does for reads
+                        AccessKind::WebSearch(_) if policy_forced_prompt => None,
                         AccessKind::WebSearch(_) => Some((Decision::Allow, reasons::SAFE_COMMAND)),
                         AccessKind::Grep { .. } => Some((Decision::Allow, reasons::SAFE_COMMAND)),
                         // Peer messaging (design row 3a): `send_message` is auto-allowed in every mode, but only here, after the
@@ -2894,6 +2980,9 @@ fn spawn_permission_manager_with_pin(
                                     web_fetch_deny_pre_decision(&parsed_url, &state)
                                 {
                                     Some((reject, reasons::SESSION_DENY))
+                                } else if policy_forced_prompt {
+                                    // An ask rule binds over the allowlists: only the user's answer runs the fetch
+                                    None
                                 } else if static_domain_matcher.check(&parsed_url).is_none() {
                                     tracing::debug!(
                                         url = %url,
@@ -2945,8 +3034,8 @@ fn spawn_permission_manager_with_pin(
                                 if *reason == reasons::STATIC_ALLOWLIST
                                     || *reason == reasons::PERSISTED_GRANT
                         );
-                    if auto_forced_prompt
-                        && auto_prompt_blocks_allow(&access)
+                    if (recovered_classification
+                        || (auto_forced_prompt && auto_prompt_blocks_allow(&access)))
                         && matches!(pre_decision, Some((Decision::Allow, _)))
                         && !webfetch_static_fallback
                     {
@@ -2979,6 +3068,7 @@ fn spawn_permission_manager_with_pin(
                     }
 
                     if prompt_policy == crate::permission::types::PromptPolicy::Allow
+                        && !recovered_classification
                         && !hook_forced_prompt
                     {
                         tracing::info!(
@@ -3349,6 +3439,9 @@ mod tests {
     use super::*;
     use crate::permission::bash_command_splitting::primary_command_from_script;
     use crate::permission::types::RequestPathContext;
+
+    #[path = "bash_filename_arguments_tests.rs"]
+    mod bash_filename_arguments_tests;
 
     async fn decide(
         handle: &PermissionHandle,
@@ -4652,6 +4745,143 @@ mod tests {
             acp::ToolCallId::new(Arc::from("tc")),
             acp::ToolCallUpdateFields::default(),
         )
+    }
+
+    /// "Allow once" on a shell command card allows that command once: it leaves no grant behind, so the very same command
+    /// asked again (and any other command) prompts again.
+    #[tokio::test]
+    async fn allow_once_on_a_shell_command_applies_to_that_command_only() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let client = IdSelectingClient::new("allow-once");
+                let prompts = client.prompts.clone();
+                let (mgr, _events) = manager_with_recording_client_remember(&cwd, None, client, ClientType::Generic, true);
+                for command in ["make deploy", "make deploy", "make deploy-all"] {
+                    let d = decide(&mgr, AccessKind::Bash(command.into()), tool_call()).await;
+                    assert!(matches!(d, Decision::Allow), "{command}: the user allowed it once, got {d:?}");
+                }
+                assert_eq!(prompts.borrow().len(), 3, "each command is put to the user again");
+            })
+            .await;
+    }
+
+    /// Web fetch and the media tools follow `prompt_policy` and the rules before any prompt: `dontAsk` refuses what is not
+    /// pre-approved, `allow` approves what would prompt, and a deny rule binds under both.
+    #[tokio::test]
+    async fn web_and_media_tools_follow_prompt_policy_and_rules_before_prompting() {
+        use crate::permission::types::{
+            PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
+        };
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let fetch = || AccessKind::WebFetch("https://unlisted.example.test/x".into());
+                let image = || AccessKind::Tool("image_gen".into());
+                let config = |policy, rules| {
+                    let mut config = PermissionConfig::new(rules);
+                    config.prompt_policy = policy;
+                    config
+                };
+                let (mgr, _e) = test_manager_with_config(&cwd, config(PromptPolicy::Deny, vec![]), false);
+                for access in [fetch(), image()] {
+                    let d = decide(&mgr, access.clone(), tool_call()).await;
+                    assert!(matches!(d, Decision::PolicyDeny(_)), "dontAsk {access:?}: {d:?}");
+                }
+                let (mgr, _e) = test_manager_with_config(&cwd, config(PromptPolicy::Allow, vec![]), false);
+                for access in [fetch(), image()] {
+                    let d = decide(&mgr, access.clone(), tool_call()).await;
+                    assert!(matches!(d, Decision::Allow), "allow {access:?}: {d:?}");
+                }
+                let deny = |tool, pattern: &str| PermissionRule {
+                    action: RuleAction::Deny,
+                    tool,
+                    pattern: Some(pattern.to_owned()),
+                    pattern_mode: PatternMode::Glob,
+                };
+                let rules = vec![deny(ToolFilter::WebFetch, "*unlisted.example.test*")];
+                let (mgr, _e) = test_manager_with_config(&cwd, config(PromptPolicy::Allow, rules), false);
+                let d = decide(&mgr, fetch(), tool_call()).await;
+                assert!(matches!(d, Decision::Reject(_) | Decision::PolicyDeny(_)), "a deny rule binds under allow: {d:?}");
+            })
+            .await;
+    }
+
+    /// An `ask` rule on a web tool shows a prompt; neither the built-in safe-listing of searches nor the fetch domain
+    /// allowlists run it silently. The recording client answers `reject-once`, so a silent auto-allow is distinguishable.
+    #[tokio::test]
+    async fn ask_rule_on_web_tools_prompts_instead_of_auto_running() {
+        use crate::permission::types::{
+            PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
+        };
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let ask = |tool, pattern: &str, pattern_mode| PermissionRule {
+                    action: RuleAction::Ask,
+                    tool,
+                    pattern: Some(pattern.to_owned()),
+                    pattern_mode,
+                };
+                let spawn = |config: Option<PermissionConfig>, domains: Vec<String>, client: RecordingClient| {
+                    let (gateway, receiver) = fuigo_acp_lib::acp_gateway::<acp::AgentSide, _>(client);
+                    tokio::task::spawn_local(receiver.run());
+                    spawn_permission_manager_with_pin(
+                        acp::SessionId::new(Arc::from("test-session")),
+                        gateway,
+                        cwd.clone(),
+                        ClientType::Generic,
+                        config,
+                        vec![],
+                        domains,
+                        false,
+                        None,
+                        true,
+                        None,
+                        None,
+                    )
+                };
+                let cases: [(&str, AccessKind, PermissionRule, Vec<String>); 2] = [
+                    (
+                        "web search",
+                        AccessKind::WebSearch("rust lifetimes".into()),
+                        ask(ToolFilter::WebSearch, "*", PatternMode::Glob),
+                        vec![],
+                    ),
+                    (
+                        "web fetch of an allow-listed domain",
+                        AccessKind::WebFetch("https://docs.allowed.test/page".into()),
+                        ask(ToolFilter::WebFetch, "docs.allowed.test", PatternMode::Domain),
+                        vec!["docs.allowed.test".to_owned()],
+                    ),
+                ];
+                for (label, access, rule, domains) in cases {
+                    // Control: with no rule the tool runs without a prompt, so the prompt below is the rule's doing.
+                    let client = RecordingClient::default();
+                    let prompts = client.prompts.clone();
+                    let (mgr, _events) = spawn(None, domains.clone(), client);
+                    let d = decide(&mgr, access.clone(), tool_call()).await;
+                    assert!(matches!(d, Decision::Allow), "{label}: control must auto-run, got {d:?}");
+                    assert_eq!(prompts.borrow().len(), 0, "{label}: control must not prompt");
+
+                    let client = RecordingClient::default();
+                    let prompts = client.prompts.clone();
+                    let (mgr, _events) = spawn(Some(PermissionConfig::new(vec![rule])), domains, client);
+                    let d = decide(&mgr, access, tool_call()).await;
+                    assert!(
+                        matches!(d, Decision::Reject(_)),
+                        "{label}: an ask rule must put the call to the user, got {d:?}"
+                    );
+                    assert_eq!(prompts.borrow().len(), 1, "{label}: exactly one prompt");
+                }
+            })
+            .await;
     }
 
     /// Build an actor-backed handle whose command channel is `cmd_tx` (the actor task, if any, is the caller's responsibility).
@@ -11046,6 +11276,61 @@ mod tests {
                         Some(0),
                         "the classifier allowed, so the streak is broken"
                     );
+                })
+                .await;
+        }
+
+        /// A hook's ask reaches the user for web tools and under a session-wide edit grant too, not only for the cases
+        /// above: nothing a mode or a grant would auto-approve skips it.
+        #[tokio::test]
+        async fn ask_prompts_for_web_tools_and_through_the_session_edit_grant() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let client = RecordingClient::default();
+                    let prompts = client.prompts.clone();
+                    let (gateway, receiver) = fuigo_acp_lib::acp_gateway::<acp::AgentSide, _>(client);
+                    tokio::task::spawn_local(receiver.run());
+                    let (mgr, _events) = spawn_permission_manager_with_pin(
+                        acp::SessionId::new(Arc::from("test-session")),
+                        gateway,
+                        cwd.clone(),
+                        ClientType::Generic,
+                        None,
+                        vec![],
+                        vec!["docs.allowed.test".to_owned()],
+                        false,
+                        None,
+                        true,
+                        None,
+                        None,
+                    );
+                    for access in [
+                        AccessKind::WebSearch("rust".into()),
+                        AccessKind::WebFetch("https://docs.allowed.test/page".into()),
+                        AccessKind::Tool("image_gen".into()),
+                    ] {
+                        let before = prompts.borrow().len();
+                        let resolution = request_with_ask(&mgr, access.clone()).await;
+                        assert!(matches!(resolution.decision, Decision::Reject(_)), "{access:?}: {:?}", resolution.decision);
+                        assert_eq!(prompts.borrow().len(), before + 1, "{access:?} must prompt");
+                    }
+
+                    // "Allow all edits this session" is a grant for edits; a hook's ask still asks
+                    let client = IdSelectingClient::new("allow-edits-session");
+                    let prompts = client.prompts.clone();
+                    let (mgr, _events) = manager_with_recording_client_remember(&cwd, None, client, ClientType::Generic, true);
+                    let first = request_with_ask(&mgr, AccessKind::Edit("a.rs".into())).await;
+                    assert!(matches!(first.decision, Decision::Allow), "{:?}", first.decision);
+                    let second = request_with_ask(&mgr, AccessKind::Edit("a.rs".into())).await;
+                    assert!(matches!(second.decision, Decision::Allow), "{:?}", second.decision);
+                    assert_eq!(prompts.borrow().len(), 2, "the session edit grant must not skip a hook's ask");
+                    // Without the hook the grant does apply
+                    let third = decide(&mgr, AccessKind::Edit("a.rs".into()), tool_call()).await;
+                    assert!(matches!(third, Decision::Allow));
+                    assert_eq!(prompts.borrow().len(), 2, "the grant still covers an edit no hook asked about");
                 })
                 .await;
         }

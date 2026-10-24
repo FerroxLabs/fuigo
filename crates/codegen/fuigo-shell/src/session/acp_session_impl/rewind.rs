@@ -44,8 +44,20 @@ impl SessionActor {
             &fuigo_workspace::session::file_state::RewindPointMeta,
         > = file_metas.iter().map(|m| (m.prompt_index, m)).collect();
 
-        // Generate a rewind point for every prompt 0..current_prompt_index.
+        // The turns the runtime started on its own (a finished background task, a workflow result, a goal nudge, ...) are not offered:
+        // the picker lists what the user typed
+        let updates_path = crate::session::persistence::session_dir(&self.session_info).join("updates.jsonl");
+        let automatic = tokio::task::spawn_blocking(move || {
+            crate::session::storage::collect_automatic_prompt_indices(&updates_path)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+
+        // Generate a rewind point for every user-typed prompt 0..current_prompt_index.
         let rewind_points = (0..current_prompt_index)
+            .filter(|idx| !automatic.contains(idx))
             .map(|idx| {
                 let prompt_preview = prompts.get(idx).and_then(|text| {
                     let clean_text = extract_user_query(text);
@@ -985,3 +997,4 @@ struct PlannedConversationRewind {
     /// The text of the prompt at the target, to pre-fill the input.
     prompt_text: Option<String>,
 }
+

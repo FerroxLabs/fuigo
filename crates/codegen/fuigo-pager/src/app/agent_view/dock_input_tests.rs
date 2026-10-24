@@ -1003,7 +1003,10 @@ fn stop_click_uses_current_row_when_rows_change_after_hover() {
     let x = agent.pane_areas.dock.right() - 1;
     let y = agent.pane_areas.dock.y + 1;
     let _ = agent.handle_mouse(&mouse(MouseEventKind::Moved, x, y));
-    assert_eq!(agent.dock_hovered, Some(DockItem::Row(Section::Subagents, 0)));
+    assert_eq!(
+        agent.dock_hovered,
+        Some(DockItem::Row(Section::Subagents, 0))
+    );
     agent.subagent_sessions.remove("child-1");
     agent.subagent_views.remove("child-1");
     cache_stop_button(&mut agent);
@@ -1321,7 +1324,10 @@ fn wheel_scrolls_the_section_under_the_pointer_and_clicks_follow_it() {
         dock.y + 2,
     ));
     assert!(matches!(outcome, InputOutcome::Changed));
-    assert_eq!(agent.dock_items().get(agent.dock_cursor).copied(), Some(clicked));
+    assert_eq!(
+        agent.dock_items().get(agent.dock_cursor).copied(),
+        Some(clicked)
+    );
 }
 
 #[test]
@@ -1842,7 +1848,9 @@ fn dock_item_at_budgets_against_the_passed_rect_height() {
     let hit: Vec<_> = (0..4)
         .filter_map(|i| agent.dock_item_at(squeezed, squeezed.y + i))
         .collect();
-    let expected = DockLayout::with_cap(&agent.dock_counts(), 4).rows().to_vec();
+    let expected = DockLayout::with_cap(&agent.dock_counts(), 4)
+        .rows()
+        .to_vec();
     assert_eq!(
         hit, expected,
         "the passed rect height, not pane_areas.dock, must budget the hit-test: {hit:?}"
@@ -2179,4 +2187,36 @@ fn dock_footer_offers_kill_and_open_only_where_they_act() {
         has(&labels, "kill") && !has(&labels, "open"),
         "an unlinked loop can be cancelled but not opened: {labels:?}"
     );
+}
+
+/// 50.2: with the dock enabled (`FUIGO_DOCK_V2`), compact mode hides it. The dock is painted on a normal
+/// frame and gone on a compact one, and the compact frame also drops the dock's pane area and focus.
+#[test]
+fn compact_mode_hides_an_enabled_dock() {
+    let _dock = crate::views::dock::force_enabled_for_test();
+    let set_compact = |agent: &mut AgentView, compact: bool| {
+        let mut config = agent.scrollback.appearance().clone();
+        config.prompt.compact = compact;
+        agent.scrollback.set_appearance(config);
+        agent.prompt.set_compact(compact);
+    };
+
+    let mut agent = make_agent();
+    insert_running_task(&mut agent, "bg-1");
+    set_compact(&mut agent, false);
+    draw_frame(&mut agent);
+    assert!(agent.dock_on && agent.dock_shown, "the enabled dock paints when not compact");
+    assert!(agent.pane_areas.dock.area() > 0);
+
+    agent.active_pane = AgentPane::Dock;
+    set_compact(&mut agent, true);
+    draw_frame(&mut agent);
+    assert!(!agent.dock_on, "compact mode must switch the dock off");
+    assert!(!agent.dock_shown, "compact mode must not paint the dock");
+    assert_eq!(agent.pane_areas.dock.area(), 0, "no dock area is reserved");
+    assert_ne!(agent.active_pane, AgentPane::Dock, "focus leaves the hidden dock");
+
+    set_compact(&mut agent, false);
+    draw_frame(&mut agent);
+    assert!(agent.dock_shown, "leaving compact mode brings the dock back");
 }

@@ -87,6 +87,11 @@ impl ScrollbackSearchIndex {
         true
     }
 
+    /// Whether the scrollback content changed since the cache was built.
+    fn is_stale(&self, state: &ScrollbackState) -> bool {
+        self.built_generation != Some(state.content_generation())
+    }
+
     /// A cheap pointer clone of the cached corpus, for handing to the daemon.
     fn entries_arc(&self) -> Arc<[IndexedEntry]> {
         self.entries.clone()
@@ -310,7 +315,19 @@ pub struct ScrollbackSearchState {
     last_seen_generation: u64,
     /// Monotonic UI-owned request generation, incremented only when enqueuing query/corpus work.
     request_generation: u64,
+    /// The match the cursor was on (and its position) when a content-change rescan was enqueued; the next result restores the cursor to it
+    /// (or to the same position, clamped) instead of snapping to the first match.
+    resync_anchor: Option<(ScrollbackMatch, usize)>,
+    /// When the last content-change rescan was enqueued; paces rescans while a reply streams.
+    last_resync_at: Option<std::time::Instant>,
+    /// Set by `poll` when the result it applied was a content-change rescan: the counts changed but the user did not navigate,
+    /// so the caller must not scroll the view to the match.
+    quiet_refresh: bool,
 }
+
+/// Minimum spacing of content-change rescans: streaming bumps the content generation on nearly every frame, and each rescan re-derives
+/// every entry's text.
+const RESYNC_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl ScrollbackSearchState {
     /// Open an empty session in the composing phase.
@@ -326,7 +343,36 @@ impl ScrollbackSearchState {
             daemon: SearchDaemon::new(),
             last_seen_generation: 0,
             request_generation: 0,
+            resync_anchor: None,
+            last_resync_at: None,
+            quiet_refresh: false,
         }
+    }
+
+    /// Rescan after the scrollback changed under an open search (a reply streaming in), so the match count and the cursor stay true to
+    /// what is on screen.
+    /// Paced by [`RESYNC_MIN_INTERVAL`]. Returns `true` when a rescan was enqueued.
+    /// The cursor stays on the match it was on (see [`Self::poll`]), and the result does not ask the view to scroll.
+    pub fn resync(&mut self, state: &ScrollbackState, now: std::time::Instant) -> bool {
+        if self.matcher.is_error() || self.query().is_empty() || !self.index.is_stale(state) {
+            return false;
+        }
+        if self
+            .last_resync_at
+            .is_some_and(|t| now.saturating_duration_since(t) < RESYNC_MIN_INTERVAL)
+        {
+            return false;
+        }
+        self.last_resync_at = Some(now);
+        self.resync_anchor = self.current().cloned().zip(self.current);
+        self.update_derived_query(state);
+        true
+    }
+
+    /// Whether the result `poll` last applied was a content-change rescan (the caller should redraw but not reveal the match).
+    /// Reading it clears it.
+    pub fn take_quiet_refresh(&mut self) -> bool {
+        std::mem::take(&mut self.quiet_refresh)
     }
 
     /// Replace the canonical query, recompile its derived matcher, and enqueue the latest corpus/query snapshot for the background scan.
@@ -334,6 +380,7 @@ impl ScrollbackSearchState {
     /// The corpus is only re-synced and re-sent when scrollback content changed since the last send.
     /// Steady-state keystrokes therefore just push a query string.
     pub fn update_query(&mut self, query: &str, state: &ScrollbackState) {
+        self.resync_anchor = None;
         self.editor.set_text(query);
         self.update_derived_query(state);
     }
@@ -375,6 +422,7 @@ impl ScrollbackSearchState {
     ) -> LineEditOutcome {
         let outcome = self.editor.handle_key(key);
         if outcome == LineEditOutcome::TextChanged {
+            self.resync_anchor = None;
             self.update_derived_query(state);
         }
         outcome
@@ -387,6 +435,7 @@ impl ScrollbackSearchState {
     ) -> LineEditOutcome {
         let outcome = self.editor.insert_paste(text);
         if outcome == LineEditOutcome::TextChanged {
+            self.resync_anchor = None;
             self.update_derived_query(state);
         }
         outcome
@@ -418,7 +467,22 @@ impl ScrollbackSearchState {
         let matches = guard.matches.clone();
         drop(guard);
         self.matches = matches;
-        self.current = (!self.matches.is_empty()).then_some(0);
+        self.current = match self.resync_anchor.take() {
+            // A content-change rescan: stay on the match the user was on (or the last one before it, when it is gone)
+            Some((anchor, was_at)) => {
+                self.quiet_refresh = true;
+                (!self.matches.is_empty()).then(|| {
+                    self.matches
+                        .iter()
+                        .position(|m| m.entry_id == anchor.entry_id && m.byte_range == anchor.byte_range)
+                        .unwrap_or_else(|| was_at.min(self.matches.len() - 1))
+                })
+            }
+            None => {
+                self.quiet_refresh = false;
+                (!self.matches.is_empty()).then_some(0)
+            }
+        };
         true
     }
 
@@ -1133,5 +1197,63 @@ mod tests {
             "the held corpus is reused across a None-corpus burst"
         );
         assert_eq!(search.current_index(), Some(0));
+    }
+
+    #[test]
+    fn streaming_content_keeps_the_match_count_and_the_cursor_true() {
+        // Row 51.8: a reply streaming in while a search is open must keep the counts right without the user retyping the query,
+        // and must not throw the cursor back to the first match
+        let mut state = state_with(&["foo one", "bar", "foo two"]);
+        let mut search = ScrollbackSearchState::open();
+        update_and_wait(&mut search, "foo", &state);
+        assert_eq!(search.match_count(), 2);
+        search.next();
+        assert_eq!(search.current_index(), Some(1));
+        let before = search.current().cloned().expect("on a match");
+
+        state.push_block(RenderBlock::user_prompt("foo three"));
+        let t0 = std::time::Instant::now();
+        assert!(search.resync(&state, t0), "changed content enqueues a rescan");
+        for _ in 0..1000 {
+            if search.poll() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(search.match_count(), 3, "the new match is counted");
+        assert_eq!(search.current(), Some(&before), "the cursor stays on its match");
+        assert!(search.take_quiet_refresh(), "a rescan does not ask the view to scroll");
+        assert!(!search.take_quiet_refresh(), "reading it clears it");
+    }
+
+    #[test]
+    fn resync_is_paced_and_skips_unchanged_content() {
+        let mut state = state_with(&["foo"]);
+        let mut search = ScrollbackSearchState::open();
+        update_and_wait(&mut search, "foo", &state);
+        let t0 = std::time::Instant::now();
+        assert!(!search.resync(&state, t0), "nothing changed, nothing to rescan");
+
+        state.push_block(RenderBlock::user_prompt("foo"));
+        assert!(search.resync(&state, t0));
+        state.push_block(RenderBlock::user_prompt("foo"));
+        assert!(
+            !search.resync(&state, t0 + std::time::Duration::from_millis(10)),
+            "a second change inside the pacing window waits"
+        );
+        assert!(search.resync(&state, t0 + std::time::Duration::from_millis(400)));
+    }
+
+    #[test]
+    fn typing_a_query_drops_the_resync_anchor() {
+        let mut state = state_with(&["foo", "foo"]);
+        let mut search = ScrollbackSearchState::open();
+        update_and_wait(&mut search, "foo", &state);
+        search.next();
+        state.push_block(RenderBlock::user_prompt("foo"));
+        assert!(search.resync(&state, std::time::Instant::now()));
+        update_and_wait(&mut search, "foo", &state);
+        assert_eq!(search.current_index(), Some(0), "a typed query parks on the first match");
+        assert!(!search.take_quiet_refresh());
     }
 }

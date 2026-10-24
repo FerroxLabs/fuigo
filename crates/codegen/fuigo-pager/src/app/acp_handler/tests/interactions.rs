@@ -250,9 +250,10 @@
         );
     }
 
-    /// A newer request cancels the card on screen, answers it, and says so in the scrollback.
+    /// 53.6: input requests that arrive while a card is open wait their turn. None is cancelled to make room, and
+    /// each is shown, in the order it arrived, once the one before it is answered.
     #[test]
-    fn mcp_elicit_superseding_a_card_cancels_it_and_leaves_a_notice() {
+    fn parallel_mcp_input_requests_each_get_their_own_prompt() {
         let open = |app: &mut AppView, tool_call_id: &str| {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let raw = serde_json::value::to_raw_value(&serde_json::json!({
@@ -273,33 +274,45 @@
             );
             rx
         };
+        let shown = |app: &AppView| {
+            app.agents
+                .get(&AgentId(0))
+                .unwrap()
+                .elicitation_view
+                .as_ref()
+                .map(|ev| ev.tool_call_id.clone())
+        };
         let mut app = make_app_with_agent("sess-A");
         let mut first = open(&mut app, "mcp-elicit-1");
-        let _second = open(&mut app, "mcp-elicit-2");
+        let mut second = open(&mut app, "mcp-elicit-2");
+        let mut third = open(&mut app, "mcp-elicit-3");
 
-        let answer = first
-            .try_recv()
-            .expect("the superseded request is answered")
-            .expect("not an error");
+        assert_eq!(Some("mcp-elicit-1".to_owned()), shown(&app));
+        for (name, rx) in [("first", &mut first), ("second", &mut second), ("third", &mut third)] {
+            assert!(rx.try_recv().is_err(), "the {name} request must still be waiting for an answer");
+        }
+
+        for (answered, next) in [("mcp-elicit-1", Some("mcp-elicit-2")), ("mcp-elicit-2", Some("mcp-elicit-3"))] {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let mut ev = agent.elicitation_view.take().expect("a card is open");
+            assert_eq!(answered, ev.tool_call_id);
+            assert!(ev.send_response(fuigo_tools::mcp_elicitation::McpElicitExtResponse::Decline));
+            agent.promote_pending_elicitation();
+            assert_eq!(next.map(str::to_owned), shown(&app));
+        }
+        let answer = first.try_recv().expect("the first request was answered").expect("not an error");
         assert_eq!(
-            serde_json::json!({ "outcome": "cancel" }),
+            serde_json::json!({ "outcome": "decline" }),
             serde_json::from_str::<serde_json::Value>(answer.0.get()).unwrap()
         );
+        assert!(second.try_recv().is_ok());
+        assert!(third.try_recv().is_err(), "the third is on screen and unanswered");
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            Some("mcp-elicit-2"),
-            agent.elicitation_view.as_ref().map(|ev| ev.tool_call_id.as_str())
-        );
         let notes: Vec<String> = (0..agent.scrollback.len())
             .filter_map(|i| agent.scrollback.get(i))
             .filter_map(|entry| entry.block.searchable_text())
             .collect();
-        assert_eq!(
-            vec![
-                "Cancelled MCP “airlock” request for input to show a newer one.".to_owned()
-            ],
-            notes
-        );
+        assert!(notes.is_empty(), "nothing was cancelled, so there is nothing to explain: {notes:?}");
     }
 
     #[test]
@@ -746,6 +759,47 @@
             resp.outcome,
         );
     }
+
+    /// A background subagent's shell ask is queued for the user, never cancelled or auto-rejected. The shared permission
+    /// manager sends a child's ask under the parent's session id; an ask addressed to the child resolves to the same agent.
+    #[test]
+    fn a_background_subagents_permission_ask_waits_in_the_parents_queue() {
+        let mut app = make_app_with_parent_and_child("sess-parent", "sess-child");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_sessions
+            .get_mut("sess-child")
+            .unwrap()
+            .is_background = true;
+
+        let mut held = Vec::new();
+        for (session, queued) in [("sess-parent", 1), ("sess-child", 2)] {
+            let (msg, mut rx) = make_permission_message(session);
+            handle(msg, &mut app);
+            assert_eq!(
+                app.agents[&AgentId(0)].permission_queue.len(),
+                queued,
+                "{session}: the ask is queued for the user"
+            );
+            assert!(
+                matches!(
+                    rx.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                ),
+                "{session}: the ask waits for the user; it is neither cancelled nor auto-rejected"
+            );
+            held.push(rx);
+        }
+        let queue = &app.agents[&AgentId(0)].permission_queue;
+        assert_eq!(None, queue[0].subagent_label);
+        let label = queue[1]
+            .subagent_label
+            .as_deref()
+            .expect("an ask addressed to the child names its subagent");
+        assert!(label.contains("general-purpose"), "{label}");
+    }
+
 
     // ── Plan approval persistence tests ─────────────────────────
 

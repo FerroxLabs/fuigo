@@ -293,7 +293,7 @@ mod interjection_format_tests {
         );
         assert!(
             wrapped.trim_end().ends_with(
-                "</user_query>\nMake sure to complete any unfinished tasks from previous turns."
+                "</user_query>\nIf the user is asking for a response, address the user first. After replying, complete any unfinished tasks from previous turns."
             ),
             "unfinished-task reminder must follow the wrapped query, got: {wrapped}"
         );

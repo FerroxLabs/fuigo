@@ -131,12 +131,30 @@ fn new_command_lines(src: &str) -> Vec<String> {
     production(src)
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))
-        .filter(|l| l.contains("|| tokio::process::Command::new(") || l.contains("let new_command = ||"))
+        .filter(|l| {
+            l.contains("|| tokio::process::Command::new(")
+                || l.contains("let new_command = ||")
+                || l.contains("|| parts.new_command()")
+        })
         .map(str::to_string)
         .collect()
 }
 
 fn assert_bare_new_command(line: &str) {
+    // A site that rebuilds the command the sandbox hook rewrote constructs it from the captured
+    // parts: `CommandParts::new_command` must itself be exactly one bare `Command::new(..)`.
+    if line.contains("|| parts.new_command()") {
+        let launch = include_str!("../../sandbox_launch.rs");
+        let sig = "pub fn new_command(&self) -> tokio::process::Command {";
+        let start = launch.find(sig).expect("CommandParts::new_command") + sig.len();
+        let end = start + launch[start..].find("\n    }").expect("end of new_command");
+        let body = launch[start..end].trim();
+        assert_eq!(
+            "tokio::process::Command::new(&self.program)", body,
+            "CommandParts::new_command is not a bare Command::new"
+        );
+        return;
+    }
     let at = line.find("|| tokio::process::Command::new(").expect("closure start");
     let expr = &line[at + 3..];
     // balanced parens: the expression ends where `Command::new(` closes, followed only by `,`/`;`/` ,`

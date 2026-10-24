@@ -27,6 +27,7 @@ use super::session_load_barrier::{
     AcpDrainArm, SessionLoadAcpTick, SessionLoadBarrier, session_load_agent_id,
 };
 use super::{PagerArgs, PagerTerminal, acp_handler, dispatch, effects};
+use super::reader_thread::ReaderThread;
 
 /// During a continuous terminal drag, dozens of resize events fire per second, and each would rebuild the layout of every entry.
 /// One deferred draw runs after the size stabilizes instead.
@@ -45,7 +46,7 @@ pub(crate) struct TimedInputEvent {
 }
 
 impl TimedInputEvent {
-    fn now(event: Event) -> Self {
+    pub(super) fn now(event: Event) -> Self {
         Self {
             event,
             arrived_at: std::time::Instant::now(),
@@ -646,6 +647,9 @@ impl Presenter {
                     // inline pixels; drop overlay ownership so the next
                     // preview frame re-emits instead of taking the keep path.
                     crate::terminal::overlay::reset_owner();
+                    // ESC[2J also drops Kitty image data in some terminals (Ghostty):
+                    // forget what was transmitted so the next frame re-uploads.
+                    app.forget_transmitted_inline_media();
                 }
                 app.draw(terminal);
             },
@@ -926,7 +930,8 @@ fn run_pending_suspends(
                     if ansi && is_less && !args.iter().any(|a| a == "+G") {
                         args.push("+G".to_string());
                     }
-                    let _ = crate::app::external_editor::user_program_command(prog, &args, &path).status();
+                    let _ = crate::app::external_editor::user_program_command(prog, &args, &path)
+                        .status();
                 }
             },
         ) {
@@ -1179,7 +1184,11 @@ impl TimerStreak {
 
     /// Record how the previous pass ended.
     fn note(&mut self, timer_won: bool) {
-        self.wins = if timer_won { self.wins.saturating_add(1) } else { 0 };
+        self.wins = if timer_won {
+            self.wins.saturating_add(1)
+        } else {
+            0
+        };
     }
 
     fn timers_enabled(&self) -> bool {
@@ -1288,7 +1297,12 @@ async fn priority_wake<T>(
         animation_tick,
         resize_debounce,
         status_line_refresh,
-        WakeGates { input_empty, scroll_ok: input_empty, timers: true, acp_escalated: false },
+        WakeGates {
+            input_empty,
+            scroll_ok: input_empty,
+            timers: true,
+            acp_escalated: false,
+        },
         acp,
     )
     .await
@@ -1315,6 +1329,7 @@ pub(crate) async fn run(
         tokio::sync::oneshot::Receiver<Option<fuigo_update::auto_update::UpdateAvailable>>,
     >,
     mut writer_event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::render::draw::WriterEvent>,
+    reader_thread: &mut ReaderThread,
 ) -> anyhow::Result<RunResult> {
     crate::unified_log::init(connection.tx.clone());
     crate::unified_log::info("pager started", None, None);
@@ -1416,8 +1431,6 @@ pub(crate) async fn run(
     }
     let headless_only: &[(&str, bool)] = &[
         ("--agents", args.agents_json.is_some()),
-        ("--tools", args.cli_tools.is_some()),
-        ("--disallowed-tools", args.cli_disallowed_tools.is_some()),
         ("--max-turns", args.max_turns.is_some()),
         ("--memory-flush", args.memory_flush),
         ("--peer", args.peer),
@@ -1578,6 +1591,15 @@ pub(crate) async fn run(
     } else {
         vec![]
     };
+
+    // An explicitly set default that no connection can reach: say why and offer the usable models
+    // rather than starting a session that would fail on its first prompt.
+    if !needs_interactive_login {
+        let explicit = fuigo_shell::config::load_agent_config_disk_only()
+            .ok()
+            .and_then(|c| c.models.default);
+        app.open_model_pick_if_default_unusable(explicit.as_deref());
+    }
 
     app.has_external_auth_provider =
         crate::slash::commands::usage::detect_external_auth_provider(&app.auth_methods);
@@ -1862,6 +1884,49 @@ pub(crate) async fn run(
                 .into_iter()
                 .collect(),
         );
+        // A sandbox profile is set but this platform cannot enforce it (Windows): the pre-TUI stderr line is gone once
+        // the TUI takes the screen, so show it loudly on the first screen. First, so it wins the single banner slot.
+        if let Some(w) = crate::startup::sandbox_unavailable_startup_warning(
+            fuigo_sandbox::unavailable_warning().as_deref(),
+        ) {
+            app.startup_warnings.insert(0, w);
+        }
+        // An explicit default that needs Flux Router while only a subscription is connected: say why.
+        if let Some(explicit) = fuigo_shell::config::load_agent_config_disk_only()
+            .ok()
+            .and_then(|config| config.models.default)
+        {
+            let route_kind = app
+                .models
+                .available
+                .iter()
+                .find(|(id, info)| id.0.as_ref() == explicit || info.name == explicit)
+                .and_then(|(_, info)| crate::app::default_check::route_kind_of(info));
+            if let Some(note) = crate::app::default_check::unusable_default_note(
+                &app.sign_in_status,
+                Some(&explicit),
+                route_kind,
+            ) {
+                app.startup_warnings.push(crate::startup::StartupWarning {
+                    severity: crate::startup::WarningSeverity::Warning,
+                    message: note,
+                    action: None,
+                });
+            }
+        }
+        // A stale `fuigo` earlier on PATH runs instead of this one; say so, naming both paths.
+        let current_exe = std::env::current_exe().unwrap_or_default();
+        if let Some(other) = crate::install_check::other_installs_on_path().first() {
+            app.startup_warnings.push(crate::startup::StartupWarning {
+                severity: crate::startup::WarningSeverity::Warning,
+                message: crate::install_check::warning_text(
+                    &current_exe,
+                    fuigo_version::VERSION,
+                    other,
+                ),
+                action: Some("Run `fuigo doctor` for details.".to_string()),
+            });
+        }
     }
 
     // Apply initial config (may come from existing ~/.fuigo/pager.toml).
@@ -1977,6 +2042,9 @@ pub(crate) async fn run(
     app.show_tips = config_session_bools.show_tips;
     app.auto_update = config_session_bools.auto_update;
     app.ask_user_question_timeout_enabled = config_session_bools.ask_user_question_timeout_enabled;
+    app.subagent_model_inheritance = crate::settings::FeatureTiers::load(
+        fuigo_shell::agent::config::Feature::SubagentModelInheritance,
+    );
     // Prime thread-local caches so first render doesn't hit disk.
     crate::appearance::cache::prime(&app.current_ui);
     // Apply the remote soft default for text selection (flash | hold | word_select) when the user has set none locally
@@ -2055,59 +2123,8 @@ pub(crate) async fn run(
     // poll/read share one global lock, so the main-thread drain must be the sole crossterm caller
     let reader_parked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let reader_parked_thread = reader_parked.clone();
-    std::thread::spawn(move || {
-        use std::sync::atomic::Ordering;
-        // Bounds how long a tty handoff (external editor / pager) waits for this thread to park
-        // The pause flag is only observed between `poll()` calls, so the timeout is the handoff latency
-        // A `poll()` timeout does NOT wake the main loop (only a successful `send` does), so the idle loop still parks (no metronome tick)
-        // The extra idle wakeups are this thread's alone
-        const POLL_TIMEOUT: Duration = Duration::from_millis(20);
-        let mut consecutive_event_errors: u32 = 0;
-        loop {
-            // Shutdown observed within one poll cycle in every state (idle or paused); the send() break below covers close-while-sending
-            if reader_input_tx.is_closed() {
-                break;
-            }
-            // While a tty handoff owns stdin, do not read(): the child (e.g. the editor) must keep its bytes.
-            // Re-check soon without touching stdin
-            if reader_paused.load(Ordering::Acquire) {
-                // Signal the handoff that the reader is no longer in crossterm.
-                reader_parked_thread.store(true, Ordering::Release);
-                std::thread::sleep(POLL_TIMEOUT);
-                continue;
-            }
-            // Active path: this thread owns crossterm again this iteration.
-            reader_parked_thread.store(false, Ordering::Release);
-            // poll() then read() (not a bare blocking read) so the pause flag and a dropped receiver are observed within POLL_TIMEOUT
-            let event = match crossterm::event::poll(POLL_TIMEOUT) {
-                Ok(true) => crossterm::event::read(),
-                Ok(false) => continue,
-                Err(e) => Err(e),
-            };
-            match event {
-                Ok(ev) => {
-                    consecutive_event_errors = 0;
-                    let timed = TimedInputEvent::now(ev);
-                    if reader_input_tx.send(timed).is_err() {
-                        break; // event loop has shut down
-                    }
-                }
-                Err(e) => {
-                    // VTE terminals / SSH PTYs can emit garbage that crossterm's parser rejects
-                    // Skip transient errors rather than kill the TUI (ratatui#1275), bailing only if they never stop
-                    consecutive_event_errors += 1;
-                    if consecutive_event_errors >= 50 {
-                        tracing::error!(
-                            "crossterm read returned {consecutive_event_errors} \
-                             consecutive errors, exiting reader: {e}"
-                        );
-                        break;
-                    }
-                    tracing::warn!("crossterm read error (skipping): {e}");
-                }
-            }
-        }
-    });
+    // The caller owns the handle: teardown joins this thread before the kitty pop fence reads stdin
+    *reader_thread = ReaderThread::spawn(reader_input_tx, reader_paused, reader_parked_thread);
     let mut acp_rx = connection.rx;
     let connection_cancel = connection.cancel;
     let mut leader_status_rx = connection.leader_status_rx;
@@ -2837,6 +2854,8 @@ pub(crate) async fn run(
                             // Lost-response recovery (see `dispatch::reconcile_overdue_turn_ends`)
                             // Finish any turn whose `prompt_complete` broadcast outlived the grace window without its `session/prompt` RPC response arriving
                             let reconciled = dispatch::reconcile_overdue_turn_ends(&mut app);
+                            // The reconcile queues image notices without dispatching an action
+                            let notice_shown = app.flush_image_notices_if_root();
                             if let Some(effs) = reconciled {
                                 if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
                                     break;
@@ -2848,7 +2867,7 @@ pub(crate) async fn run(
                                 if !input_pending {
                                     scroll_gate.note_scroll_advanced();
                                 }
-                                if app.tick_with_input(input_pending) {
+                                if app.tick_with_input(input_pending) || notice_shown {
                                     presenter.request(false);
                                 }
                             }
@@ -3746,6 +3765,9 @@ pub(crate) fn schedule_tick(tick_at: &mut Option<Instant>, app: &AppView, interv
                 None => interval,
             },
             // Only low-frequency work (welcome shimmer, Cmd link poll): don't spin the full 30fps loop for it
+            crate::app::app_view::TickDemand::Rest => {
+                interval.max(crate::app::app_view::REST_TICK_INTERVAL)
+            }
             crate::app::app_view::TickDemand::Slow => {
                 interval.max(crate::app::app_view::SLOW_TICK_INTERVAL)
             }
@@ -3962,6 +3984,7 @@ async fn drain_and_process(
         }
         match ev {
             Event::FocusGained => {
+                crate::views::welcome::set_focused(true);
                 // Re-assert mouse capture on refocus: ConPTY-backed relays (VS Code on Windows with a WSL/SSH session) can strip DEC private modes
                 // That silently downgrades mouse reports from SGR to legacy X10
                 // X10 column-coordinate bytes of 95 or more then corrupt into typed characters
@@ -4042,6 +4065,7 @@ async fn drain_and_process(
                 return false;
             }
             Event::FocusLost => {
+                crate::views::welcome::set_focused(false);
                 app.notification_service.focus_tracker.on_focus_lost();
                 // The /gboom game latches held keys until their release; a release can be lost while unfocused, so stop all movement
                 if app.gboom_active() {
@@ -5788,6 +5812,54 @@ mod tests {
         assert_eq!(error.to_string(), "injected writer failure");
     }
 
+    /// A forced repaint clears the screen, and Ghostty drops Kitty image data on `ESC[2J`:
+    /// the presenter must make the next frame re-transmit instead of placing ids that no longer exist.
+    /// A plain frame keeps what was transmitted, so images are not re-uploaded every draw.
+    #[test]
+    fn forced_repaint_forgets_transmitted_inline_media_and_a_plain_frame_keeps_it() {
+        use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
+        use ratatui::{TerminalOptions, Viewport};
+        let _protocol = set_protocol_for_test(GraphicsProtocol::Kitty);
+        let (tx, _rx) = std::sync::mpsc::channel::<crate::render::draw::WriterPayload>();
+        let backend = ratatui::backend::CrosstermBackend::new(
+            crate::render::draw::TermWriter::new(tx, crate::render::draw::WriterSync::new())
+                .expect("single test writer"),
+        );
+        let mut terminal = fuigo_ratatui_inline::Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 80, 24)),
+            },
+        )
+        .expect("test terminal");
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let id = crate::app::agent::AgentId(0);
+        let seed = |app: &mut AppView| {
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent
+                    .inline_media_ids
+                    .insert(std::path::PathBuf::from("/tmp/media.png"), 5);
+                agent.last_placed_ids.insert(5);
+            }
+        };
+        let transmitted = |app: &AppView| {
+            app.agents
+                .get(&id)
+                .is_some_and(|a| !a.inline_media_ids.is_empty() && !a.last_placed_ids.is_empty())
+        };
+
+        let mut presenter = Presenter::new();
+        seed(&mut app);
+        presenter.request(false);
+        presenter.present_if_dirty(&mut app, &mut terminal);
+        assert!(transmitted(&app), "a plain frame must not forget what was transmitted");
+
+        presenter.in_flight_target = None;
+        presenter.request(true);
+        presenter.present_if_dirty(&mut app, &mut terminal);
+        assert!(!transmitted(&app), "a forced repaint must forget what was transmitted");
+    }
+
     #[test]
     fn presenter_coalesces_until_ack() {
         let mut presenter = Presenter::new();
@@ -6805,13 +6877,28 @@ mod tests {
             "_ = resize_debounce",
             "_ = status_line_refresh",
         ] {
-            assert!(at(f, name) < acp, "timer arm `{name}` sits below the ACP arm");
+            assert!(
+                at(f, name) < acp,
+                "timer arm `{name}` sits below the ACP arm"
+            );
         }
-        assert!(f.contains("_ = scroll_tick, if gates.scroll_ok"), "scroll gate lost");
-        assert!(f.contains("_ = resize_debounce, if gates.input_empty"), "resize gate lost");
-        assert!(f.contains("msg = acp, if gates.input_empty"), "ACP gate lost");
+        assert!(
+            f.contains("_ = scroll_tick, if gates.scroll_ok"),
+            "scroll gate lost"
+        );
+        assert!(
+            f.contains("_ = resize_debounce, if gates.input_empty"),
+            "resize gate lost"
+        );
+        assert!(
+            f.contains("msg = acp, if gates.input_empty"),
+            "ACP gate lost"
+        );
         let src = include_str!("event_loop.rs");
-        let sel = at(src, &format!("tokio::select! {{\n{}biased;", " ".repeat(12)));
+        let sel = at(
+            src,
+            &format!("tokio::select! {{\n{}biased;", " ".repeat(12)),
+        );
         let region = &src[sel..];
         let order = [
             at(region, "_ = connection_cancel"),
@@ -6828,15 +6915,26 @@ mod tests {
     #[test]
     fn timer_arm_bodies_never_touch_the_acp_channel() {
         let src = include_str!("event_loop.rs");
-        let sel = at(src, &format!("tokio::select! {{\n{}biased;", " ".repeat(12)));
+        let sel = at(
+            src,
+            &format!("tokio::select! {{\n{}biased;", " ".repeat(12)),
+        );
         let region = &src[sel..];
         let from = at(region, "PriorityWake::ScrollTick =>");
         let to = at(region, "PriorityWake::Acp(msg) =>");
         assert!(from < to);
         let moved = &region[from..to];
         // Read-only peeks (`is_empty`, `is_some`) are the ACP-first hold's; consuming the channel is what must not happen.
-        for forbidden in ["acp_rx.recv", "acp_rx.try_recv", "acp_peek.take", "acp_peek ="] {
-            assert!(!moved.contains(forbidden), "timer arms consume ACP: {forbidden}");
+        for forbidden in [
+            "acp_rx.recv",
+            "acp_rx.try_recv",
+            "acp_peek.take",
+            "acp_peek =",
+        ] {
+            assert!(
+                !moved.contains(forbidden),
+                "timer arms consume ACP: {forbidden}"
+            );
         }
     }
 
@@ -6888,8 +6986,16 @@ mod tests {
                 _ => panic!("unexpected wake"),
             }
         }
-        assert_eq!(fired_at, Some(TIMER_DUE_AT), "due timer was delayed by the flood");
-        assert_eq!(seen, (0..N).collect::<Vec<_>>(), "ACP messages lost or reordered");
+        assert_eq!(
+            fired_at,
+            Some(TIMER_DUE_AT),
+            "due timer was delayed by the flood"
+        );
+        assert_eq!(
+            seen,
+            (0..N).collect::<Vec<_>>(),
+            "ACP messages lost or reordered"
+        );
     }
 
     /// Behavioural, real channel: an `acp_peek` slot plus an mpsc receiver, the exact ACP future shape `run()` builds.
@@ -7009,7 +7115,10 @@ mod tests {
         let resend = at(body, "dispatch::reconcile_overdue_cancels(");
         let turn_end = at(body, "dispatch::reconcile_overdue_turn_ends(");
         assert!(hold < resend && hold < turn_end, "the fence must run first");
-        assert!(body[..hold].contains("stale_state_due(&app)"), "turn-end is not fenced");
+        assert!(
+            body[..hold].contains("stale_state_due(&app)"),
+            "turn-end is not fenced"
+        );
         assert!(
             body[hold..resend].contains("acp_first_pass = true"),
             "a hold must arm the ACP-first pass"
@@ -7073,7 +7182,12 @@ mod tests {
                     timer(!skip),
                     pending::<()>(),
                     pending::<()>(),
-                    WakeGates { input_empty: true, scroll_ok: true, timers: true, acp_escalated: false },
+                    WakeGates {
+                        input_empty: true,
+                        scroll_ok: true,
+                        timers: true,
+                        acp_escalated: false,
+                    },
                     async {
                         match peek.take() {
                             Some(m) => Some(m),
@@ -7119,7 +7233,10 @@ mod tests {
     #[tokio::test]
     async fn resend_waits_for_a_completion_behind_a_300_message_backlog() {
         let (resent, completed, _, _) = sim_resend(300, true, |_| 0, 500).await;
-        assert!(!resent, "the resend fired although the completion was still buffered");
+        assert!(
+            !resent,
+            "the resend fired although the completion was still buffered"
+        );
         assert!(completed);
     }
 
@@ -7146,7 +7263,10 @@ mod tests {
     async fn resend_goes_out_once_the_captured_backlog_is_processed() {
         let (resent, completed, _, elapsed) = sim_resend(300, false, |_| 0, 1000).await;
         assert!(resent && !completed);
-        assert!(elapsed < StaleStateFence::CAP, "waited for the cap instead of the backlog: {elapsed:?}");
+        assert!(
+            elapsed < StaleStateFence::CAP,
+            "waited for the cap instead of the backlog: {elapsed:?}"
+        );
     }
 
     #[test]
@@ -7171,14 +7291,22 @@ mod tests {
         let mut passes = 0u32;
         loop {
             passes += 1;
-            assert!(passes <= u32::from(TimerStreak::MAX) + 1, "ACP starved by the timer");
+            assert!(
+                passes <= u32::from(TimerStreak::MAX) + 1,
+                "ACP starved by the timer"
+            );
             let wake = priority_wake_with(
                 pending::<()>(),
                 pending::<()>(),
                 timer(true),
                 pending::<()>(),
                 pending::<()>(),
-                WakeGates { input_empty: true, scroll_ok: true, timers: streak.timers_enabled(), acp_escalated: false },
+                WakeGates {
+                    input_empty: true,
+                    scroll_ok: true,
+                    timers: streak.timers_enabled(),
+                    acp_escalated: false,
+                },
                 ready(Some(7u32)),
             )
             .await;
@@ -7219,7 +7347,12 @@ mod tests {
                     pending::<()>(),
                     pending::<()>(),
                     pending::<()>(),
-                    WakeGates { input_empty: false, scroll_ok, timers: true, acp_escalated: false },
+                    WakeGates {
+                        input_empty: false,
+                        scroll_ok,
+                        timers: true,
+                        acp_escalated: false,
+                    },
                     ready(Some(1u32)),
                 ),
             )
@@ -7235,11 +7368,14 @@ mod tests {
                 Err(_) => gate.note_input_batch(),
             }
         }
-        assert_eq!(woke_at, Some(1), "scroll clock stayed off under continuous input");
+        assert_eq!(
+            woke_at,
+            Some(1),
+            "scroll clock stayed off under continuous input"
+        );
         // And it is held again until the next batch (input order is preserved: input first, then the clock).
         assert!(!gate.scroll_ok(false));
     }
-
 
     // ---- P196 round 4 (Astra r3) ----
 
@@ -7267,7 +7403,12 @@ mod tests {
                     timer(true),
                     timer(true),
                     timer(true),
-                    WakeGates { input_empty, scroll_ok, timers, acp_escalated: esc },
+                    WakeGates {
+                        input_empty,
+                        scroll_ok,
+                        timers,
+                        acp_escalated: esc,
+                    },
                     ready(Some(1u32)),
                 ),
             )
@@ -7279,12 +7420,20 @@ mod tests {
                 Ok(PriorityWake::Acp(_)) => Some("acp"),
                 Ok(_) => Some("other"),
             };
-            assert_eq!(got, expect, "input_empty={input_empty} scroll_ok={scroll_ok} timers={timers} esc={esc}");
+            assert_eq!(
+                got, expect,
+                "input_empty={input_empty} scroll_ok={scroll_ok} timers={timers} esc={esc}"
+            );
         }
     }
 
     /// Item 1 through an outer select shaped like `run()`: the priority arm above, the input arm below.
-    async fn outer_pass(input_empty: bool, timers: bool, esc: bool, acp_ready: bool) -> &'static str {
+    async fn outer_pass(
+        input_empty: bool,
+        timers: bool,
+        esc: bool,
+        acp_ready: bool,
+    ) -> &'static str {
         let acp = async {
             if acp_ready {
                 Some(1u32)
@@ -7322,7 +7471,12 @@ mod tests {
     const REQ_COMPLETE: u32 = u32::MAX;
 
     fn req_key(at: I) -> dispatch::StaleRequestKey {
-        dispatch::StaleRequestKey { kind: dispatch::StaleKind::CancelResend, agent: 0, subagent: None, at }
+        dispatch::StaleRequestKey {
+            kind: dispatch::StaleKind::CancelResend,
+            agent: 0,
+            subagent: None,
+            at,
+        }
     }
 
     struct Esc {
@@ -7404,9 +7558,7 @@ mod tests {
                     fence.note_processed();
                     out.completed |= m == REQ_COMPLETE;
                     let mut drained = 1;
-                    while drained < 32
-                        && fence.escalated(now, rx.len())
-                    {
+                    while drained < 32 && fence.escalated(now, rx.len()) {
                         let Ok(m) = rx.try_recv() else { break };
                         drained += 1;
                         fence.note_processed();
@@ -7424,7 +7576,10 @@ mod tests {
     async fn escalation_processes_the_buffered_completion_before_any_resend() {
         let o = sim_escalation(300, true, 400).await;
         assert!(o.completed, "the buffered completion was never processed");
-        assert!(!o.resent, "the resend fired although the completion was buffered before capture");
+        assert!(
+            !o.resent,
+            "the resend fired although the completion was buffered before capture"
+        );
         assert!(o.escalated_passes > 0 && o.input_passes > 0);
     }
 
@@ -7443,7 +7598,10 @@ mod tests {
         let mut f = StaleStateFence::default();
         let keys = [req_key(t)];
         assert!(f.hold_requests(t, &keys, 5));
-        assert!(!f.hold_requests(t + D::from_millis(10), &keys, 0), "nothing can arrive: release");
+        assert!(
+            !f.hold_requests(t + D::from_millis(10), &keys, 0),
+            "nothing can arrive: release"
+        );
         assert!(!f.escalated(t + StaleStateFence::CAP, 0));
     }
 
@@ -7452,7 +7610,10 @@ mod tests {
     async fn redraw_timer_still_fires_during_escalation() {
         let o = sim_escalation(300, true, 400).await;
         assert!(o.escalated_passes > 0);
-        assert!(o.redraws_during_escalation > 0, "timers were starved by the escalation");
+        assert!(
+            o.redraws_during_escalation > 0,
+            "timers were starved by the escalation"
+        );
     }
 
     /// The cap never releases and never shortens the boundary: before the cap held, at the cap escalated, still held.
@@ -7481,7 +7642,10 @@ mod tests {
         assert!(!f.hold_requests(t + D::from_millis(5), std::slice::from_ref(&a), 0));
         // Manual cancel B: new `sent_at`, 40 messages are buffered, no animation pass saw "nothing due" in between.
         let b = req_key(t + D::from_millis(10));
-        assert!(f.hold_requests(t + D::from_millis(10), std::slice::from_ref(&b), 40), "B reused A's spent boundary");
+        assert!(
+            f.hold_requests(t + D::from_millis(10), std::slice::from_ref(&b), 40),
+            "B reused A's spent boundary"
+        );
         for _ in 0..40 {
             f.note_processed();
         }
@@ -7514,4 +7678,5 @@ mod tests {
         // fps is a u8 (>= 1 after `max(1)`), so 1000 / fps >= 3 ms; the floor covers any other caller.
         assert!(MIN_TICK_INTERVAL > D::ZERO);
         assert!(Duration::from_millis(1000 / 255) >= MIN_TICK_INTERVAL);
-    }}
+    }
+}

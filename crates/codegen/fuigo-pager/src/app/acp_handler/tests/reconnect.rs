@@ -1046,9 +1046,11 @@
             seed_models(agent, "grok-3", &["grok-3", "grok-4"]);
         }
 
-        // An unknown model is ignored; both markers stay untouched
+        // A change that arrives while this client's own switch is in flight is ignored (the switch's
+        // response is the authority); both markers stay untouched
+        app.agents.get_mut(&id).unwrap().session.model_switch_pending = true;
         assert!(!handle_ext_notification(
-            &model_changed_ext_with_event("sess-1", "grok-99-unknown", "sess-1-7"),
+            &model_changed_ext_with_event("sess-1", "grok-4", "sess-1-7"),
             &mut app
         ));
         assert_eq!(
@@ -1060,7 +1062,8 @@
             "an ignored ModelChanged must not advance the dedup highwater"
         );
 
-        // A known model applies; both markers advance
+        // With no switch in flight it applies; both markers advance
+        app.agents.get_mut(&id).unwrap().session.model_switch_pending = false;
         assert!(handle_ext_notification(
             &model_changed_ext_with_event("sess-1", "grok-4", "sess-1-8"),
             &mut app

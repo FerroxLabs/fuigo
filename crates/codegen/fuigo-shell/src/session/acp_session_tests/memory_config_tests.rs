@@ -124,6 +124,7 @@ async fn create_test_actor_with_memory(
             env_http_headers: Default::default(),
             context_window: std::num::NonZeroU64::new(context_window)
                 .expect("test context_window must be non-zero"),
+            max_request_bytes: None,
             reasoning_effort: None,
             stream_tool_calls: None,
             mtls_cert_dir: None,
@@ -202,6 +203,7 @@ async fn create_test_actor_with_memory(
             context_window_selection: Default::default(),
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
+            overflow_compactions_since_response: std::cell::Cell::new(0),
             previous_model: std::cell::Cell::new(None),
             compaction_mode: fuigo_chat_state::CompactionMode::Transcript,
             verbatim_input: true,

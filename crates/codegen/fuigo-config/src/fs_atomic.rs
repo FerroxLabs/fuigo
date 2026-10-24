@@ -26,6 +26,76 @@ pub fn write_atomically(
     staged.commit()
 }
 
+/// [`write_atomically`], and the file that lands at `final_path` must be the temp this call wrote, as
+/// its open handle identifies it (unix: same device and inode): in a directory another process may
+/// write, a file swapped in under the temp's name would otherwise be published. On a mismatch the
+/// swapped-in file is removed and the call fails with [`std::io::ErrorKind::InvalidData`]; the caller
+/// decides whether to write again. Off unix the rename is trusted.
+///
+/// # Errors
+///
+/// As [`write_atomically`], plus `InvalidData` on a swap.
+pub fn write_atomically_verified(
+    final_path: &Path,
+    contents: &str,
+    mode: Option<u32>,
+) -> std::io::Result<()> {
+    let (staged, mut file) = create_staged_temp(final_path, mode)?;
+    let written = write_temp(&mut file, final_path, contents.as_bytes());
+    let created = file.metadata();
+    drop(file);
+    written?;
+    let created = created?;
+    let mut staged = staged.finish_with(|_tmp| {
+        #[cfg(test)]
+        BEFORE_VERIFIED_RENAME.with_borrow_mut(|hook| {
+            if let Some(hook) = hook.as_mut() {
+                hook(_tmp);
+            }
+        });
+        Ok(())
+    });
+    staged.sync_dir = false;
+    staged.commit()?;
+    let landed_is_ours = std::fs::symlink_metadata(final_path).is_ok_and(|landed| {
+        landed.is_file() && {
+            #[cfg(unix)]
+            {
+                FileKey::of(&landed) == FileKey::of(&created)
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = &created;
+                true
+            }
+        }
+    });
+    if landed_is_ours {
+        return Ok(());
+    }
+    let _ = std::fs::remove_file(final_path);
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "{} was swapped for another file while it was written",
+            final_path.display()
+        ),
+    ))
+}
+
+#[cfg(test)]
+type RenameHook = Option<Box<dyn FnMut(&Path)>>;
+
+#[cfg(test)]
+thread_local! {
+    /// Runs on the temp's path just before [`write_atomically_verified`] renames it.
+    static BEFORE_VERIFIED_RENAME: std::cell::RefCell<RenameHook> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+#[path = "fs_atomic_verified_tests.rs"]
+mod verified_tests;
+
 /// The first half of [`write_atomically`]: create the uniquely named temp beside `final_path`, write `contents`
 /// and `sync_all` it, but do not rename it. Same naming, `create_new` and `mode` rules as [`write_atomically`].
 ///

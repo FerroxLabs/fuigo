@@ -1184,6 +1184,21 @@ mod tests {
         );
     }
 
+    /// 54.5: an image in pretty mode shows its alt text and source without the `!` and `[` of the markup.
+    #[test]
+    fn test_pretty_image_has_no_stray_markup_characters() {
+        let render = |text: &str| {
+            let (output, _) = render_markdown_ratatui_full(text, test_style::STYLE, true, None);
+            lines_to_text(&output.lines)
+        };
+        assert_eq!(render("An ![image](src.png) here.\n\n"), vec!["An image (src.png) here."]);
+        assert_eq!(render("[![badge](b.svg)](https://x.example)\n\n"), vec!["badge (b.svg) (https://x.example)"]);
+        // A plain link and the raw view are untouched
+        assert_eq!(render("a [link](https://e.com) b\n\n"), vec!["a link (https://e.com) b"]);
+        let (raw, _) = render_markdown_ratatui_full("![image](src.png)\n\n", test_style::STYLE, false, None);
+        assert_eq!(lines_to_text(&raw.lines)[0], "![image](src.png)");
+    }
+
     /// Same regression for images: `![img](src)` should not show `[img`.
     #[test]
     fn test_pretty_image_bracket_removed() {
@@ -2515,6 +2530,21 @@ mod math_tests {
     fn dollar_inline_math_renders_unicode() {
         let lines = pretty_lines("Energy is $E = mc^2$ here.\n\n");
         assert_eq!(lines[0], "Energy is E = mc² here.", "got: {lines:#?}");
+    }
+
+    /// 54.5: dollar amounts are text, not math. A `$` that opens a number cannot close a span.
+    #[test]
+    fn dollar_amounts_render_as_plain_text() {
+        for src in [
+            "Seats cost $5/$10 each.",
+            "It is $5 or $10.",
+            "Between $5 and $10, about $7.",
+            "Tiers: $5/month,$10/month,$15/month.",
+            "Pay $20/$30 now and $1,000 later.",
+        ] {
+            let lines = pretty_lines(&format!("{src}\n\n"));
+            assert_eq!(lines[0], src, "got: {lines:#?}");
+        }
     }
 
     #[test]

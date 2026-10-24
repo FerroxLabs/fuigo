@@ -114,20 +114,44 @@ impl SessionActor {
         prompt_id: Option<&str>,
         results: &[fuigo_hooks::result::HookRunResult],
     ) {
+        use crate::extensions::notification::{HookRunEntryDto, HookRunStatusDto};
+        use fuigo_hooks::result::HookRunResult;
+
+        // A hook that can never start (CONFIG failure) is not a run: it is told to the user once, as one grouped notice,
+        // and the dispatcher skips it silently for the rest of the session. It never reaches the transcript as a failure.
+        let mut problems: Vec<fuigo_hooks::health::ConfigProblem> = Vec::new();
+        let results: Vec<&HookRunResult> = results
+            .iter()
+            .filter(|r| match r {
+                HookRunResult::Failed { hook_name, error, .. }
+                    if fuigo_hooks::health::is_config_failure(error) =>
+                {
+                    problems.push(fuigo_hooks::health::ConfigProblem {
+                        hook_name: hook_name.clone(),
+                        source: fuigo_hooks::health::hook_source(hook_name),
+                        is_plugin: hook_name.starts_with(fuigo_hooks::config::PLUGIN_HOOK_PREFIX),
+                        detail: fuigo_hooks::health::config_failure_detail(error).to_string(),
+                    });
+                    false
+                }
+                _ => true,
+            })
+            .collect();
+        if let Some(notice) = fuigo_hooks::health::grouped_notice(&problems) {
+            self.send_hook_annotation(&notice).await;
+        }
         if results.is_empty()
             || results
                 .iter()
-                .all(|r| matches!(r, fuigo_hooks::result::HookRunResult::Skipped { .. }))
+                .all(|r| matches!(r, HookRunResult::Skipped { .. }))
         {
             return;
         }
-        use crate::extensions::notification::{HookRunEntryDto, HookRunStatusDto};
-        use fuigo_hooks::result::HookRunResult;
 
         let runs: Vec<HookRunEntryDto> = results
             .iter()
             .map(|r| {
-                let (name, status) = match r {
+                let (name, status) = match *r {
                     HookRunResult::Success {
                         hook_name, elapsed, ..
                     } => (
@@ -193,6 +217,23 @@ impl SessionActor {
             if let Some(message) = system_message.map(str::trim).filter(|m| !m.is_empty()) {
                 self.send_hook_annotation(message).await;
             }
+        }
+    }
+
+    /// Validate every enabled command hook once, without running anything, and tell the user about the ones that cannot
+    /// start as ONE grouped notice. Run at session start and after a hooks reload, so config failures are known before
+    /// the first prompt; the dispatcher then skips those hooks silently for the session.
+    pub(super) async fn check_hooks_after_load(&self) {
+        let Some(registry) = self.hook_registry.borrow().clone() else {
+            return;
+        };
+        let problems = fuigo_hooks::health::validate_registry(
+            &registry,
+            &self.hook_resolved_workspace_root,
+            &self.session_info.id.0,
+        );
+        if let Some(notice) = fuigo_hooks::health::grouped_notice(&problems) {
+            self.send_hook_annotation(&notice).await;
         }
     }
 

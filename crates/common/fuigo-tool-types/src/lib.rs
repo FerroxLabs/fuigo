@@ -12,7 +12,8 @@ pub use serde_lenient::{
 };
 pub use task::{
     BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK, BUILTIN_SUBAGENTS, BackgroundNoticeNaming,
-    DEFAULT_TASK_OUTPUT_WAIT_MS, MIN_TASK_OUTPUT_WAIT_MS, effective_task_output_wait_ms,
+    DEFAULT_TASK_OUTPUT_WAIT_MS, ForegroundSpawnInterrupt, HandedOffSubagentState,
+    MIN_TASK_OUTPUT_WAIT_MS, effective_task_output_wait_ms,
     BuiltinSubagent, EXPLORE_PROMPT, EXPLORE_SUBAGENT, GENERAL_PURPOSE_PROMPT,
     GENERAL_PURPOSE_SUBAGENT, KillTaskOutput, KillTaskResult, KillTaskToolInput,
     KillTaskToolNaming, MAX_MULTI_WAIT_IDS, MAX_WAIT_BLOCK_MS_DEFAULT, MAX_WAIT_MS_PLACEHOLDER,
@@ -22,7 +23,8 @@ pub use task::{
     TaskToolNaming, WaitMode, WaitTasksToolInput, WaitTasksToolNaming, build_kill_task_description,
     build_task_description, build_task_output_description, build_wait_tasks_description,
     builtin_subagent_by_name, default_subagent_type, format_resume_footer,
-    format_subagent_auto_backgrounded, format_subagent_completed,
+    format_subagent_auto_backgrounded, format_subagent_backgrounded_on_turn_end,
+    format_subagent_completed,
     format_subagent_started_background, format_wait_cap_ms, is_not_sentinel, max_wait_block_ms,
     resolve_task_ids, sanitize_optional_arg, should_continue_parent_work, task_output_waits,
     task_output_waits_from_json,

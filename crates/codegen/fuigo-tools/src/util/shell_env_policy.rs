@@ -217,7 +217,7 @@ where
     env
 }
 
-/// Clear the command's inherited env and install the policy-derived base env.
+/// Remove the command's inherited env (by name, see below) and install the policy-derived base env.
 /// `active` must already be noop-filtered; `None` leaves the command untouched.
 /// The one base-env code path, shared by the public entry point and the spawn
 /// sites.
@@ -226,8 +226,23 @@ pub(crate) fn install_policy_base_env(
     active: Option<&ShellEnvironmentPolicy>,
 ) {
     if let Some(policy) = active {
-        cmd.env_clear();
-        cmd.envs(create_env(policy));
+        // Not `env_clear()`: a clear is invisible to `Command::get_envs`, so the per-command
+        // sandbox (which rebuilds the command from its program, args, dir and env edits, and
+        // reads the environment the child will have through `sandbox_launch::child_env`) would see
+        // the whole inherited environment come back. Every inherited name the base does not carry
+        // is removed by name instead, which both of them observe; the child's environment is the
+        // same set either way.
+        let base = create_env(policy);
+        // Inherited names and any the command already set (a clear drops those too)
+        let mut names: std::collections::BTreeSet<std::ffi::OsString> =
+            std::env::vars_os().map(|(name, _)| name).collect();
+        names.extend(cmd.as_std().get_envs().map(|(name, _)| name.to_os_string()));
+        for name in names {
+            if !name.to_str().is_some_and(|name| base.contains_key(name)) {
+                cmd.env_remove(&name);
+            }
+        }
+        cmd.envs(base);
     }
 }
 

@@ -1,6 +1,7 @@
 mod display;
+use crate::app::worktree_session::{WorktreeSpec, create_worktree, new_worktree_id};
 use agent_client_protocol as acp;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use fuigo_acp_lib::acp_send;
 use fuigo_fast_worktree::WorktreeRecord;
@@ -9,6 +10,7 @@ pub use fuigo_fast_worktree::{DbStats, GcReport, KeptWorktree, RebuildReport};
 use fuigo_shell::agent::config::Config as AgentConfig;
 use fuigo_shell::sampling::error::{acp_error_text, error_detail_from_data};
 use std::io::Write;
+use std::path::Path;
 use tokio_util::sync::CancellationToken;
 #[derive(Debug, clap::Args, Clone)]
 pub struct WorktreeArgs {
@@ -17,6 +19,14 @@ pub struct WorktreeArgs {
 }
 #[derive(Debug, Subcommand, Clone)]
 enum WorktreeCommand {
+    /// Create a worktree the way `fuigo -w` does, without starting a session
+    Create {
+        /// Worktree name; generated when omitted
+        name: Option<String>,
+        /// Branch, tag, or commit to base the worktree on; without it, HEAD plus uncommitted changes
+        #[arg(long = "ref", value_name = "REF")]
+        git_ref: Option<String>,
+    },
     /// List tracked worktrees
     #[command(visible_alias = "ls")]
     List {
@@ -99,6 +109,21 @@ pub async fn run(args: WorktreeArgs, agent_config: &AgentConfig) -> Result<()> {
 }
 async fn dispatch(command: WorktreeCommand, tx: &fuigo_acp_lib::AcpAgentTx) -> Result<()> {
     match command {
+        WorktreeCommand::Create { name, git_ref } => {
+            let source_cwd =
+                std::env::current_dir().context("couldn't read the current directory")?;
+            let spec = WorktreeSpec {
+                label: name,
+                git_ref,
+            };
+            cmd_create(
+                tx,
+                &source_cwd,
+                &spec,
+                &mut fuigo_tty_utils::best_effort_stdout::display_stdout(),
+            )
+            .await
+        }
         WorktreeCommand::List {
             repo,
             r#type,
@@ -162,11 +187,34 @@ async fn ext_call<T: serde::de::DeserializeOwned>(
     let envelope: ExtEnvelope<T> = serde_json::from_str(resp.0.get())
         .map_err(|e| anyhow::anyhow!("response parse error: {e}"))?;
     if let Some(err) = envelope.error {
-        bail!("ACP error: {}", fuigo_tty_utils::untrusted(ext_envelope_error_text(&err)));
+        bail!(
+            "ACP error: {}",
+            fuigo_tty_utils::untrusted(ext_envelope_error_text(&err))
+        );
     }
     envelope
         .result
         .ok_or_else(|| anyhow::anyhow!("ACP response missing result field"))
+}
+/// Stdout carries only the session directory, so `cd "$(fuigo worktree create)"` works.
+async fn cmd_create(
+    tx: &fuigo_acp_lib::AcpAgentTx,
+    source_cwd: &Path,
+    spec: &WorktreeSpec,
+    out: &mut impl Write,
+) -> Result<()> {
+    let created = create_worktree(tx, source_cwd, spec, &new_worktree_id(None)).await?;
+    let dir = if created.session_cwd.is_dir() {
+        &created.session_cwd
+    } else {
+        fuigo_tty_utils::best_effort_stderr::eprint_line(&format!(
+            "{} is not in the new worktree; printing the worktree root",
+            created.session_cwd.display()
+        ));
+        &created.worktree_root
+    };
+    let written = writeln!(out, "{}", dir.display());
+    Ok(crate::util::ignore_broken_pipe(written)?)
 }
 async fn cmd_list(
     tx: &fuigo_acp_lib::AcpAgentTx,
@@ -202,10 +250,16 @@ async fn cmd_show(tx: &fuigo_acp_lib::AcpAgentTx, id_or_path: &str) -> Result<()
     .await?;
     match rec {
         Some(r) => {
-            let written = display::print_show(&r, &mut fuigo_tty_utils::best_effort_stdout::display_stdout());
+            let written = display::print_show(
+                &r,
+                &mut fuigo_tty_utils::best_effort_stdout::display_stdout(),
+            );
             Ok(crate::util::ignore_broken_pipe(written)?)
         }
-        None => bail!("worktree not found: {}", fuigo_tty_utils::untrusted(id_or_path)),
+        None => bail!(
+            "worktree not found: {}",
+            fuigo_tty_utils::untrusted(id_or_path)
+        ),
     }
 }
 #[derive(serde::Deserialize)]
@@ -236,12 +290,22 @@ async fn cmd_rm(
             Ok(r) => {
                 let path = r.resolved_path.as_deref().unwrap_or(id_or_path);
                 if dry_run {
-                    fuigo_tty_utils::cli_println!("  would remove: {}", fuigo_tty_utils::untrusted(path));
+                    fuigo_tty_utils::cli_println!(
+                        "  would remove: {}",
+                        fuigo_tty_utils::untrusted(path)
+                    );
                 } else if r.removed {
-                    fuigo_tty_utils::cli_println!("  removed: {}", fuigo_tty_utils::untrusted(path));
+                    fuigo_tty_utils::cli_println!(
+                        "  removed: {}",
+                        fuigo_tty_utils::untrusted(path)
+                    );
                 }
             }
-            Err(e) => fuigo_tty_utils::cli_eprintln!("  error removing {}: {}", fuigo_tty_utils::untrusted(id_or_path), fuigo_tty_utils::untrusted(e)),
+            Err(e) => fuigo_tty_utils::cli_eprintln!(
+                "  error removing {}: {}",
+                fuigo_tty_utils::untrusted(id_or_path),
+                fuigo_tty_utils::untrusted(e)
+            ),
         }
     }
     Ok(())
@@ -275,7 +339,10 @@ async fn cmd_db(tx: &fuigo_acp_lib::AcpAgentTx, command: WorktreeDbCommand) -> R
     match command {
         WorktreeDbCommand::Stats => {
             let stats: DbStats = ext_call(tx, "fuigo/git/worktree/db/stats", &()).await?;
-            let written = display::print_stats(&stats, &mut fuigo_tty_utils::best_effort_stdout::display_stdout());
+            let written = display::print_stats(
+                &stats,
+                &mut fuigo_tty_utils::best_effort_stdout::display_stdout(),
+            );
             Ok(crate::util::ignore_broken_pipe(written)?)
         }
         WorktreeDbCommand::Path => {
@@ -289,7 +356,10 @@ async fn cmd_db(tx: &fuigo_acp_lib::AcpAgentTx, command: WorktreeDbCommand) -> R
         }
         WorktreeDbCommand::Rebuild => {
             let report: RebuildReport = ext_call(tx, "fuigo/git/worktree/db/rebuild", &()).await?;
-            let written = display::print_rebuild(&report, &mut fuigo_tty_utils::best_effort_stdout::display_stdout());
+            let written = display::print_rebuild(
+                &report,
+                &mut fuigo_tty_utils::best_effort_stdout::display_stdout(),
+            );
             Ok(crate::util::ignore_broken_pipe(written)?)
         }
     }
@@ -297,6 +367,122 @@ async fn cmd_db(tx: &fuigo_acp_lib::AcpAgentTx, command: WorktreeDbCommand) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::worktree_session::{CREATE_METHOD, create_worktree_params};
+    /// Answers every extension call with `reply` and forwards each `(method, params)` it saw.
+    fn spawn_ext_agent(
+        reply: serde_json::Value,
+    ) -> (
+        fuigo_acp_lib::AcpAgentTx,
+        tokio::sync::mpsc::UnboundedReceiver<(String, serde_json::Value)>,
+    ) {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpAgentMessage>();
+        let (seen_tx, seen_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                let fuigo_acp_lib::AcpAgentMessage::ExtMethod(args) = msg else {
+                    panic!("unexpected ACP message");
+                };
+                let params: serde_json::Value =
+                    serde_json::from_str(args.request.params.get()).unwrap();
+                seen_tx
+                    .send((args.request.method.to_string(), params))
+                    .unwrap();
+                let raw = serde_json::value::to_raw_value(&reply).unwrap();
+                args.response_tx
+                    .send(Ok(acp::ExtResponse::new(std::sync::Arc::from(raw))))
+                    .unwrap();
+            }
+        });
+        (tx, seen_rx)
+    }
+    #[tokio::test]
+    async fn create_sends_the_dash_w_request_and_prints_only_the_session_cwd() {
+        let src = tempfile::tempdir().unwrap();
+        let launch_cwd = src.path().join("crates").join("pager");
+        std::fs::create_dir_all(&launch_cwd).unwrap();
+        let wt = tempfile::tempdir().unwrap();
+        let session_cwd = wt.path().join("crates").join("pager");
+        std::fs::create_dir_all(&session_cwd).unwrap();
+        let (tx, mut seen) = spawn_ext_agent(serde_json::json!({"result": {
+            "worktreePath": wt.path(),
+            "sourceGitRoot": src.path(),
+        }}));
+        let spec = WorktreeSpec {
+            label: Some("my-fix".to_owned()),
+            git_ref: Some("origin/main".to_owned()),
+        };
+        let mut out = Vec::new();
+        cmd_create(&tx, &launch_cwd, &spec, &mut out).await.unwrap();
+        let (method, params) = seen.recv().await.unwrap();
+        assert_eq!(CREATE_METHOD, method);
+        let worktree_id = params.get("newSessionId").and_then(|v| v.as_str()).unwrap();
+        assert!(worktree_id.starts_with("pager-"), "{worktree_id}");
+        assert_eq!(
+            create_worktree_params(&launch_cwd, &spec, worktree_id),
+            params
+        );
+        assert_eq!(
+            format!("{}\n", session_cwd.display()),
+            String::from_utf8(out).unwrap()
+        );
+    }
+    #[tokio::test]
+    async fn create_prints_the_worktree_root_when_the_ref_lacks_the_launch_subdirectory() {
+        let src = tempfile::tempdir().unwrap();
+        let launch_cwd = src.path().join("crates").join("pager");
+        std::fs::create_dir_all(&launch_cwd).unwrap();
+        let wt = tempfile::tempdir().unwrap();
+        let (tx, _seen) = spawn_ext_agent(serde_json::json!({"result": {
+            "worktreePath": wt.path(),
+            "sourceGitRoot": src.path(),
+        }}));
+        let spec = WorktreeSpec {
+            label: None,
+            git_ref: Some("v1".to_owned()),
+        };
+        let mut out = Vec::new();
+        cmd_create(&tx, &launch_cwd, &spec, &mut out).await.unwrap();
+        assert_eq!(
+            format!("{}\n", wt.path().display()),
+            String::from_utf8(out).unwrap()
+        );
+    }
+    #[tokio::test]
+    async fn create_failure_surfaces_the_agent_error_and_prints_nothing() {
+        let src = tempfile::tempdir().unwrap();
+        let (tx, _seen) = spawn_ext_agent(serde_json::json!({"error": "disk full"}));
+        let mut out = Vec::new();
+        let error = cmd_create(&tx, src.path(), &WorktreeSpec::default(), &mut out)
+            .await
+            .unwrap_err();
+        assert_eq!("couldn't create worktree: disk full", error.to_string());
+        assert!(out.is_empty());
+    }
+    #[test]
+    fn create_parses_name_and_ref_and_defaults_both_to_none() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            command: WorktreeCommand,
+        }
+        let cli = Cli::parse_from(["test", "create", "my-fix", "--ref", "origin/main"]);
+        match cli.command {
+            WorktreeCommand::Create { name, git_ref } => {
+                assert_eq!(Some("my-fix"), name.as_deref());
+                assert_eq!(Some("origin/main"), git_ref.as_deref());
+            }
+            _ => panic!("expected Create variant"),
+        }
+        let cli = Cli::parse_from(["test", "create"]);
+        match cli.command {
+            WorktreeCommand::Create { name, git_ref } => {
+                assert!(name.is_none());
+                assert!(git_ref.is_none());
+            }
+            _ => panic!("expected Create variant"),
+        }
+    }
     /// A-R8-3: `83112ed` converted this file's other renders to `data.message` and left the envelope
     /// error printing its whole JSON value. A 1.0.18 agent answers with object `data`, so the dump is
     /// now nested: the CLI user must get the sentence, not the envelope.

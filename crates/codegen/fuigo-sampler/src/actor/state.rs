@@ -81,6 +81,7 @@ mod tests {
             query_params: IndexMap::new(),
             env_http_headers: IndexMap::new(),
             context_window: 8192,
+            max_request_bytes: None,
             force_http1: false,
             max_retries: None,
             stream_tool_calls: false,

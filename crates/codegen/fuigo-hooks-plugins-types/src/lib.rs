@@ -256,6 +256,49 @@ pub struct HookInfo {
     /// elsewhere.
     #[serde(default)]
     pub removable: bool,
+    /// What `/hooks` and `fuigo doctor` show beside the hook: where it came from and whether it can run.
+    #[serde(default)]
+    pub health: HookHealthInfo,
+}
+
+/// Whether a hook can run, as `/hooks` and `fuigo doctor` list it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HookState {
+    /// Runs, and its last run (if any) succeeded.
+    #[default]
+    Ok,
+    /// Will not run: disabled, or a CONFIG failure (missing placeholder, command not found).
+    Skipped,
+    /// Ran and failed (non-zero exit, timeout); the last error is the reason.
+    Failing,
+}
+
+impl HookState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Skipped => "skipped",
+            Self::Failing => "failing",
+        }
+    }
+}
+
+/// Source, state, reason and fix hint of one hook.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookHealthInfo {
+    /// The plugin name for a plugin hook, otherwise the tier (`global`, `project`, ...).
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub state: HookState,
+    /// Why the hook is skipped, or its last error when failing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// What to do about it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix_hint: Option<String>,
 }
 
 /// Response for `fuigo/hooks/list`.
@@ -751,6 +794,7 @@ mod tests {
             disabled: false,
             pinned: false,
             removable: true,
+            health: HookHealthInfo::default(),
         };
         let json = serde_json::to_string(&hook).unwrap();
         assert!(json.contains("handlerType"));

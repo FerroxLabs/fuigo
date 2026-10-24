@@ -726,6 +726,7 @@ pub(crate) struct RegistryConfig {
 pub mod acp_conversion;
 pub(crate) mod acp_mcp;
 pub(crate) mod acp_session;
+pub(crate) mod agent_mcp;
 pub(crate) mod agent_rebuild;
 pub(crate) mod chat_persistence;
 pub(crate) mod events;

@@ -13,7 +13,72 @@ fn completion_cancel_trigger(result: &PromptTurnResult) -> Option<&str> {
     }
 }
 
+/// Whether a finished turn used any tool, as far as the goal idle guard can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GoalTurnActivity {
+    ToolCalls,
+    NoToolCalls,
+    /// The turn carried no signal snapshot, so it neither counts as idle nor clears the streak.
+    Unknown,
+}
+
 impl SessionActor {
+    /// Classify a finished turn for the goal idle guard.
+    pub(super) fn goal_turn_activity(result: &PromptTurnResult) -> GoalTurnActivity {
+        let Some(snapshot) = result.as_ref().ok().and_then(|ok| ok.turn_snapshot.as_ref()) else {
+            return GoalTurnActivity::Unknown;
+        };
+        if snapshot.delta.delta_tool_calls > 0 || !snapshot.delta.tools_this_turn.is_empty() {
+            GoalTurnActivity::ToolCalls
+        } else {
+            GoalTurnActivity::NoToolCalls
+        }
+    }
+
+    /// Feed one finished goal turn to the idle guard.
+    ///
+    /// A goal is continued by queueing a `goal-summary-*` turn after each turn that ends. When
+    /// [`GOAL_IDLE_CONTINUATION_THRESHOLD`] of those in a row end without a single tool call, the goal is not
+    /// moving: it pauses (resumable with `/goal resume`) instead of paying for more empty turns. A turn that used
+    /// a tool, or one the user typed, clears the streak; a turn with no signal snapshot moves nothing.
+    pub(crate) async fn note_goal_turn_activity(&self, prompt_id: &str, activity: GoalTurnActivity) {
+        use crate::session::goal_tracker::{
+            GOAL_IDLE_CONTINUATION_THRESHOLD, GoalPauseReason, GoalStatus,
+        };
+        if !self.goal_harness_enabled() {
+            return;
+        }
+        let streak = {
+            let mut tracker = self.goal_tracker.lock();
+            if tracker.status() != Some(GoalStatus::Active) {
+                return;
+            }
+            let continuation = prompt_id.starts_with("goal-summary-");
+            match (continuation, activity) {
+                (true, GoalTurnActivity::NoToolCalls) => tracker.note_idle_continuation(),
+                (true, GoalTurnActivity::Unknown) => return,
+                _ => {
+                    tracker.reset_idle_continuations();
+                    return;
+                }
+            }
+        };
+        if streak < GOAL_IDLE_CONTINUATION_THRESHOLD {
+            return;
+        }
+        let message = format!(
+            "Goal paused: {GOAL_IDLE_CONTINUATION_THRESHOLD} continuations in a row made no tool call, \
+             so it is not making progress. Use /goal resume to continue or /goal clear to abandon."
+        );
+        let paused = self
+            .auto_pause_goal_if_active_with_message(GoalPauseReason::NoProgress, message.clone())
+            .await;
+        self.goal_tracker.lock().reset_idle_continuations();
+        if paused {
+            self.send_slash_command_output(&message).await;
+        }
+    }
+
     /// Emit a cosmetic `Plan` update at turn end to clear stale spinners.
     ///
     /// When the model ends the turn without a cleanup `todo_write` call, remaining `in_progress` items keep spinning in the UI.

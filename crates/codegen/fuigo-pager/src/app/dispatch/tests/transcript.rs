@@ -370,3 +370,91 @@ fn open_block_viewer_skips_image_viewer_when_no_graphics() {
         "image_viewer modal should not open on terminals without a graphics protocol"
     );
 }
+
+// -- Row 46.6: Enter on a video card ---------------------------------------
+
+fn app_with_video_card(dir: &std::path::Path) -> AppView {
+    let mut app = test_app_with_agent();
+    let video_path = dir.join("clip.mp4");
+    std::fs::write(&video_path, b"not really a video").unwrap();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent
+        .scrollback
+        .push_block(RenderBlock::ToolCall(ToolCallBlock::Other(
+            crate::scrollback::blocks::OtherToolCallBlock::new("video_tool", "saved video")
+                .with_media_ref(video_path, true),
+        )));
+    agent.scrollback.set_selected(Some(0));
+    app
+}
+
+fn toast_text(app: &AppView) -> String {
+    app.agents[&AgentId(0)]
+        .toast
+        .as_ref()
+        .map(|t| t.0.clone())
+        .unwrap_or_default()
+}
+
+/// A terminal that cannot draw frames hands the video to the default player; it neither dead-ends on the image guard nor starts extraction.
+#[test]
+fn enter_on_a_video_card_without_graphics_opens_the_default_player() {
+    use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_video_card(dir.path());
+    let _protocol = set_protocol_for_test(GraphicsProtocol::None);
+    let _ffmpeg = crate::inline_media_ffmpeg::set_ffmpeg_available_for_test(true);
+
+    let effects = dispatch(Action::OpenBlockViewer, &mut app);
+
+    assert!(effects.is_empty());
+    let agent = &app.agents[&AgentId(0)];
+    assert!(agent.video_load_rx.is_none(), "no frame extraction is started");
+    assert!(agent.inline_video.is_none());
+    let toast = toast_text(&app);
+    assert!(!toast.contains("not supported"), "no image-guard dead end: {toast}");
+    assert!(
+        toast.contains("default app") || toast.contains("Could not open"),
+        "the open was attempted: {toast}"
+    );
+}
+
+/// Graphics are available but ffmpeg is not: no stalled poster/frame extraction, the file opens in the default player.
+#[test]
+fn enter_on_a_video_card_without_ffmpeg_opens_the_default_player() {
+    use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_video_card(dir.path());
+    let _protocol = set_protocol_for_test(GraphicsProtocol::Kitty);
+    let _ffmpeg = crate::inline_media_ffmpeg::set_ffmpeg_available_for_test(false);
+
+    let effects = dispatch(Action::OpenBlockViewer, &mut app);
+
+    assert!(effects.is_empty());
+    let agent = &app.agents[&AgentId(0)];
+    assert!(agent.video_load_rx.is_none(), "no extraction thread without ffmpeg");
+    let toast = toast_text(&app);
+    assert!(!toast.contains("Loading video"), "no stalled loading state: {toast}");
+    assert!(
+        toast.contains("default app") || toast.contains("Could not open"),
+        "the open was attempted: {toast}"
+    );
+}
+
+/// With graphics and ffmpeg the card still plays inline.
+#[test]
+fn enter_on_a_video_card_with_graphics_and_ffmpeg_plays_inline() {
+    use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_video_card(dir.path());
+    let _protocol = set_protocol_for_test(GraphicsProtocol::Kitty);
+    let _ffmpeg = crate::inline_media_ffmpeg::set_ffmpeg_available_for_test(true);
+
+    let effects = dispatch(Action::OpenBlockViewer, &mut app);
+
+    assert!(effects.is_empty());
+    assert!(
+        app.agents[&AgentId(0)].video_load_rx.is_some(),
+        "inline playback starts loading frames"
+    );
+}

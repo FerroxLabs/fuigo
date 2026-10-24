@@ -102,7 +102,10 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
                         Ok(Vec::new())
                     })
                     .unwrap_or_else(|e| {
-                        fuigo_tty_utils::cli_eprintln!("warning: remote session search failed: {}", fuigo_tty_utils::untrusted(e));
+                        fuigo_tty_utils::cli_eprintln!(
+                            "warning: remote session search failed: {}",
+                            fuigo_tty_utils::untrusted(e)
+                        );
                         Vec::new()
                     })
                 }
@@ -201,9 +204,15 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
             .await?;
 
             if deletion.any_removed() {
-                fuigo_tty_utils::cli_println!("Deleted session {}", fuigo_tty_utils::untrusted(&id));
+                fuigo_tty_utils::cli_println!(
+                    "Deleted session {}",
+                    fuigo_tty_utils::untrusted(&id)
+                );
             } else {
-                fuigo_tty_utils::cli_println!("No session found with id {}.", fuigo_tty_utils::untrusted(&id));
+                fuigo_tty_utils::cli_println!(
+                    "No session found with id {}.",
+                    fuigo_tty_utils::untrusted(&id)
+                );
             }
         }
     }

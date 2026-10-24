@@ -663,6 +663,7 @@ impl WorkspaceHandle {
             default_tool_config: config.default_tool_config,
             require_explicit_toolset: config.require_explicit_toolset,
             confine_fs_to_workspace_root: config.confine_fs_to_workspace_root,
+            sandbox: config.sandbox,
             root_cwd: config.root_cwd.clone(),
             sessions: parking_lot::RwLock::new(sessions),
             session_factory: config.session_factory,
@@ -719,6 +720,11 @@ impl WorkspaceHandle {
     #[allow(dead_code)]
     pub fn shared(&self) -> &Arc<WorkspaceShared> {
         &self.shared
+    }
+    /// The folder's per-command shell sandbox, when the host built the workspace with one (the
+    /// leader's workspace exposure does; the CLI and the remote sandbox server do not).
+    pub fn sandbox(&self) -> Option<Arc<crate::sandbox::WorkspaceSandbox>> {
+        self.shared.sandbox()
     }
     pub fn activity_tracker(&self) -> &std::sync::Arc<crate::activity::ActivityTracker> {
         &self.shared.activity_tracker
@@ -1708,6 +1714,11 @@ impl WorkspaceHandle {
     /// Does **not** drop the session; the server's `unbind_session` path handles that.
     pub fn on_session_ended(&self, session_id: &str) {
         self.shared.activity_tracker.session_ended(session_id);
+        if let Some(sandbox) = self.shared.sandbox() {
+            let session_id = session_id.to_owned();
+            let owner = sandbox.clone();
+            owner.spawn_owned(async move { sandbox.end_session(&session_id).await });
+        }
         self.shared.session_event_writers.remove(session_id);
         self.shared
             .inflight_enqueues
@@ -4376,6 +4387,11 @@ pub struct LocalWorkspaceConnectOptions {
     /// MCP servers every admitted hub session binds; hot-swappable via
     /// [`WorkspaceHandle::reload_bind_mcp`].
     pub bind_mcp: Option<crate::config::BindMcpConfig>,
+    /// The folder's per-command shell sandbox (`crate::sandbox`): its launch hook is handed to
+    /// the session factory, so every shell spawn of every session goes through it. `None` runs
+    /// commands unwrapped. The leader's workspace exposure builds one; its mode is `off` unless
+    /// the user, the managed config or the folder's `workspaced.toml` says otherwise.
+    pub sandbox: Option<Arc<crate::sandbox::WorkspaceSandbox>>,
 }
 /// Create a [`WorkspaceHandle`] and connect it to the hub.
 ///
@@ -4404,6 +4420,7 @@ pub async fn connect_local_workspace(
         require_explicit_toolset,
         confine_fs_to_workspace_root,
         bind_mcp,
+        sandbox,
     } = options;
     let time_to_ready_started = std::time::Instant::now();
     let identity: crate::upload::environment::WorkspaceIdentity =
@@ -4422,6 +4439,11 @@ pub async fn connect_local_workspace(
     } = auxiliary_service_wiring(&auth);
     if crate::session::tool_config::tool_state_enabled() {
         factory = factory.with_tool_state_home(workspace_home.clone());
+    }
+    if let Some(sandbox) = &sandbox {
+        factory = factory.with_sandbox_launch(fuigo_tools::sandbox_launch::SandboxLaunchHook::new(
+            sandbox.clone(),
+        ));
     }
     let hub_cfg = crate::hub::HubConfig {
         url: hub_url,
@@ -4446,6 +4468,7 @@ pub async fn connect_local_workspace(
     ws_config.require_explicit_toolset = require_explicit_toolset;
     ws_config.confine_fs_to_workspace_root = confine_fs_to_workspace_root;
     ws_config.bind_mcp = bind_mcp;
+    ws_config.sandbox = sandbox;
     if let Ok(dir) = std::env::var("FUIGO_WORKSPACE_SERVER_SKILLS_DIR")
         && !dir.is_empty()
     {
@@ -5110,6 +5133,7 @@ impl WorkspaceHandle {
             require_explicit_toolset: false,
             confine_fs_to_workspace_root: false,
             bind_mcp: None,
+            sandbox: None,
         };
         Self::build(
             config,
@@ -5153,6 +5177,7 @@ impl WorkspaceHandle {
             require_explicit_toolset: false,
             confine_fs_to_workspace_root: false,
             bind_mcp: None,
+            sandbox: None,
         }
     }
     /// Test handle backed by a temp dir. Zero sessions; `TempDir` kept alive via `Arc`.
@@ -5162,6 +5187,21 @@ impl WorkspaceHandle {
         let root_cwd = factory.temp.path().to_path_buf();
         Self::new(Self::test_config(root_cwd, factory))
             .expect("test workspace handle construction must succeed")
+    }
+    /// Like [`Self::for_test_in`] with the folder's command sandbox wired the way
+    /// `connect_local_workspace` wires it: every shell spawn goes through `sandbox`, the hub's
+    /// result path decodes what it stopped.
+    pub fn for_test_in_with_sandbox(
+        root: &std::path::Path,
+        sandbox: std::sync::Arc<crate::sandbox::WorkspaceSandbox>,
+    ) -> Self {
+        use crate::session::tool_config::test_support::TestSessionContextFactory;
+        let factory = std::sync::Arc::new(TestSessionContextFactory::new().with_sandbox_launch(
+            fuigo_tools::sandbox_launch::SandboxLaunchHook::new(sandbox.clone()),
+        ));
+        let mut config = Self::test_config(root.to_path_buf(), factory);
+        config.sandbox = Some(sandbox);
+        Self::new(config).expect("test workspace handle construction must succeed")
     }
     /// Like [`Self::for_test`] but rooted at `root` (must exist on disk).
     pub fn for_test_in(root: &std::path::Path) -> Self {

@@ -361,6 +361,12 @@ See the [MCP Server Registry](https://github.com/modelcontextprotocol/servers) f
 
 ---
 
+## Servers declared by an agent
+
+An agent definition (agent.md) can declare its own servers under `mcpServers`, either as the name of an already-configured server or as an inline definition. Inline definitions take the same fields as `config.toml` (`headers = { K = "v" }` and `env = { K = "v" }` maps) as well as the ACP list form. When the same server name appears in `config.toml` / `.mcp.json` and in the active agent's `mcpServers`, **agent.md wins**, including its HTTP headers. The agent's servers are put back on top after every config hot-reload and plugin reload, so a reload cannot restore the `config.toml` copy.
+
+A server that the `enabled = false` switch or the admin policy blocks stays blocked: an agent definition cannot start it. Plugin agents and agents from an untrusted project folder ignore `mcpServers`.
+
 ## Subagents and MCP
 
 Subagents inherit the parent session’s connected MCP servers by default, including plugin-sourced agents. Use agent frontmatter `mcpInheritance` to restrict that set (`all`, `none`, `named`, or `except`). Details are in [Subagents — MCP inheritance](16-subagents.md#mcp-inheritance).

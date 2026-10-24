@@ -1635,6 +1635,7 @@ pub fn apply_sandbox(
         .and_then(|p| dunce::canonicalize(p).ok())
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
+    fuigo_sandbox::set_confinement_root(&workspace);
     #[cfg(target_os = "linux")]
     let requires_read_deny = fuigo_sandbox::requires_read_deny(&sandbox_profile, &workspace);
     #[cfg(target_os = "linux")]

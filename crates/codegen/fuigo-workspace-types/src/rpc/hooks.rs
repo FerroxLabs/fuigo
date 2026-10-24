@@ -32,6 +32,12 @@ pub struct HookSpecWire {
     pub enabled: bool,
     pub command: Option<PathBuf>,
     pub command_raw: Option<String>,
+    /// The `command` + `args` form (run without a shell). Absent on the wire for the shell form and from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// The shell a shell-form command runs in (`"bash"`). Absent on the wire for the default `sh` and from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
     pub url: Option<String>,
     pub url_raw: Option<String>,
     pub timeout_ms: u64,
@@ -54,6 +60,8 @@ impl std::fmt::Debug for HookSpecWire {
             enabled,
             command,
             command_raw,
+            args,
+            shell,
             url,
             url_raw,
             timeout_ms,
@@ -69,6 +77,8 @@ impl std::fmt::Debug for HookSpecWire {
             .field("enabled", enabled)
             .field("command", &command.as_ref().map(|_| "<redacted>"))
             .field("command_raw", &command_raw.as_ref().map(|_| "<redacted>"))
+            .field("args", &args.as_ref().map(Vec::len))
+            .field("shell", shell)
             .field("url", &url.as_ref().map(|_| "<redacted>"))
             .field("url_raw", &url_raw.as_ref().map(|_| "<redacted>"))
             .field("timeout_ms", timeout_ms)

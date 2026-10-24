@@ -49,8 +49,10 @@ jobs:
   build:
     name: ${{ matrix.npm_platform }}
     runs-on: ${{ matrix.runner }}
-    # The workspace is large; a cold cache genuinely takes this long.
-    timeout-minutes: 120
+    # The workspace is large; a cold cache genuinely takes this long. release-dist (thin LTO, codegen-units=1) builds
+    # ~2.8x slower than --release (Hetzner, linux-x64: 6m57 -> 19m21, same load). The 1.0.31 --release jobs took
+    # 23-50 min, so the slowest projects to ~145 min; 300 is the 2x headroom (and the hosted-runner ceiling).
+    timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
@@ -223,7 +225,14 @@ jobs:
           set -euo pipefail
           FUIGO_VERSION=$(grep -m1 '^version' crates/codegen/fuigo-version/Cargo.toml | cut -d'"' -f2)
           export FUIGO_VERSION
-          cargo build --release --target ${{ matrix.target }} -p fuigo-pager-bin
+          # macOS only: "packed" makes rustc run dsymutil itself right after the link, while the
+          # object files (which hold the DWARF) still exist, and leave <bin>.dSYM next to the
+          # binary. With the profile's "off" the DWARF stays in the discarded .o files and a later
+          # `dsymutil <bin>` finds nothing but compiler_builtins. Windows keeps its profile value.
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            export CARGO_PROFILE_RELEASE_DIST_SPLIT_DEBUGINFO=packed
+          fi
+          cargo build --profile release-dist --target ${{ matrix.target }} -p fuigo-pager-bin
 
       # Linux: the runner is native, but the build runs in a manylinux_2_28 container
       # (AlmaLinux 8, glibc 2.28, image pinned by digest inside the script) so the binary
@@ -245,7 +254,95 @@ jobs:
         run: |
           set -euo pipefail
           scripts/release/check-linux-floor.sh --self-test
-          scripts/release/check-linux-floor.sh "target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          scripts/release/check-linux-floor.sh "target/${{ matrix.target }}/release-dist/${{ matrix.bin }}"
+
+      # Debug info as a SEPARATE file (release-dist keeps line-table DWARF and symbols in the binary). Taken
+      # from the unstripped binary, after the floor check and before the strip below. Uploaded as a
+      # workflow artifact only: never attached to the GitHub release, never in an npm package (the
+      # `debug-symbols-*` name matches no `fuigo-*` download pattern). Linux: the .debug file (the
+      # .gnu_debuglink is added to the shipped binary after the strip). macOS: the .dSYM bundle rustc wrote (split-debuginfo=packed).
+      # Windows: the .pdb the MSVC linker wrote next to the exe.
+      - name: Extract debug symbols
+        id: dbg
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release-dist/${{ matrix.bin }}"
+          VERSION=$(grep -m1 '^version' crates/codegen/fuigo-version/Cargo.toml | cut -d'"' -f2)
+          OUT="$RUNNER_TEMP/debug-symbols"
+          rm -rf "$OUT"; mkdir -p "$OUT"
+          case "${{ runner.os }}" in
+            Linux)
+              # zlib-compress the DWARF sections (the uncompressed Linux file is ~1.44 GB); gdb and lldb read them transparently.
+              objcopy --only-keep-debug --compress-debug-sections=zlib "$BIN" "$OUT/${{ matrix.bin }}.debug"
+              ;;
+            macOS)
+              # Built with split-debuginfo=packed (see "Build"): rustc already wrote the dSYM next to the binary.
+              DSYM="$BIN.dSYM"
+              [ -d "$DSYM" ] || { echo "::error::no $DSYM next to the binary (split-debuginfo=packed did not produce one)"; exit 1; }
+              # The .dSYM cargo leaves next to the binary is a symlink into deps/; -L copies the bundle, not the link.
+              cp -RL "$DSYM" "$OUT/"
+              # Guard: a dSYM that cannot symbolicate fails the job. It must carry our own crates (the
+              # 1.0.32 dry run shipped one with only compiler_builtins) and match the binary's UUID.
+              # The UUID is stable across strip and codesign, so this is also the shipped binary's dSYM.
+              n=$(dwarfdump --debug-info "$OUT/${{ matrix.bin }}.dSYM" | grep -c 'DW_AT_name.*crates/codegen/fuigo-' || true)
+              [ "$n" -gt 0 ] || { echo "::error::dSYM has no compile unit from crates/codegen/fuigo-*"; exit 1; }
+              echo "dSYM compile units from fuigo crates: $n"
+              bu=$(dwarfdump --uuid "$BIN" | awk '{print $2}' | sort | tr '\n' ' ')
+              du=$(dwarfdump --uuid "$OUT/${{ matrix.bin }}.dSYM" | awk '{print $2}' | sort | tr '\n' ' ')
+              [ -n "$bu" ] && [ "$bu" = "$du" ] || { echo "::error::dSYM UUID ($du) does not match the binary ($bu)"; exit 1; }
+              echo "$bu" > "$RUNNER_TEMP/binary-uuid"
+              ;;
+            Windows)
+              PDB="target/${{ matrix.target }}/release-dist/$(basename "${{ matrix.bin }}" .exe | tr - _).pdb"
+              [ -f "$PDB" ] || { echo "::error::no $PDB next to the exe"; exit 1; }
+              cp "$PDB" "$OUT/"
+              ;;
+          esac
+          [ -n "$(ls -A "$OUT")" ] || { echo "::error::no debug symbols were produced"; exit 1; }
+          ls -lR "$OUT" | head -30
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # Strip the symbol table (U32-SIZE). cargo's release profile keeps .symtab/.strtab (~40 MB
+      # of a 229 MB linux-x64 binary in 1.0.31); nothing at runtime reads them (panic=abort,
+      # no debuginfo, the dynamic symbols stay). Done AFTER the Linux floor check on purpose:
+      # check-linux-floor.sh reads aarch64 mapping symbols ($x/$d) from .symtab to tell code
+      # from data, so it must see the unstripped binary. Done BEFORE the smoke test and the
+      # macOS verify so both judge the exact file that ships. Windows: the exe carries no
+      # symbol table (MSVC keeps symbols in the .pdb), nothing to strip.
+      - name: Strip symbols
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release-dist/${{ matrix.bin }}"
+          before=$(wc -c < "$BIN")
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            strip --strip-all "$BIN"
+            # Point the shipped binary at its separate debug file (added after the strip, which would drop it).
+            objcopy --add-gnu-debuglink="$RUNNER_TEMP/debug-symbols/${{ matrix.bin }}.debug" "$BIN"
+            if readelf -S -W "$BIN" | grep -qE '\.(symtab|strtab)[[:space:]]'; then
+              echo "::error::strip left a symbol table in $BIN"; exit 1
+            fi
+          else
+            # -x drops local symbols only; global symbols (tens of thousands) and the undefined-symbol
+            # table that `-undefined dynamic_lookup` binds at load time are kept. So macOS still has a
+            # partial symbol table; function names come from the dSYM, not from the binary.
+            strip -x "$BIN"
+            # arm64 will not run without a valid signature and strip invalidates the one the
+            # linker applied: sign again ad hoc, exactly as the linker did. (The `sign` job
+            # signs the shipped file afterwards, as before.)
+            if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
+              codesign --force --sign - "$BIN"
+            fi
+          fi
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            # strip and codesign keep LC_UUID: the shipped binary must still match the dSYM taken above.
+            [ "$(dwarfdump --uuid "$BIN" | awk '{print $2}' | sort | tr '\n' ' ')" = "$(cat "$RUNNER_TEMP/binary-uuid")" ] \
+              || { echo "::error::strip changed the binary UUID; the dSYM no longer matches"; exit 1; }
+          fi
+          after=$(wc -c < "$BIN")
+          echo "stripped $BIN: $before -> $after bytes"
 
       # A binary that cannot start is worth catching here rather than after
       # publish. Only meaningful where the runner can execute what it built,
@@ -254,7 +351,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BIN="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          BIN="target/${{ matrix.target }}/release-dist/${{ matrix.bin }}"
           ACTUAL=$("$BIN" --version | tr -d '\r')
           EXPECTED=$(grep -m1 '^version' crates/codegen/fuigo-version/Cargo.toml | cut -d'"' -f2)
           COMMIT=$(git rev-parse HEAD)
@@ -287,7 +384,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BIN="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          BIN="target/${{ matrix.target }}/release-dist/${{ matrix.bin }}"
           archs=$(lipo -archs "$BIN")
           echo "architectures: $archs"
           case "${{ matrix.target }}" in
@@ -309,7 +406,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BIN="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          BIN="target/${{ matrix.target }}/release-dist/${{ matrix.bin }}"
           python3 scripts/memory-bench/native_smoke.py --binary "$BIN" --force-recall-loop --out "$RUNNER_TEMP/memory-final"
           python3 scripts/memory-bench/native_smoke.py --binary "$BIN" --force-recall-loop --hostile-final-tool --out "$RUNNER_TEMP/memory-hostile"
           python3 scripts/memory-bench/native_smoke.py --binary "$BIN" --force-recall-loop --general-tools --out "$RUNNER_TEMP/memory-general"
@@ -329,10 +426,18 @@ jobs:
       # Windows and macOS binaries leave `build` UNSIGNED under a name that no consumer's
       # `fuigo-*` download pattern matches; the `sign` job re-uploads them as `fuigo-<platform>`.
       # Linux binaries are not signed and keep their final name.
+      # Debug symbols for crash symbolication: workflow artifact only (see "Extract debug symbols").
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debug-symbols-${{ matrix.npm_platform }}-${{ steps.dbg.outputs.version }}
+          path: ${{ runner.temp }}/debug-symbols/
+          retention-days: 90
+          if-no-files-found: error
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ runner.os == 'Linux' && format('fuigo-{0}', matrix.npm_platform) || format('unsigned-fuigo-{0}', matrix.npm_platform) }}
-          path: target/${{ matrix.target }}/release/${{ matrix.bin }}
+          path: target/${{ matrix.target }}/release-dist/${{ matrix.bin }}
           retention-days: 3
           # Already ~166 MB; the assemble step brotli-compresses it properly.
           compression-level: 0
@@ -388,8 +493,37 @@ jobs:
           tenant-id: 11fd2488-ed71-47ba-aad3-6c19d6e911ab
           allow-no-subscriptions: true
 
+      # The action downloads its signing module from the PowerShell Gallery on every run, and that download fails
+      # now and then. Try once more before failing; the Authenticode gate below still checks every binary.
       - name: Sign with Azure Artifact Signing
+        id: sign_first
         if: matrix.os == 'windows'
+        continue-on-error: true
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
+        with:
+          endpoint: https://eus.codesigning.azure.net
+          signing-account-name: ferrox-labs-signing
+          certificate-profile-name: ferroxlabs
+          files-folder: ${{ github.workspace }}\bin
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+          # This job has no actions: write, so the dependency cache could only warn; skip it.
+          cache-dependencies: false
+
+      - name: Sign with Azure Artifact Signing (second attempt)
+        if: matrix.os == 'windows' && steps.sign_first.outcome == 'failure'
         uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
         with:
           endpoint: https://eus.codesigning.azure.net

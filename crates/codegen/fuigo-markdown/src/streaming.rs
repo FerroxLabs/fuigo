@@ -524,6 +524,12 @@ impl StreamingMarkdownRenderer {
         // They are lazily rebuilt if rendering ever resumes
         self.open_code = None;
 
+        // The streaming scratch (parse output of the last tail render: highlight and code-block copies, grown vectors) and the
+        // chunk-by-chunk slack on the source are dead weight once the reply is complete; a long reply otherwise keeps several
+        // times what the same text rendered in one go does. Rendering that resumes rebuilds the scratch on demand.
+        self.buffers = MarkdownBuffers::new();
+        self.source.shrink_to_fit();
+
         self.output.as_view()
     }
 

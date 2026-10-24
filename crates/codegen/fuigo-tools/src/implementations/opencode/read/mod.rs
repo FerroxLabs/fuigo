@@ -97,6 +97,10 @@ impl From<ReadInput> for ToolInput {
 pub struct ReadTool;
 
 impl crate::types::tool_metadata::ToolMetadata for ReadTool {
+    fn lock_path_param(&self) -> Option<&'static str> {
+        Some("filePath")
+    }
+
     fn kind(&self) -> ToolKind {
         ToolKind::Read
     }

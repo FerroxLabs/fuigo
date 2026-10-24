@@ -15,7 +15,10 @@ fn held_update(n: u8, name: &str) -> Value {
 }
 
 fn row(n: u8, token: &str) -> (PeerHold, Token) {
-    (parse_hold(&held_update(n, "lane a")), Token(token.to_owned()))
+    (
+        parse_hold(&held_update(n, "lane a")),
+        Token(token.to_owned()),
+    )
 }
 
 fn parse_hold(v: &Value) -> PeerHold {
@@ -28,16 +31,32 @@ fn parse_hold(v: &Value) -> PeerHold {
 #[test]
 fn held_id_shape_is_exact() {
     assert!(is_held_id(&hid(1)));
-    for bad in ["", "h-", "h-zz", "x-00000000000000000000000000000000", &format!("{}0", hid(1)), "h-0000000000000000000000000000000\n"] {
+    for bad in [
+        "",
+        "h-",
+        "h-zz",
+        "x-00000000000000000000000000000000",
+        &format!("{}0", hid(1)),
+        "h-0000000000000000000000000000000\n",
+    ] {
         assert!(!is_held_id(bad), "{bad:?}");
     }
 }
 
 #[test]
 fn parses_the_six_events_and_ignores_the_rest() {
-    assert!(matches!(parse_event(&held_update(1, "x")), Some(PeerEvent::Held(_))));
-    for (name, want) in [("peer_released", 0), ("peer_refused", 1), ("peer_expired", 2), ("peer_reheld", 3)] {
-        let ev = parse_event(&json!({"sessionUpdate": name, "heldId": hid(1), "detail": "d"})).unwrap();
+    assert!(matches!(
+        parse_event(&held_update(1, "x")),
+        Some(PeerEvent::Held(_))
+    ));
+    for (name, want) in [
+        ("peer_released", 0),
+        ("peer_refused", 1),
+        ("peer_expired", 2),
+        ("peer_reheld", 3),
+    ] {
+        let ev =
+            parse_event(&json!({"sessionUpdate": name, "heldId": hid(1), "detail": "d"})).unwrap();
         let got = match ev {
             PeerEvent::Released(Some(_)) => 0,
             PeerEvent::Refused(Some(_), _) => 1,
@@ -71,14 +90,22 @@ fn malformed_held_events_are_dropped() {
         assert!(parse_event(&v).is_none(), "{v}");
     }
     // A notice with a bad id still parses, with no id (it just names nobody).
-    assert_eq!(parse_event(&json!({"sessionUpdate": "peer_released", "heldId": "nope"})), Some(PeerEvent::Released(None)));
+    assert_eq!(
+        parse_event(&json!({"sessionUpdate": "peer_released", "heldId": "nope"})),
+        Some(PeerEvent::Released(None))
+    );
 }
 
 #[test]
 fn session_id_peek_needs_a_peer_name() {
     let p = json!({"sessionId": "s1", "update": {"sessionUpdate": "peer_held"}});
     assert_eq!(peer_update_session_id(&p).as_deref(), Some("s1"));
-    assert!(peer_update_session_id(&json!({"sessionId": "s1", "update": {"sessionUpdate": "agent_message_chunk"}})).is_none());
+    assert!(
+        peer_update_session_id(
+            &json!({"sessionId": "s1", "update": {"sessionUpdate": "agent_message_chunk"}})
+        )
+        .is_none()
+    );
     assert!(peer_update_session_id(&json!({"update": {"sessionUpdate": "peer_held"}})).is_none());
 }
 
@@ -86,7 +113,10 @@ fn session_id_peek_needs_a_peer_name() {
 fn flag_off_state_ignores_everything() {
     let _g = force_peer_ui_for_test(false);
     let mut s = PeerUiState::default();
-    assert!(s.apply_event(PeerEvent::Held(parse_hold(&held_update(1, "x")))).is_none());
+    assert!(
+        s.apply_event(PeerEvent::Held(parse_hold(&held_update(1, "x"))))
+            .is_none()
+    );
     assert_eq!(s.held_count(), 0);
     assert!(s.row_text(0).is_none());
     assert!(s.apply_list(vec![row(1, "t")], true).is_none());
@@ -98,29 +128,57 @@ fn flag_off_state_ignores_everything() {
 fn held_row_appears_and_goes_with_a_notice() {
     let _g = force_peer_ui_for_test(true);
     let mut s = PeerUiState::default();
-    assert!(s.apply_event(PeerEvent::Held(parse_hold(&held_update(1, "lane a")))).is_none());
+    assert!(
+        s.apply_event(PeerEvent::Held(parse_hold(&held_update(1, "lane a"))))
+            .is_none()
+    );
     let t = s.row_text(10).unwrap();
-    assert!(t.contains("lane a") && t.contains("mode mismatch") && t.contains("review"), "{t}");
+    assert!(
+        t.contains("lane a") && t.contains("mode mismatch") && t.contains("review"),
+        "{t}"
+    );
     assert!(!t.contains('\n'));
     s.apply_event(PeerEvent::Held(parse_hold(&held_update(2, "lane b"))));
     assert!(s.row_text(10).unwrap().contains("+1 more"));
     let note = s.apply_event(PeerEvent::Released(Some(hid(1)))).unwrap();
-    assert!(note.contains("lane a") && note.contains("No tool call was approved"), "{note}");
+    assert!(
+        note.contains("lane a") && note.contains("No tool call was approved"),
+        "{note}"
+    );
     assert_eq!(s.held_count(), 1);
-    assert!(s.apply_event(PeerEvent::Refused(Some(hid(2)), false)).unwrap().contains("refused"));
+    assert!(
+        s.apply_event(PeerEvent::Refused(Some(hid(2)), false))
+            .unwrap()
+            .contains("refused")
+    );
     assert!(s.row_text(10).is_none());
     s.apply_event(PeerEvent::Held(parse_hold(&held_update(3, "lane c"))));
-    assert!(s.apply_event(PeerEvent::Expired(Some(hid(3)))).unwrap().contains("expired"));
+    assert!(
+        s.apply_event(PeerEvent::Expired(Some(hid(3))))
+            .unwrap()
+            .contains("expired")
+    );
 }
 
 #[test]
 fn hostile_strings_cannot_forge_a_row_or_an_escape() {
     let _g = force_peer_ui_for_test(true);
     let mut s = PeerUiState::default();
-    s.apply_event(PeerEvent::Held(parse_hold(&held_update(1, "evil\n\u{1b}[2J\u{202e}/exit\r\u{85}"))));
+    s.apply_event(PeerEvent::Held(parse_hold(&held_update(
+        1,
+        "evil\n\u{1b}[2J\u{202e}/exit\r\u{85}",
+    ))));
     let t = s.row_text(0).unwrap();
-    assert!(!t.contains(['\n', '\r', '\u{1b}', '\u{202e}', '\u{85}']), "{t:?}");
-    let w = s.apply_event(PeerEvent::Warning { text: "fixed\nline two".into(), subject: "a\nb\u{1b}[31m".into() }).unwrap();
+    assert!(
+        !t.contains(['\n', '\r', '\u{1b}', '\u{202e}', '\u{85}']),
+        "{t:?}"
+    );
+    let w = s
+        .apply_event(PeerEvent::Warning {
+            text: "fixed\nline two".into(),
+            subject: "a\nb\u{1b}[31m".into(),
+        })
+        .unwrap();
     assert!(!w.contains(['\n', '\u{1b}']), "{w:?}");
 }
 
@@ -145,7 +203,10 @@ fn reheld_returns_the_row_and_closes_its_dialog() {
 fn dialog_opens_from_a_list_and_the_token_is_used_once() {
     let _g = force_peer_ui_for_test(true);
     let mut s = PeerUiState::default();
-    assert_eq!(s.apply_list(vec![], true).as_deref(), Some("No peer message is held."));
+    assert_eq!(
+        s.apply_list(vec![], true).as_deref(),
+        Some("No peer message is held.")
+    );
     assert!(!s.dialog_open());
     assert!(s.apply_list(vec![row(1, "secret-token")], true).is_none());
     assert!(s.dialog_open());
@@ -156,7 +217,10 @@ fn dialog_opens_from_a_list_and_the_token_is_used_once() {
     assert!(!s.dialog_open(), "the token is gone with the dialog");
     assert!(s.take_decision(false).is_none(), "no second use");
     let p = call.params("sess");
-    assert_eq!(p, json!({"sessionId": "sess", "heldId": hid(1), "token": "secret-token", "action": "release"}));
+    assert_eq!(
+        p,
+        json!({"sessionId": "sess", "heldId": hid(1), "token": "secret-token", "action": "release"})
+    );
     assert_eq!(call.method(), METHOD_RELEASE);
 }
 
@@ -178,33 +242,66 @@ fn a_refresh_closes_a_stale_dialog() {
     let mut s = PeerUiState::default();
     s.apply_list(vec![row(1, "old")], true);
     assert!(s.apply_list(vec![row(1, "new")], false).is_none());
-    assert!(!s.dialog_open(), "a refresh never leaves a dialog holding a dead token");
+    assert!(
+        !s.dialog_open(),
+        "a refresh never leaves a dialog holding a dead token"
+    );
 }
 
 #[test]
 fn configure_is_attended_and_names_no_policy() {
     let p = PeerCall::Configure.params("s");
-    assert_eq!(p, json!({"sessionId": "s", "optIn": true, "operator": "attended"}));
+    assert_eq!(
+        p,
+        json!({"sessionId": "s", "optIn": true, "operator": "attended"})
+    );
     assert_eq!(PeerCall::Configure.method(), METHOD_CONFIGURE);
-    assert_eq!(PeerCall::ListHeld { reopen: true }.params("s"), json!({"sessionId": "s"}));
-    let d = PeerCall::Decide { held_id: hid(1), token: Token("t".into()), refuse: true }.params("s");
+    assert_eq!(
+        PeerCall::ListHeld { reopen: true }.params("s"),
+        json!({"sessionId": "s"})
+    );
+    let d = PeerCall::Decide {
+        held_id: hid(1),
+        token: Token("t".into()),
+        refuse: true,
+    }
+    .params("s");
     assert_eq!(d["action"], "refuse");
 }
 
 #[test]
 fn errors_map_to_one_plain_line() {
     let typed = |reason: &str| {
-        PeerRpcError::from_acp(&agent_client_protocol::Error::new(PEER_ERROR_CODE, "x").data(json!({"kind": "k", "fields": {"reason": reason}})))
+        PeerRpcError::from_acp(
+            &agent_client_protocol::Error::new(PEER_ERROR_CODE, "x")
+                .data(json!({"kind": "k", "fields": {"reason": reason}})),
+        )
     };
-    for reason in ["unavailable", "no_operator", "not_opted_in", "expired", "bad_token", "not_found"] {
+    for reason in [
+        "unavailable",
+        "no_operator",
+        "not_opted_in",
+        "expired",
+        "bad_token",
+        "not_found",
+    ] {
         let line = typed(reason).plain_line();
-        assert!(!line.contains('\n') && !line.contains('_'), "{reason}: {line}");
+        assert!(
+            !line.contains('\n') && !line.contains('_'),
+            "{reason}: {line}"
+        );
     }
     assert!(typed("bad_token").is_stale() && typed("not_found").is_stale());
     assert!(!typed("unavailable").is_stale() && !typed("no_operator").is_stale());
     // An unknown reason is shown capped and escaped; a different error code carries no reason.
-    assert!(!typed("weird\n\u{1b}[2Jreason").plain_line().contains(['\n', '\u{1b}']));
-    let other = PeerRpcError::from_acp(&agent_client_protocol::Error::new(-32603, "boom").data(json!({"reason": "bad_token"})));
+    assert!(
+        !typed("weird\n\u{1b}[2Jreason")
+            .plain_line()
+            .contains(['\n', '\u{1b}'])
+    );
+    let other = PeerRpcError::from_acp(
+        &agent_client_protocol::Error::new(-32603, "boom").data(json!({"reason": "bad_token"})),
+    );
     assert!(!other.is_stale());
 }
 
@@ -231,7 +328,10 @@ fn hold_fields_are_capped_at_ingest() {
     v["detail"] = json!("d".repeat(5000));
     v["reasons"] = json!((0..50).map(|_| "z".repeat(500)).collect::<Vec<_>>());
     let h = parse_hold(&v);
-    assert_eq!((h.from_name.len(), h.from_ref.len(), h.sender_mode.len()), (64, 64, 32));
+    assert_eq!(
+        (h.from_name.len(), h.from_ref.len(), h.sender_mode.len()),
+        (64, 64, 32)
+    );
     assert_eq!(h.detail.unwrap().len(), 200);
     assert_eq!(h.reasons.len(), 8);
     assert!(h.reasons.iter().all(|r| r.len() == 32));
@@ -241,15 +341,30 @@ fn hold_fields_are_capped_at_ingest() {
 fn notice_rows_are_rate_limited_then_one_suppressed_row() {
     let _g = force_peer_ui_for_test(true);
     let mut s = PeerUiState::default();
-    let warn = || PeerEvent::Warning { text: "t".into(), subject: String::new() };
+    let warn = || PeerEvent::Warning {
+        text: "t".into(),
+        subject: String::new(),
+    };
     for _ in 0..20 {
-        assert!(s.apply_event_at(warn(), 1_000).unwrap().starts_with("Warning"));
+        assert!(
+            s.apply_event_at(warn(), 1_000)
+                .unwrap()
+                .starts_with("Warning")
+        );
     }
-    assert_eq!(s.apply_event_at(warn(), 1_001).as_deref(), Some("more peer notices suppressed"));
+    assert_eq!(
+        s.apply_event_at(warn(), 1_001).as_deref(),
+        Some("more peer notices suppressed")
+    );
     for t in 1_002..1_059 {
         assert_eq!(s.apply_event_at(warn(), t), None);
     }
-    assert!(s.apply_event_at(warn(), 1_060).unwrap().starts_with("Warning"), "a new window shows notices again");
+    assert!(
+        s.apply_event_at(warn(), 1_060)
+            .unwrap()
+            .starts_with("Warning"),
+        "a new window shows notices again"
+    );
 }
 
 #[test]
@@ -257,12 +372,19 @@ fn configure_is_sent_once_per_session_id_and_closes_an_open_dialog() {
     let _g = force_peer_ui_for_test(true);
     let mut s = PeerUiState::default();
     assert_eq!(s.note_configure("s1"), Some(false));
-    assert_eq!(s.note_configure("s1"), None, "create then load of the same session: one configure");
+    assert_eq!(
+        s.note_configure("s1"),
+        None,
+        "create then load of the same session: one configure"
+    );
     let row = (parse_hold(&held_update(1, "x")), Token("t".into()));
     s.apply_list(vec![row], true);
     assert!(s.dialog_open());
     assert_eq!(s.note_configure("s1"), None);
-    assert!(s.dialog_open(), "no second configure, so the dialog and its token stay valid");
+    assert!(
+        s.dialog_open(),
+        "no second configure, so the dialog and its token stay valid"
+    );
     assert_eq!(s.note_configure("s2"), Some(true));
     assert!(!s.dialog_open());
 }

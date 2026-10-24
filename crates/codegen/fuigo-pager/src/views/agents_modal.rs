@@ -272,12 +272,12 @@ impl AgentsConfigWrite {
     /// never run on the input thread.
     pub fn run(&self) -> Result<(), String> {
         match &self.op {
-            AgentsConfigOp::SetDefault { name, .. } => {
-                edit_config_at(&self.config_path, |doc| set_default_agent_in(doc, name.as_deref()))
-            }
-            AgentsConfigOp::Toggle { name, enabled } => {
-                edit_config_at(&self.config_path, |doc| toggle_agent_in(doc, name, *enabled))
-            }
+            AgentsConfigOp::SetDefault { name, .. } => edit_config_at(&self.config_path, |doc| {
+                set_default_agent_in(doc, name.as_deref())
+            }),
+            AgentsConfigOp::Toggle { name, enabled } => edit_config_at(&self.config_path, |doc| {
+                toggle_agent_in(doc, name, *enabled)
+            }),
         }
     }
 }
@@ -893,9 +893,7 @@ fn edit_config_at(
     }
     fuigo_config::fs_atomic::edit_locked(
         config_path,
-        |bytes| {
-            fuigo_config::fs_atomic::stage_atomically_from_existing(config_path, bytes, 0o600)
-        },
+        |bytes| fuigo_config::fs_atomic::stage_atomically_from_existing(config_path, bytes, 0o600),
         |current| {
             let Some(mut doc) =
                 crate::config_toml_edit::config_document_for_edit(config_path, current)
@@ -2773,7 +2771,10 @@ mod tests {
     /// P181 (Astra round 1): a description holds no hidden character once wrapped.
     #[test]
     fn word_wrap_drops_hidden_characters() {
-        assert_eq!(word_wrap("ab\u{e0041}c\u{00ad} d\u{2028}e", 80), ["abc d e"]);
+        assert_eq!(
+            word_wrap("ab\u{e0041}c\u{00ad} d\u{2028}e", 80),
+            ["abc d e"]
+        );
     }
 
     /// A default-agent change and eight toggles racing each other must ALL land.
@@ -3742,7 +3743,10 @@ mod tests {
             }
         );
         assert_eq!(state.write_pending, Some(write.ticket));
-        assert_eq!(state.message.as_ref().map(|m| m.text.as_str()), Some("Saving\u{2026}"));
+        assert_eq!(
+            state.message.as_ref().map(|m| m.text.as_str()),
+            Some("Saving\u{2026}")
+        );
     }
 
     /// While a write is in flight another `s`/`t` is refused: it would be
@@ -3751,7 +3755,10 @@ mod tests {
     fn a_second_write_while_saving_is_refused() {
         let cwd = tempfile::tempdir().unwrap();
         let mut state = agents_tab_state(cwd.path());
-        assert!(matches!(press(&mut state, 't'), AgentsModalOutcome::Persist(_)));
+        assert!(matches!(
+            press(&mut state, 't'),
+            AgentsModalOutcome::Persist(_)
+        ));
         for c in ['t', 's'] {
             assert!(
                 matches!(press(&mut state, c), AgentsModalOutcome::Changed),
@@ -3814,7 +3821,10 @@ mod tests {
             Some("Disabled 'x' \u{2014} applies to new sessions")
         );
         // And a new write can start again.
-        assert!(matches!(press(&mut state, 't'), AgentsModalOutcome::Persist(_)));
+        assert!(matches!(
+            press(&mut state, 't'),
+            AgentsModalOutcome::Persist(_)
+        ));
     }
 
     /// A write from an earlier modal (closed and reopened since) cannot finish
@@ -3834,7 +3844,10 @@ mod tests {
         assert_ne!(old_write.ticket, new_write.ticket);
         assert!(!finish_config_write(&mut state, &old_write, Ok(())));
         assert_eq!(state.write_pending, Some(new_write.ticket), "still saving");
-        assert!(matches!(press(&mut state, 't'), AgentsModalOutcome::Changed));
+        assert!(matches!(
+            press(&mut state, 't'),
+            AgentsModalOutcome::Changed
+        ));
         assert!(finish_config_write(&mut state, &new_write, Ok(())));
         assert_eq!(state.write_pending, None);
     }
@@ -3943,7 +3956,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_agents_modal(&mut buf, area, &mut state, false, &theme);
         let text = painted_text(&buf);
-        assert!(!text.chars().any(fuigo_tty_utils::is_unsafe_display_char), "{text:?}");
+        assert!(
+            !text.chars().any(fuigo_tty_utils::is_unsafe_display_char),
+            "{text:?}"
+        );
         assert!(text.contains("helper system"), "{text}");
         assert!(text.contains("de sc"), "{text}");
 
@@ -3954,7 +3970,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_agents_modal(&mut buf, area, &mut state, false, &theme);
         let text = painted_text(&buf);
-        assert!(!text.chars().any(fuigo_tty_utils::is_unsafe_display_char), "{text:?}");
+        assert!(
+            !text.chars().any(fuigo_tty_utils::is_unsafe_display_char),
+            "{text:?}"
+        );
         assert!(text.contains("agent evil"), "{text}");
     }
 }

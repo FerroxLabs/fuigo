@@ -349,6 +349,7 @@ pub(crate) async fn spawn_session_actor(
     app_builder_deployer_config: fuigo_tools::implementations::fuigo_build::app_builder::AppBuilderDeployerConfig,
     write_file_enabled: bool,
     active_agent_messages_enabled: bool,
+    subagent_model_inheritance: bool,
     goal_enabled: bool,
     background_workflows_enabled: bool,
     subagents_enabled: bool,
@@ -408,6 +409,18 @@ pub(crate) async fn spawn_session_actor(
     }
     let wf_sid: String = session_info.id.0.to_string();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    // The servers the session's own agent definition declares (`mcpServers` in agent.md) win over the disk/client
+    // merge by name. A child session gets its definition's servers from the spawn that created it.
+    let mut mcp_servers = mcp_servers;
+    if !startup_hints.is_subagent {
+        for notice in crate::session::agent_mcp::apply_agent_mcp_overlay(
+            &mut mcp_servers,
+            &agent_definition,
+            tool_context.cwd.as_path(),
+        ) {
+            let _ = cmd_tx.send(SessionCommand::NotifyConfigNotice { notice });
+        }
+    }
     tracing::info!(
         "Session '{}' created with {} MCP servers",
         session_info.id.0,
@@ -671,6 +684,7 @@ pub(crate) async fn spawn_session_actor(
         query_params: sampling_config.query_params.clone(),
         env_http_headers: sampling_config.env_http_headers.clone(),
         context_window: context_window_override.unwrap_or(baseline_context_window),
+        max_request_bytes: None,
         reasoning_effort: sampling_config.reasoning_effort,
         reasoning_summary: sampling_config.reasoning_summary,
         stream_tool_calls: Some(sampling_config.stream_tool_calls),
@@ -850,6 +864,9 @@ pub(crate) async fn spawn_session_actor(
                     resolve_search_shadows(),
                     shell_env_policy.clone(),
                     tool_context.process_scope.clone(),
+                    // The per-command sandbox is the workspace daemon's seam; the in-process
+                    // shell session runs its commands unwrapped
+                    None,
                 ))
             }
             TerminalBackendKind::LocalNonPersistent => {
@@ -861,6 +878,9 @@ pub(crate) async fn spawn_session_actor(
                     login_shell_capture,
                     shell_env_policy.clone(),
                     tool_context.process_scope.clone(),
+                    // The per-command sandbox is the workspace daemon's seam; the in-process
+                    // shell session runs its commands unwrapped
+                    None,
                 ))
             }
         };
@@ -1073,8 +1093,9 @@ pub(crate) async fn spawn_session_actor(
     );
     // Created before the MCP state so tool progress can ride the same ordered queue as the tool-call announcement.
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
-    let mcp_state = {
+    let (mcp_state, admitted_mcp_servers) = {
         let mut state = McpState::new_with_meta(mcp_servers.clone(), mcp_meta_config_map);
+        let admitted_mcp_servers = state.admitted_servers();
         state.set_progress_sink(Some(crate::tools::mcp_progress::progress_sink(
             event_tx.clone(),
             session_info.id.clone(),
@@ -1106,7 +1127,7 @@ pub(crate) async fn spawn_session_actor(
                 "Registered in-process SDK MCP servers (fuigo/mcp/sdk_call)"
             );
         }
-        Arc::new(TokioMutex::new(state))
+        (Arc::new(TokioMutex::new(state)), admitted_mcp_servers)
     };
     let rebuild_spec = std::sync::Arc::new(crate::session::agent_rebuild::AgentRebuildSpec {
         working_directory: tool_context.cwd.as_path().to_path_buf(),
@@ -1137,6 +1158,7 @@ pub(crate) async fn spawn_session_actor(
         media_gen_batch_limits,
         write_file_enabled,
         active_agent_messages_enabled,
+        subagent_model_inheritance,
         subagents_enabled,
         subagent_toggle: subagent_toggle.clone(),
         background_workflows_enabled,
@@ -1961,6 +1983,7 @@ pub(crate) async fn spawn_session_actor(
             count: std::sync::atomic::AtomicU64::new(0),
             validation_tokens_before: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
+            overflow_compactions_since_response: std::cell::Cell::new(0),
             previous_model: std::cell::Cell::new(None),
             compaction_mode,
             verbatim_input: compaction_verbatim_input,
@@ -2524,7 +2547,7 @@ pub(crate) async fn spawn_session_actor(
             gateway_enabled,
             status_line_enabled: client_caps.status_line.clone(),
             client_caps,
-            mcp_servers,
+            mcp_servers: admitted_mcp_servers,
             initial_client_mcp_servers,
             display_cwd: None,
             feedback_manager: feedback_manager.clone(),
@@ -2665,6 +2688,7 @@ pub(crate) async fn spawn_session_on_thread(
     app_builder_deployer_config: fuigo_tools::implementations::fuigo_build::app_builder::AppBuilderDeployerConfig,
     write_file_enabled: bool,
     active_agent_messages_enabled: bool,
+    subagent_model_inheritance: bool,
     goal_enabled: bool,
     background_workflows_enabled: bool,
     subagents_enabled: bool,
@@ -2871,6 +2895,7 @@ pub(crate) async fn spawn_session_on_thread(
                         app_builder_deployer_config,
                         write_file_enabled,
                         active_agent_messages_enabled,
+                        subagent_model_inheritance,
                         goal_enabled,
                         background_workflows_enabled,
                         subagents_enabled,

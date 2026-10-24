@@ -429,7 +429,7 @@ impl SessionActor {
                      **Working directory:** {}\n\n\
                      {}{}\n\n\
                      **Turn:** {}\n\n\
-                     **Context:** {} / {} tokens ({:.0}%)",
+                     **Context:** {} / {} tokens ({:.0}%){}",
                     title_line,
                     self.session_info.id.0,
                     self.session_info.cwd,
@@ -439,6 +439,7 @@ impl SessionActor {
                     ctx.used,
                     ctx.total,
                     context_pct,
+                    status_sandbox_warning_block(fuigo_sandbox::unavailable_warning().as_deref()),
                 );
                 self.send_host_turn_slash_command_output(&text).await;
                 ok_end_turn(0, None)
@@ -1117,5 +1118,26 @@ impl SessionActor {
         }
 
         ok_end_turn(0, None)
+    }
+}
+
+/// The `/status` (alias of `/session-info`) block for "a sandbox profile is set but this platform cannot enforce it":
+/// a `Sandbox warning` line, or nothing when there is no warning (profile `off`, Linux, macOS).
+fn status_sandbox_warning_block(warning: Option<&str>) -> String {
+    warning.map(|w| format!("\n\n**Sandbox warning:** {w}")).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod status_sandbox_warning_tests {
+    use super::status_sandbox_warning_block;
+
+    #[test]
+    fn status_shows_the_sandbox_warning_line_only_when_there_is_one() {
+        let w = fuigo_sandbox::unavailable_warning_for("workspace", true).unwrap();
+        let block = status_sandbox_warning_block(Some(&w));
+        assert_eq!(block, format!("\n\n**Sandbox warning:** {w}"));
+        assert!(block.contains("sandboxing is not available on Windows"));
+        assert_eq!(status_sandbox_warning_block(None), "");
+        assert_eq!(status_sandbox_warning_block(fuigo_sandbox::unavailable_warning_for("off", true).as_deref()), "");
     }
 }

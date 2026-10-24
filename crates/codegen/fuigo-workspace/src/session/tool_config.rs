@@ -82,6 +82,10 @@ pub(crate) fn resolve_session_toolset_rebuild(
     terminal_backend: Arc<dyn fuigo_tools::computer::types::TerminalBackend>,
 ) -> WorkspaceResult<(ToolServerConfig, Arc<FinalizedToolset>)> {
     let mut builder = factory.registry_builder();
+    let guidance = crate::tool_guidance::load_for_session(&cwd, &builder.known_tool_names());
+    if !guidance.is_empty() {
+        builder = builder.with_tool_guidance(guidance);
+    }
     if let Some(lr) = local_registry {
         builder = builder.with_local_registry(lr);
     }
@@ -307,6 +311,10 @@ pub struct WorkspaceSessionContextFactory {
     /// Resolved `$FUIGO_WORKSPACE_HOME` when tool-state persistence is enabled; `None` disables it.
     /// Resolved once by the caller so the factory performs no per-build env reads.
     tool_state_home: Option<PathBuf>,
+    /// The per-command sandbox seam (`fuigo_tools::sandbox_launch`): handed to the terminal
+    /// backend and stored in `Resources` so every shell spawn goes through it. `None` runs
+    /// commands unwrapped.
+    sandbox_launch: Option<fuigo_tools::sandbox_launch::SandboxLaunchHook>,
 }
 impl Default for WorkspaceSessionContextFactory {
     fn default() -> Self {
@@ -319,6 +327,7 @@ impl WorkspaceSessionContextFactory {
             auth: None,
             api_base_url: None,
             tool_state_home: None,
+            sandbox_launch: None,
         }
     }
     /// Factory with auth: gen tools use the provider's live token.
@@ -327,12 +336,18 @@ impl WorkspaceSessionContextFactory {
             auth: Some(auth),
             api_base_url: Some(api_base_url),
             tool_state_home: None,
+            sandbox_launch: None,
         }
     }
     /// Enable session-keyed tool-state persistence rooted at `home` (`$FUIGO_WORKSPACE_HOME`).
     /// Callers should only invoke this when [`tool_state_enabled`] is `true`.
     pub fn with_tool_state_home(mut self, home: PathBuf) -> Self {
         self.tool_state_home = Some(home);
+        self
+    }
+    /// Route every shell spawn of the sessions this factory builds through `hook`.
+    pub fn with_sandbox_launch(mut self, hook: fuigo_tools::sandbox_launch::SandboxLaunchHook) -> Self {
+        self.sandbox_launch = Some(hook);
         self
     }
     /// `<tool_state_home>/sessions/<sanitized_id>/tool_state.json`, or empty when persistence is disabled or dir creation fails.
@@ -488,12 +503,21 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
         }
     }
     fn build_terminal_backend(&self) -> crate::config::SessionTerminalBackend {
-        crate::config::SessionTerminalBackend::local(
-            fuigo_tools::computer::local::LocalTerminalBackend::new(),
-        )
+        let backend = match &self.sandbox_launch {
+            Some(hook) => {
+                fuigo_tools::computer::local::LocalTerminalBackend::new_with_sandbox_launch(
+                    hook.shared(),
+                )
+            }
+            None => fuigo_tools::computer::local::LocalTerminalBackend::new(),
+        };
+        crate::config::SessionTerminalBackend::local(backend)
     }
     fn registry_builder(&self) -> ToolRegistryBuilder {
-        ToolRegistryBuilder::new()
+        match &self.sandbox_launch {
+            Some(hook) => ToolRegistryBuilder::new().with_sandbox_launch(hook.clone()),
+            None => ToolRegistryBuilder::new(),
+        }
     }
     fn known_tool_ids(&self) -> Arc<std::collections::HashSet<String>> {
         static IDS: std::sync::LazyLock<Arc<std::collections::HashSet<String>>> =
@@ -564,6 +588,7 @@ pub mod test_support {
     pub struct TestSessionContextFactory {
         pub temp: TempDir,
         tool_state: bool,
+        sandbox_launch: Option<fuigo_tools::sandbox_launch::SandboxLaunchHook>,
     }
     impl Default for TestSessionContextFactory {
         fn default() -> Self {
@@ -575,7 +600,16 @@ pub mod test_support {
             Self {
                 temp: TempDir::new().expect("create temp dir"),
                 tool_state: true,
+                sandbox_launch: None,
             }
+        }
+        /// Route every shell spawn of the sessions this factory builds through `hook`.
+        pub fn with_sandbox_launch(
+            mut self,
+            hook: fuigo_tools::sandbox_launch::SandboxLaunchHook,
+        ) -> Self {
+            self.sandbox_launch = Some(hook);
+            self
         }
         /// Matches production, where `FUIGO_WORKSPACE_TOOL_STATE_ENABLED` is unset and the real factory returns an empty path.
         pub fn without_tool_state() -> Self {
@@ -628,10 +662,17 @@ pub mod test_support {
             }
         }
         fn build_terminal_backend(&self) -> crate::config::SessionTerminalBackend {
-            crate::config::SessionTerminalBackend::local(LocalTerminalBackend::new())
+            let backend = match &self.sandbox_launch {
+                Some(hook) => LocalTerminalBackend::new_with_sandbox_launch(hook.shared()),
+                None => LocalTerminalBackend::new(),
+            };
+            crate::config::SessionTerminalBackend::local(backend)
         }
         fn registry_builder(&self) -> ToolRegistryBuilder {
-            ToolRegistryBuilder::new()
+            match &self.sandbox_launch {
+                Some(hook) => ToolRegistryBuilder::new().with_sandbox_launch(hook.clone()),
+                None => ToolRegistryBuilder::new(),
+            }
         }
     }
     /// `ToolConfig` builder helper.

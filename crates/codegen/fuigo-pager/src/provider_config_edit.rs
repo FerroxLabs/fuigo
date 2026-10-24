@@ -10,7 +10,6 @@
 use std::io;
 use std::path::Path;
 
-
 /// One provider entry plus the model keys that should route through it.
 pub(crate) struct ProviderWrite<'a> {
     pub id: &'a str,
@@ -242,7 +241,6 @@ fn plan_provider_write(
         value: ProviderWriteOutcome::Written { kept },
     })
 }
-
 
 /// [`ProviderWriteOutcome::PartialProviderPair`] when exactly one of the two
 /// `(key, wanted, existing)` entries is already set on disk; `None` when both

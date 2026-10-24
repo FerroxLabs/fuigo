@@ -53,6 +53,34 @@ fn mark_summary_used(session_dir: &std::path::Path) {
     .unwrap();
 }
 
+/// 51.2: a session made in a worktree is found by id from any directory (so `/resume <id>` and `--resume` work from the
+/// main checkout), and it lists with its worktree label.
+#[tokio::test]
+#[serial]
+async fn a_worktree_session_is_found_by_id_from_anywhere_and_lists_with_its_label() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let home = TempDir::new().unwrap();
+    let _env = EnvGuard::set("FUIGO_HOME", home.path());
+    let info = Info {
+        id: acp::SessionId::new("worktree-resume-by-id"),
+        cwd: worktree_cwd_under(home.path()),
+    };
+    let adapter = JsonlStorageAdapter::with_root(home.path().to_path_buf());
+    write_untagged_summary(&adapter.session_dir(&info), &info);
+
+    let found = crate::session::persistence::resolve_local_session_any_cwd("worktree-resume-by-id")
+        .expect("a session recorded under a worktree cwd resolves by id alone");
+    assert_eq!(
+        dunce::canonicalize(&found).unwrap(),
+        dunce::canonicalize(&info.cwd).unwrap()
+    );
+    let listed = adapter.list_sessions(None).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].worktree_label.as_deref(), Some("fix-bug"));
+}
+
 #[tokio::test]
 #[serial]
 async fn list_sessions_repairs_untagged_worktree_summary_in_rows_and_on_disk() {

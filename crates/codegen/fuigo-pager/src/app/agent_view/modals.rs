@@ -2484,6 +2484,7 @@ mod extensions_action_target_tests {
             disabled,
             pinned: false,
             removable: false,
+            health: Default::default(),
         }
     }
 
@@ -3214,6 +3215,7 @@ mod extensions_modal_confirmation_tests {
             disabled: false,
             pinned: false,
             removable: false,
+            health: Default::default(),
         }
     }
 

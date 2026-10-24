@@ -109,7 +109,7 @@ pub struct SessionHandle {
     ///
     /// This is a snapshot from `spawn_session_actor` time; if the client later sends `UpdateMcpServers`, the handle's copy is NOT updated.
     /// That is fine for forks that happen right after spawn, but callers that need the latest MCP state should query the session actor via command.
-    pub mcp_servers: Vec<acp::McpServer>,
+    pub mcp_servers: super::mcp_servers::AdmittedMcpServers,
     /// Client-provided MCP servers as admitted by the vendor `mcps` kill-switch, before merging with disk/plugin/managed servers.
     /// Hot-reloads re-merge from this seed; a server the kill-switch rejected cannot reappear because its on-disk attribution vanished mid-session.
     pub initial_client_mcp_servers: crate::session::managed_mcp::ClientMcpSeed,

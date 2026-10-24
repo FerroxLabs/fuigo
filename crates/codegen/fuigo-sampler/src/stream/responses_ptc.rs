@@ -267,7 +267,7 @@ mod tests {
             RequestId::from("ptc"),
             Duration::from_secs(60),
             None,
-            HashSet::new(),
+            HashSet::new().into(),
         ));
         while let Some(ev) = s.next().await {
             events.push(ev);

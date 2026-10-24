@@ -206,6 +206,84 @@
         }
     }
 
+    /// A write that would replace a file shows what is there now, so the user can see what they are about to lose.
+    #[test]
+    fn write_approval_card_shows_the_contents_it_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.path().join("notes.txt"), &body).unwrap();
+        let write = |file: &str| serde_json::json!({"file_path": file, "content": "fresh"});
+
+        // Relative paths resolve against the session directory
+        let lines = existing_contents_lines(&write("notes.txt"), dir.path());
+        assert_eq!(lines[0], "Replaces existing contents (20 lines):");
+        assert_eq!(lines[1], "line 1");
+        assert_eq!(lines[12], "line 12");
+        assert_eq!(lines.last().map(String::as_str), Some("… (+8 more lines)"));
+        assert_eq!(lines.len(), 1 + 12 + 1);
+
+        // A new file replaces nothing; an edit (old_string) is shown as a diff elsewhere
+        assert!(existing_contents_lines(&write("missing.txt"), dir.path()).is_empty());
+        let edit = serde_json::json!({"file_path": "notes.txt", "old_string": "a", "new_string": "b"});
+        assert!(existing_contents_lines(&edit, dir.path()).is_empty());
+
+        // Empty, short, and binary-ish files
+        std::fs::write(dir.path().join("empty.txt"), "").unwrap();
+        assert_eq!(
+            existing_contents_lines(&write("empty.txt"), dir.path()),
+            ["Replaces an empty file."]
+        );
+        std::fs::write(dir.path().join("t.txt"), "a\tb\x1b[31mc").unwrap();
+        let lines = existing_contents_lines(&write("t.txt"), dir.path());
+        assert_eq!(lines, ["Replaces existing contents (1 line):", "a    b[31mc"]);
+
+        // The queued card carries it
+        let mut agent = make_agent(Some("s1"));
+        agent.session.cwd = dir.path().to_path_buf();
+        let (response_tx, _rx) = tokio::sync::oneshot::channel();
+        enqueue_permission(
+            fuigo_acp_lib::AcpArgs {
+                request: permission_req_with_raw_input(Some(write("notes.txt"))),
+                response_tx,
+            },
+            &mut agent,
+        );
+        let card = agent.permission_queue.front().expect("queued card");
+        assert!(
+            card.description.iter().any(|l| l.starts_with("Replaces existing contents (20 lines)")),
+            "{:?}",
+            card.description
+        );
+    }
+
+    /// A hook that asks about a web search or a file deletion is named on the approval card, like it is for the other shapes.
+    #[test]
+    fn hook_ask_names_the_hook_on_web_search_and_file_delete_cards() {
+        let ask_line = "hook 'guard' asks: confirm this";
+        for (raw_input, acp_title, expected_title) in [
+            (
+                serde_json::json!({"query": "rust lifetimes"}),
+                "Search the web for rust lifetimes",
+                "Allow Search the web for rust lifetimes?",
+            ),
+            (
+                serde_json::json!({"file_path": "/tmp/old.rs"}),
+                "Delete /tmp/old.rs",
+                "Allow Delete /tmp/old.rs?",
+            ),
+        ] {
+            let req = hook_ask_permission_req(raw_input, acp_title, vec![]);
+            let (title, description, command) = build_permission_display(&req, None);
+            assert_eq!(title, expected_title);
+            assert_eq!(command, None);
+            assert_eq!(
+                description.first().map(String::as_str),
+                Some(ask_line),
+                "{acp_title}: {description:?}"
+            );
+        }
+    }
+
     #[test]
     fn recap_fills_uncommitted_spinner_in_place() {
         let mut agent = make_agent(Some("s1"));
@@ -702,3 +780,40 @@
             "the row refolds to its default once the prompt resolves"
         );
     }
+
+#[cfg(test)]
+mod compact_recap_tests {
+    use super::*;
+    use crate::app::acp_handler::permissions::permission_notification_body;
+
+    #[test]
+    fn compact_mode_collapses_a_new_recap() {
+        let mut agent = make_agent(Some("s1"));
+        agent.prompt.set_compact(true);
+        apply_recap_block(&mut agent, true, recap_block("THE RECAP"));
+        let entry = agent.scrollback.get(0).expect("recap pushed");
+        assert_eq!(entry.display_mode(), crate::scrollback::DisplayMode::Collapsed);
+    }
+
+    #[test]
+    fn roomy_mode_leaves_recap_on_its_default() {
+        let mut agent = make_agent(Some("s1"));
+        agent.prompt.set_compact(false);
+        apply_recap_block(&mut agent, true, recap_block("THE RECAP"));
+        let entry = agent.scrollback.get(0).expect("recap pushed");
+        assert_ne!(entry.display_mode(), crate::scrollback::DisplayMode::Collapsed);
+    }
+
+    #[test]
+    fn notification_names_the_asking_subagent() {
+        let mut agent = make_agent(Some("s1"));
+        let body = permission_notification_body(&agent, &acp::SessionId::new(std::sync::Arc::from("s1")));
+        assert_eq!(body, "Approval required");
+        agent.subagent_sessions.insert(
+            "child".into(),
+            crate::app::agent_view::test_fixtures::running_subagent_info("child"),
+        );
+        let body = permission_notification_body(&agent, &acp::SessionId::new(std::sync::Arc::from("child")));
+        assert_eq!(body, "Approval required: test");
+    }
+}

@@ -236,6 +236,55 @@ impl CodingDataSharingLock {
     }
 }
 
+/// What each tier that can speak for one `[features]` flag has said, so a `/settings` row shows the value actually in
+/// force and says when something outranks the config file. Precedence is the feature registry's, never re-derived here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FeatureTiers {
+    /// `requirements.toml` or an MDM policy.
+    pub pin: Option<bool>,
+    /// The feature's environment variable.
+    pub env: Option<bool>,
+    /// The user-config layer, which the row writes.
+    pub config: Option<bool>,
+}
+
+impl FeatureTiers {
+    /// Read every tier for `feature` from the process and the loaded layers.
+    pub fn load(feature: fuigo_shell::agent::config::Feature) -> Self {
+        let layer_value = |layer: Option<toml::Value>| -> Option<bool> {
+            layer?.get("features")?.get(feature.key())?.as_bool()
+        };
+        let sources = fuigo_shell::agent::config::FeatureSources::from_process_env(feature);
+        Self {
+            pin: layer_value(fuigo_config::load_merged_requirements()),
+            env: sources.env,
+            config: layer_value(fuigo_shell::config::load_effective_config().ok()),
+        }
+    }
+
+    /// The value in force: the registry's precedence over the tiers (no remote tier for these flags).
+    pub fn effective(self, feature: fuigo_shell::agent::config::Feature) -> bool {
+        feature
+            .resolve(fuigo_shell::agent::config::FeatureSources {
+                pin: self.pin,
+                env: self.env,
+                config: self.config,
+                remote: None,
+            })
+            .value
+    }
+
+    /// What outranks the config file, in words for the user; `None` when the config file decides.
+    pub fn override_label(self, feature: fuigo_shell::agent::config::Feature) -> Option<String> {
+        if self.pin.is_some() {
+            return Some("a requirements.toml pin or an MDM policy".to_owned());
+        }
+        self.env
+            .is_some()
+            .then(|| format!("the {} environment variable", feature.env()))
+    }
+}
+
 /// Snapshot of pager-local state captured when the modal opens.
 /// Used by `current_value_for` to render against LIVE state rather than the on-disk `UiConfig`.
 /// Refreshed by `refresh_open_settings_modals` after every mutation.
@@ -282,6 +331,8 @@ pub struct PagerLocalSnapshot {
     /// `[toolset.ask_user_question].timeout_enabled` mirror (effective TOML merge, like `show_tips`).
     /// `None` means unset in TOML, so the default `true` applies.
     pub ask_user_question_timeout_enabled: Option<bool>,
+    /// `[features] subagent_model_inheritance` as every tier sees it: pin, environment and the user-config layer.
+    pub subagent_model_inheritance: FeatureTiers,
     /// Live `voice_config.language` at snapshot time.
     /// Lets the modal show the language actually in effect when `[ui].voice_stt_language` is unset but an explicit `[voice].language` applies.
     pub voice_stt_language: String,
@@ -311,6 +362,7 @@ impl Default for PagerLocalSnapshot {
             respect_manual_folds: crate::appearance::ScrollConfig::default().respect_manual_folds,
             auto_mode_gate: false,
             ask_user_question_timeout_enabled: None,
+            subagent_model_inheritance: Default::default(),
             voice_stt_language: fuigo_voice::STT_LANGUAGE_DEFAULT.to_string(),
             // Matches `resolve_scheduler_background_loops`'s default.
             scheduler_background_loops: true,
@@ -348,6 +400,16 @@ pub fn canonical_hunk_tracker_mode(value: Option<&str>) -> &'static str {
         "agent_only"
     } else {
         "off"
+    }
+}
+
+/// `compact` stays; everything else (including unset and unknown values) reads as `detailed`.
+pub fn canonical_tool_density(value: Option<&str>) -> &'static str {
+    let raw = value.unwrap_or_default().trim();
+    if raw.eq_ignore_ascii_case("compact") {
+        "compact"
+    } else {
+        "detailed"
     }
 }
 
@@ -579,6 +641,9 @@ pub fn current_value_for(
         "screen_mode" => Some(SettingValue::Enum(canonical_screen_mode(
             ui.screen_mode.as_deref(),
         ))),
+        "tool_density" => Some(SettingValue::Enum(canonical_tool_density(
+            ui.tool_density.as_deref(),
+        ))),
         // SHELL: whether the Ctrl+Space or F8 chord is active; None means true
         "voice_keybind_enabled" => {
             Some(SettingValue::Bool(ui.voice_keybind_enabled.unwrap_or(true)))
@@ -647,6 +712,12 @@ pub fn current_value_for(
             pager
                 .ask_user_question_timeout_enabled
                 .unwrap_or(ask_user_question::DEFAULT_ASK_USER_QUESTION_TIMEOUT_ENABLED),
+        )),
+        // subagent_model_inheritance: the value in force across pin, environment and config, so an overriding tier shows
+        "features.subagent_model_inheritance" => Some(SettingValue::Bool(
+            pager
+                .subagent_model_inheritance
+                .effective(fuigo_shell::agent::config::Feature::SubagentModelInheritance),
         )),
         // default_selected_permission: maps `[ui].default_selected_permission` onto one of the four registry canonicals
         // `None` or an unrecognised value on disk falls back to `allow_once`, the effective default (P152)
@@ -980,6 +1051,15 @@ mod tests {
                          shared resolver const in fuigo-tools"
                     );
                 }
+                // subagent_model_inheritance: no UiConfig mirror (lives under `[features]`); anchored on the feature registry's default
+                ("features.subagent_model_inheritance", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        FeatureTiers::default()
+                            .effective(fuigo_shell::agent::config::Feature::SubagentModelInheritance),
+                        "features.subagent_model_inheritance default drifts from the feature registry"
+                    );
+                }
                 // show_thinking_blocks: Option<bool>; None reads as true (client default)
                 ("show_thinking_blocks", SettingKind::Bool { default }) => {
                     assert_eq!(
@@ -1079,6 +1159,17 @@ mod tests {
                         "screen_mode default drifts from UiConfig::default()",
                     );
                     assert_eq!(*default, "fullscreen");
+                }
+                ("tool_density", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        ui.tool_density, None,
+                        "test assumes UiConfig::default().tool_density is None",
+                    );
+                    assert_eq!(
+                        *default,
+                        canonical_tool_density(ui.tool_density.as_deref()),
+                        "tool_density default drifts from UiConfig::default()",
+                    );
                 }
                 // render_mermaid: Option<String>; None reads as "auto"
                 ("render_mermaid", SettingKind::Enum { default, .. }) => {

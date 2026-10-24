@@ -12,7 +12,6 @@ use crate::app::dispatch::modes::inherit_auto_mode;
 use crate::app::dispatch::prompt::supersede_open_reload_window;
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
-use crate::scrollback::state::ScrollbackState;
 use agent_client_protocol as acp;
 use std::time::Instant;
 /// Top-level `/fork` dispatcher.
@@ -47,6 +46,16 @@ pub(in crate::app::dispatch) fn dispatch_fork(
         .unwrap_or((false, false));
     if !has_session {
         app.show_toast("Cannot fork: session is still being created");
+        return vec![];
+    }
+    // A fork copies the conversation as it stands, so it must not run while an approval, question or confirm card is waiting on the
+    // user: the child would start from a state the answer is about to change
+    if app
+        .agents
+        .get(&parent_id)
+        .is_some_and(|a| a.blocking_card().is_some())
+    {
+        app.show_toast("Cannot fork while a prompt is waiting for your answer");
         return vec![];
     }
     match args.worktree_override {
@@ -257,8 +266,7 @@ fn build_fork_placeholder(
     parent_cwd: &std::path::Path,
     worktree: bool,
 ) -> AgentView {
-    let mut scrollback = ScrollbackState::new();
-    scrollback.set_appearance(app.appearance.clone());
+    let mut scrollback = app.new_scrollback();
     let mut agent = AgentView::new(
         AgentSession {
             id: new_id,
@@ -445,7 +453,10 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
             session_id_str.clone(),
         );
     }
-    let attempt = app.agents.get_mut(&agent_id).map_or(0, |a| a.begin_load_attempt());
+    let attempt = app
+        .agents
+        .get_mut(&agent_id)
+        .map_or(0, |a| a.begin_load_attempt());
     vec![Effect::LoadSession {
         agent_id,
         attempt,
@@ -478,6 +489,15 @@ pub(in crate::app::dispatch) fn handle_fork_session_ready(
         return vec![];
     }
     let rename_entry = session_opens_as_chat(app, conversation_entry);
+    // A fork made without a new worktree runs in its parent's folder; when that folder is a worktree the fork is a worktree
+    // session too, and says where it runs.
+    let inherits_worktree = app
+        .agents
+        .get(&agent_id)
+        .and_then(|a| a.session.forked_from)
+        .and_then(|parent| app.agents.get(&parent))
+        .filter(|parent| parent.session.is_worktree || parent.is_worktree)
+        .map(|parent| (parent.session.is_worktree, parent.is_worktree));
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         supersede_open_reload_window(agent, agent_id, "ForkSessionReady");
         agent.session.finish_command();
@@ -486,6 +506,13 @@ pub(in crate::app::dispatch) fn handle_fork_session_ready(
         agent.scrollback.begin_batch();
         agent.begin_replay_window();
         agent.session.cwd = cwd.clone();
+        if let Some((session_is_worktree, view_is_worktree)) = inherits_worktree {
+            agent.session.is_worktree = session_is_worktree;
+            agent.is_worktree = view_is_worktree;
+            agent
+                .scrollback
+                .push_block(RenderBlock::system(format!("Running in worktree: {}", cwd.display())));
+        }
         let effective_chat = conversation_entry || app.chat_mode;
         agent.chat_kind = effective_chat;
         agent.conversation_entry = rename_entry;
@@ -497,7 +524,10 @@ pub(in crate::app::dispatch) fn handle_fork_session_ready(
         parent_session_id.0.as_ref(),
         session_id_str.clone(),
     );
-    let attempt = app.agents.get_mut(&agent_id).map_or(0, |a| a.begin_load_attempt());
+    let attempt = app
+        .agents
+        .get_mut(&agent_id)
+        .map_or(0, |a| a.begin_load_attempt());
     vec![Effect::LoadSession {
         agent_id,
         attempt,

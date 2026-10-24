@@ -75,6 +75,9 @@ fuigo-env = { workspace = true }
 humantime-serde = { workspace = true }
 prometheus = { workspace = true }
 glob = "0.3"
+fuigo-egress-proxy = { path = "../fuigo-egress-proxy" }
+strum = { workspace = true }
+toml_edit = { workspace = true }
 fuigo-sandbox = { path = "../fuigo-sandbox", default-features = false }
 fuigo-hooks = { path = "../fuigo-hooks" }
 fuigo-hunk-tracker = { path = "../fuigo-hunk-tracker" }

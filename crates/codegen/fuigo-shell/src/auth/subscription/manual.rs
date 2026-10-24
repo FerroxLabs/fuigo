@@ -2,21 +2,100 @@
 //! worker survives cancellation, and terminal echo is restored on every exit.
 use super::*;
 
-pub(super) async fn code(provider: SubscriptionProvider) -> Result<String> {
-    if provider != SubscriptionProvider::Xai {
-        return std::future::pending().await;
-    }
+/// The optional xAI paste prompt. Showing it silences the terminal first and the prompt
+/// text second, so nothing pasted can ever be echoed; dropping it (every exit path of the
+/// login, including errors and Ctrl+C) discards the input it invited and restores termios.
+pub(super) struct Prompt {
     #[cfg(unix)]
-    {
-        if let Ok(file) = open_terminal() {
-            fuigo_tty_utils::cli_eprintln!(
-                "If xAI shows a code instead of redirecting, paste it here and press Enter (input hidden)."
-            );
-            return read_from(file).await;
+    terminal: Option<(std::fs::File, SilentTty)>,
+}
+
+impl Prompt {
+    pub(super) fn show(provider: SubscriptionProvider) -> Self {
+        #[cfg(unix)]
+        {
+            if provider == SubscriptionProvider::Xai
+                && let Ok(file) = open_terminal()
+            {
+                return Self::on(file);
+            }
+            Self { terminal: None }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = provider;
+            Self {}
         }
     }
-    // Without a local terminal, retain the bounded browser callback path.
-    std::future::pending().await
+
+    #[cfg(unix)]
+    pub(super) fn on(file: std::fs::File) -> Self {
+        let Ok(tty) = SilentTty::new(&file) else {
+            // Cannot hide input: do not invite a paste at all.
+            return Self { terminal: None };
+        };
+        fuigo_tty_utils::cli_eprintln!(
+            "If xAI shows a code instead of redirecting, paste it here and press Enter (input hidden)."
+        );
+        Self {
+            terminal: Some((file, tty)),
+        }
+    }
+
+    pub(super) async fn code(&self) -> Result<String> {
+        #[cfg(unix)]
+        if let Some((file, _)) = &self.terminal
+            && let Ok(file) = file.try_clone()
+        {
+            return read_from(file).await;
+        }
+        // Without a local terminal, retain the bounded browser callback path.
+        std::future::pending().await
+    }
+}
+
+/// Echo off for the lifetime of the value. On drop, unread input is discarded before the
+/// original settings return, so a pasted line can never reach the shell.
+#[cfg(unix)]
+pub(super) struct SilentTty {
+    file: std::fs::File,
+    original: libc::termios,
+}
+
+#[cfg(unix)]
+impl SilentTty {
+    pub(super) fn new(file: &std::fs::File) -> Result<Self> {
+        use std::os::fd::AsRawFd;
+        let file = file.try_clone().map_err(|_| SubscriptionError::Terminal)?;
+        let fd = file.as_raw_fd();
+        let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: tcgetattr initializes the struct on success; fd is owned and live.
+        if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
+            return Err(SubscriptionError::Terminal);
+        }
+        // SAFETY: initialized by the successful tcgetattr above.
+        let original = unsafe { original.assume_init() };
+        let mut hidden = original;
+        hidden.c_lflag &= !(libc::ECHO | libc::ECHONL);
+        // SAFETY: valid terminal fd and initialized termios.
+        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &hidden) } != 0 {
+            return Err(SubscriptionError::Terminal);
+        }
+        Ok(Self { file, original })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SilentTty {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        let fd = self.file.as_raw_fd();
+        // SAFETY: the owned descriptor stays open; original came from tcgetattr.
+        unsafe {
+            libc::tcflush(fd, libc::TCIFLUSH);
+            libc::tcsetattr(fd, libc::TCSANOW, &self.original);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -54,42 +133,13 @@ pub(super) fn open_terminal() -> std::io::Result<std::fs::File> {
 #[cfg(unix)]
 pub(super) async fn read_from(file: std::fs::File) -> Result<String> {
     use std::io::Read;
-    use std::os::fd::AsRawFd;
-    struct SilentTty {
-        file: tokio::io::unix::AsyncFd<std::fs::File>,
-        original: libc::termios,
-    }
-    impl Drop for SilentTty {
-        fn drop(&mut self) {
-            // SAFETY: the owned file remains open, and original came from tcgetattr.
-            unsafe {
-                libc::tcsetattr(
-                    self.file.get_ref().as_raw_fd(),
-                    libc::TCSANOW,
-                    &self.original,
-                );
-            }
-        }
-    }
-    let fd = file.as_raw_fd();
-    let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
-    // SAFETY: tcgetattr initializes the struct on success; fd is owned and live.
-    if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
-        return Err(SubscriptionError::Terminal);
-    }
-    let original = unsafe { original.assume_init() };
-    let mut hidden = original;
-    hidden.c_lflag &= !(libc::ECHO | libc::ECHONL);
+    let silent = SilentTty::new(&file)?;
     let file = tokio::io::unix::AsyncFd::new(file).map_err(|_| SubscriptionError::Terminal)?;
-    let tty = SilentTty { file, original };
-    // SAFETY: valid terminal fd and initialized termios.
-    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &hidden) } != 0 {
-        return Err(SubscriptionError::Terminal);
-    }
+    let tty = (file, silent);
     let mut input = Vec::new();
     loop {
         let mut ready = tty
-            .file
+            .0
             .readable()
             .await
             .map_err(|_| SubscriptionError::Terminal)?;

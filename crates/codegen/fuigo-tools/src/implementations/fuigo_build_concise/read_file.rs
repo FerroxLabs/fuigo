@@ -7,6 +7,9 @@ It is okay to read a file that does not exist; an error will be returned.
 
 Usage:
 - You can optionally specify ${{ params.read.offset }} and ${{ params.read.limit }} (especially handy for long files).
+${%- if whole_read.skill_markdown or whole_read.instruction_files %}
+- ${% if whole_read.skill_markdown %}SKILL.md${% endif %}${% if whole_read.skill_markdown and whole_read.instruction_files %} and ${% endif %}${% if whole_read.instruction_files %}AGENTS.md/CLAUDE.md${% endif %} files are returned whole when they fit the per-call limit; ${{ params.read.offset }} and ${{ params.read.limit }} are ignored for them
+${%- endif %}
 - Lines in the output are numbered starting at 1, using following format: LINE_NUMBER→LINE_CONTENT.
 - You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple files as a batch that are potentially useful."#;
 use crate::types::output::ReadFileOutput;
@@ -21,6 +24,10 @@ use crate::types::tool::{ToolKind, ToolNamespace};
 pub struct ReadFileConciseTool;
 
 impl crate::types::tool_metadata::ToolMetadata for ReadFileConciseTool {
+    fn lock_path_param(&self) -> Option<&'static str> {
+        Some("target_file")
+    }
+
     fn kind(&self) -> ToolKind {
         ToolKind::Read
     }
@@ -151,6 +158,58 @@ mod tests {
             rendered.contains("start_line") && rendered.contains("num_lines"),
             "renamed offset/limit must appear:\n{rendered}"
         );
+    }
+
+    /// The concise description makes the same whole-read promise as the full one, for the same file classes, and only
+    /// while the policy keeps it.
+    #[test]
+    fn concise_description_carries_the_whole_read_note_the_full_one_has() {
+        use crate::types::context::WholeReadPolicy;
+        use crate::types::template_renderer::TemplateRenderer;
+        use crate::types::tool_metadata::ToolMetadata;
+        use std::collections::HashMap;
+
+        let render = |template: &str, policy: WholeReadPolicy| {
+            let tools = HashMap::from([(ToolKind::Read, "read_file".to_string())]);
+            let params = HashMap::from([(
+                ToolKind::Read,
+                HashMap::from(
+                    ["target_file", "offset", "limit"]
+                        .map(|name| (name.to_string(), name.to_string())),
+                ),
+            )]);
+            TemplateRenderer::new(tools, params)
+                .with_whole_read(policy)
+                .render(template)
+                .unwrap()
+        };
+        let note = "files are returned whole when they fit the per-call limit; offset and limit are ignored for them";
+        let both = WholeReadPolicy {
+            skill_markdown: true,
+            instruction_files: true,
+        };
+        let full = render(ToolMetadata::description_template(&ReadFileTool), both);
+        let concise = render(ToolMetadata::description_template(&ReadFileConciseTool), both);
+        assert!(full.contains(note), "full:\n{full}");
+        assert!(concise.contains(note), "concise:\n{concise}");
+        assert!(concise.contains("SKILL.md and AGENTS.md/CLAUDE.md files"), "{concise}");
+        let skills_only = render(
+            ToolMetadata::description_template(&ReadFileConciseTool),
+            WholeReadPolicy {
+                skill_markdown: true,
+                instruction_files: false,
+            },
+        );
+        assert!(skills_only.contains("- SKILL.md files are returned whole"), "{skills_only}");
+        assert!(!skills_only.contains("AGENTS.md"), "{skills_only}");
+        let neither = render(
+            ToolMetadata::description_template(&ReadFileConciseTool),
+            WholeReadPolicy {
+                skill_markdown: false,
+                instruction_files: false,
+            },
+        );
+        assert!(!neither.contains("returned whole"), "{neither}");
     }
 
     #[tokio::test]

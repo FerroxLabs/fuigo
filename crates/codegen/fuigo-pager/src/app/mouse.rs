@@ -58,14 +58,19 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 if self.hit_goal_status.contains(mouse.column, mouse.row) {
-                    if !self.workflow_runs.is_empty() {
+                    // The chip is the goal's chip: a goal opens the goal panel even while workflow runs exist.
+                    // Runs stay reachable from the tasks chip and `/workflow runs`.
+                    if self.goal_state.is_some() {
+                        self.show_goal_detail = !self.show_goal_detail;
+                        if self.show_goal_detail {
+                            self.show_workflows = false;
+                        }
+                    } else if !self.workflow_runs.is_empty() {
                         self.show_workflows = !self.show_workflows;
                         if self.show_workflows {
                             self.workflows_view.reset();
                             self.show_goal_detail = false;
                         }
-                    } else if self.goal_state.is_some() {
-                        self.show_goal_detail = !self.show_goal_detail;
                     }
                     return InputOutcome::Changed;
                 }
@@ -243,6 +248,12 @@ impl AgentView {
                     return InputOutcome::Action(Action::AnnouncementsOpenCta(
                         fuigo_telemetry::events::AnnouncementCtaSurface::Header,
                     ));
+                }
+                if self.hit_branch.contains(mouse.column, mouse.row)
+                    && let Some(branch) = self.header_branch_name()
+                {
+                    self.copy_to_clipboard(&branch);
+                    return InputOutcome::Changed;
                 }
                 if self.hit_cwd.contains(mouse.column, mouse.row) {
                     let path = self.session.cwd.display().to_string();
@@ -1124,6 +1135,7 @@ impl AgentView {
                 changed |= self.hit_bg_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_catalog_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_cwd.update_hover(mouse.column, mouse.row);
+                changed |= self.hit_branch.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_upgrade_cta.update_hover(mouse.column, mouse.row);
                 {
                     let new_kill = self
@@ -1390,7 +1402,7 @@ mod tests {
         let ids = agent.queue.entry_ids();
         let outcome = click_send_now(&mut agent, ids[1]);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, images }) => {
+            InputOutcome::Action(Action::SendPromptNow { text, images, .. }) => {
                 assert_eq!(text, "local one");
                 assert_eq!(images.len(), 1, "row image must ride the send-now");
             }
@@ -1741,5 +1753,68 @@ mod tests {
             "double-click must expand the chip"
         );
         assert_eq!(agent.prompt.textarea.text(), text);
+    }
+}
+
+#[cfg(test)]
+mod goal_chip_tests {
+    use super::*;
+    use crate::app::agent_view::test_fixtures::make_agent;
+    use crossterm::event::KeyModifiers;
+    use ratatui::layout::Rect;
+
+    fn run_snapshot(status: &str) -> crate::views::workflows::WorkflowRunSnapshot {
+        crate::views::workflows::WorkflowRunSnapshot {
+            run_id: "wf_1".into(),
+            name: "deep-research".into(),
+            objective: "obj".into(),
+            status: status.into(),
+            management_available: true,
+            builtin: false,
+            phases: Vec::new(),
+            current_phase: None,
+            agents: Vec::new(),
+            agent_budget: None,
+            agents_used: 0,
+            agents_reserved: 0,
+            agents_remaining: None,
+            agent_usage_incomplete: false,
+            active_agents: 0,
+            elapsed_ms: 1_000,
+            received_at: std::time::Instant::now(),
+            pause_message: None,
+            result_summary: None,
+        }
+    }
+
+    fn click_goal_chip(agent: &mut AgentView) {
+        agent.hit_goal_status.rect = Some(Rect::new(0, 0, 10, 1));
+        let _ = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        });
+    }
+
+    #[test]
+    fn goal_chip_opens_goal_panel_even_with_workflow_runs() {
+        let mut agent = make_agent();
+        agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+        agent.workflow_runs = vec![run_snapshot("active")];
+        click_goal_chip(&mut agent);
+        assert!(agent.show_goal_detail, "the goal chip opens the goal panel");
+        assert!(!agent.show_workflows, "the runs overlay stays closed");
+        click_goal_chip(&mut agent);
+        assert!(!agent.show_goal_detail, "a second click closes it");
+    }
+
+    #[test]
+    fn goal_chip_hit_opens_runs_only_without_a_goal() {
+        let mut agent = make_agent();
+        agent.workflow_runs = vec![run_snapshot("active")];
+        click_goal_chip(&mut agent);
+        assert!(agent.show_workflows);
+        assert!(!agent.show_goal_detail);
     }
 }

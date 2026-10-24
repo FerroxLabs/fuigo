@@ -410,6 +410,9 @@ pub struct PeekRenderResult {
     /// Screen rect of the reply input row (the `❯ reply` line, or the reject-feedback slot in question mode).
     /// Recorded by the caller for mouse routing (click-to-focus, drag text selection).
     pub reply_rect: Option<Rect>,
+    /// Screen rect of the live tail (the agent's recent output), when one was painted.
+    /// Recorded by the caller so a drag over it selects text and copies it on release.
+    pub tail_rect: Option<Rect>,
 }
 
 /// Paint the peeked agent's model and always-approve flag onto the peek box's **bottom border**.
@@ -660,8 +663,13 @@ pub fn render_peek_panel(
             crate::render::color::blend_area(buf, frame_inner, Some((theme.bg_base, 0.45)), None);
         }
         // No reply row in question mode; return the feedback caret (if the user is typing into the reject option)
-        return PeekRenderResult { caret, reply_rect };
+        return PeekRenderResult {
+            caret,
+            reply_rect,
+            tail_rect: None,
+        };
     }
+    let mut tail_rect: Option<Rect> = None;
 
     {
         // Last-response TYPE on the LEFT, time-ago on the FAR RIGHT, like the row list's primary/secondary columns
@@ -727,6 +735,7 @@ pub fn render_peek_panel(
                     }
                 } else {
                     super::peek_tail::paint_peek_live_tail(scrollback, middle_area, buf);
+                    tail_rect = Some(middle_area);
                 }
             }
         } else if let Some(hint) = empty_hint
@@ -802,7 +811,11 @@ pub fn render_peek_panel(
     if !panel.focused {
         crate::render::color::blend_area(buf, frame_inner, Some((theme.bg_base, 0.45)), None);
     }
-    PeekRenderResult { caret, reply_rect }
+    PeekRenderResult {
+        caret,
+        reply_rect,
+        tail_rect,
+    }
 }
 
 /// Number of rows the `❯ reply` input wants at the given reply TEXT width (the inner box width minus the `❯ ` prefix), capped at `cap`.

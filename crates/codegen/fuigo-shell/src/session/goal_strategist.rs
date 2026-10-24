@@ -182,6 +182,7 @@ impl ChannelSpawner {
             fork_context: false,
             owner: SubagentOwner::Task,
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            tool_call_id: None,
         };
         let backend = ChannelBackend::new(self.event_tx.clone());
         let result = backend

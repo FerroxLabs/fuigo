@@ -19,7 +19,7 @@
 
 On 24 hard, real-world engineering tasks, with every agent on the same model, Fuigo solved **43 of 48** runs. Claude Code solved 41 and Grok Build 41. Fuigo did it for **18–27% less per solved task**, with no timeouts. ([How we tested](docs/benchmark.md))
 
-It isn't tied to one model company. Bring an OpenAI or Anthropic key, sign in with your ChatGPT subscription, or run a model on your own machine. It reads your code, edits it, runs your tests, and **asks before it changes a file or runs a command**. Kernel sandboxing, outbound destination checks and folder trust are built in, not bolted on. It remembers what it learned. And it is one engine: the same agent runs in your terminal, unattended in CI, or inside your product. It is the engine behind [Murage](https://github.com/FerroxLabs/murage)'s AI workforce.
+It isn't tied to one model company. Bring an OpenAI or Anthropic key, sign in with your ChatGPT subscription, or run a model on your own machine. It reads your code, edits it, runs your tests, and **asks before it changes a file or runs a command**. Kernel sandboxing (off until you turn it on), outbound destination checks and folder trust are built in, not bolted on. It remembers what it learned. And it is one engine: the same agent runs in your terminal, unattended in CI, or inside your product. It is the engine behind [Murage](https://github.com/FerroxLabs/murage)'s AI workforce.
 
 Apache-2.0. Yours to own.
 
@@ -27,7 +27,7 @@ Apache-2.0. Yours to own.
 
 [![Install: npm i -g fuigo](https://img.shields.io/badge/install-npm%20i%20--g%20fuigo-FF6A1A?style=for-the-badge&labelColor=1B1B20&logo=npm&logoColor=white)](#install)
 
-[Install](#install) · [Why Fuigo](#why-fuigo) · [Three ways to work](#three-ways-to-work) · [Features](#features) · [Models](#model-routes) · [Memory](#memory) · [Benchmark](docs/benchmark.md) · [Docs](#documentation) · [Release notes](docs/release-notes-1.0.31.md)
+[Install](#install) · [Why Fuigo](#why-fuigo) · [Three ways to work](#three-ways-to-work) · [Features](#features) · [Models](#model-routes) · [Memory](#memory) · [Benchmark](docs/benchmark.md) · [Docs](#documentation) · [Release notes](docs/release-notes-1.0.32.md)
 
 </div>
 
@@ -59,7 +59,7 @@ On first launch Fuigo asks for a key, or offers one it finds in your environment
 
 - **Any model, one workflow.** OpenAI and Anthropic keys, ChatGPT and Grok subscriptions, Flux Router and other OpenAI-compatible gateways, and local servers such as Ollama. Switch models mid-session with `/model`.
 - **One engine, three surfaces.** The same runtime behind the full-screen terminal UI, the headless `-p` command for scripts and CI, and an ACP server that editors and your own applications drive over JSON-RPC.
-- **It asks before it acts.** Every command and edit goes through a permission step you control: approve one, approve a class for the session, or set allow and deny rules. Plan mode is read-only until you accept the plan. Optional kernel sandboxing on macOS and Linux.
+- **It asks before it acts.** Every command and edit goes through a permission step you control: approve one, approve a class for the session, or set allow and deny rules. Plan mode is read-only until you accept the plan. Kernel sandboxing on macOS and Linux is off by default; turn it on with `--sandbox <profile>`.
 - **It remembers.** Local, workspace-scoped memory is on by default; sharing across workspaces and remote embeddings are explicit choices. Notes, decisions and session knowledge come back in later sessions, with their source attached.
 - **Built to be extended.** Subagents and personas, MCP servers, skills, plugins, hooks and project rules. A single Rust binary with no runtime to install beyond Node for the launcher.
 
@@ -110,7 +110,7 @@ Protocol details, error shapes and a client skeleton: [agent mode](crates/codege
 | **Tools** | File read and edit, search, shell, web search and fetch, Git and checkpoints. Read-only tools and read-only shell commands run without prompting. |
 | **Permissions** | Ask by default. Approve once, for the session, or always; allow and deny rules per tool and per command pattern; `.claude/settings.json` rules are honoured. [Guide](crates/codegen/fuigo-pager/docs/user-guide/22-permissions-and-safety.md) |
 | **Plan mode** | The agent explores and writes a plan; nothing but the plan file is editable until you approve it. [Guide](crates/codegen/fuigo-pager/docs/user-guide/19-plan-mode.md) |
-| **Sandbox** | Opt-in kernel sandboxing (Landlock on Linux, Seatbelt on macOS) with built-in and custom profiles. [Guide](crates/codegen/fuigo-pager/docs/user-guide/18-sandbox.md) |
+| **Sandbox** | Off by default. Choose a profile (`--sandbox workspace`, `read-only`, `strict`, or your own) to confine the agent and its commands with Landlock on Linux or Seatbelt on macOS. If an enforcing profile you asked for (anything but `devbox`) cannot be applied on Linux or macOS, Fuigo refuses to start rather than run unconfined; on Windows, where there is no sandbox, it starts and prints a warning at every start. [Guide](crates/codegen/fuigo-pager/docs/user-guide/18-sandbox.md) |
 | **Subagents** | Parallel child sessions with their own context, agent types and personas, managed from `/agents`. [Guide](crates/codegen/fuigo-pager/docs/user-guide/16-subagents.md) |
 | **MCP** | Stdio and remote servers, OAuth, elicitation; manage them from `/mcps`. [Guide](crates/codegen/fuigo-pager/docs/user-guide/07-mcp-servers.md) |
 | **Skills, plugins, hooks** | Reusable instructions, a marketplace, and hooks that run around tool calls and sessions. [Skills](crates/codegen/fuigo-pager/docs/user-guide/08-skills.md) · [Plugins](crates/codegen/fuigo-pager/docs/user-guide/09-plugins.md) · [Hooks](crates/codegen/fuigo-pager/docs/user-guide/10-hooks.md) |

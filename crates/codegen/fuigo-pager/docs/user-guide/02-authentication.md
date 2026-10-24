@@ -1,6 +1,46 @@
 # Authentication
 
-Fuigo supports several authentication methods: a FluxRouter API key (the default), ChatGPT and Grok subscription login, enterprise single sign-on (SSO), external auth providers, and headless CI/CD runners.
+Fuigo asks one question: **Choose how Fuigo reaches a model.** The answer is a Flux Router key (the recommended default), a ChatGPT or Grok subscription, a provider API key, or, where a deployment configures one, Enterprise SSO. Headless CI/CD runners use an environment variable.
+
+---
+
+## Signing in
+
+The same picker appears on first launch, when you type `/login`, and when you run `fuigo login` in a terminal:
+
+```
+Choose how Fuigo reaches a model.
+
+  1  Flux Router: one key, every model (recommended)
+  2  ChatGPT subscription (Plus/Pro)
+  3  Grok subscription
+  4  Provider API key...
+  q  Quit
+```
+
+Press a number, or click a row. Esc steps back from a sign-in in progress to the picker. In `/login` the last row reads **Cancel** and leaves everything as it was; each row shows its state ("signed in", "key ••••1234"), so `/login` also switches accounts. An **Enterprise SSO** row appears only when an OIDC issuer or an external auth command is configured.
+
+Signing in is the only step. Fuigo reads the account's model list itself and caches it under `~/.fuigo/subscriptions/`; the models appear in `/model` and on the welcome screen with the route each one uses, and nothing is written to `config.toml`. When you have never chosen a default model and Flux Router is not set up, Fuigo starts on the best model of the first signed-in subscription; a default you set yourself is never replaced.
+
+From a script or an SSH session, skip the picker:
+
+```bash
+fuigo login --provider flux       # paste a Flux Router key (hidden)
+fuigo login --provider flux < keyfile   # or pipe it in: one line on stdin, never echoed
+fuigo login --provider chatgpt    # browser sign-in
+fuigo login --provider xai        # browser sign-in (alias: grok)
+fuigo login --provider openai     # reports whether OPENAI_API_KEY is ready
+fuigo login --provider sso        # the deployment's OIDC / external provider
+fuigo login --status              # every connection and its state; no network call
+```
+
+Without a terminal, bare `fuigo login` prints these options and exits with status 2.
+
+The status line names the model and the route it is reached by ("Grok 4.7 · Grok subscription"), and the footer on the welcome screen names the credential in use ("Logged in with Grok subscription", "Logged in with Flux Router key"). Fuigo never falls back from one route to another on an error.
+
+If a different `fuigo` earlier on your `PATH` is another version, the welcome screen and `fuigo doctor` name both paths.
+
+---
 
 ---
 
@@ -14,9 +54,14 @@ fuigo login --provider chatgpt
 fuigo login --provider xai
 fuigo login --provider chatgpt --status
 fuigo login --provider xai --status
-fuigo models --provider chatgpt
+fuigo models --provider chatgpt    # print the IDs the account returns, and refresh the cache
 fuigo models --provider xai
 ```
+
+You do not need `fuigo models` to use a subscription: signing in already fetched the
+list. Inside Fuigo, `/provider chatgpt-subscription` and `/provider grok-subscription`
+show the signed-in state and list the account's models, and
+`/provider grok-subscription grok-4` switches to one.
 
 ChatGPT opens a browser and listens on `localhost:1455`. xAI uses a random local
 callback port. On Unix, if xAI displays a code instead of redirecting, paste it
@@ -28,8 +73,12 @@ A subscription must grant the requested model access. Model listing shows IDs
 returned by the authenticated backend; it does not promise access to every model.
 A denial never switches to a paid API key or Flux Router.
 
-To select subscription inference, add named auth providers and models to your
-trusted user config (`~/.fuigo/config.toml`, or `$FUIGO_HOME/config.toml`):
+### Advanced: pin a subscription model by hand
+
+A signed-in subscription's models are listed without any configuration. To pin a
+model to a specific account, or to give it your own name, add named auth providers
+and models to your trusted user config (`~/.fuigo/config.toml`, or
+`$FUIGO_HOME/config.toml`):
 
 ```toml
 [auth_provider.chatgpt-subscription]
@@ -133,15 +182,15 @@ endorsement or a guarantee of a stable third-party subscription API.
 
 ---
 
-## First Launch (API Key by Default)
+## First Launch
 
-On first launch, Fuigo asks for an API key:
+On first launch, Fuigo shows the sign-in picker described above:
 
 ```bash
 fuigo
 ```
 
-Paste your FluxRouter API key (from your FluxRouter dashboard), or pick a supported key that is already in your environment from the menu. Fuigo does not open a browser: it ships with no first-party web login. The first-launch menu offers a **Login with ...** row only when your deployment has configured something real behind it -- an OIDC issuer or an external auth provider -- so the row never leads to a dead end.
+Choose **Flux Router** and paste your key (from your Flux Router dashboard), or take the `FLUX_API_KEY` Fuigo found in your environment (the row reads "Use FLUX_API_KEY from your environment ••••1234"). A subscription opens your browser; a Flux key does not. The **Enterprise SSO** row appears only when your deployment has configured something real behind it -- an OIDC issuer or an external auth provider -- so the row never leads to a dead end. If anything usable already exists (a saved key, a signed-in subscription), Fuigo skips the picker and starts on the best model.
 
 Fuigo stores the credential in `~/.fuigo/auth.json` and reuses it across sessions. For issuer-backed sessions, Fuigo refreshes access tokens automatically in the background; when a token can't be refreshed, Fuigo prompts you to sign in again. Credentials without a server-provided expiry fall back to a 30-day lifetime.
 
@@ -155,13 +204,13 @@ Tokens in `~/.fuigo/auth.json` (and MCP OAuth tokens in `~/.fuigo/mcp_credential
 
 ### Re-authenticate
 
-To switch accounts or resolve an authentication problem, run:
+To switch accounts or resolve an authentication problem, type `/login` in Fuigo, or run:
 
 ```bash
 fuigo login
 ```
 
-Running `fuigo login` (without `--provider`) starts the sign-in flow again, replacing your cached session. It signs in through the identity provider your deployment configured: enterprise OIDC under `[fuigo_com_config.oidc]`, or an OAuth2 issuer set with `FUIGO_OAUTH2_ISSUER` and `FUIGO_OAUTH2_CLIENT_ID`. Fuigo ships with no issuer of its own, so with neither configured the command explains that there is nothing to log in to and points you at `FUIGO_API_KEY`. Pass a flag to select the transport:
+Both open the sign-in picker. Single sign-on is the old `fuigo login` path and is now reached with `fuigo login --provider sso` (or `--oauth` / `--device-auth`). It signs in through the identity provider your deployment configured: enterprise OIDC under `[fuigo_com_config.oidc]`, or an OAuth2 issuer set with `FUIGO_OAUTH2_ISSUER` and `FUIGO_OAUTH2_CLIENT_ID`. Fuigo ships with no issuer of its own, so with neither configured that command explains there is nothing to sign in to and points you at `FUIGO_API_KEY`. Pass a flag to select the transport:
 
 | Flag | Description |
 |------|-------------|
@@ -180,6 +229,8 @@ For CI/CD, automation, or any environment where pasting a key at the prompt is i
 export FUIGO_API_KEY="fuigo-..."
 fuigo
 ```
+
+Fuigo reads the key from the first of `FUIGO_API_KEY`, then `FUIGO_CODE_API_KEY`, then `FLUX_API_KEY` that is set and not blank, so a key exported only as `FLUX_API_KEY` works too, in the app, in `fuigo -p`, in `fuigo models` and over ACP, exactly as `fuigo login --status` reports. None of the three is inherited by programs Fuigo starts.
 
 Fuigo uses the API key as a fallback when no session token is active. If you have already signed in interactively, the stored session token takes precedence. To fall back to the API key, run `fuigo logout` or delete `~/.fuigo/auth.json`.
 
@@ -469,7 +520,7 @@ Fuigo resolves credentials for each request in this order, highest to lowest:
 
 1. **Per-model `api_key` or `env_key`** -- set under `[model.<name>]` in `config.toml`. Wins whenever present.
 2. **Active session token** -- obtained through OIDC/OAuth2 or external-provider login and stored in `~/.fuigo/auth.json`.
-3. **`FUIGO_API_KEY`** -- fallback when no session token is active.
+3. **`FUIGO_API_KEY`**, then **`FUIGO_CODE_API_KEY`**, then **`FLUX_API_KEY`** -- the first one set and not blank is the fallback when no session token is active.
 
 When more than one login flow is configured, Fuigo populates the session token from the first available source, highest to lowest:
 

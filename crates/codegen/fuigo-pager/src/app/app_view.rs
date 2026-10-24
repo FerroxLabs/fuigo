@@ -252,11 +252,14 @@ impl DashboardReturn {
     }
 }
 /// Tick cadence demanded by the current view state; see [`AppView::tick_demand`].
-/// Ordered: `None < Slow < Fast`.
+/// Ordered: `None < Rest < Slow < Fast`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TickDemand {
     /// Nothing animates or polls: the event loop parks (zero wakeups).
     None,
+    /// Nothing moves, but the screen keeps a heartbeat (a resting welcome screen notices a toast, a returning visit or a
+    /// finished load): tick at [`REST_TICK_INTERVAL`].
+    Rest,
     /// Only low-frequency work is pending (welcome logo shimmer at ~12fps, the macOS Cmd link-hover poll): tick at [`SLOW_TICK_INTERVAL`].
     Slow,
     /// Real animation is on screen: tick at the configured animation fps.
@@ -265,6 +268,9 @@ pub enum TickDemand {
 /// Tick cadence for [`TickDemand::Slow`] (~12fps).
 /// Matches the welcome logo's `SHIMMER_FPS` so slow ticks sample every shimmer frame, and bounds the latency of the macOS Cmd link-hover underline.
 pub const SLOW_TICK_INTERVAL: Duration = Duration::from_millis(83);
+/// Tick cadence for [`TickDemand::Rest`] (2 a second). Shorter than the mark's replay gap (one second), so a resting welcome
+/// screen is never mistaken for one that was left and returned to.
+pub const REST_TICK_INTERVAL: Duration = Duration::from_millis(500);
 /// Welcome toast lifetime (wall clock, so the duration holds whether the event loop is ticking Slow or Fast).
 const WELCOME_TOAST_DURATION: Duration = Duration::from_secs(2);
 fn reconnect_success_hides_mismatch(current: Option<&str>, incoming: &str) -> bool {
@@ -508,6 +514,8 @@ impl PasteProvenance {
 /// If the same key is pressed within the TTL, the action fires.
 /// Any other key or expiry clears it.
 /// `label: None` means a silent arm (the idle-empty Esc rewind).
+/// Shortcuts-bar label for the quit confirmation while workflow runs are active.
+pub const QUIT_STOPS_WORKFLOWS_LABEL: &str = "quit and stop running workflows";
 pub struct PendingAction {
     /// The action to fire on second press.
     pub action: Action,
@@ -909,6 +917,12 @@ pub struct AppView {
     pub welcome_privacy_banner_policy_rect: Option<ratatui::layout::Rect>,
     /// Transient welcome toast: (message, wall-clock expiry).
     pub welcome_toast: Option<(String, std::time::Instant)>,
+    /// Nesting depth of `dispatch::dispatch`; image notices surface only when it returns to 0.
+    pub dispatch_depth: u32,
+    /// Image notices raised while one dispatch or ACP message runs (unbound placeholder, unreadable attachment).
+    /// App-owned so a command that removes its own session (`/new`, `/home` in minimal) cannot take the notice down with it;
+    /// the `unified_log` event is written against the originating session when the notice is raised.
+    pub pending_image_notices: Vec<String>,
     /// P167: why the last "yes" to the folder-trust question recorded nothing; shown with the question until it is
     /// answered (the minimal view paints no welcome toast). Cleared when trust resolves.
     pub trust_error: Option<String>,
@@ -1097,6 +1111,21 @@ pub struct AppView {
     /// The same rows' environment variable names, in menu order. Kept
     /// separately so the input path can borrow them without the render rows.
     pub detected_env_vars: Vec<String>,
+    /// What every sign-in surface shows: Flux, subscriptions, environment keys. Read from disk and
+    /// the environment on construction and refreshed after a sign-in, never per frame.
+    pub sign_in_status: fuigo_shell::auth::provider_status::ProviderStatus,
+    /// The picker is open as the `/login` modal (its exit row reads "Cancel" and restores the prior view).
+    pub picker_modal: bool,
+    /// Which list of the picker is showing.
+    pub picker_page: crate::app::pending_menu::PickerPage,
+    /// On the "Pick a model:" page: also save the pick as the default model.
+    pub pick_make_default: bool,
+    /// A model picked for this session only: the next completed switch to it is not saved as the default.
+    pub session_only_model: Option<agent_client_protocol::ModelId>,
+    /// The subscription sign-in in progress, if any.
+    pub subscription_signin: Option<fuigo_shell::auth::subscription::SubscriptionProvider>,
+    /// One neutral line under the picker heading, or the welcome tip slot after a sign-in.
+    pub sign_in_notice: Option<String>,
     /// The auth method ID to use for login.
     pub login_method_id: Option<acp::AuthMethodId>,
     /// Initial auth mode hint from method metadata.
@@ -1144,6 +1173,8 @@ pub struct AppView {
     /// Persisted `[toolset.ask_user_question].timeout_enabled` mirror, seeded from the effective TOML merge like `show_tips`.
     /// `None` means unset in TOML (default `true`); toggles write the user layer.
     pub ask_user_question_timeout_enabled: Option<bool>,
+    /// Every tier of `[features] subagent_model_inheritance`, seeded at startup like the other `[features]` mirrors.
+    pub subagent_model_inheritance: crate::settings::FeatureTiers,
     /// Whether ZDR users are allowed to use the product.
     /// Server-controlled via RemoteSettings (remote settings). Default `false` (blocked) during beta.
     pub zdr_access_enabled: bool,
@@ -1475,6 +1506,53 @@ impl AppView {
             self.show_resolved_model = show;
         }
     }
+    /// The credential in use, for the welcome footer: the current model's route when a subscription
+    /// or a key carries it, never a generic "API key". `None` when no key or subscription is in use.
+    pub(crate) fn credential_label(&self) -> Option<String> {
+        let route = self.models.current_route_label();
+        match (route, self.is_api_key_auth) {
+            // A Flux key reads "Flux Router key", as the picker words it; other routes already name
+            // their credential ("OpenAI key from OPENAI_API_KEY", "Grok subscription").
+            (Some(label), true) if label == "Flux Router" => Some("Flux Router key".to_string()),
+            (Some(label), true) => Some(label),
+            (Some(label), false) if label != "Flux Router" => Some(label),
+            // No route on the model means Flux Router (only a subscription or a provider key says
+            // otherwise): the key in use is the Flux key.
+            (None, true) => Some("Flux Router key".to_string()),
+            _ => None,
+        }
+    }
+    /// Re-read the credential stores and the environment for the sign-in surfaces.
+    pub(crate) fn refresh_sign_in_status(&mut self) {
+        self.sign_in_status = fuigo_shell::auth::provider_status::ProviderStatus::current(false);
+    }
+    /// The status the picker paints: the cached one plus whether single sign-on is configured.
+    /// The user's own default model cannot be used (no route to it is set up) but others can:
+    /// show "Pick a model:" with the usable ones instead of starting a session that would fail.
+    /// Never changes the default. Returns whether the page was opened.
+    pub(crate) fn open_model_pick_if_default_unusable(&mut self, explicit_default: Option<&str>) -> bool {
+        let Some(explicit) = explicit_default.map(str::trim).filter(|s| !s.is_empty()) else {
+            return false;
+        };
+        let Some((name, why)) = self.models.unusable_default_reason(explicit) else {
+            return false;
+        };
+        self.auth_state = AuthState::Pending { error: None };
+        self.picker_modal = false;
+        self.picker_page = crate::app::pending_menu::PickerPage::PickModel;
+        self.pick_make_default = false;
+        self.welcome_menu_index = None;
+        self.sign_in_notice = Some(format!(
+            "Your default model {name} can't be used: {why}. Pick a model:"
+        ));
+        true
+    }
+
+    pub(crate) fn sign_in_menu_status(&self) -> fuigo_shell::auth::provider_status::ProviderStatus {
+        let mut status = self.sign_in_status.clone();
+        status.sso_configured = self.login_label.is_some();
+        status
+    }
     /// Mirror the billing and `/usage` gates onto every slash surface (agents, welcome, dashboard dispatch / peek-reply).
     pub(crate) fn sync_billing_surface_to_agents(&mut self) {
         let billing = self.usage_visible;
@@ -1609,6 +1687,8 @@ impl AppView {
             welcome_privacy_banner_terms_rect: None,
             welcome_privacy_banner_policy_rect: None,
             welcome_toast: None,
+            dispatch_depth: 0,
+            pending_image_notices: Vec::new(),
             trust_error: None,
             welcome_on_privacy_banner: false,
             welcome_on_upgrade_cta: false,
@@ -1690,6 +1770,13 @@ impl AppView {
                     masked: d.masked(),
                 })
                 .collect(),
+            sign_in_status: fuigo_shell::auth::provider_status::ProviderStatus::current(false),
+            picker_modal: false,
+            picker_page: crate::app::pending_menu::PickerPage::Main,
+            pick_make_default: false,
+            session_only_model: None,
+            subscription_signin: None,
+            sign_in_notice: None,
             login_method_id: None,
             auth_start_mode: AuthMode::Pending,
             auth_code_input: LineEditor::default(),
@@ -1712,6 +1799,7 @@ impl AppView {
             show_tips: None,
             auto_update: None,
             ask_user_question_timeout_enabled: None,
+            subagent_model_inheritance: Default::default(),
             zdr_access_enabled: false,
             usage_billing_redirect_url: None,
             announcement_cta_impressions_logged: Default::default(),
@@ -2284,6 +2372,12 @@ impl AppView {
     pub fn home_session(&self) -> Option<&AgentView> {
         self.home_session_agent.and_then(|id| self.agents.get(&id))
     }
+    /// Show the queued image notices when no dispatch is in flight (a nested dispatch leaves them to
+    /// the outermost one); true when a visible surface changed.
+    pub fn flush_image_notices_if_root(&mut self) -> bool {
+        self.dispatch_depth == 0 && crate::app::dispatch::flush_image_notices(self)
+    }
+
     /// Session ID of the active agent, if one exists and has an established session.
     pub fn active_session_id(&self) -> Option<&str> {
         match self.active_view {
@@ -2319,7 +2413,12 @@ impl AppView {
         let id = self
             .agents
             .iter()
-            .find(|(_, a)| a.session.session_id.as_ref().is_some_and(|s| &*s.0 == session_id))
+            .find(|(_, a)| {
+                a.session
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|s| &*s.0 == session_id)
+            })
             .map(|(id, _)| *id);
         if let Some(id) = id {
             self.apply_relay_refusal(id);
@@ -2371,11 +2470,9 @@ impl AppView {
         };
         // Never into a running turn or a streaming wake turn (see `apply_relay_refusal`), nor while a fullscreen
         // subagent hides this session's transcript; the tick tries again.
-        let Some(agent) = self
-            .agents
-            .get_mut(&id)
-            .filter(|a| a.session.state.is_idle() && !a.wake_turn_active() && a.active_subagent.is_none())
-        else {
+        let Some(agent) = self.agents.get_mut(&id).filter(|a| {
+            a.session.state.is_idle() && !a.wake_turn_active() && a.active_subagent.is_none()
+        }) else {
             return false;
         };
         for text in self.leader_notices.drain(..) {
@@ -2635,6 +2732,16 @@ impl AppView {
         self.welcome_prompt.sync_tab_width_from_appearance();
         self.appearance = config;
     }
+    /// A fresh transcript for a new agent: current appearance plus the persisted `[ui].tool_density` default.
+    /// `/density` later overrides the density for that one session and never writes the setting back.
+    pub(crate) fn new_scrollback(&self) -> crate::scrollback::state::ScrollbackState {
+        let mut scrollback = crate::scrollback::state::ScrollbackState::new();
+        scrollback.set_appearance(self.appearance.clone());
+        if let Some(raw) = self.current_ui.tool_density.as_deref() {
+            scrollback.set_tool_density(crate::settings::canonical_tool_density(Some(raw)) == "compact");
+        }
+        scrollback
+    }
     /// Recompute the render-value compact flag from the user setting and terminal height (`views::agent::effective_compact`).
     /// Propagate it to the appearance fan-out and every agent's prompt widget when it changed.
     /// In-memory only: never touches the user setting (`current_ui.compact_mode`), the render cache, or disk.
@@ -2820,6 +2927,14 @@ impl AppView {
         }
     }
 
+    /// After a full screen clear (`ESC[2J`), the terminal may have dropped every Kitty image it held. Forget what was
+    /// transmitted for every agent so the next frame re-uploads instead of placing ids that no longer exist.
+    pub(crate) fn forget_transmitted_inline_media(&mut self) {
+        for agent in self.agents.values_mut() {
+            agent.forget_transmitted_inline_media();
+        }
+    }
+
     /// Whether `ev` disturbs the screen. Exhaustive on purpose: a new `Event` variant must be classified here.
     pub(crate) fn event_disturbs_screen(ev: &Event) -> bool {
         match ev {
@@ -2829,6 +2944,16 @@ impl AppView {
             | Event::Mouse(_)
             | Event::Paste(_)
             | Event::Resize(_, _) => true,
+        }
+    }
+
+    /// Any key other than Enter closes the dashboard's send echo window.
+    fn close_dashboard_send_echo_window(&mut self, key_event: Option<&crossterm::event::KeyEvent>) {
+        if let Some(key) = key_event
+            && key.code != KeyCode::Enter
+            && let Some(d) = self.dashboard.as_mut()
+        {
+            d.last_send_at = None;
         }
     }
 
@@ -2848,7 +2973,8 @@ impl AppView {
             agent.peer.clear_key_taken();
         }
         let focus_before = self.focus_signature();
-        let outcome = self.handle_input_at_with_paste_provenance_inner(ev, arrived_at, paste_provenance);
+        let outcome =
+            self.handle_input_at_with_paste_provenance_inner(ev, arrived_at, paste_provenance);
         if matches!(ev, Event::Key(_)) && !self.agents.values().any(|a| a.peer.key_taken()) {
             self.note_screen_disturbed();
         }
@@ -3037,6 +3163,19 @@ impl AppView {
             self.session_picker_loading,
             &self.session_picker_lanes,
         );
+        // Any key on the welcome screen (menu navigation included) snaps the spinning mark to rest
+        if matches!(self.active_view, ActiveView::Welcome) && matches!(ev, Event::Key(_)) {
+            crate::views::welcome::snap_to_rest();
+        }
+        let menu_status = self.sign_in_menu_status();
+        let pending_entries = crate::app::pending_menu::menu_entries_for(
+            &menu_status,
+            self.picker_modal,
+            self.picker_page,
+            &self.models,
+            self.pick_make_default,
+        );
+        let flux_env_var = menu_status.flux_env_var().map(str::to_owned);
         let outcome = match self.active_view {
             ActiveView::Welcome => handle_welcome_input(
                 ev,
@@ -3056,8 +3195,10 @@ impl AppView {
                     new_worktree_dialog: &mut self.new_worktree_dialog,
                     menu_index: &mut self.welcome_menu_index,
                     menu_rects: &self.welcome_menu_rects,
-                    pending_detected_env_vars: &self.detected_env_vars,
-                    login_available: self.login_label.is_some(),
+                    pending_entries: &pending_entries,
+                    flux_env_var: flux_env_var.as_deref(),
+                    picker_modal: self.picker_modal,
+                    subscription_signin: self.subscription_signin.is_some(),
                     menu_count: if zdr_blocked {
                         2
                     } else {
@@ -3325,6 +3466,7 @@ impl AppView {
                 }
             }
             ActiveView::AgentDashboard => {
+                self.close_dashboard_send_echo_window(key_event);
                 if let Some(outcome) = self.voice_esc_outcome(key_event) {
                     return outcome;
                 }
@@ -3579,8 +3721,16 @@ impl AppView {
             }
             _ => return InputOutcome::Unchanged,
         };
-        if def.requires_confirmation {
+        // Quitting ends active workflow runs: name them in the prompt and always ask for the second press
+        let quit_stops_workflows =
+            matches!(action, Action::Quit) && self.running_workflow_count() > 0;
+        if def.requires_confirmation || quit_stops_workflows {
             let shortcut = KeyShortcut::from(*key);
+            let label = if quit_stops_workflows {
+                QUIT_STOPS_WORKFLOWS_LABEL
+            } else {
+                def.label
+            };
             let action = if action_id == ActionId::NewSession
                 && matches!(self.active_view, ActiveView::Agent(_))
                 && self.new_session_worktree_mode == WorktreeMode::Ask
@@ -3589,11 +3739,18 @@ impl AppView {
             } else {
                 action
             };
-            self.pending_action = Some(PendingAction::new(action, shortcut, def.label));
+            self.pending_action = Some(PendingAction::new(action, shortcut, label));
             InputOutcome::Changed
         } else {
             InputOutcome::Action(action)
         }
+    }
+    /// Workflow runs across all sessions that quitting would stop (active ones; finished and paused runs are not counted).
+    pub(crate) fn running_workflow_count(&self) -> usize {
+        self.agents
+            .values()
+            .map(|agent| agent.workflow_runs.iter().filter(|r| r.is_active()).count())
+            .sum()
     }
     /// Apply quit confirmation (double-press).
     /// Used both for direct global quit and for escalated quit from agent-level cancel.
@@ -3607,6 +3764,16 @@ impl AppView {
         let Some(def) = self.registry.find(ActionId::Quit) else {
             return InputOutcome::Action(Action::Quit);
         };
+        // Quitting ends the session's workflow runs: say so, and always ask for the second press
+        if self.running_workflow_count() > 0 {
+            let shortcut = KeyShortcut::from(*key);
+            self.pending_action = Some(PendingAction::new(
+                Action::Quit,
+                shortcut,
+                QUIT_STOPS_WORKFLOWS_LABEL,
+            ));
+            return InputOutcome::Changed;
+        }
         if def.requires_confirmation {
             let shortcut = KeyShortcut::from(*key);
             self.pending_action = Some(PendingAction::new(Action::Quit, shortcut, def.label));
@@ -3667,11 +3834,14 @@ struct WelcomeInputCtx<'a> {
     menu_index: &'a mut Option<usize>,
     menu_rects: &'a [ratatui::layout::Rect],
     menu_count: usize,
-    /// Environment variables holding discovered credentials, in menu order.
-    /// Names, never values -- these are painted on screen already.
-    pending_detected_env_vars: &'a [String],
-    /// Whether an interactive login row is offered (an issuer is configured).
-    login_available: bool,
+    /// The picker rows as painted, so a click or key runs the row the user saw.
+    pending_entries: &'a [crate::app::pending_menu::MenuEntry],
+    /// The Flux key variable the first row applies, when one is in the environment. A name, never a value.
+    flux_env_var: Option<&'a str>,
+    /// The picker is the `/login` modal.
+    picker_modal: bool,
+    /// A subscription sign-in is in progress (Esc returns to the picker instead of quitting).
+    subscription_signin: bool,
     prompt_rect: Option<&'a ratatui::layout::Rect>,
     import_banner_rect: Option<&'a ratatui::layout::Rect>,
     auth_url_rect: Option<&'a ratatui::layout::Rect>,
@@ -4236,39 +4406,48 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             }
             AuthState::Pending { .. } => {
                 if key!('q').matches(key)
+                    || key!(Esc).matches(key) && ctx.picker_modal
                     || key!('c', CONTROL).matches(key)
                     || key!('d', CONTROL).matches(key)
                 {
+                    if ctx.picker_modal {
+                        return InputOutcome::Action(Action::CancelPicker);
+                    }
                     if ctx.mid_session_login {
                         return InputOutcome::Action(Action::CancelLogin);
                     }
                     return InputOutcome::Action(Action::QuitConfirmed);
                 }
-                // Digit rows first: `1`..`N` apply a discovered credential.
-                // These need explicit keys because arrow-key selection is
-                // gated to `AuthState::Done`, so this menu is otherwise
-                // mouse-only and a numbered row would be unreachable.
-                // Matched directly rather than through `key!`, which needs a
-                // literal; the digit is derived from the row index.
+                // Digits pick a row by its painted number. The exit row is `q`, the provider-key
+                // page's Back row is `b`.
                 if let crossterm::event::KeyCode::Char(c) = key.code
                     && key.modifiers.is_empty()
                     && let Some(d) = c.to_digit(10)
                     && d >= 1
                 {
-                    let i = (d - 1) as usize;
-                    if i < ctx
-                        .pending_detected_env_vars
-                        .len()
-                        .min(crate::app::pending_menu::MAX_DETECTED_ROWS)
-                    {
-                        if let Some(row) = ctx.pending_detected_env_vars.get(i) {
-                            return InputOutcome::Action(Action::UseDetectedKey(row.clone()));
-                        }
-                        return InputOutcome::Unchanged;
+                    let index = (d - 1) as usize;
+                    if index < ctx.pending_entries.len() {
+                        return dispatch_pending_menu_action(
+                            index,
+                            ctx.pending_entries,
+                            ctx.flux_env_var,
+                        );
                     }
                 }
-                if key!('k').matches(key) || key!(Enter).matches(key) {
+                if key!('b').matches(key)
+                    && let Some(i) = ctx
+                        .pending_entries
+                        .iter()
+                        .position(|e| e.row == crate::app::pending_menu::PendingMenuRow::Back)
+                {
+                    return dispatch_pending_menu_action(i, ctx.pending_entries, ctx.flux_env_var);
+                }
+                if key!('k').matches(key) {
                     return InputOutcome::Action(Action::EnterApiKey);
+                }
+                // Enter takes the first row: Flux Router, the recommended default.
+                if key!(Enter).matches(key) {
+                    return dispatch_pending_menu_action(0, ctx.pending_entries, ctx.flux_env_var);
                 }
                 if key!('l').matches(key) {
                     return InputOutcome::Action(Action::Login);
@@ -4288,6 +4467,14 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     || key!('q', CONTROL).matches(key)
                     || key!('c', CONTROL).matches(key)
                 {
+                    // Esc steps back to the picker; the quit chords leave as before.
+                    // Esc steps back to the picker from a sign-in or a key screen; the quit chords leave.
+                    let key_screen = matches!(mode, AuthMode::ApiKey);
+                    if key!(Esc).matches(key)
+                        && (ctx.subscription_signin || ctx.picker_modal || key_screen)
+                    {
+                        return InputOutcome::Action(Action::CancelSignIn);
+                    }
                     if ctx.mid_session_login {
                         return InputOutcome::Action(Action::CancelLogin);
                     }
@@ -4332,6 +4519,9 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     || key!('q', CONTROL).matches(key)
                     || key!('c', CONTROL).matches(key)
                 {
+                    if key!(Esc).matches(key) && (ctx.subscription_signin || ctx.picker_modal) {
+                        return InputOutcome::Action(Action::CancelSignIn);
+                    }
                     if ctx.mid_session_login {
                         return InputOutcome::Action(Action::CancelLogin);
                     }
@@ -4374,8 +4564,8 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                         if matches!(ctx.auth_state, AuthState::Pending { .. }) {
                             return dispatch_pending_menu_action(
                                 i,
-                                ctx.pending_detected_env_vars,
-                                ctx.login_available,
+                                ctx.pending_entries,
+                                ctx.flux_env_var,
                             );
                         }
                         if ctx.is_zdr_blocked {
@@ -4596,28 +4786,42 @@ fn handle_menu_nav(
         _ => None,
     }
 }
-/// Dispatch an action for a welcome menu item when not yet authenticated.
+/// Dispatch an action for a picker row.
 ///
-/// Item 0 is "Enter API key" and the LAST item is Quit. A "Login with ..." row
-/// Built from `pending_menu_rows`, the same function the renderer uses. This
-/// previously hardcoded `0 => EnterApiKey, 1 => Login` and derived Quit from
-/// the rect count, which held only while the menu had two or three fixed
-/// rows -- adding one silently remapped every click to the wrong action.
+/// `entries` is the very list the renderer painted (`pending_menu::menu_entries`), so row N here
+/// is row N on screen. This previously hardcoded `0 => EnterApiKey, 1 => Login` and derived Quit
+/// from the rect count, which held only while the menu had two or three fixed rows.
 fn dispatch_pending_menu_action(
     index: usize,
-    detected_env_vars: &[String],
-    has_login: bool,
+    entries: &[crate::app::pending_menu::MenuEntry],
+    flux_env_var: Option<&str>,
 ) -> InputOutcome {
-    let detected = detected_env_vars.len();
-    use crate::app::pending_menu::{PendingMenuRow, pending_menu_rows};
-    match pending_menu_rows(detected, has_login).get(index) {
-        Some(PendingMenuRow::UseDetectedKey(i)) => match detected_env_vars.get(*i) {
-            Some(env_var) => InputOutcome::Action(Action::UseDetectedKey(env_var.clone())),
+    use crate::app::pending_menu::PendingMenuRow;
+    match entries.get(index).map(|e| e.row) {
+        Some(PendingMenuRow::UseDetectedKey) => match flux_env_var {
+            Some(env_var) => InputOutcome::Action(Action::UseDetectedKey(env_var.to_owned())),
             None => InputOutcome::Unchanged,
         },
         Some(PendingMenuRow::EnterApiKey) => InputOutcome::Action(Action::EnterApiKey),
+        Some(PendingMenuRow::SignIn(provider)) => {
+            InputOutcome::Action(Action::SignInSubscription(provider))
+        }
+        Some(PendingMenuRow::ProviderKeys) => InputOutcome::Action(Action::ProviderKeysPage),
         Some(PendingMenuRow::Login) => InputOutcome::Action(Action::Login),
+        Some(PendingMenuRow::SignOut(provider)) => {
+            InputOutcome::Action(Action::SignOutSubscription(provider))
+        }
         Some(PendingMenuRow::Quit) => InputOutcome::Action(Action::Quit),
+        Some(PendingMenuRow::Cancel) => InputOutcome::Action(Action::CancelPicker),
+        Some(PendingMenuRow::KeyProvider(id)) => {
+            InputOutcome::Action(Action::ProviderKeyInfo(id.to_owned()))
+        }
+        Some(PendingMenuRow::KeyOther) => InputOutcome::Action(Action::ProviderKeyInfo("other".into())),
+        Some(PendingMenuRow::Back | PendingMenuRow::MoreConnections) => {
+            InputOutcome::Action(Action::PickerBack)
+        }
+        Some(PendingMenuRow::UseModel(i)) => InputOutcome::Action(Action::PickWelcomeModel(i)),
+        Some(PendingMenuRow::ToggleMakeDefault) => InputOutcome::Action(Action::ToggleMakeDefault),
         None => InputOutcome::Unchanged,
     }
 }
@@ -4915,6 +5119,18 @@ impl AppView {
             );
         let agent_mouse_pos = self.last_mouse_pos;
         let status_line_frame = self.status_line_frame();
+        // Computed here, not in the draw closure: they read the whole view, and the closure holds
+        // disjoint borrows of its fields.
+        let credential = self.credential_label();
+        let route_note = self.models.route_note();
+        let picker_status = self.sign_in_menu_status();
+        let menu_entries = crate::app::pending_menu::menu_entries_for(
+            &picker_status,
+            self.picker_modal,
+            self.picker_page,
+            &self.models,
+            self.pick_make_default,
+        );
         let Self {
             active_view,
             agents,
@@ -4980,6 +5196,12 @@ impl AppView {
                         }
                         let tip = if self.welcome_tip_typing_dismissed {
                             None
+                        } else if matches!(self.auth_state, AuthState::Done)
+                            && self.sign_in_notice.is_some()
+                        {
+                            self.sign_in_notice.as_deref()
+                        } else if matches!(self.auth_state, AuthState::Done) && route_note.is_some() {
+                            route_note.as_deref()
                         } else {
                             self.tip.as_deref()
                         };
@@ -4987,6 +5209,11 @@ impl AppView {
                         let model_name = match self.models.reasoning_effort {
                             Some(eff) => format!("{model_name_base} ({eff})"),
                             None => model_name_base,
+                        };
+                        // The status line names the route Fuigo uses, not just the model.
+                        let model_name = match self.models.current_route_label() {
+                            Some(route) => format!("{model_name} \u{b7} {route}"),
+                            None => model_name,
                         };
                         let hero_cta = crate::views::announcements::promo_cta(
                             &self.active_announcements,
@@ -5012,8 +5239,13 @@ impl AppView {
                             trust_state: &self.trust_state,
                             consent_state: &self.consent_state,
                             consent_hover_link: self.welcome_consent_hover_link,
-                            login_label: self.login_label.as_deref(),
-                            detected_keys: &self.detected_keys,
+                            menu_entries: &menu_entries,
+                            picker_modal: self.picker_modal,
+                            sign_in_notice: if matches!(self.auth_state, AuthState::Pending { .. }) {
+                                self.sign_in_notice.as_deref()
+                            } else {
+                                None
+                            },
                             auth_code_input: self.auth_code_input.text(),
                             auth_code_cursor_byte: self.auth_code_input.cursor_byte(),
                             clipboard_delivery: self.auth_clipboard_delivery,
@@ -5060,7 +5292,7 @@ impl AppView {
                             credit_balance: self.credit_balance.as_ref(),
                             auto_topup: self.auto_topup.as_ref(),
                             usage_visible: self.usage_visible,
-                            is_api_key_auth: self.is_api_key_auth,
+                            credential: credential.as_deref(),
                             changelog_bullets: &self.changelog_bullets,
                             changelog_has_full_notes: self.changelog_markdown.is_some(),
                             welcome_announcement_expanded: self.welcome_announcement.expanded,
@@ -5801,9 +6033,11 @@ impl AppView {
         let mut needs_redraw = false;
         needs_redraw |= self.drain_relay_notices();
         needs_redraw |= self.drain_leader_notices();
-        needs_redraw |= self.minimal_state.transcript.is_some();
+        needs_redraw |= self.minimal_state.needs_frames();
         needs_redraw |= self.poll_clipboard_focus_tip();
         if matches!(self.active_view, ActiveView::Welcome) {
+            // Returning to the welcome screen replays the background mark's spin
+            crate::views::welcome::note_visible();
             self.welcome_tick = self.welcome_tick.wrapping_add(1);
             if let Some(expires_at) = self.welcome_toast.as_ref().map(|(_, at)| *at) {
                 if std::time::Instant::now() >= expires_at {
@@ -5821,7 +6055,7 @@ impl AppView {
             {
                 needs_redraw = true;
             } else {
-                let frame = crate::views::welcome::shimmer_frame();
+                let frame = crate::views::welcome::mark_frame();
                 if frame != self.welcome_shimmer_frame {
                     self.welcome_shimmer_frame = frame;
                     needs_redraw = true;
@@ -5972,6 +6206,15 @@ impl AppView {
                 gboom.tick();
                 needs_redraw = true;
             }
+            if agent.stoke.is_some() {
+                // A permission card or question demands input the fire would hide: drop the overlay.
+                if agent.blocking_card().is_some() {
+                    agent.stoke = None;
+                    needs_redraw = true;
+                } else if let Some(ref mut stoke) = agent.stoke {
+                    needs_redraw |= stoke.tick_at(std::time::Instant::now());
+                }
+            }
             if let Some(ref rx) = agent.video_load_rx
                 && let Ok(result) = rx.try_recv()
             {
@@ -6095,6 +6338,12 @@ impl AppView {
         if self.gboom_active() {
             return Some(std::time::Duration::from_millis(33));
         }
+        if let ActiveView::Agent(id) = self.active_view
+            && let Some(stoke) = self.agents.get(&id).and_then(|a| a.stoke.as_ref())
+        {
+            // 30 fps (15 over SSH) while the `/stoke` fire is open.
+            return Some(stoke.interval());
+        }
         if self.minimal_state.transcript.is_some() {
             return Some(std::time::Duration::from_millis(16));
         }
@@ -6189,7 +6438,7 @@ impl AppView {
         if self.pending_action.is_some() {
             return TickDemand::Fast;
         }
-        if self.minimal_state.transcript.is_some() {
+        if self.minimal_state.needs_frames() {
             return TickDemand::Fast;
         }
         if self
@@ -6266,6 +6515,7 @@ impl AppView {
                     || agent.image_load_rx.is_some()
                     || agent.video_viewer.as_ref().is_some_and(|v| v.playing)
                     || agent.gboom.is_some()
+                    || agent.stoke.is_some()
                     || agent.inline_video.as_ref().is_some_and(|v| !v.finished)
                     || agent.video_load_rx.is_some()
                     || agent.mermaid_needs_tick()
@@ -6332,7 +6582,14 @@ impl AppView {
                     TickDemand::None
                 }
             }
-            ActiveView::Welcome => TickDemand::Slow,
+            ActiveView::Welcome => {
+                // Only a moving mark or a toast needs the 12fps cadence; a settled screen keeps a slow heartbeat
+                if self.welcome_toast.is_some() || crate::views::welcome::spin_pending() {
+                    TickDemand::Slow
+                } else {
+                    TickDemand::Rest
+                }
+            }
         }
     }
     /// Update the terminal tab title and OSC 9;4 progress bar.

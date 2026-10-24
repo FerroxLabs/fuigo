@@ -2318,6 +2318,53 @@ fn activity_strips_windows_shaped_session_cd_on_unix_host() {
         }),
     );
 }
+/// A terminal command that was cancelled names the command that stopped, even where the header shows only its description.
+#[test]
+fn cancelled_execute_names_the_command_that_stopped() {
+    use fuigo_tools::types::output::{BashOutput, ToolOutput};
+    let bash = |signal: &str| BashOutput {
+        output: Vec::new(),
+        output_for_prompt: String::new(),
+        exit_code: 130,
+        command: String::new(),
+        truncated: false,
+        signal: Some(signal.to_string()),
+        timed_out: false,
+        description: None,
+        current_dir: "/tmp".to_string(),
+        output_file: String::new(),
+        total_bytes: 0,
+        output_delta: None,
+        was_bare_echo: false,
+    };
+    let call = |signal: &str, command: &str| {
+        acp::ToolCall::new(acp::ToolCallId::new(Arc::from("tc-cancel")), "Execute")
+            .kind(acp::ToolKind::Execute)
+            .status(acp::ToolCallStatus::Failed)
+            .content(vec![])
+            .raw_input(Some(serde_json::json!({
+                "command": command,
+                "description": "Wait for the build",
+            })))
+            .raw_output(serde_json::to_value(ToolOutput::Bash(bash(signal))).ok())
+            .locations(vec![])
+    };
+    let error_of = |tc: &acp::ToolCall| match tool_call_to_block(tc, None) {
+        RenderBlock::ToolCall(ToolCallBlock::Execute(exec)) => exec.error.unwrap_or_default(),
+        other => panic!("expected Execute block, got {other:?}"),
+    };
+    let error = error_of(&call("cancelled", "sleep 600 && make all"));
+    assert!(error.starts_with("cancelled"), "{error:?}");
+    assert!(error.contains("sleep 600 && make all"), "names the command: {error:?}");
+    // Only the first line of a long script is named, and it is cut to a short length
+    let long = format!("make {}\necho done", "x".repeat(200));
+    let error = error_of(&call("cancelled", &long));
+    assert!(!error.contains("echo done"), "{error:?}");
+    assert!(error.chars().count() < 100, "{error:?}");
+    // Other signals keep their own text
+    assert_eq!(error_of(&call("killed", "sleep 600")), "killed");
+}
+
 #[test]
 fn execute_block_keeps_full_command_sets_header_display_when_peeled() {
     let tc = acp::ToolCall::new(acp::ToolCallId::new(Arc::from("tc-exec")), "Execute")
@@ -3397,11 +3444,17 @@ fn tracker_extracts_tools_meta_from_available_commands_update() {
 fn tracker_remembers_the_shells_memory_state_and_keeps_it_across_meta_less_updates() {
     let mut tracker = AcpUpdateTracker::new();
     let mut sb = ScrollbackState::new();
-    assert_eq!(tracker.memory_enabled(), None, "unknown until the shell says");
+    assert_eq!(
+        tracker.memory_enabled(),
+        None,
+        "unknown until the shell says"
+    );
     for (value, expected) in [(false, Some(false)), (true, Some(true))] {
         let update = acp::SessionUpdate::AvailableCommandsUpdate(
             acp::AvailableCommandsUpdate::new(vec![]).meta(
-                serde_json::json!({"tools": [], "memoryEnabled": value}).as_object().cloned(),
+                serde_json::json!({"tools": [], "memoryEnabled": value})
+                    .as_object()
+                    .cloned(),
             ),
         );
         tracker.handle_update(update, &meta(), &mut sb);
@@ -3892,9 +3945,12 @@ fn tool_update_in_progress_bg(id: &str, output_bytes: &[u8]) -> acp::SessionUpda
 #[test]
 fn block_until_ms_zero_and_the_retired_flags_defer_an_execute_call_as_a_background_task() {
     let call = |raw: serde_json::Value| {
-        acp::ToolCall::new(acp::ToolCallId::new(Arc::from("t1")), "run_terminal_command".to_string())
-            .kind(acp::ToolKind::Execute)
-            .raw_input(Some(raw))
+        acp::ToolCall::new(
+            acp::ToolCallId::new(Arc::from("t1")),
+            "run_terminal_command".to_string(),
+        )
+        .kind(acp::ToolKind::Execute)
+        .raw_input(Some(raw))
     };
     for background in [
         serde_json::json!({"command": "x", "block_until_ms": 0}),
@@ -3909,7 +3965,10 @@ fn block_until_ms_zero_and_the_retired_flags_defer_an_execute_call_as_a_backgrou
         serde_json::json!({"command": "x", "background": "TRUE"}),
         serde_json::json!({"command": "x", "block_until_ms": "0", "is_background": "false"}),
     ] {
-        assert!(is_bg_tool(&call(background.clone())), "a background call: {background}");
+        assert!(
+            is_bg_tool(&call(background.clone())),
+            "a background call: {background}"
+        );
     }
     for foreground in [
         serde_json::json!({"command": "x"}),
@@ -3922,7 +3981,10 @@ fn block_until_ms_zero_and_the_retired_flags_defer_an_execute_call_as_a_backgrou
         serde_json::json!({"command": "x", "is_background": "0"}),
         serde_json::json!({"command": "x", "block_until_ms": "5000", "is_background": "true"}),
     ] {
-        assert!(!is_bg_tool(&call(foreground.clone())), "a foreground call: {foreground}");
+        assert!(
+            !is_bg_tool(&call(foreground.clone())),
+            "a foreground call: {foreground}"
+        );
     }
 }
 /// Regression: is_bg_tool() detected on first InProgress defers the tool before any scrollback entry is created.
@@ -4619,7 +4681,7 @@ fn interjection_user_message(typed: &str) -> acp::SessionUpdate {
     let mut text_meta = serde_json::Map::new();
     text_meta.insert("displayText".into(), serde_json::json!(typed));
     let framed = format!(
-        "The user sent a message while you were working:\n<user_query>\n{typed}\n</user_query>\nMake sure to complete any unfinished tasks from previous turns."
+        "The user sent a message while you were working:\n<user_query>\n{typed}\n</user_query>\nIf the user is asking for a response, address the user first. After replying, complete any unfinished tasks from previous turns."
     );
     acp::SessionUpdate::UserMessageChunk(
         acp::ContentChunk::new(acp::ContentBlock::Text(
@@ -5428,12 +5490,19 @@ fn p188_discard_removes_the_dead_attempts_rows() {
             ..Default::default()
         };
         assert!(tracker.handle_update(agent_chunk("earlier answer"), &attempt(1), &mut sb));
-        assert!(tracker.handle_update(tool_call("read-1", acp::ToolKind::Read, "read_file"), &attempt(1), &mut sb));
+        assert!(tracker.handle_update(
+            tool_call("read-1", acp::ToolKind::Read, "read_file"),
+            &attempt(1),
+            &mut sb
+        ));
         assert!(tracker.handle_update(tool_update_completed("read-1"), &attempt(1), &mut sb));
         for (start, text) in [(2, "A1"), (3, "A2")] {
             tracker.handle_update(thought_chunk("thinking"), &attempt(start), &mut sb);
             assert!(tracker.handle_update(agent_chunk(text), &attempt(start), &mut sb));
-            assert!(tracker.discard_current_response(&mut sb, Some(start)), "{text} rows are removed");
+            assert!(
+                tracker.discard_current_response(&mut sb, Some(start)),
+                "{text} rows are removed"
+            );
         }
         assert!(tracker.handle_update(agent_chunk("A3"), &attempt(4), &mut sb));
         tracker.finish_turn(&mut sb);
@@ -5446,7 +5515,10 @@ fn p188_discard_removes_the_dead_attempts_rows() {
             !(0..sb.len()).any(|i| matches!(&sb.get(i).unwrap().block, RenderBlock::Thinking(t) if t.text() == "thinking")),
             "replay={is_replay}: the dead attempts' thinking is gone too"
         );
-        assert!(!tracker.discard_current_response(&mut sb, None), "nothing left to discard");
+        assert!(
+            !tracker.discard_current_response(&mut sb, None),
+            "nothing left to discard"
+        );
     }
 }
 /// Astra r1 HIGH: an accepted text-only response, then an attempt that streams only tool-call deltas (no rows) and is

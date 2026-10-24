@@ -9,12 +9,25 @@ use crate::client_identity::{PAGER_CLIENT_TYPE, PAGER_CLIENT_VERSION};
 
 pub async fn list_available_models(agent_config: &AgentConfig) -> Result<()> {
     match AuthStatus::resolve(agent_config) {
-        AuthStatus::ApiKey => fuigo_tty_utils::cli_println!("You are using FUIGO_API_KEY."),
-        AuthStatus::LoggedIn(host) => fuigo_tty_utils::cli_println!("You are logged in with {}.", fuigo_tty_utils::untrusted(host)),
+        AuthStatus::ApiKey => fuigo_tty_utils::cli_println!(
+            "You are using {}.",
+            fuigo_shell::agent::auth_method::flux_key_env_var_in_use()
+                .unwrap_or(fuigo_shell::agent::auth_method::FUIGO_API_KEY_ENV_VAR)
+        ),
+        AuthStatus::SavedKey => fuigo_tty_utils::cli_println!("Using your saved Flux Router key."),
+        AuthStatus::LoggedIn(host) => fuigo_tty_utils::cli_println!(
+            "You are logged in with {}.",
+            fuigo_tty_utils::untrusted(host)
+        ),
         AuthStatus::ModelCredentials(model) => {
-            fuigo_tty_utils::cli_println!("Model '{}' is using its own API key.", fuigo_tty_utils::untrusted(model));
+            fuigo_tty_utils::cli_println!(
+                "Model '{}' is using its own API key.",
+                fuigo_tty_utils::untrusted(model)
+            );
         }
-        AuthStatus::DeploymentKey => fuigo_tty_utils::cli_println!("You are authenticated via deployment key."),
+        AuthStatus::DeploymentKey => {
+            fuigo_tty_utils::cli_println!("You are authenticated via deployment key.")
+        }
         AuthStatus::NotAuthenticated => fuigo_tty_utils::cli_println!("You are not authenticated."),
     }
     fuigo_tty_utils::cli_println!();
@@ -33,12 +46,18 @@ pub async fn list_available_models(agent_config: &AgentConfig) -> Result<()> {
 
     let state = list_models(&spawned.channel.tx, PAGER_CLIENT_TYPE, PAGER_CLIENT_VERSION).await?;
 
-    fuigo_tty_utils::cli_println!("Default model: {}", fuigo_tty_utils::untrusted(&state.current_model_id.0));
+    fuigo_tty_utils::cli_println!(
+        "Default model: {}",
+        fuigo_tty_utils::untrusted(&state.current_model_id.0)
+    );
     fuigo_tty_utils::cli_println!();
     fuigo_tty_utils::cli_println!("Available models:");
     for m in state.available_models {
         if m.model_id == state.current_model_id {
-            fuigo_tty_utils::cli_println!("  * {} (default)", fuigo_tty_utils::untrusted(&m.model_id.0));
+            fuigo_tty_utils::cli_println!(
+                "  * {} (default)",
+                fuigo_tty_utils::untrusted(&m.model_id.0)
+            );
         } else {
             fuigo_tty_utils::cli_println!("  - {}", fuigo_tty_utils::untrusted(&m.model_id.0));
         }

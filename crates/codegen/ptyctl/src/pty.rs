@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -124,7 +126,20 @@ impl PtyHandle {
         if let Some(ref cwd) = config.cwd {
             cmd.cwd(cwd);
         }
+        #[cfg(unix)]
+        {
+            cmd.env_clear();
+            for (key, value) in std::env::vars_os() {
+                if key.as_bytes().contains(&0) || value.as_bytes().contains(&0) {
+                    continue;
+                }
+                cmd.env(&key, &value);
+            }
+        }
         for (key, value) in &config.env {
+            if key.contains('\0') || value.contains('\0') {
+                continue;
+            }
             cmd.env(key, value);
         }
         // Set TERM for proper terminal detection.
@@ -174,5 +189,30 @@ impl PtyHandle {
             self.reader,
             self.writer,
         )
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// A variable whose name or value holds a NUL cannot be passed to `exec`; it is skipped, and the child still starts
+    /// with the rest instead of the whole spawn failing.
+    #[test]
+    fn a_nul_in_one_variable_is_skipped_and_the_child_still_starts() {
+        let config = PtyConfig {
+            command: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            env: HashMap::from([
+                ("KEEP".to_owned(), "ok".to_owned()),
+                ("BAD".to_owned(), "a\0b".to_owned()),
+                ("B\0AD".to_owned(), "x".to_owned()),
+            ]),
+        };
+        let handle = PtyHandle::spawn(&config).expect("a NUL in one variable must not fail the spawn");
+        let (_master, mut child, _reader, _writer) = handle.into_parts();
+        assert_eq!(child.wait().expect("wait"), 0);
     }
 }

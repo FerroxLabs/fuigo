@@ -721,7 +721,16 @@ impl WorkspaceRpcHandler {
             }
             <LoadEnvrcReq as WorkspaceRpc>::METHOD => {
                 let cwd = self.workspace.root_cwd()?;
-                let env = crate::envrc::spawn_envrc_load(cwd, true).join().await;
+                let sandbox = self.workspace.sandbox();
+                if let Some(sandbox) = &sandbox {
+                    sandbox.engage_unless_off().await;
+                }
+                let sandbox = sandbox.map(|sandbox| {
+                    sandbox as std::sync::Arc<dyn fuigo_tools::sandbox_launch::SandboxLaunch>
+                });
+                let env = crate::envrc::spawn_envrc_load_sandboxed(cwd, true, sandbox)
+                    .join()
+                    .await;
                 serde_json::to_value(env).map_err(|e| WorkspaceError::HubError(e.to_string()))
             }
             <InstallPluginReq as WorkspaceRpc>::METHOD => {

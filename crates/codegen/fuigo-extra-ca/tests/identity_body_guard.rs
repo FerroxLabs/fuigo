@@ -125,15 +125,16 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/agent_view/workflows_overlay.rs", 2),
     ("crates/codegen/fuigo-pager/src/app/app_view.rs", 4), // P77: +1 `hostname` field of the session-picker row; local UI
     ("crates/codegen/fuigo-pager/src/app/app_view_tests.rs", 8), // P77: +3 `hostname: None` fixtures
-    ("crates/codegen/fuigo-pager/src/app/dispatch/auth.rs", 2),
+    ("crates/codegen/fuigo-pager/src/app/dispatch/auth.rs", 3), // pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/billing.rs", 2),
     ("crates/codegen/fuigo-pager/src/app/dispatch/cta.rs", 6),
     ("crates/codegen/fuigo-pager/src/app/dispatch/dashboard.rs", 2),
     ("crates/codegen/fuigo-pager/src/app/dispatch/interject.rs", 2),
     ("crates/codegen/fuigo-pager/src/app/dispatch/notes.rs", 10),
+    ("crates/codegen/fuigo-pager/src/app/dispatch/peer.rs", 2), // pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/prompt.rs", 7),
     ("crates/codegen/fuigo-pager/src/app/dispatch/queue.rs", 5), // R-guard54: +1 `agent_id: AgentId` parameter of `send_held_side_question` (d52be8ca, P193): the pager-local tab id, passed in-process to `start_side_question`; not the machine id. Keep.
-    ("crates/codegen/fuigo-pager/src/app/dispatch/rewind.rs", 9),
+    ("crates/codegen/fuigo-pager/src/app/dispatch/rewind.rs", 9), // LEFTOVERS: +1 `agent_id: AgentId` parameter of `start_forced` (the TUI /rewind files restore); pager-local tab id, passed in-process; never a request body. Keep. Earlier: pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/router.rs", 19), // 26-6d: the `Effect::SetContextWindow` constructor repeats the in-process `agent_id`; no body site
     ("crates/codegen/fuigo-pager/src/app/dispatch/session/fork.rs", 5),
     ("crates/codegen/fuigo-pager/src/app/dispatch/session/lifecycle.rs", 6), // 26-6d: `handle_context_window_set(agent_id)`, in-process routing key; no body site
@@ -142,7 +143,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/dispatch/settings/setters.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/dispatch/settings/ui.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/dispatch/status.rs", 13),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/auth.rs", 6),
+    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/auth.rs", 7), // pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep.
     // P119 (+4): test fixtures for typed verdicts building `TaskResult::PromptResponse`; no request body. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/billing.rs", 21),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/cta_e2e.rs", 57),
@@ -151,15 +152,15 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/notes.rs", 14), // P152: +2 `agent_id:` are the pager's local tab id in `TaskResult::FeedbackComplete` test literals (an in-process action, never a request body).
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/prompt.rs", 50), // P152: +2, W3-B: +1 `agent_id:` are the pager's local tab id in test action literals (in-process, never a request body).
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/queue_release.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/rewind.rs", 21),
+    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/rewind.rs", 21), // LEFTOVERS: +8 `agent_id:` fields of `TaskResult::RewindExecuteComplete` test literals and `files_response` fixtures (rewind files restore); pager-local tab id, in-process, no body. Keep. Earlier: pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/router.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/fork.rs", 14),
+    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/fork.rs", 16), // ROWS-A2 (5103ae922): +2 `agent_id:` test-literal fields, the pager-local tab id of an in-process action; never a request body. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/lifecycle.rs", 25), // P66 (97efd30a) deleted the dead local-workspace tests; pager-local fixtures, no body site (re-pinned by P54-K, R080 §11)
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/load.rs", 63), // P30-PERM-R2: +2 `agent_id:` fields of `TaskResult::SessionCreated` (1) and `TaskResult::SessionLoadFailed` (1) test literals (refused-/resume closes the picker); pager-local tab id, no body. Keep. P30-PERM: +4 `agent_id:` fields of `TaskResult::SessionCreated` (1) and `TaskResult::SessionLoadFailed` (3) test literals (refused-/resume tests); pager-local tab id, no body. Keep. R-guard54: +9 `agent_id:` fields of `TaskResult::SessionLoadFailed/SessionRestoreFailed/SessionCreated/ForkSessionFailed` test literals (P193: 8ef61a39, 7b190af9, e661ed68); pager-local tab id, no body. Keep.
+    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/load.rs", 64), // Rows B2b: +1 `agent_id:` field of a test literal (pager-local tab id, no body). Keep. P30-PERM-R2: +2 `agent_id:` fields of `TaskResult::SessionCreated` (1) and `TaskResult::SessionLoadFailed` (1) test literals (refused-/resume closes the picker); pager-local tab id, no body. Keep. P30-PERM: +4 `agent_id:` fields of `TaskResult::SessionCreated` (1) and `TaskResult::SessionLoadFailed` (3) test literals (refused-/resume tests); pager-local tab id, no body. Keep. R-guard54: +9 `agent_id:` fields of `TaskResult::SessionLoadFailed/SessionRestoreFailed/SessionCreated/ForkSessionFailed` test literals (P193: 8ef61a39, 7b190af9, e661ed68); pager-local tab id, no body. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/modal.rs", 6),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/settings.rs", 4),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/status.rs", 27),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/task_result.rs", 37), // 26-6d: pager-local fixtures for `ContextWindowSet`; no body site
+    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/task_result.rs", 39), // pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep. // 26-6d: pager-local fixtures for `ContextWindowSet`; no body site
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/transcript.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/turn.rs", 7),
     ("crates/codegen/fuigo-pager/src/app/dispatch/transcript.rs", 9),
@@ -180,7 +181,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/views/session_picker.rs", 1), // P77: `hostname: None` fixture
     ("crates/codegen/fuigo-pager/src/views/tasks_pane.rs", 2),
     ("crates/codegen/fuigo-pager/src/views/welcome/mod.rs", 1), // P77: `hostname: None` fixture
-    ("crates/codegen/fuigo-pager/src/views/workflows.rs", 9),
+    ("crates/codegen/fuigo-pager/src/views/workflows.rs", 11), // B2a-FIX: +1 `agent_id:` field of a `WorkflowAgentRowView` test literal (done_over_total_counts_only_finished_agents; a view row, never a request body). Keep. ROWS-B2a/B2b: +1 `agent_id:` field of a test literal (pager-local agent id, no body). Keep.
     ("crates/codegen/fuigo-pager/tests/pty_e2e/subscription_watch_and_gate_verify_pty.rs", 2),
     ("crates/codegen/fuigo-plugin-marketplace/src/git.rs", 1),
     ("crates/codegen/fuigo-plugin-marketplace/src/index.rs", 1),
@@ -227,6 +228,8 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-shell/src/auth/refresh/auth_backend_contract_tests.rs", 3),
     ("crates/codegen/fuigo-shell/src/auth/refresh/oidc_refresher.rs", 1),
     ("crates/codegen/fuigo-shell/src/auth/refresh/oidc_refresher_tests.rs", 37),
+    ("crates/codegen/fuigo-shell/src/auth/subscription/flow.rs", 1), // SIGNINCOPY: reads the `email` claim of the ID token in the inbound token response, shown once after sign-in and never stored or sent
+    ("crates/codegen/fuigo-shell/src/auth/subscription/tests.rs", 4), // SIGNINCOPY: inbound ID-token fixtures for that display name; test only
     ("crates/codegen/fuigo-shell/src/config/reloader.rs", 1),
     ("crates/codegen/fuigo-shell/src/extensions/auth.rs", 7), // P81 (R086): the `fuigo/auth/info` response (`email:`, `team_id:`, `organization_id:` of `AuthInfoResponse`, declared and filled) and the `"email"` of `fuigo/auth/logout`: the local ACP client keeps them; over a bridged relay that is not FluxRouter-operated they are withheld by `relay_outbound_frame` (agent/relay.rs)
     ("crates/codegen/fuigo-shell/src/extensions/bundle.rs", 8),
@@ -321,6 +324,10 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-workspace/src/permission/auto_mode/mod.rs", 1), // P77: the `hostname` shell command in an allowlist; not a body
     ("crates/codegen/fuigo-workspace/src/permission/manager/mod.rs", 3), // P77: the `hostname` shell command in allowlists and a test; not a body
     ("crates/codegen/fuigo-workspace/src/publish.rs", 1),
+    ("crates/codegen/fuigo-workspace/src/sandbox/grants.rs", 3), // U32-P3: `self.engage()` is `WorkspaceSandbox::engage`, which builds the folder's sandbox grant store; it is not a Mixpanel profile write. No body site
+    ("crates/codegen/fuigo-workspace/src/sandbox/mod.rs", 1), // U32-P3: the `engage()` call in `engage_unless_off`; same method, no body site
+    ("crates/codegen/fuigo-workspace/src/sandbox/network_tests.rs", 1), // U32-P3: a test's `sandbox.engage()`; no body site
+    ("crates/codegen/fuigo-workspace/src/sandbox/tests.rs", 4), // U32-P3: tests' `sandbox.engage()` / `linked.engage()` calls; no body site
     ("crates/codegen/fuigo-workspace/src/session/git_gate_tests.rs", 1),
     ("crates/codegen/fuigo-workspace/src/session/git_restore_code_tests.rs", 2),
     ("crates/codegen/fuigo-workspace/src/session/git_tests.rs", 3),

@@ -836,6 +836,10 @@ pub enum SessionUpdate {
         /// Additive: clients that do not know the field ignore it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_window_selection: Option<u64>,
+        /// The route the engine uses for the model ("Grok subscription", "Flux Router"), so a client whose
+        /// catalog lacks the model still names it and its route. Additive: older clients ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        route: Option<String>,
     },
     /// Streaming chunk of a tool call's arguments.
     ///
@@ -1305,7 +1309,15 @@ impl SessionUpdate {
             model_id: model_id.into(),
             reasoning_effort,
             context_window_selection,
+            route: None,
         }
+    }
+    /// [`Self::model_changed`] naming the route the engine uses for the model.
+    pub fn with_route(mut self, route_label: Option<String>) -> Self {
+        if let SessionUpdate::ModelChanged { route, .. } = &mut self {
+            *route = route_label;
+        }
+        self
     }
     /// P70b display sink: replace credentials this process sent upstream (exact match) in the variants that carry
     /// error text from a failed model or tool call. Applied where a Fuigo notification is sent, so the client, the
@@ -2886,6 +2898,24 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(parsed, SessionUpdate::model_changed("m", None, None));
+    }
+
+    /// The route rides along when the engine names one, and an older client's JSON (no field) still parses.
+    #[test]
+    fn model_changed_carries_the_route_and_stays_compatible_without_it() {
+        let with = SessionUpdate::model_changed("grok-4.7", None, None)
+            .with_route(Some("Grok subscription".into()));
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!(json["route"], "Grok subscription");
+        assert_eq!(serde_json::from_value::<SessionUpdate>(json).unwrap(), with);
+        let without = serde_json::to_value(SessionUpdate::model_changed("grok-4.7", None, None)).unwrap();
+        assert!(without.get("route").is_none(), "an unset route is not serialised: {without}");
+        let old: SessionUpdate = serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "model_changed",
+            "model_id": "m",
+        }))
+        .unwrap();
+        assert!(matches!(old, SessionUpdate::ModelChanged { route: None, .. }));
     }
 
     /// `ModelChanged` round-trips through JSON: a follower client deserializes the exact same value the agent serialized.

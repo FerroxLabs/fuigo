@@ -58,7 +58,7 @@ fuigo
 
 On first launch, Fuigo asks for an API key: paste your FluxRouter API key (from your FluxRouter dashboard), or pick a supported key that is already in your environment from the menu. Fuigo stores the key in `~/.fuigo/auth.json`, where it persists across sessions. There is no browser sign-in unless your deployment configures an identity provider or an external auth provider, in which case the first-launch menu also offers **Login with** that provider.
 
-For CI/CD or any environment where you would rather not paste a key, set the `FUIGO_API_KEY` environment variable instead:
+For CI/CD or any environment where you would rather not paste a key, set the `FUIGO_API_KEY` environment variable instead (`FLUX_API_KEY` works too; `FUIGO_API_KEY` wins when both are set):
 
 ```bash
 export FUIGO_API_KEY="fuigo-..."

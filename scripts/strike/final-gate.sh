@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# final-gate.sh [--network none|host] [--pkg <name>]... [--src <dir>] [--lane <name>] [--timeout <s>] <sha> <jobs>
+# final-gate.sh [--network none|host] [--pkg <name>]... [--pty] [--src <dir>] [--lane <name>] [--timeout <s>] <sha> <jobs>
 #
 # The Contract A.2.1 release gate. HARD RULE: runs on hetzner-dsm, never on a developer Mac.
 #
@@ -8,6 +8,14 @@
 #   --network none : EXECUTE the tests inside an empty network namespace (`unshare -n`, loopback only).
 #                    The test binaries are built first WITH network; the run phase is `cargo test --offline`.
 #                    Default `host` (the release gate on 1.0.21 is judged under the default).
+#   --pty          : run the IGNORED PTY SUITE instead of the default tests: every target listed in the candidate's
+#                    scripts/strike/pty-targets.txt, each as `cargo test ... -- --ignored` (plus its thread count and name filter).
+#                    These tests drive the real pager binary in a pseudo-terminal and are `#[ignore]`d so a plain `cargo test`
+#                    skips them; the workspace gate above therefore never runs them, and the release gate (release-gate.sh) runs
+#                    BOTH. The pager binary is built first (network allowed, like the test build) and handed over as PAGER_BINARY.
+#                    Judged exactly like the default run: headers == the count derived from the candidate, each header's
+#                    `running N tests` == that binary's own `--list --ignored [filter]` count, every header reaching its result.
+#                    Cannot be combined with --pkg.
 #   --src <dir>    : use an existing checkout (must be at <sha>) instead of cloning into <lane>/src
 #   --lane <name>  : lane under /root/fuigo-builds (default final-gate-<sha12>); holds src/ target/ home/ logs
 #   --timeout <s>  : wall clock for the RUN phase (default 7200); expiry => exit 124 => INADMISSIBLE
@@ -41,11 +49,12 @@ export GATE_CG_MOUNT=/sys/fs/cgroup GATE_PROC_ROOT=/proc
 unset GATE_ALLOW_NO_EXPECT
 . "$HERE/gate-lib.sh"
 B=/root/fuigo-builds
-NET=host; PKGS=(); SRC=""; LANE_NAME=""; TMO=7200
+NET=host; PKGS=(); SRC=""; LANE_NAME=""; TMO=7200; PTY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --network) NET=${2:?}; shift 2;;
     --pkg) PKGS+=("${2:?}"); shift 2;;
+    --pty) PTY=1; shift;;
     --src) SRC=${2:?}; shift 2;;
     --lane) LANE_NAME=${2:?}; shift 2;;
     --timeout) TMO=${2:?}; shift 2;;
@@ -56,6 +65,7 @@ while [ $# -gt 0 ]; do
 done
 SHA="${1:?usage: final-gate.sh [opts] <sha> <jobs>}"; JOBS="${2:?usage: final-gate.sh [opts] <sha> <jobs>}"
 case "$NET" in none|host) ;; *) echo "final-gate: --network must be none|host" >&2; exit 2;; esac
+[ "$PTY" = 0 ] || [ ${#PKGS[@]} -eq 0 ] || { echo "final-gate: --pty selects its own packages (scripts/strike/pty-targets.txt); do not combine it with --pkg" >&2; exit 2; }
 [[ "$SHA" =~ ^[0-9a-f]{12,40}$ ]] || { echo "final-gate: sha must match ^[0-9a-f]{12,40}\$ (got '$SHA')" >&2; exit 2; }
 LANE_NAME=${LANE_NAME:-final-gate-${SHA:0:12}}
 LANE=$B/$LANE_NAME
@@ -157,7 +167,40 @@ if [ $TRC -ne 0 ]; then
 fi
 
 SCOPE=(--locked --no-fail-fast)
-if [ ${#PKGS[@]} -gt 0 ]; then for p in "${PKGS[@]}"; do SCOPE+=(-p "$p"); done; else SCOPE+=(--workspace); fi
+# --pty: the target list comes from THE CANDIDATE (like every count in this gate), is validated, and becomes three strings:
+#   PTYBUILD  what phase 1 builds (the pager binary, then every listed test executable, JSON for derive.py / list-counts.py)
+#   PTYRUN    what phase 2 runs (one `cargo test ... -- --ignored` per listed target; the exit code is the worst of them)
+#   PTYFILT   the per-binary name filters, so --list counts exactly what the run selects
+# Line format: `<package> <test|lib|tests> <target|-> <threads> [name-filter]` (see the file header).
+PTYBUILD=""; PTYRUN=""; PTYFILT=""; PTYPKGS=""
+if [ "$PTY" = 1 ]; then
+  PTYFILE="$SRC/scripts/strike/pty-targets.txt"
+  [ -f "$PTYFILE" ] || { echo "GATE: --pty needs $PTYFILE in the candidate (not found)"; gate_inventory "$LANE" "run=$RUNID event=no-pty-targets"; exit 2; }
+  PTYBUILD="cargo build --locked -p fuigo-pager-bin 1>&2"
+  while read -r PPKG PKIND PTGT PTHR PFLT; do
+    case "$PPKG" in ''|'#'*) continue;; esac
+    [[ "$PPKG$PTGT$PFLT" =~ ^[A-Za-z0-9_:.-]*$ ]] && [[ "$PTHR" =~ ^[1-9][0-9]*$ ]] || { echo "GATE: bad line in $PTYFILE: $PPKG $PKIND $PTGT $PTHR $PFLT"; exit 2; }
+    case "$PKIND" in
+      test) PSEL="--test $PTGT";;
+      lib) PSEL="--lib";;
+      tests) PSEL="--tests";;
+      *) echo "GATE: bad target kind '$PKIND' in $PTYFILE"; exit 2;;
+    esac
+    PTYBUILD+=" && cargo test --locked --no-run --message-format=json -p $PPKG $PSEL"
+    PTYRUN+="cargo test --locked --no-fail-fast @OFFLINE@ -p $PPKG $PSEL -- --ignored --test-threads=$PTHR $PFLT || rc=\$?; "
+    if [ -n "$PFLT" ]; then
+      case "$PKIND" in lib) PTYFILT+="${PPKG//-/_}=$PFLT;";; test) PTYFILT+="$PTGT=$PFLT;";; *) echo "GATE: a name filter needs a lib or test target: $PPKG $PKIND"; exit 2;; esac
+    fi
+    case ",$PTYPKGS," in *",$PPKG,"*) ;; *) PTYPKGS+="${PTYPKGS:+,}$PPKG";; esac
+  done < "$PTYFILE"
+  [ -n "$PTYPKGS" ] || { echo "GATE: $PTYFILE lists no targets"; exit 2; }
+  # (a filter is keyed by the binary name, which is the package name with `_`; a filter on a `test` target would need its own name)
+  export NODOC=1 LIST_IGNORED=1 LIST_FILTERS="$PTYFILT"
+  PKGS=(${PTYPKGS//,/ })
+else
+  unset NODOC LIST_IGNORED LIST_FILTERS
+fi
+if [ ${#PKGS[@]} -gt 0 ] && [ "$PTY" = 0 ]; then for p in "${PKGS[@]}"; do SCOPE+=(-p "$p"); done; elif [ "$PTY" = 0 ]; then SCOPE+=(--workspace); fi
 if [ ${#PKGS[@]} -gt 0 ]; then P=$(IFS=,; echo "${PKGS[*]}")
 else
   # Workspace scope: derive over the actual workspace MEMBERS (cargo metadata --no-deps), not "every local path crate".
@@ -177,7 +220,7 @@ echo "tree:           $TREE  (clean, incl. untracked)"
 echo "rustc:          $(rustc -vV | tr '\n' ' ')"
 echo "cargo:          $(cargo --version)"
 echo "protoc:         $(protoc --version 2>/dev/null || echo absent)"
-echo "scope:          ${SCOPE[*]}"
+echo "scope:          ${SCOPE[*]}$([ "$PTY" = 1 ] && echo " (ignored PTY suite: $PTYFILE)")"
 echo "jobs:           $JOBS   network: $NET   lane: $LANE_NAME   timeout: ${TMO}s"
 echo "RUST_MIN_STACK: $RUST_MIN_STACK"
 echo "started:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -186,11 +229,13 @@ echo "started:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # Phase 1 (network allowed, not part of the evidence): build the test executables and DERIVE the expected
 # target count from this candidate (A.2.1 rule 2).
 JSON="$RUNDIR/derive.json"
+BUILDCMD=(cargo test "${SCOPE[@]}" --no-run --message-format=json)
+[ "$PTY" = 0 ] || BUILDCMD=(sh -c "$PTYBUILD")
 # The build runs in its own scope + backgrounded so that a TERM during the (long) build runs the trap at once
 # (bash defers a trap until a FOREGROUND child exits) and the whole build tree is killed by cgroup.
 FUIGO_GATE_RUN=$RUNID nice -n 10 setsid systemd-run --scope --quiet --collect --slice=system.slice --unit="$UNITBASE-build" \
   sh -c 'cat /proc/self/cgroup > "$1" || exit 97; [ ! -e "$2" ] || exit 96; shift 2; exec "$@"' gate-cg "$RUNDIR/cgroup-build.path" "$RUNDIR/abort.flag" \
-  cargo test "${SCOPE[@]}" --no-run --message-format=json < /dev/null 9>&- > "$JSON" 2> "$RUNDIR/build.err" &
+  "${BUILDCMD[@]}" < /dev/null 9>&- > "$JSON" 2> "$RUNDIR/build.err" &
 SID=$!; echo "$SID $(gate_pid_starttime "$SID")" > "$RUNDIR/launcher.id"
 wait "$SID"; BRC=$?; SID=""; : > "$RUNDIR/launcher.id"
 # nothing may outlive the build: leftovers are counted, and an unresolvable/unkillable build scope FAILS CLOSED (GATE_ORPHANS=unknown)
@@ -236,7 +281,16 @@ fi
 
 # Phase 2: the run, through the slot runner, in its own session and its own cgroup scope, also tagged with
 # FUIGO_GATE_RUN in its environment.
-if [ "$NET" = none ]; then
+if [ "$PTY" = 1 ]; then
+  # Each target is its own `cargo test`; the script's exit is the worst of them (a later green one must not hide an earlier red one).
+  PTYENV="export PAGER_BINARY=$CARGO_TARGET_DIR/debug/fuigo-pager FUIGO_BINARY=$CARGO_TARGET_DIR/debug/fuigo-pager; rc=0; "
+  if [ "$NET" = none ]; then
+    INNER="ip link set lo up && export CARGO_NET_OFFLINE=true && $PTYENV${PTYRUN//@OFFLINE@/--offline}exit \$rc"
+    RUN=(timeout -k 30 "$TMO" unshare -n -- /bin/sh -c "$INNER")
+  else
+    RUN=(timeout -k 30 "$TMO" /bin/sh -c "$PTYENV${PTYRUN//@OFFLINE@/}exit \$rc")
+  fi
+elif [ "$NET" = none ]; then
   INNER=$(printf 'ip link set lo up && export CARGO_NET_OFFLINE=true && exec cargo test --offline %s' "$(printf '%q ' "${SCOPE[@]}")")
   RUN=(timeout -k 30 "$TMO" unshare -n -- /bin/sh -c "$INNER")
 else

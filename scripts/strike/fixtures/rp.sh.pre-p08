@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# rp.sh <lane> <parent-sha> <tip-ref-in-bundle> <bundle> <pkgs...> — generic post-rebase re-proof, tip + parent, A.2.1 checks.
+set -uo pipefail
+LANE=$1 PARENT=$2 TIPREF=$3 BUNDLE=$4; shift 4; PKGS="$*"
+B=/root/fuigo-builds; L0=$B/$LANE; SRC=$L0/src; R=$B/integration/src-p15r
+mkdir -p $L0; exec 7>"$L0/.lane.lock"; flock -n 7 || exit 3
+export CARGO_TARGET_DIR="$L0/target" PATH="$HOME/.cargo/bin:$PATH" RUST_MIN_STACK=16777216 CARGO_TERM_COLOR=never RG_BIN_PATH=/usr/bin/rg CARGO_BUILD_JOBS=16
+OUT=$B/$LANE.out; : > $OUT; say(){ echo "$(date -u +%FT%TZ) $*" >> $OUT; }
+say "pid=$$ sid=$(ps -o sid= $$ | tr -d ' ') pkgs=$PKGS"
+for b in $B/int-*.bundle; do git -C $R fetch -qf $b "+refs/heads/*:refs/remotes/rbi/$(basename $b .bundle)/*" 2>/dev/null; done
+git -C $R fetch -qf $BUNDLE "+refs/heads/*:refs/remotes/rb-$LANE/*" || { say FETCHFAIL; exit 2; }
+[ -d $SRC ] || git -C $R worktree add -q --detach $SRC $PARENT || { say WTFAIL; exit 2; }
+cd $SRC; TIP=$(git rev-parse refs/remotes/rb-$LANE/$TIPREF)
+git merge-base --is-ancestor $PARENT $TIP || { say "TIP NOT ON PARENT"; exit 2; }
+say "toolchain_digest=$(rustc -vV | sha256sum | cut -d' ' -f1) parent=$PARENT tip=$TIP"
+HU(){ awk '/^ +(Running|Doc-tests) /{n++; if(o)u++; o=1; next} /^test result:/{o=0} END{if(o)u++; print n+0, u+0}' "$1"; }
+FS(){ awk '/^failures:$/{f=1;next} f&&/^ +[A-Za-z0-9_:]+$/{print $1} f&&/^$/{f=0}' "$1" | sort -u; }
+for LABEL in parent tip; do
+  REF=$PARENT; [ $LABEL = tip ] && REF=$TIP; git checkout -q --detach $REF; say "=== $LABEL $(git rev-parse HEAD) dirty=$(git status --porcelain | wc -l)"
+  for P in $PKGS; do
+    D=$(nice -n 10 cargo test --locked -p $P --no-run --message-format=json 2>/dev/null | P=$P python3 $B/derive.py | cut -d' ' -f1)
+    LG=$B/$LANE-$LABEL-$P.log; SKIP=""; [ $P = fuigo-shell ] && [ -n "${P29SKIP:-}" ] && SKIP="-- --skip session::workflow::manager::tests"
+    $B/slot-run.sh $LANE nice -n 10 timeout 3600 cargo test --locked --no-fail-fast -p $P $SKIP > $LG 2>&1; C=$?; echo DONE >> $LG; FS $LG > $B/$LANE-$LABEL-$P.failset
+    say "  $LABEL $P exit=$C derived=$D hu=$(HU $LG) failures=$(wc -l < $B/$LANE-$LABEL-$P.failset) skip='${SKIP}' sha256=$(sha256sum $LG | cut -d' ' -f1)"
+  done
+  nice -n 10 timeout 3600 cargo clippy --locked --all-targets $(for P in $PKGS; do printf -- '-p %s ' $P; done) > $B/$LANE-$LABEL-clippy.log 2>&1; C=$?
+  awk '/^(warning|error)(\[|:)/{w=$0; next} w && /^ +--> /{f=$2; sub(/:[0-9]+:[0-9]+$/,"",f); sub(/.*\/src\//,"src/",f); print w " @ " f; w=""}' $B/$LANE-$LABEL-clippy.log | sort -u > $B/$LANE-$LABEL-clippy.warnset
+  say "  $LABEL clippy exit=$C warnset=$(wc -l < $B/$LANE-$LABEL-clippy.warnset)"
+done
+for P in $PKGS; do say "$P only-tip: $(comm -13 $B/$LANE-parent-$P.failset $B/$LANE-tip-$P.failset | tr '\n' ' ')| only-parent: $(comm -23 $B/$LANE-parent-$P.failset $B/$LANE-tip-$P.failset | tr '\n' ' ')"; done
+say "clippy new: $(comm -13 $B/$LANE-parent-clippy.warnset $B/$LANE-tip-clippy.warnset | tr '\n' ';') gone: $(comm -23 $B/$LANE-parent-clippy.warnset $B/$LANE-tip-clippy.warnset | wc -l)"
+rm -rf $CARGO_TARGET_DIR; git -C $R worktree remove --force $SRC; say DONE

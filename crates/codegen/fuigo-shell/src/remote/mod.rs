@@ -3,7 +3,7 @@ pub mod agent;
 pub(crate) mod chat_models_client;
 pub mod client;
 pub mod conversations_client;
-mod model_source;
+pub(crate) mod model_source;
 pub mod pull;
 #[cfg(test)]
 mod pull_smoke_test;

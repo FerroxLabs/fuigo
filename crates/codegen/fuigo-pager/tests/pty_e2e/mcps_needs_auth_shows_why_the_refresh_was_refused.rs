@@ -98,7 +98,8 @@ fn seed_oauth_fixture(content: &ContentController) -> OauthFixture {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    let config = format!("[mcp_servers.{OAUTH_SERVER}]\nurl = \"{base}/mcp\"\nstartup_timeout_sec = 20\n");
+    let config =
+        format!("[mcp_servers.{OAUTH_SERVER}]\nurl = \"{base}/mcp\"\nstartup_timeout_sec = 20\n");
     std::fs::write(fuigo_home.join("config.toml"), config).expect("write config.toml");
     let credentials = json!({
         format!("{OAUTH_SERVER}:{base}/mcp"): {

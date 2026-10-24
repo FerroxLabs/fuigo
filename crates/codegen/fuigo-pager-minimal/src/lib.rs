@@ -9,6 +9,7 @@
 //! - [`live`]: the pinned live region (tail, todos, `/btw`, status, prompt).
 //! - [`todo`]: the persistent todo panel shown above the prompt.
 //! - [`auth`]: the in-region sign-in flow shown before a session exists.
+//! - [`reprint`]: reprints the history at the new width after a resize.
 //! - [`overlay`]: the inline-overlay host (prompt-anchored dropdowns; grows / shrinks the live viewport).
 //!
 //! # Wiring
@@ -26,6 +27,7 @@ pub mod live;
 pub mod overlay;
 pub mod panel;
 pub mod plan;
+pub mod reprint;
 pub mod todo;
 pub mod welcome;
 
@@ -71,13 +73,15 @@ use fuigo_pager::app::app_view::AppView;
 /// Under tmux neither is emitted (see `fuigo_pager::terminal::should_emit_synchronized_output`).
 pub fn draw(app: &mut AppView, terminal: &mut PagerTerminal) {
     let ctx = fuigo_pager::terminal::terminal_context();
+    terminal.set_width_shrink(ctx.width_shrink());
+    let _ = terminal.autoresize();
     if fuigo_pager::terminal::should_emit_synchronized_output(ctx) {
         let _ = terminal.backend_mut().queue(BeginSynchronizedUpdate);
     }
-    let _ = terminal.autoresize();
     // Pending permission/question marks are synced ONCE, up front (see `commit::sync_pending_marks`)
     // The viewport sizing (`sync_viewport` / `tail_height` / `will_commit`) and the commit pass then judge committability against the same state
     commit::sync_pending_marks(app);
+    reprint::maybe_reprint(app, terminal);
     // Advance any in-progress /transcript build by one time-budgeted slice (sets `pending_pager_path` when done; see `full_view::pump_transcript`)
     full_view::pump_transcript(app);
     welcome::maybe_commit_welcome(app, terminal);

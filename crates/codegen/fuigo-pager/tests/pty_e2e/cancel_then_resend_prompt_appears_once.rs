@@ -5,7 +5,7 @@ use super::common::*;
 /// Mirrors `fuigo_interjection_core::format::{INTERRUPT_NOTE, UNFINISHED_TASKS_REMINDER}`.
 const INTERRUPT_NOTE: &str = "The user interrupted the previous turn:";
 const UNFINISHED_TASKS_REMINDER: &str =
-    "Make sure to complete any unfinished tasks from previous turns.";
+    "If the user is asking for a response, address the user first. After replying, complete any unfinished tasks from previous turns.";
 
 /// Submit OLD, Ctrl+C rewind, send NEW: NEW's request must not contain OLD or interrupt framing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

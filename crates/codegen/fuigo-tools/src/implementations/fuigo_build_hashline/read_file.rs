@@ -100,6 +100,10 @@ Usage:
 pub struct HashlineReadTool;
 
 impl crate::types::tool_metadata::ToolMetadata for HashlineReadTool {
+    fn lock_path_param(&self) -> Option<&'static str> {
+        Some("target_file")
+    }
+
     fn kind(&self) -> ToolKind {
         ToolKind::Read
     }

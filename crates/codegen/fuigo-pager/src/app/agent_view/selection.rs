@@ -1235,17 +1235,11 @@ impl AgentView {
                 }
             }
             2 if is_prompt => {
-                // Edit in place; bash/cron keep the old fold behavior.
-                //
-                // Gated OFF for now (unsolved scroll jump on enter; see inline_edit::INLINE_EDIT_ENABLED)
-                // When disabled this is a no-op, so the block below runs
-                // That restores the EXACT pre-feature double-click behavior for a prompt: fold (if foldable) and scroll the entry to the top
-                if !(crate::app::inline_edit::INLINE_EDIT_ENABLED && self.enter_inline_edit(idx)) {
-                    if foldable {
-                        self.scrollback.toggle_fold_selected();
-                    }
-                    self.scrollback.scroll_to_entry_top(idx);
+                // Fold (if foldable) and scroll the entry to the top
+                if foldable {
+                    self.scrollback.toggle_fold_selected();
                 }
+                self.scrollback.scroll_to_entry_top(idx);
             }
             2 => {
                 if foldable {
@@ -1651,7 +1645,10 @@ mod tests {
             assert!(!agent.tick_export_copy_detector(), "toast still showing");
             assert_eq!(agent.ephemeral_tip.current_key(), None);
         }
-        assert!(agent.tick_export_copy_detector(), "due once the toast expires");
+        assert!(
+            agent.tick_export_copy_detector(),
+            "due once the toast expires"
+        );
 
         assert!(
             !crate::app::dispatch::present_export_copy_tip(&mut agent, &mut seen, false),

@@ -137,6 +137,27 @@ pub struct PullDiagnostics {
     /// disowned, and — being about the current version — passes for a reply to
     /// the question the refresh re-opened.
     generation: Arc<AtomicU64>,
+    /// Test seam for the confirmation wait: see [`ConfirmGate`].
+    #[cfg(test)]
+    confirm_gate: Arc<std::sync::Mutex<Option<Arc<ConfirmGate>>>>,
+}
+
+/// Test control over the confirmation wait. Without one the wait is the real [`CONFIRM_DELAY`] sleep.
+///
+/// A test that must land an edit while a pull is waiting to confirm an empty answer used to sleep a guessed
+/// time (150 ms) and hope the pull was inside its 600 ms wait. On a loaded host the pull task started, or the
+/// test thread resumed, on the wrong side of that guess, so the edit landed before the pull had read the revision
+/// it was asking about (or after the confirmation had already been acted on) and the interleaving under test never
+/// happened. With a gate the pull says when it has entered the wait, holds there until released, and says when it
+/// has acted on the confirmation; the test waits on those events instead of on the clock.
+#[cfg(test)]
+pub struct ConfirmGate {
+    /// One permit per pull that has received its empty answer and is now waiting to confirm it.
+    pub entered: tokio::sync::Semaphore,
+    /// One permit lets one waiting pull go on to ask again.
+    pub release: tokio::sync::Semaphore,
+    /// One permit per pull whose confirming answer has been acted on (written down, or deliberately not).
+    pub settled: tokio::sync::Semaphore,
 }
 
 /// Which documents have a pull running, and which were edited again while it
@@ -165,6 +186,44 @@ impl PullDiagnostics {
             in_flight: Arc::new(std::sync::Mutex::new(InFlight::default())),
             answered_a_pull: Arc::new(AtomicBool::new(false)),
             generation: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            confirm_gate: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Put the confirmation wait under the caller's control.
+    #[cfg(test)]
+    pub fn install_confirm_gate(&self) -> Arc<ConfirmGate> {
+        let gate = Arc::new(ConfirmGate {
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+            settled: tokio::sync::Semaphore::new(0),
+        });
+        *self.confirm_gate.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+
+    /// The wait before a second ask of an answer that is not yet worth believing.
+    async fn confirm_wait(&self) {
+        #[cfg(test)]
+        {
+            let gate = self.confirm_gate.lock().unwrap().clone();
+            if let Some(gate) = gate {
+                gate.entered.add_permits(1);
+                if let Ok(permit) = gate.release.acquire().await {
+                    permit.forget();
+                }
+                return;
+            }
+        }
+        tokio::time::sleep(CONFIRM_DELAY).await;
+    }
+
+    /// Tell a test gate that a confirming answer has been acted on.
+    fn confirmation_settled(&self) {
+        #[cfg(test)]
+        if let Some(gate) = self.confirm_gate.lock().unwrap().as_ref() {
+            gate.settled.add_permits(1);
         }
     }
 
@@ -337,7 +396,7 @@ impl PullDiagnostics {
                     self.note_answered();
                     if confirming {
                         confirming = false;
-                        tokio::time::sleep(CONFIRM_DELAY).await;
+                        self.confirm_wait().await;
                         continue;
                     }
                     // An empty answer about text that has since been replaced
@@ -352,6 +411,7 @@ impl PullDiagnostics {
                             server = %self.server_name, uri = %key, asked,
                             "clean answer is about text that has since been replaced; leaving what we hold"
                         );
+                        self.confirmation_settled();
                         return;
                     }
                     tracing::debug!(
@@ -359,6 +419,7 @@ impl PullDiagnostics {
                         "diagnostic pull returned nothing"
                     );
                     self.commit(key, Answer::new(Vec::new(), asked, result_id), generation);
+                    self.confirmation_settled();
                     return;
                 }
                 PullOutcome::Unsupported | PullOutcome::Failed => return,

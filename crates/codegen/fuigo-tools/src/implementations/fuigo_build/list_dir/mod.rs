@@ -18,6 +18,7 @@
 //!
 //! Under `legacy-0.4.10`, the old depth-threshold algorithm is used instead
 //! (see `versions::legacy_0_4_10` module).
+mod fs_kind;
 mod versions;
 use crate::types::output::{ListDirContent, ListDirOutput};
 #[allow(unused_imports)]
@@ -379,6 +380,19 @@ fn build_tree_with_limit(
     root_node.sort_recursive();
     (root_node, seed_truncated || walk_truncated)
 }
+/// The top level only: no deep walk, so no subtree file counts. For a directory on a network or virtual filesystem.
+fn build_shallow_tree(
+    root: &Path,
+    respect_gitignore: bool,
+    deny: Option<crate::util::read_deny::ReadDenyFilter>,
+) -> (DirNode, bool) {
+    let mut root_node = DirNode::new(0);
+    let truncated =
+        seed_depth1_children(root, &mut root_node, respect_gitignore, MAX_SEED_ITEMS, deny);
+    root_node.sort_recursive();
+    (root_node, truncated)
+}
+
 /// BFS-expand directories within the character budget, return rendered body.
 fn budget_expand(
     root: &mut DirNode,
@@ -483,6 +497,27 @@ enum ListDirWalk {
         truncation_notice: String,
         deny: Option<crate::util::read_deny::ReadDenyFilter>,
     },
+}
+/// Whether `path`, already known to be a directory, can be opened for listing.
+fn probe_listable(path: &Path) -> std::io::Result<()> {
+    std::fs::read_dir(path).map(|_| ())
+}
+/// What the model reads when a directory that exists cannot be listed. Without it the walk shows nothing, which
+/// reads as an empty directory.
+fn unlistable_output(err: &std::io::Error, display_path: &Path) -> ListDirOutput {
+    match err.kind() {
+        std::io::ErrorKind::PermissionDenied => {
+            ListDirOutput::PermissionDenied(format!("Permission denied: {}", display_path.display()))
+        }
+        std::io::ErrorKind::NotFound => ListDirOutput::NotFound(format!(
+            "Error: {} no longer exists.",
+            display_path.display()
+        )),
+        _ => ListDirOutput::Error(format!(
+            "Error: could not list {}: {err}",
+            display_path.display()
+        )),
+    }
 }
 fn map_list_dir_join_error(
     err: tokio::task::JoinError,
@@ -603,6 +638,13 @@ impl fuigo_tool_runtime::Tool for ListDirTool {
                 )),
             });
         }
+        if !is_legacy {
+            let probe_path = path.clone();
+            let probed = spawn_list_dir_walk(&display_path, move || probe_listable(&probe_path)).await?;
+            if let Err(err) = probed {
+                return Ok(unlistable_output(&err, &display_path));
+            }
+        }
         let walk = if is_legacy {
             let res = resources.lock().await;
             let max_output_bytes = res
@@ -651,15 +693,26 @@ impl fuigo_tool_runtime::Tool for ListDirTool {
                     truncation_notice,
                     deny,
                 } => {
-                    let (mut tree, truncated) =
-                        build_tree_with_limit(&path, respect_gitignore, MAX_GLOBAL_ITEMS, deny);
-                    budget_expand(
+                    let remote = fs_kind::network_or_virtual_filesystem(&path);
+                    let (mut tree, truncated) = if remote.is_some() {
+                        build_shallow_tree(&path, respect_gitignore, deny)
+                    } else {
+                        build_tree_with_limit(&path, respect_gitignore, MAX_GLOBAL_ITEMS, deny)
+                    };
+                    let mut body = budget_expand(
                         &mut tree,
                         max_output_chars,
                         TOP_K_EXTENSIONS,
                         truncated,
                         &truncation_notice,
-                    )
+                    );
+                    if let Some(fstype) = remote {
+                        body.push_str(&format!(
+                            "\nNote: this directory is on a network or virtual filesystem ({fstype}), so file counts \
+                             for its subdirectories were skipped. List a subdirectory to see what is inside it.\n"
+                        ));
+                    }
+                    body
                 }
             };
             (body, path)
@@ -1244,6 +1297,32 @@ mod tests {
             other => panic!("unexpected error: {other:?}"),
         }
     }
+    /// `/proc` is a virtual filesystem: walking its whole subtree to count files is slow and meaningless. The listing
+    /// shows the top level only and says why it has no per-directory counts.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_virtual_filesystem_is_listed_without_subtree_counts_and_says_so() {
+        let tmp = TempDir::new().unwrap();
+        let mut resources = Resources::new();
+        resources.insert(Cwd(tmp.path().to_path_buf()));
+        let output = fuigo_tool_runtime::Tool::run(
+            &ListDirTool,
+            test_ctx(resources.into_shared()),
+            ListDirInput {
+                target_directory: "/proc/self".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        match &output {
+            ListDirOutput::Content(c) => {
+                assert!(c.content.contains("network or virtual filesystem"), "no notice: {}", c.content);
+                assert!(!c.content.contains("files in subtree"), "subtree counts were computed: {}", c.content);
+                assert!(c.content.contains("status"), "the top level is still listed: {}", c.content);
+            }
+            other => panic!("unexpected output: {other:?}"),
+        }
+    }
     #[tokio::test]
     async fn legacy_nonexistent_dir_returns_exact_historical_message() {
         let tmp = TempDir::new().unwrap();
@@ -1661,6 +1740,65 @@ mod tests {
             "Directory listing was cancelled for /tmp/listed."
         );
     }
+    /// Run `f` with this thread's filesystem identity dropped to an unprivileged user, so a mode-000 directory is
+    /// unreadable even when the suite runs as root. Only the calling thread is affected; it is restored on return.
+    #[cfg(target_os = "linux")]
+    fn as_unprivileged<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    // SAFETY: setfsuid changes only the calling thread's filesystem uid; it is undone below.
+                    let previous = unsafe { libc::setfsuid(65534) };
+                    let out = f();
+                    // SAFETY: as above.
+                    unsafe { libc::setfsuid(previous as libc::uid_t) };
+                    out
+                })
+                .join()
+                .unwrap()
+        })
+    }
+
+    /// 52.14: a directory that exists but cannot be read used to list as empty; the model must be told why instead.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unreadable_directory_is_reported_instead_of_listed_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let locked = tmp.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        File::create(locked.join("inside.txt")).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let probed = as_unprivileged(|| probe_listable(&locked));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = probed.expect_err("a directory the caller cannot read must fail the probe");
+        match unlistable_output(&err, Path::new("locked")) {
+            ListDirOutput::PermissionDenied(msg) => assert_eq!(msg, "Permission denied: locked"),
+            other => panic!("expected PermissionDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_listing_failures_name_the_path_and_the_cause() {
+        let err = std::io::Error::other("input/output error");
+        match unlistable_output(&err, Path::new("net/share")) {
+            ListDirOutput::Error(msg) => {
+                assert!(msg.contains("net/share"), "{msg}");
+                assert!(msg.contains("input/output error"), "{msg}");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn readable_directory_probes_clean() {
+        let tmp = TempDir::new().unwrap();
+        assert!(probe_listable(tmp.path()).is_ok());
+    }
+
     #[test]
     fn tool_name_and_description() {
         use crate::types::tool_metadata::ToolMetadata;

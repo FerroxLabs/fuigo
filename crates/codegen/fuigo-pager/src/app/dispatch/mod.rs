@@ -45,23 +45,26 @@ pub(crate) use modes::{downgrade_displayed_auto_if_gated, effective_auto};
 pub(crate) use notes::FEEDBACK_QUESTION_LABEL;
 pub(crate) use notes::FEEDBACK_TRACE_UPLOAD_TIMEOUT_MS;
 pub(crate) use notes::{recap_unavailable_toast, scrollback_has_user_messages};
-pub(crate) use session::load::fail_agent_after_failed_reconnect;
 pub(crate) use permissions::resolve_permission_queue_transition;
 pub(crate) use prompt::dispatch_initial_prompt;
-pub(crate) use session::lifecycle::{
-    abandon_unused_home_session, maybe_create_home_session, reveal_home_session_for_peer_delivery,
+pub(in crate::app) use prompt::{
+    present_export_copy_tip, show_small_screen_tip, show_ssh_wrap_tip,
 };
-pub(in crate::app) use prompt::{present_export_copy_tip, show_small_screen_tip, show_ssh_wrap_tip};
 pub(super) use queue::{
     apply_turn_start_shim, arm_send_now_and_paint, maybe_drain_queue_and_note_peek,
     note_peek_page_flip, shim_renders_own_user_block,
 };
 pub(in crate::app) use rewind::{find_user_prompt_entry_for_shell_index, shell_prompt_index_at};
-pub(crate) use router::dispatch;
+pub(crate) use router::{dispatch, flush_image_notices};
+pub(crate) use session::lifecycle::{
+    abandon_unused_home_session, maybe_create_home_session, reveal_home_session_for_peer_delivery,
+};
+pub(crate) use session::load::fail_agent_after_failed_reconnect;
 pub(crate) use settings::ui::refresh_open_settings_modals;
 pub(crate) use status::commit_minimal_update_notice;
 pub(crate) use turn::{
-    cancel_resend_due, stale_request_keys, StaleKind, StaleRequestKey, reconcile_overdue_cancels, reconcile_overdue_turn_ends, turn_end_reconcile_due,
+    StaleKind, StaleRequestKey, cancel_resend_due, reconcile_overdue_cancels,
+    reconcile_overdue_turn_ends, stale_request_keys, turn_end_reconcile_due,
 };
 
 // Test-only consumers (cfg(test) mods elsewhere in the crate); a plain re-export trips -D unused-imports in the lib build

@@ -231,10 +231,132 @@ fn reattach_completion_roundtrips_durable_log() {
     });
 }
 
-/// Kill the leader and let the bridge reconnect (real `LeaderReconnector`, socket pinned).
-/// Then reload by hand (`begin_session_reload`, `session/load`, `finish_session_reload`): history renders exactly once and new turns work.
-/// The reload driver mirrors the event loop's reconnect arm.
-/// Its `plan_reconnect_load` is event_loop-private, so the cwd and meta derivation is replicated inline.
+/// Reconnect one client to the respawned leader and reload its session by hand, the way the event loop's reconnect arm does.
+/// Waits for the bridge to adopt the new generation, re-initialises (and re-authenticates once per generation, as the agent is shared),
+/// then `begin_session_reload`, `session/load`, `finish_session_reload`.
+/// `plan_reconnect_load` is event_loop-private, so the session id, cwd and meta (including the reconnect cursor) are derived inline.
+async fn reconnect_and_reload(
+    cluster: &mut PagerLeaderCluster,
+    client: &mut ClusterClient,
+    sid: &str,
+) {
+    let mut status_rx = client.status_rx.clone().expect("reconnecting client");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if matches!(
+            *status_rx.borrow_and_update(),
+            ConnectionStatus::Connected { generation } if generation >= 1
+        ) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "bridge never reconnected to the respawned leader"
+        );
+        client.pump_once();
+        tokio::time::sleep(PUMP_TICK).await;
+    }
+
+    let _init: acp::InitializeResponse = bounded(
+        "reconnect re-initialize",
+        acp_send(
+            acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
+                acp::ClientCapabilities::new()
+                    .fs(acp::FileSystemCapabilities::new())
+                    .terminal(false),
+            ),
+            &client.app.acp_tx,
+        ),
+    )
+    .await
+    .expect("re-initialize after reconnect");
+    if !cluster.authenticated {
+        let _: acp::AuthenticateResponse = bounded(
+            "reconnect re-authenticate",
+            acp_send(
+                acp::AuthenticateRequest::new(acp::AuthMethodId::new("fuigo.api_key"))
+                    .meta(serde_json::json!({ "headless": true }).as_object().cloned()),
+                &client.app.acp_tx,
+            ),
+        )
+        .await
+        .expect("re-authenticate after reconnect");
+        cluster.authenticated = true;
+    }
+
+    let (agent_id, load_sid, load_cwd, load_meta) = {
+        let (id, agent) = client
+            .app
+            .agents
+            .iter()
+            .find(|(_, agent)| {
+                agent
+                    .session
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|s| s.0.as_ref() == sid)
+            })
+            .expect("reconnecting tab exists");
+        let cwd = if agent.session.cwd.as_os_str().is_empty() {
+            client.app.cwd.clone()
+        } else {
+            agent.session.cwd.clone()
+        };
+        let mut meta = serde_json::json!({ "yoloMode": false, "autoMode": false });
+        let cursor = agent
+            .last_seen_event_id
+            .clone()
+            .expect("a client that saw a turn holds a reconnect cursor");
+        meta["cursor"] = serde_json::Value::String(cursor);
+        (*id, agent.session.session_id.clone().unwrap(), cwd, meta)
+    };
+    client
+        .app
+        .agents
+        .get_mut(&agent_id)
+        .unwrap()
+        .begin_session_reload(1);
+    let load = bounded(
+        "reconnect session/load",
+        acp_send(
+            acp::LoadSessionRequest::new(load_sid, load_cwd)
+                .mcp_servers(vec![])
+                .meta(load_meta.as_object().cloned()),
+            &client.app.acp_tx,
+        ),
+    )
+    .await;
+    let ok = load.is_ok();
+
+    // With a cursor the leader replays only the events AFTER it, and nothing follows the last completed turn, so there is no replay to wait for.
+    // (Waiting for the old text to reappear in the fresh state never completes; the transcript comes back from the stash on finalize.)
+    // Whatever the leader did send precedes the load response on the wire, so pump until the client has been quiet for a few ticks before finalizing.
+    let deadline = tokio::time::Instant::now() + TURN_BUDGET;
+    let mut quiet_ticks = 0;
+    while quiet_ticks < 5 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "client never went quiet after session/load"
+        );
+        quiet_ticks = if client.pump_once() {
+            0
+        } else {
+            quiet_ticks + 1
+        };
+        tokio::time::sleep(PUMP_TICK).await;
+    }
+    client
+        .app
+        .agents
+        .get_mut(&agent_id)
+        .unwrap()
+        .finish_session_reload(1, ok);
+    assert!(ok, "reconnect session/load failed: {:?}", load.err());
+}
+
+/// Kill the leader and let every bridge reconnect (real `LeaderReconnector`, socket pinned) to ONE respawned leader.
+/// Then reload each client by hand: history renders exactly once on every client, no turn is re-driven, and a new turn fans out to both.
+/// A driver and a viewer share the session, so this covers the all-clients case, not just the client that ran the turn.
 #[test]
 #[ignore = "leader-cluster: needs single-process isolation (process-global env + fuigo_home OnceLock in the shared lib test binary); run: cargo test -p fuigo-pager --lib -- app::leader_cluster --ignored --test-threads=1"]
 #[serial_test::serial(FUIGO_HOME)]
@@ -248,132 +370,76 @@ fn leader_kill_reconnect_reloads_without_duplicating_history() {
         .unwrap();
     tokio::task::LocalSet::new().block_on(&rt, async {
         let mut cluster = PagerLeaderCluster::start().await;
-        let mut a = cluster.client("cluster-reconnect", true).await;
+        let mut a = cluster.client("cluster-reconnect-driver", true).await;
 
         cluster.server.set_response(format!("{T1} pre-crash turn."));
         let sid = a.new_session().await;
         a.run_turn("go", T1).await;
 
-        // Kill the leader generation, respawn at the same path; the bridge's reconnector adopts the new in-process server
-        cluster.kill_leader().await;
-        cluster.respawn_leader().await;
-
-        let mut status_rx = a.status_rx.clone().expect("reconnecting client");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            if matches!(
-                *status_rx.borrow_and_update(),
-                ConnectionStatus::Connected { generation } if generation >= 1
-            ) {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "bridge never reconnected to the respawned leader"
-            );
-            a.pump_once();
-            tokio::time::sleep(PUMP_TICK).await;
-        }
-
-        // Reconnect re-init: initialize, then reload each session tab.
-        let _init: acp::InitializeResponse = bounded(
-            "reconnect re-initialize",
-            acp_send(
-                acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
-                    acp::ClientCapabilities::new()
-                        .fs(acp::FileSystemCapabilities::new())
-                        .terminal(false),
-                ),
-                &a.app.acp_tx,
-            ),
-        )
-        .await
-        .expect("re-initialize after reconnect");
-        let _: acp::AuthenticateResponse = bounded(
-            "reconnect re-authenticate",
-            acp_send(
-                acp::AuthenticateRequest::new(acp::AuthMethodId::new("fuigo.api_key"))
-                    .meta(serde_json::json!({ "headless": true }).as_object().cloned()),
-                &a.app.acp_tx,
-            ),
-        )
-        .await
-        .expect("re-authenticate after reconnect");
-        cluster.authenticated = true;
-
-        let (agent_id, plan) = {
-            let (id, agent) = a
-                .app
-                .agents
-                .iter()
-                .find(|(_, agent)| {
-                    agent
-                        .session
-                        .session_id
-                        .as_ref()
-                        .is_some_and(|s| s.0.as_ref() == sid)
-                })
-                .expect("reconnecting tab exists");
-            // The plan_reconnect_load equivalent: the session id, the session cwd, and the yolo/auto/cursor meta
-            let cwd = if agent.session.cwd.as_os_str().is_empty() {
-                a.app.cwd.clone()
-            } else {
-                agent.session.cwd.clone()
-            };
-            let mut meta = serde_json::json!({ "yoloMode": false, "autoMode": false });
-            if let Some(ref cursor) = agent.last_seen_event_id {
-                meta["cursor"] = serde_json::Value::String(cursor.clone());
-            }
-            (*id, (agent.session.session_id.clone().unwrap(), cwd, meta))
-        };
-        a.app
-            .agents
-            .get_mut(&agent_id)
-            .unwrap()
-            .begin_session_reload(1);
-        let (load_sid, load_cwd, load_meta) = plan;
-        let load = bounded(
-            "reconnect session/load",
-            acp_send(
-                acp::LoadSessionRequest::new(load_sid, load_cwd)
-                    .mcp_servers(vec![])
-                    .meta(load_meta.as_object().cloned()),
-                &a.app.acp_tx,
-            ),
-        )
-        .await;
-        let ok = load.is_ok();
-        // Drain the replay the load unicast to this client BEFORE finalizing, mirroring the production replay-then-finalize order
-        a.pump_until("reload replay lands", move |app| {
+        let mut b = cluster.client("cluster-reconnect-viewer", true).await;
+        b.load_session(&sid).await;
+        b.pump_until("replay reaches viewer", move |app| {
             app.agents
                 .values()
                 .any(|agent| agent_message_text(agent).contains(T1))
         })
         .await;
-        a.app
-            .agents
-            .get_mut(&agent_id)
-            .unwrap()
-            .finish_session_reload(1, ok);
-        assert!(ok, "reconnect session/load failed: {:?}", load.err());
+        let inference_before_crash = cluster.inference_request_count();
 
+        // Kill the leader generation, respawn at the same path; both bridges' reconnectors adopt the one new in-process server
+        cluster.kill_leader().await;
+        cluster.respawn_leader().await;
+
+        reconnect_and_reload(&mut cluster, &mut a, &sid).await;
+        reconnect_and_reload(&mut cluster, &mut b, &sid).await;
+
+        for (name, client) in [("driver", &a), ("viewer", &b)] {
+            assert_eq!(
+                occurrences(&agent_message_text(client.agent_for_session(&sid)), T1),
+                1,
+                "reconnect reload must not duplicate history on the {name}"
+            );
+        }
         assert_eq!(
-            occurrences(&agent_message_text(a.agent_for_session(&sid)), T1),
-            1,
-            "reconnect reload must not duplicate history"
+            cluster.inference_request_count(),
+            inference_before_crash,
+            "reconnect must reload from the durable log, not re-drive a turn"
         );
 
-        // The reconnected generation serves new turns.
+        // The reconnected generation serves new turns, and one leader fans them out to every client.
         cluster
             .server
             .set_response(format!("{T2} post-crash turn."));
-        a.run_turn("after crash", T2).await;
-        assert_eq!(
-            occurrences(&agent_message_text(a.agent_for_session(&sid)), T2),
-            1
-        );
+        a.act(Action::SendPrompt("after crash".to_string()));
+        pump_clients_until(
+            &mut [&mut a, &mut b],
+            "post-crash turn fans out",
+            |clients| {
+                clients.iter().all(|c| {
+                    c.app
+                        .agents
+                        .values()
+                        .any(|agent| agent_message_text(agent).contains(T2))
+                })
+            },
+        )
+        .await;
+        for (name, client) in [("driver", &a), ("viewer", &b)] {
+            let text = agent_message_text(client.agent_for_session(&sid));
+            assert_eq!(
+                occurrences(&text, T1),
+                1,
+                "history stays single on the {name}"
+            );
+            assert_eq!(
+                occurrences(&text, T2),
+                1,
+                "post-crash turn renders once on the {name}"
+            );
+        }
 
         a.sever();
+        b.sever();
     });
 }
 

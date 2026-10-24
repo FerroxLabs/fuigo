@@ -22,7 +22,7 @@
 //!   But `is_pasteable_key_event` (`fuigo-pager` `src/app/event_loop.rs`) excludes `Repeat` on purpose.
 //!   So auto-repeat counts toward paste coalescing again.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crossterm::event::KeyboardEnhancementFlags;
 
@@ -76,6 +76,21 @@ pub fn pushed_kitty_flags() -> KeyboardEnhancementFlags {
 
 pub fn set_pushed_kitty_flags(flags: KeyboardEnhancementFlags) {
     PUSHED_KITTY_FLAGS.store(flags.bits(), Ordering::Relaxed);
+}
+
+/// Set when the static environment looked compatible but the startup probe (`supports_keyboard_enhancement`) found no
+/// Kitty keyboard support: tmux 3.4 with `extended-keys on` is the known case, it forwards modified keys only to a pane
+/// that asks for xterm's `modifyOtherKeys`, which the pager does not.
+/// Modified keys such as `Ctrl+.` then never arrive, so the UI must not advertise them.
+static KITTY_PROBE_UNSUPPORTED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_kitty_probe_unsupported(unsupported: bool) {
+    KITTY_PROBE_UNSUPPORTED.store(unsupported, Ordering::Relaxed);
+}
+
+/// See [`set_kitty_probe_unsupported`]; `false` until the startup probe has run and failed.
+pub fn kitty_probe_unsupported() -> bool {
+    KITTY_PROBE_UNSUPPORTED.load(Ordering::Relaxed)
 }
 
 /// Whether Kitty keyboard enhancement flags were actually pushed during `init_terminal`.

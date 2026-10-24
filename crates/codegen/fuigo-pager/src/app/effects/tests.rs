@@ -2866,13 +2866,18 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
     assert_eq!(roster.origin.host.as_deref(), Some("box"));
 }
 #[test]
-fn rewind_execute_params_sends_conversation_only_with_force() {
-    let params = rewind_execute_params("sess-1", 3);
+fn rewind_execute_params_carry_the_scope_and_force() {
+    use crate::views::rewind::RewindScope;
+    let params = rewind_execute_params("sess-1", 3, RewindScope::All, false);
     assert_eq!(params["sessionId"], "sess-1");
     assert_eq!(params["targetPromptIndex"], 3);
+    assert_eq!(params["force"], false);
+    assert_eq!(params["mode"], "all");
+    let params = rewind_execute_params("sess-1", 3, RewindScope::ConversationOnly, true);
     assert_eq!(params["force"], true);
-    assert_eq!(params["mode"], REWIND_MODE_WIRE);
     assert_eq!(params["mode"], "conversation_only");
+    let params = rewind_execute_params("sess-1", 3, RewindScope::FilesOnly, true);
+    assert_eq!(params["mode"], "files_only");
 }
 
 #[tokio::test]

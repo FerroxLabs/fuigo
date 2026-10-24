@@ -783,7 +783,10 @@ pub fn render_modal_shortcuts(
                     width: visible_w,
                     height: 1,
                 };
-                buf.set_style(hover_rect, Style::default().add_modifier(Modifier::REVERSED));
+                buf.set_style(
+                    hover_rect,
+                    Style::default().add_modifier(Modifier::REVERSED),
+                );
             }
 
             hits.push(ShortcutHitArea {

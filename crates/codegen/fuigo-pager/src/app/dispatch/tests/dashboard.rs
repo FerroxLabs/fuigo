@@ -454,6 +454,25 @@ fn resolve_location_input_expands_and_joins() {
     assert_eq!(resolve_location_input("~/x", &cwd), Some(home.join("x")));
     assert_eq!(resolve_location_input("   ", &cwd), None);
 }
+/// A folder name with a space reaches `/cd` quoted (`"my dir"`, as pasted from a file manager) or escaped (`my\ dir`, as a
+/// shell completes it); both name the same folder as the bare text.
+#[test]
+fn resolve_location_input_accepts_quoted_and_escaped_paths() {
+    let cwd = PathBuf::from("/work/dir");
+    assert_eq!(resolve_location_input("\"/abs/my dir\"", &cwd), Some(PathBuf::from("/abs/my dir")));
+    assert_eq!(resolve_location_input("'/abs/my dir'", &cwd), Some(PathBuf::from("/abs/my dir")));
+    assert_eq!(resolve_location_input("  \"sub dir/x\"  ", &cwd), Some(PathBuf::from("/work/dir/sub dir/x")));
+    let home = fuigo_dirs::home_dir().expect("home dir");
+    assert_eq!(resolve_location_input("\"~/my dir\"", &cwd), Some(home.join("my dir")));
+    #[cfg(unix)]
+    {
+        assert_eq!(resolve_location_input("/abs/my\\ dir", &cwd), Some(PathBuf::from("/abs/my dir")));
+        assert_eq!(resolve_location_input("~/a\\ b/c\\(1\\)", &cwd), Some(home.join("a b").join("c(1)")));
+    }
+    // Quotes that do not wrap the whole text are part of the name.
+    assert_eq!(resolve_location_input("/abs/it's", &cwd), Some(PathBuf::from("/abs/it's")));
+    assert_eq!(resolve_location_input("\"\"", &cwd), None);
+}
 #[test]
 fn open_location_picker_without_dashboard_is_noop() {
     let mut app = test_app();
@@ -1026,7 +1045,7 @@ fn dashboard_image_dispatch_cancel_rewind_resends_attachment() {
         agent.session.session_id = Some(acp::SessionId::new("dashboard-image"));
         agent.session.state = AgentState::Idle;
         assert!(matches!(
-            maybe_drain_queue(agent).effects.as_slice(),
+            maybe_drain_queue(agent, &mut app.pending_image_notices).effects.as_slice(),
             [Effect::SendPromptBlocks { .. }]
         ));
     }
@@ -6958,4 +6977,23 @@ fn dashboard_attach_build_roster_row_keeps_disk_resume() {
         ),
         "expected Build disk resume with roster cwd, got {effects:?}"
     );
+}
+
+/// `/loop` typed bare on the dashboard shows its usage; it must not start a session whose first prompt is the slash text.
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_slash_loop_without_prompt_shows_usage_not_a_new_session() {
+    let mut app = test_app();
+    open_dashboard(&mut app);
+    let effects = dispatch_dashboard_dispatch_slash(&mut app, "/loop".into());
+    assert!(effects.is_empty(), "bare /loop must not spawn: {effects:?}");
+    assert!(app.agents.is_empty(), "no session may be created");
+    let toast = app
+        .dashboard
+        .as_ref()
+        .unwrap()
+        .error_toast
+        .as_deref()
+        .expect("usage must be shown");
+    assert!(toast.contains("/loop"), "usage names the command: {toast}");
 }

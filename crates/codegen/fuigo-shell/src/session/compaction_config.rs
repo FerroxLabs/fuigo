@@ -16,6 +16,9 @@ pub(crate) const SUPPRESS_TURN: u8 = 1;
 /// Fatal failure (size/schema) retrying can never fix: survives turn boundaries.
 /// Cleared only when the context budget changes: a successful compaction, a rewind (context shrank), or a model switch (a larger window may now fit).
 pub(crate) const SUPPRESS_STICKY: u8 = 2;
+/// Compact-and-resubmit recoveries allowed in a row for context-overflow errors before the failure is surfaced.
+/// A request that still overflows after this many compactions cannot be fixed by compacting again.
+pub(crate) const MAX_CONSECUTIVE_OVERFLOW_COMPACTIONS: u32 = 3;
 /// Credit block: suppress until a model `200` (credits aren't client-observable).
 /// Survives turns; context changes can't fix it.
 /// Token refresh must not clear this.
@@ -166,6 +169,9 @@ pub(crate) struct CompactionConfig {
     /// Auto-compaction suppression state (`SUPPRESS_*`) after a deterministic failure; the gates early-return unless `SUPPRESS_NONE`.
     /// Manual `/compact` ignores it.
     pub auto_compact_suppressed: AtomicU8,
+    /// Compact-and-resubmit recoveries run for context-overflow errors since the last response that succeeded (or the turn start).
+    /// Bounded by [`MAX_CONSECUTIVE_OVERFLOW_COMPACTIONS`] so a request that still overflows after compaction cannot refill forever.
+    pub overflow_compactions_since_response: Cell<u32>,
     /// Locks the context window when `FUIGO_DEBUG_CONTEXT_WINDOW` is set.
     pub context_window_override: Option<std::num::NonZeroU64>,
     /// Shared with `SessionHandle::context_window_selection`.

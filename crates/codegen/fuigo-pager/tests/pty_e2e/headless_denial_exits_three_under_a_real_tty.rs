@@ -23,10 +23,7 @@ async fn run_under_pty(extra_args: &[&str]) -> (Option<u32>, String, String) {
         .await
         .expect("start the mock inference server");
     server.preset_allow_access();
-    let sandbox = TestSandbox::builder()
-        .git()
-        .mock_url(server.url())
-        .build();
+    let sandbox = TestSandbox::builder().git().mock_url(server.url()).build();
     let target = sandbox.workspace().join("edit_me.txt");
     std::fs::write(&target, "old line\n").expect("write the fixture file");
     let arguments = json!({
@@ -59,7 +56,13 @@ async fn run_under_pty(extra_args: &[&str]) -> (Option<u32>, String, String) {
         )),
     );
 
-    let mut args = vec!["-p", "edit the fixture", "--trust", "--output-format", "json"];
+    let mut args = vec![
+        "-p",
+        "edit the fixture",
+        "--trust",
+        "--output-format",
+        "json",
+    ];
     args.extend_from_slice(extra_args);
     let binary = pager_binary().expect("resolve pager binary");
     let mut harness = PtyHarness::new_in_sandbox_ops(
@@ -107,12 +110,21 @@ async fn headless_denial_exits_three_under_a_real_tty() {
         raw.contains("headless_never_approves"),
         "the terminal shows the rule that blocked the run; raw:\n{raw}"
     );
+    // One line per refusal, carrying the remedy: no second "blocked" summary line.
+    assert_eq!(
+        raw.matches("fuigo: refused").count(),
+        1,
+        "the terminal shows the refusal once; raw:\n{raw}"
+    );
     assert!(
-        raw.contains("blocked"),
-        "the terminal says the run was blocked; raw:\n{raw}"
+        raw.contains("Remedy:") && !raw.contains("fuigo: blocked"),
+        "the refusal line carries the remedy and no summary line follows; raw:\n{raw}"
     );
     // D.2.4: a denial leaves no half-applied edit.
-    assert_eq!(file, "old line\n", "the refused edit must not have been applied");
+    assert_eq!(
+        file, "old line\n",
+        "the refused edit must not have been applied"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

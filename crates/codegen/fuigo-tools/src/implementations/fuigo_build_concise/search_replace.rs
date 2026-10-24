@@ -22,6 +22,10 @@ use crate::types::tool::{ToolKind, ToolNamespace};
 pub struct SearchReplaceConciseTool;
 
 impl crate::types::tool_metadata::ToolMetadata for SearchReplaceConciseTool {
+    fn lock_path_param(&self) -> Option<&'static str> {
+        Some("file_path")
+    }
+
     fn kind(&self) -> ToolKind {
         ToolKind::Edit
     }

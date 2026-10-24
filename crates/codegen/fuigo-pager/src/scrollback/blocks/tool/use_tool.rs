@@ -141,6 +141,26 @@ impl UseToolCallBlock {
     }
 }
 
+/// An error message as rows: every line of it indented two columns, and wrapped at `width` with the indent kept on the
+/// continuation rows. A message with line breaks (server stderr, a stack trace) used to be one row with newlines in it.
+fn error_rows(err: &str, width: usize, style: ratatui::style::Style) -> Vec<BlockLine> {
+    use crate::render::wrapping::{RtOptions, word_wrap_line};
+    let indent = Line::from("  ");
+    let mut rows = Vec::new();
+    for raw in err.lines() {
+        let line = Line::from(Span::styled(raw.trim_end().to_string(), style));
+        let opts = RtOptions::new(width.max(4))
+            .initial_indent(indent.clone())
+            .subsequent_indent(indent.clone());
+        for wrapped in word_wrap_line(&line, opts) {
+            rows.push(BlockLine::from(Line::from(
+                wrapped.spans.into_iter().map(|s| Span::styled(s.content.into_owned(), s.style)).collect::<Vec<_>>(),
+            )));
+        }
+    }
+    rows
+}
+
 impl BlockContent for UseToolCallBlock {
     fn output(&self, ctx: &BlockContext) -> BlockOutput {
         let theme = Theme::current();
@@ -216,13 +236,7 @@ impl BlockContent for UseToolCallBlock {
 
                 if let Some(ref err) = self.error {
                     lines.push(Line::from("").into());
-                    lines.push(
-                        Line::from(Span::styled(
-                            format!("  {err}"),
-                            theme.fg(theme.accent_error),
-                        ))
-                        .into(),
-                    );
+                    lines.extend(error_rows(err, ctx.width as usize, theme.fg(theme.accent_error)));
                 }
 
                 BlockOutput { lines }
@@ -320,6 +334,31 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// 54.5: an error with line breaks and long lines becomes indented rows that fit the width, not one row with newlines.
+    #[test]
+    fn a_long_multi_line_error_is_wrapped_into_indented_rows() {
+        let mut block = UseToolCallBlock::new("linear__list_issues");
+        block.error = Some(format!(
+            "request failed\n{}\n  at server.js:10",
+            "the upstream service refused the request because the token has expired and must be refreshed "
+        ));
+        let mut c = ctx(DisplayMode::Expanded);
+        c.width = 40;
+        let rows: Vec<String> = block
+            .output(&c)
+            .lines
+            .iter()
+            .map(|l| l.content.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect();
+        assert!(rows.iter().all(|r| !r.contains('\n')), "{rows:?}");
+        let error_rows: Vec<&String> = rows.iter().skip_while(|r| !r.contains("request failed")).collect();
+        assert!(error_rows.len() >= 5, "wrapped across rows: {rows:?}");
+        for row in &error_rows {
+            assert!(row.starts_with("  "), "continuation keeps the indent: {row:?}");
+            assert!(unicode_width::UnicodeWidthStr::width(row.as_str()) <= 40, "fits the width: {row:?}");
+        }
     }
 
     #[test]

@@ -184,6 +184,10 @@ pub struct ScrollbackState {
     /// Defaults to `Collapsed` (auto-collapse on finish).
     /// Toggled by `expand_all_thinking()` (Ctrl+E) between `Expanded` and `Collapsed`.
     thinking_display_mode: DisplayMode,
+    /// Session-wide tool-call density chosen with `/density`: `Collapsed` (compact) or `Expanded` (detailed).
+    /// `None` leaves every tool call on its own default.
+    /// New and refined tool calls adopt it, so the choice holds as the transcript grows.
+    tool_density: Option<DisplayMode>,
 
     // Animation
     /// Frame tick counter for animations (increments each render tick).
@@ -236,11 +240,6 @@ pub struct ScrollbackState {
     #[cfg(test)]
     layout_cache_builds: usize,
 
-    /// Height override for the inline-edited entry: measurement reports this instead of the block's natural height.
-    /// The layout then reserves room for the live edit textarea.
-    /// Cleared when editing ends.
-    pub(super) inline_edit_height: Option<(EntryId, u16)>,
-
     /// Session/worktree cwd (`AgentSession.cwd`) for Expanded tool paths.
     cwd: Option<std::path::PathBuf>,
 }
@@ -284,6 +283,7 @@ impl ScrollbackState {
             layout_cache: None,
             structural_scroll_anchor: None,
             thinking_display_mode: DisplayMode::Collapsed,
+            tool_density: None,
             tick: 0,
             appearance: AppearanceConfig::default(),
             batch_depth: 0,
@@ -300,7 +300,6 @@ impl ScrollbackState {
             virtual_y_rebuilds: 0,
             #[cfg(test)]
             layout_cache_builds: 0,
-            inline_edit_height: None,
             cwd: None,
         }
     }
@@ -339,6 +338,7 @@ impl ScrollbackState {
         fresh.next_id = self.next_id;
         fresh.appearance = self.appearance.clone();
         fresh.thinking_display_mode = self.thinking_display_mode;
+        fresh.tool_density = self.tool_density;
         fresh.view_mode = self.view_mode;
         fresh.follow_mode = self.follow_mode;
         fresh.cwd = self.cwd.clone();
@@ -590,6 +590,7 @@ impl ScrollbackState {
         entry.id = id;
 
         self.apply_edit_default_display_mode(&mut entry);
+        Self::apply_tool_density(self.tool_density, &mut entry);
 
         // Track if this entry is running
         if entry.is_running {
@@ -688,6 +689,47 @@ impl ScrollbackState {
     /// Fresh Edit entries at the block's Collapsed default adopt the state-owned materialize policy.
     /// An explicit non-Collapsed mode survives.
     /// An explicit Collapsed is indistinguishable from the default and may be upgraded by the effective expanded default.
+    /// Force a foldable tool-call entry onto the session density chosen with `/density` (no-op when none was chosen).
+    fn apply_tool_density(density: Option<DisplayMode>, entry: &mut ScrollbackEntry) {
+        if let Some(mode) = density
+            && matches!(entry.block, RenderBlock::ToolCall(_))
+            && entry.is_foldable()
+        {
+            entry.display_mode = mode;
+        }
+    }
+
+    /// The density chosen with `/density`: `Some(Collapsed)` compact, `Some(Expanded)` detailed, `None` per-call defaults.
+    pub fn tool_density(&self) -> Option<DisplayMode> {
+        self.tool_density
+    }
+
+    /// Apply `/density`: fold (`compact`) or unfold every tool call now, and keep that choice for tool calls that arrive later.
+    /// Other block kinds (thinking, recaps, messages) are left alone.
+    pub fn set_tool_density(&mut self, compact: bool) {
+        let mode = if compact {
+            DisplayMode::Collapsed
+        } else {
+            DisplayMode::Expanded
+        };
+        self.tool_density = Some(mode);
+        let mut changed_ids = Vec::new();
+        for (id, entry) in &mut self.entries {
+            if matches!(entry.block, RenderBlock::ToolCall(_)) && entry.is_foldable() {
+                entry.display_mode_pinned = false;
+                entry.display_mode = mode;
+                entry.invalidate_cache();
+                changed_ids.push(*id);
+            }
+        }
+        for id in changed_ids {
+            self.dirty_heights.insert(id);
+        }
+        self.expanded_groups.clear();
+        self.gaps_may_be_dirty = true;
+        self.bump_generation();
+    }
+
     fn apply_edit_default_display_mode(&self, entry: &mut ScrollbackEntry) {
         if let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block
             && entry.display_mode == DisplayMode::Collapsed
@@ -979,26 +1021,6 @@ impl ScrollbackState {
         self.bump_content_generation();
     }
 
-    /// Set (or clear) the inline-edit height override for an entry.
-    /// Marks affected entries height-dirty; no-op when unchanged (called per frame).
-    pub fn set_inline_edit_height(&mut self, override_h: Option<(EntryId, u16)>) {
-        if self.inline_edit_height == override_h {
-            return;
-        }
-        if let Some((old_id, _)) = self.inline_edit_height {
-            self.mark_height_dirty(old_id);
-        }
-        if let Some((new_id, _)) = override_h {
-            self.mark_height_dirty(new_id);
-        }
-        self.inline_edit_height = override_h;
-    }
-
-    /// Current inline-edit height override, if any.
-    pub fn inline_edit_height(&self) -> Option<(EntryId, u16)> {
-        self.inline_edit_height
-    }
-
     /// Get number of entries.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -1179,6 +1201,7 @@ impl ScrollbackState {
             .blocks
             .edit
             .effective_expanded(crate::appearance::cache::load_collapsed_edit_blocks());
+        let density = self.tool_density;
         let Some(entry) = self.entries.get_mut(&entry_id) else {
             return false;
         };
@@ -1220,6 +1243,7 @@ impl ScrollbackState {
                 }
                 block => block.default_display_mode(),
             };
+            Self::apply_tool_density(density, entry);
         }
         let pending = entry.is_pending_user_input;
         entry.invalidate_cache();
@@ -1832,6 +1856,12 @@ impl ScrollbackState {
     /// Set viewport height.
     pub fn set_viewport_height(&mut self, height: u16) {
         self.viewport_height = height;
+    }
+
+    /// Laid-out content height in rows (test probe, without the pin-reserve padding).
+    #[cfg(test)]
+    pub(crate) fn content_height_for_test(&self) -> usize {
+        self.total_height.saturating_sub(self.pin_reserve_pad)
     }
 
     /// Set total content height.
@@ -3640,5 +3670,45 @@ mod tests {
         assert_eq!(state.selected(), Some(0));
         assert_eq!(state.current_turn(), Some(0));
         assert_eq!(state.scroll_offset(), 2);
+    }
+}
+
+#[cfg(test)]
+mod tool_density_tests {
+    use super::*;
+
+    fn exec_block() -> RenderBlock {
+        let block = crate::scrollback::blocks::tool::ExecuteToolCallBlock::new("pytest")
+            .with_output("one\ntwo\nthree\nfour");
+        RenderBlock::ToolCall(ToolCallBlock::Execute(block))
+    }
+
+    #[test]
+    fn density_applies_to_existing_and_later_tool_calls_only() {
+        let mut state = ScrollbackState::new();
+        let first = state.push_block(exec_block());
+        let msg = state.push_block(RenderBlock::session_event(
+            crate::scrollback::blocks::SessionEvent::Recap {
+                summary: "x".into(),
+                auto: false,
+            },
+        ));
+        let recap_mode = state.get_by_id(msg).unwrap().display_mode();
+        state.set_tool_density(false);
+        assert_eq!(state.tool_density(), Some(DisplayMode::Expanded));
+        assert_eq!(state.get_by_id(first).unwrap().display_mode(), DisplayMode::Expanded);
+        state.set_tool_density(true);
+        assert_eq!(state.get_by_id(first).unwrap().display_mode(), DisplayMode::Collapsed);
+        let later = state.push_block(exec_block());
+        assert_eq!(
+            state.get_by_id(later).unwrap().display_mode(),
+            DisplayMode::Collapsed,
+            "tool calls arriving later adopt the chosen density"
+        );
+        assert_eq!(
+            state.get_by_id(msg).unwrap().display_mode(),
+            recap_mode,
+            "non tool-call blocks are untouched"
+        );
     }
 }

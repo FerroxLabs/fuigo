@@ -1493,3 +1493,83 @@ async fn a_leftover_copy_refusal_says_when_to_move_it_and_a_link_is_not_followed
     })
     .await;
 }
+
+
+// ── 51.1: neither a conversation rewind (edit and resend) nor a cancel that rewinds touches the project's files ──
+
+/// Editing an earlier prompt of a long (compacted) session and resending it rewinds the conversation only. The files the
+/// later prompts changed stay exactly as they are.
+#[tokio::test(flavor = "current_thread")]
+async fn a_conversation_only_rewind_of_a_long_session_leaves_the_project_files_alone() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let project = tempfile::tempdir().unwrap();
+            let root = project.path();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
+            let (actor, _gateway_rx) = actor_on_real_fs(root, persistence_tx, "k511-conv").await;
+            let session_dir = crate::session::persistence::session_dir(&actor.session_info);
+            write_compacted_session_fixture(&session_dir, "ckpt511");
+            restore_compacted_live_state(&actor).await;
+            record_prompt_6_edits(&actor, root).await;
+
+            let resp = actor
+                .handle_rewind(RewindRequest { target_prompt_index: 3, force: true, mode: RewindMode::ConversationOnly })
+                .await
+                .expect("handle_rewind ok");
+
+            let edited = std::fs::read_to_string(root.join("edited.txt")).ok();
+            let created = std::fs::read_to_string(root.join("created.txt")).ok();
+            let prompt_index = actor.chat_state_handle.get_prompt_index().await;
+            let _ = std::fs::remove_dir_all(&session_dir);
+
+            assert!(resp.success, "{resp:?}");
+            assert!(resp.reverted_files.is_empty(), "no file reverted: {resp:?}");
+            assert_eq!(edited.as_deref(), Some("after prompt 6"), "the edited file keeps prompt 6's change");
+            assert_eq!(created.as_deref(), Some("created by prompt 6"), "the created file is not deleted");
+            assert_eq!(prompt_index, 3, "the conversation was rewound");
+        })
+        .await;
+}
+
+/// Cancelling a turn that has produced nothing rewinds it as unsent. That drops the turn from the conversation and the
+/// snapshot index, and never rewrites a file on disk, however much the session did before.
+#[tokio::test(flavor = "current_thread")]
+async fn a_rewinding_cancel_leaves_the_project_files_alone() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let project = tempfile::tempdir().unwrap();
+            let root = project.path();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
+            let (actor, _gateway_rx) = actor_on_real_fs(root, persistence_tx, "k511-cancel").await;
+            let session_dir = crate::session::persistence::session_dir(&actor.session_info);
+            write_compacted_session_fixture(&session_dir, "ckpt511c");
+            restore_compacted_live_state(&actor).await;
+            record_prompt_6_edits(&actor, root).await;
+
+            *actor.current_prompt_id.lock().expect("current_prompt_id mutex poisoned") = Some("rw".to_string());
+            let (item, _rx) = super::turn_completion_emit_tests::pending_input("rw");
+            {
+                let mut state = actor.state.lock().await;
+                state.rewindable = true;
+                state.running_task = Some(super::support::running_task_stub("rw"));
+                state.pending_inputs.push_back(item);
+            }
+            let _ = actor
+                .cancel_running_task(crate::session::CancelOptions {
+                    history: crate::session::CancelHistoryDisposition::RewindIfNoOutput { prompt_id: None },
+                    user_initiated: true,
+                    ..Default::default()
+                })
+                .await;
+
+            let edited = std::fs::read_to_string(root.join("edited.txt")).ok();
+            let created = std::fs::read_to_string(root.join("created.txt")).ok();
+            let _ = std::fs::remove_dir_all(&session_dir);
+
+            assert_eq!(edited.as_deref(), Some("after prompt 6"));
+            assert_eq!(created.as_deref(), Some("created by prompt 6"));
+        })
+        .await;
+}

@@ -35,7 +35,16 @@
 //!   that client's exact-URL recipient check and its disabled redirects; see
 //!   [`resolver_allowing_exactly`].
 //! - Not websockets that dial an IP directly, and not a literal IP address in
-//!   a URL. There is no name to refuse.
+//!   a URL: there is no name to refuse, so a client built here connects to one.
+//!   Tools that take a URL from the model close this themselves (`web_fetch`;
+//!   the sandbox's egress proxy cannot be addressed by a literal at all):
+//!   every public IP literal is refused, because a literal cannot be told from
+//!   an upstream vendor address ([`refuses_public_ip_literals`]). Private,
+//!   loopback and link-local literals keep the tool's own SSRF verdict. The one
+//!   allowance is the full lift below (`FUIGO_ALLOW_UPSTREAM_HOSTS=1`); an exact
+//!   hostname list cannot name an address. Clients configured with a literal on
+//!   purpose (a self-hosted provider endpoint) are not tool URLs and are not
+//!   affected.
 //! - Not a substitute for removing the URLs. It is the backstop that proves
 //!   the removal worked, and catches the ones we missed.
 //!
@@ -173,6 +182,21 @@ pub fn upstream_allowance() -> UpstreamAllowance {
 /// (see [`is_refused_host`]).
 pub fn guard_enabled() -> bool {
     upstream_allowance() != UpstreamAllowance::All
+}
+
+/// Why a tool refuses a public IP literal.
+pub const PUBLIC_IP_LITERAL_REFUSED: &str = "fuigo refuses tool requests to a public IP address literal: the upstream-vendor guard can only refuse names, so use the hostname (or set FUIGO_ALLOW_UPSTREAM_HOSTS=1 to lift the guard)";
+
+/// Whether a tool that takes its URL from the model must refuse a public IP literal under
+/// `allowance`: always, unless the whole guard is lifted. A host list names hostnames, so it
+/// cannot lift this one.
+pub fn refuses_public_ip_literals_under(allowance: &UpstreamAllowance) -> bool {
+    *allowance != UpstreamAllowance::All
+}
+
+/// [`refuses_public_ip_literals_under`] for the environment's allowance.
+pub fn refuses_public_ip_literals() -> bool {
+    refuses_public_ip_literals_under(&upstream_allowance())
 }
 
 /// Whether the guard refuses `host` for an ordinary client: it is on the

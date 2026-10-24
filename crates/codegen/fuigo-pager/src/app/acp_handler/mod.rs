@@ -47,7 +47,8 @@ mod workflow_ingest;
 
 #[cfg(test)]
 use permissions::{
-    MCP_ARGS_MAX_LINE_CHARS, MCP_ARGS_MAX_LINES, build_permission_display, mcp_args_lines,
+    MCP_ARGS_MAX_LINE_CHARS, MCP_ARGS_MAX_LINES, build_permission_display, enqueue_permission,
+    existing_contents_lines, mcp_args_lines,
 };
 use permissions::{
     apply_recap_block, handle_permission_request, should_drop_duplicate_auto_recap,
@@ -150,6 +151,12 @@ fn is_replay_bash_execute(update: &acp::SessionUpdate) -> bool {
 }
 
 pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
+    let state_changed = handle_inner(msg, app);
+    let flushed = app.flush_image_notices_if_root();
+    state_changed || flushed
+}
+
+fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
     match msg {
         AcpClientMessage::SessionNotification(notif) => {
             // Retry-status mirrors carry no eventId or output for the pager, which renders `retry_state` itself
@@ -166,7 +173,10 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     // P29-B: a live peer message for the hidden home session (welcome screen up, no turn run yet).
                     let peer_delivery_to_home = !meta.is_replay
                         && app.home_session_agent == Some(id)
-                        && meta.prompt_id.as_deref().is_some_and(|p| p.starts_with("peer-message-"));
+                        && meta
+                            .prompt_id
+                            .as_deref()
+                            .is_some_and(|p| p.starts_with("peer-message-"));
                     let stashed_adoption_pid = app
                         .pending_running_adoptions
                         .get(&id)

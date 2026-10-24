@@ -42,9 +42,8 @@ async fn campaign_leader_mode_remote_dismiss_on_model_pick() {
     let socket = socket.to_str().expect("socket path is utf-8").to_owned();
 
     // The override stands in for a remotely served campaign; the leader and the TUI both resolve it
-    let campaign_json = format!(
-        r#"[{{"id":"{CAMPAIGN_ID}","models":{{"default":"{CAMPAIGN_MODEL}"}}}}]"#
-    );
+    let campaign_json =
+        format!(r#"[{{"id":"{CAMPAIGN_ID}","models":{{"default":"{CAMPAIGN_MODEL}"}}}}]"#);
     let binary = pager_binary().expect("resolve pager binary");
     let spawn = || -> PtyHarness {
         PtyHarness::spawn_with_content_env_ops(

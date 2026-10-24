@@ -16,7 +16,7 @@ set -uo pipefail
 abort_guard "${BASH_SOURCE[0]}" "$@"
 LANE=$1 PARENT=$2 TIPREF=$3 BUNDLE=$4; shift 4; PKGS="$*"; PAGERFEAT=${PAGERFEAT:-}   # extra flags for the PAGER build only (FEAT is package-specific and would break it)
 FEAT=${FEAT:-}   # optional extra cargo flags, e.g. FEAT="--features x" (rpf.sh behaviour)
-B=/root/fuigo-builds; RPDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); L0=$B/$LANE; SRC=$L0/src; R=$B/integration/src-p15r
+B=/root/fuigo-builds; RPDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); L0=$B/$LANE; SRC=$L0/src; R=${RP_REPO:-$B/integration/src-p15r}   # RP_REPO: any git repo to fetch into and add the worktree from (gate-selftest.sh uses a throw-away one)
 mkdir -p $L0; exec 7>"$L0/.lane.lock"; flock -n 7 || exit 3
 export CARGO_TARGET_DIR="$L0/target" PATH="$HOME/.cargo/bin:$PATH" RUST_MIN_STACK=16777216 CARGO_TERM_COLOR=never RG_BIN_PATH=/usr/bin/rg CARGO_BUILD_JOBS=16
 OUT=$B/$LANE.out; : > $OUT; say(){ echo "$(date -u +%FT%TZ) $*" >> $OUT; }

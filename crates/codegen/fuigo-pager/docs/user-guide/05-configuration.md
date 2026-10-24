@@ -84,6 +84,13 @@ follow_up_behavior = "queue"           # mid-turn follow-ups: "queue" (wait for 
                                        # next tool/model safe gap). See Keyboard Shortcuts → Mid-turn.
 screen_mode = "fullscreen"             # default render mode: "fullscreen" | "minimal"
                                        # (unset → fullscreen); set via /settings → Default screen mode
+background_mark = true                 # faint dot-matrix Wind mark above the welcome screen's text
+                                       # (default: true); never overlaps the text; hidden under 70x24,
+                                       # with NO_COLOR, and while the prompt holds text
+background_mark_animate = true         # the mark spins once on the welcome screen, then rests with an
+                                       # ember gust (default: true); any key press snaps it to rest;
+                                       # off over SSH or with NO_COLOR
+animations = true                      # master switch for decorative animation (default: true)
 
 [features]
 telemetry = false                      # anonymous usage telemetry
@@ -269,7 +276,7 @@ query_params = { api-version = "2026-07-22" } # query params appended to every r
 env_http_headers = { "X-Tenant" = "TENANT_TOKEN" }    # request headers from env vars, resolved at client build
 ```
 
-Credential resolution: `api_key` > `env_key` > signed-in session token > `FUIGO_API_KEY`. See [Custom Models](11-custom-models.md#request-query-parameters) for `query_params` and `env_http_headers`, and [Sandbox Mode](18-sandbox.md#shell-environment-policy) for `[shell_environment_policy]`, which restricts the environment variables tool subprocesses inherit.
+Credential resolution: `api_key` > `env_key` > signed-in session token > the Flux key variable (`FUIGO_API_KEY`, then `FUIGO_CODE_API_KEY`, then `FLUX_API_KEY`). See [Custom Models](11-custom-models.md#request-query-parameters) for `query_params` and `env_http_headers`, and [Sandbox Mode](18-sandbox.md#shell-environment-policy) for `[shell_environment_policy]`, which restricts the environment variables tool subprocesses inherit.
 
 To override a built-in model, use its name as the section key and set only the fields you need:
 
@@ -756,7 +763,7 @@ The key ones. See the README for the complete list.
 
 | Variable | Description |
 |----------|-------------|
-| `FUIGO_API_KEY` | Your FluxRouter API key (from your FluxRouter dashboard) |
+| `FUIGO_API_KEY` | Your FluxRouter API key (from your FluxRouter dashboard). Fuigo reads the first of `FUIGO_API_KEY`, `FUIGO_CODE_API_KEY`, `FLUX_API_KEY` that is set and not blank |
 | `FUIGO_AUTH_PROVIDER_COMMAND` | External auth binary path |
 | `FUIGO_AUTH_PROVIDER_LABEL` | Display name on TUI login screen |
 | `FUIGO_AUTH_TOKEN_TTL` | Token lifetime in seconds |
@@ -868,3 +875,25 @@ When the same server name comes from more than one source, it resolves highest-p
 3. **Plugins** — file-based `.lsp.json`, then inline `lspServers`, in plugin load order
 
 Project and user entries replace lower-priority ones of the same name. Plugin entries only add servers whose names aren't already defined by a local file, so a local `lsp.json` always wins over a plugin. Plugin LSP servers load only after the plugin is trusted (see [Plugins](09-plugins.md)).
+
+## Tool guidance (`tool-guidance.toml`)
+
+Change the guidance text attached to a built-in tool without touching its schema. Put a
+`tool-guidance.toml` in `$FUIGO_HOME` (user-wide) and/or `.fuigo/` in a project:
+
+```toml
+[tools.read_file]
+mode = "append"     # add after the stock description
+text = "Prefer ranges under 200 lines."
+
+[tools.grep]
+mode = "replace"    # use this text instead of the stock description
+text = "Search file contents with a regex. Always pass a path."
+```
+
+- Tool names are the model-facing built-in names (`read_file`, `grep`, `run_terminal_cmd`, ...). An unknown name is warned about once and ignored.
+- The project file wins over the user file, per tool, and is read only when the folder is trusted (the same gate as project `AGENTS.md` and rules). The file itself counts as a repo-local config that triggers the trust prompt.
+- Each `text` is limited to 2000 characters and a file to 8000 in total; an entry over a limit is skipped with a warning.
+- With no file present the tool definitions sent to the model are unchanged.
+- The text reaches the model on every provider API (chat completions, responses, Anthropic messages).
+- `FUIGO_TOOL_GUIDANCE=none` disables the feature; `FUIGO_TOOL_GUIDANCE=/path/to/file.toml` loads only that file.

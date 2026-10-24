@@ -177,6 +177,7 @@ fn test_config(base_url: &str) -> SamplerConfig {
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: 256_000,
+        max_request_bytes: None,
         client_version: None,
         force_http1: false,
         max_retries: None,

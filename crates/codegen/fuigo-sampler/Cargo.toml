@@ -49,5 +49,9 @@ tokio = { workspace = true, features = [
     "rt-multi-thread",
 ] }
 
+[features]
+# Test seams for crates that drive a sampler double (`SamplerHandle::notify_on_submit`). Absent from release builds.
+test-support = []
+
 [lints]
 workspace = true

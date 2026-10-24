@@ -453,6 +453,20 @@ test('the sign job is bound to the release environment, cannot publish, and sign
         if (/windows|win32/.test(m[1])) assert(!/MAC_SIGN|mac_sign|dry_run/.test(m[1]), `Windows step is conditional: ${m[1]}`);
     }
 });
+// A flaky module download may fail the first signing attempt only: the retry has no continue-on-error, and the
+// Authenticode gate runs after every signing step, so an unsigned binary can never reach publish.
+test('Windows signing retries once and the Authenticode gate follows every attempt', () => {
+    const steps = jobs.sign.split(/\n(?= {6}- )/);
+    const signing = steps.map((s, i) => [s, i]).filter(([s]) => /artifact-signing-action@/.test(s));
+    assert.equal(signing.length, 2, 'expected a first attempt and one retry');
+    assert(/continue-on-error: true/.test(signing[0][0]), 'first attempt is not allowed to fail');
+    assert(/id: sign_first/.test(signing[0][0]), 'first attempt has no id for the retry to check');
+    assert(!/continue-on-error/.test(signing[1][0]), 'the retry may not swallow a failure');
+    assert(/steps\.sign_first\.outcome == 'failure'/.test(signing[1][0]), 'the retry does not run on a failed first attempt');
+    const gate = steps.findIndex(s => /name: Gate - Authenticode Valid and Ferrox Labs signer/.test(s));
+    assert(gate > signing[1][1], 'the Authenticode gate does not follow the retry');
+    assert(!/continue-on-error/.test(steps[gate]), 'the Authenticode gate may not swallow a failure');
+});
 test('verify-published records digests and github-release compares them with the assets', () => {
     assert(/verify-published-platform\.js[^\n]*\\\n\s*--digest-out /.test(jobs['verify-published']));
     assert(/name: verified-\$\{\{ matrix\.platform \}\}/.test(jobs['verify-published']));

@@ -73,7 +73,7 @@ pub(super) fn dispatch_enter_plan_mode(
         agent
             .session
             .enqueue_prompt_with_skill_tokens(desc, skill_token_ranges);
-        let drain = maybe_drain_queue(agent);
+        let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         note_peek_page_flip(app, id, drain.page_flip_entry);
         let mut effects = Vec::with_capacity(1);
         for eff in drain.effects {
@@ -840,7 +840,9 @@ fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
                         Effect::PersistPermissionMode {
                             canonical: "ask",
                             session_id: Some(session_id),
-                            persist: crate::app::actions::PermissionModePersist::Cycle(prev_canonical),
+                            persist: crate::app::actions::PermissionModePersist::Cycle(
+                                prev_canonical,
+                            ),
                         },
                     ];
                 }

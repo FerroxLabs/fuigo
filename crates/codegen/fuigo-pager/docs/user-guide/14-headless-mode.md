@@ -35,7 +35,7 @@ Fuigo processes the prompt, runs any necessary tools, and prints the result to s
 | `--disallowed-tools <TOOLS>` | Denylist of built-in tools to remove (comma-separated). Supports `Agent` entries. Headless only. |
 | `--max-turns <N>`       | Maximum number of agentic turns before stopping. Headless only. |
 | `--reasoning-effort` / `--effort <LEVEL>` | Reasoning effort for reasoning models. Canonical levels: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (each a distinct tier; a model only accepts the levels its menu advertises). Also accepts per-model menu option ids (e.g. `deep` → mapped wire value), same as `/effort`. Works in TUI and headless. |
-| `--permission-mode <MODE>` | Permission mode. `bypassPermissions` enables always-approve (see [Permissions and safety](22-permissions-and-safety.md#permission-modes)); for deny-by-default use `defaultMode` in `.claude/settings.json`. |
+| `--permission-mode <MODE>` | Permission mode. `bypassPermissions` enables always-approve (see [Permissions and safety](22-permissions-and-safety.md#permission-modes)); `acceptEdits` approves file edits inside the working folder in a headless run, as it does under `defaultMode`; shell commands and edits outside the folder are still refused unless an `--allow` rule covers them. For deny-by-default use `defaultMode` in `.claude/settings.json`. |
 | `--allow <RULE>`        | Permission allow rule with glob patterns (repeatable). Works in TUI and headless. |
 | `--deny <RULE>`         | Permission deny rule with glob patterns (repeatable). Works in TUI and headless. |
 | `--prompt-json <JSON>`  | Prompt as JSON content blocks                         |
@@ -341,7 +341,7 @@ The other `init` fields carry real data:
 
 - `apiKeySource` is `user` for API-key auth and `oauth` otherwise. Fuigo does not distinguish the schema's `project`, `org`, and `temporary` sources.
 - `permissionMode` is the effective headless mode mapped to the Messages enum: the `--permission-mode` value, or `bypassPermissions` under `--yolo`, else `default`. Fuigo-only modes such as `auto` collapse to `default`.
-- `mcp_servers[].status` reflects configuration, not live connection state. A configured server always reports `"connected"`, because per-server handshake state is not resolved by the time `init` is emitted.
+- `mcp_servers[].status` is one `fuigo/mcp/list` snapshot, emitted only for `streaming-messages-json`: `connected`, `failed`, `needs-auth`, `pending`, or `disabled`. Servers still handshaking are `pending`. `disabled` is only stamped after the session reports `sessionMcpResolved`; an unresolved list row is `pending` even when `enabled` is still false. The snapshot does not wait for the Blocking startup grace; that grace still applies to the prompt's toolset. Other output formats omit the array and do not call `fuigo/mcp/list`.
 
 Fuigo omits the schema's pure-placeholder `init` fields it has no data for, rather than emitting dummy values: `claude_code_version`, `output_style`, and `plugins`.
 
@@ -613,7 +613,7 @@ Key environment variables that affect headless mode:
 
 | Variable                        | Description                                                   |
 | ------------------------------- | ------------------------------------------------------------- |
-| `FUIGO_API_KEY`        | API key for authentication (required when no browser login)   |
+| `FUIGO_API_KEY`        | API key for authentication (required when no browser login). If unset, `FUIGO_CODE_API_KEY` and then `FLUX_API_KEY` are read, in that order |
 | `FUIGO_DISABLE_PARENT_DEATH_WATCH` | Disable the Linux/Windows binding that ends a stdio agent when the process that started it exits. See [Parent-Process Binding](#parent-process-binding) |
 | `FUIGO_HEADLESS_TIMEOUT_SECS`   | Fallback for `--timeout`: hard cap on the whole headless run, in whole seconds. Unset, empty, `0` or unparsable means no cap. Ignored by the interactive TUI. See [Run timeout](#run-timeout) |
 | `FUIGO_HEADLESS_LIFECYCLE_TIMEOUT_SECS` | Cap on the `initialize`/`authenticate` handshakes, in whole seconds (default `120`). `0` removes the cap; empty or unparsable keeps the default. Headless only. See [Run timeout](#run-timeout) |
@@ -621,7 +621,7 @@ Key environment variables that affect headless mode:
 | `FUIGO_LOG_FILE`                | Path to a log file (used verbatim as the path; works in headless and TUI, honors `RUST_LOG`) |
 | `RUST_LOG`                     | Log level filter (e.g. `debug`). Headless logs to stderr.     |
 
-For CI environments, set `FUIGO_API_KEY` to your FluxRouter API key (from your FluxRouter dashboard):
+For CI environments, set `FUIGO_API_KEY` (or `FLUX_API_KEY`) to your FluxRouter API key (from your FluxRouter dashboard):
 
 ```bash
 export FUIGO_API_KEY="fuigo-..."
@@ -668,20 +668,28 @@ stdout that a script can read without parsing that English.
 
 #### The stderr line
 
-One line on stderr, for every `--output-format` and whether or not a terminal is attached:
+One line on stderr per refused approval, for every `--output-format` and whether or not a terminal is attached,
+written as the approval is refused:
 
 ```
-fuigo: blocked — permission denied in headless mode: “Write src/main.rs” (tool call [tc-17]).
-Denied by rule `headless_never_approves`. Remedy: pre-approve it before the run — pass
---allow, raise --permission-mode, or trust a folder whose project config allows it; headless
-mode has nobody to ask. No --allow rule covers a shell command that writes a file by redirect
-(`> file`); --always-approve runs one (--permission-mode auto runs it only if its classifier
-approves), and deny rules still apply. Exiting 3.
+fuigo: refused “Write src/main.rs” (tool call [tc-17]): headless mode has no one to ask for approval.
+Denied by rule `headless_never_approves`. Remedy: re-run with --permission-mode acceptEdits
+(it approves file edits inside the workspace), an --allow rule that covers the edit, or
+--always-approve; headless mode has nobody to ask, and deny rules still apply.
 ```
 
-For a refusal the run carried past, the line instead reads
-`fuigo: a permission was denied in headless mode and the run continued: …`, with the same rule and
-remedy and no exit code (see [When exit `3` does *not* fire](#when-exit-3-does-not-fire)).
+That one line carries the tool, the rule and the remedy; when the refusal ends the run the process then exits `3`
+without repeating it. (A run stopped by an execution budget has no tool call; it prints its own
+`fuigo: blocked — an execution budget refused …` line ending `Exiting 3.`)
+
+The remedy is fitted to the refused tool. A file edit, delete or move names `--permission-mode acceptEdits`.
+A shell command names an `--allow` rule and says that `acceptEdits` approves edits, not shell commands; a shell command that writes a file by redirect (`> file`) names `--always-approve` instead, because no `--allow` rule covers it. A redirect to `/dev/null` or a descriptor dup (`2>&1`) writes no file, so a read-only command that only silences a stream gets the ordinary `--allow` remedy.
+Any other tool gets the general remedy (`--allow`, a higher `--permission-mode`, a trusted folder). The
+`remedy` in the denial record below is the same text.
+
+Every refused approval (the one that ended the run and any other) prints its own such line as it happens.
+
+A refusal the run carried past (it finished anyway, so the exit status is not `3`) is reported by the same line, printed when it happened; see [When exit `3` does *not* fire](#when-exit-3-does-not-fire).
 
 #### The denial record, per format
 
@@ -756,7 +764,7 @@ ends (`0`, or `1` if it later fails). They produce no record and no stderr line.
 
 | `rule` | When | Remedy |
 | --- | --- | --- |
-| `headless_never_approves` | Nothing pre-approved the request, so headless mode refused it | Pre-approve it before the run: pass `--allow`, or raise `--permission-mode`. Trusting the folder helps only when its project config (permission rules) allows the call. Trust alone approves nothing |
+| `headless_never_approves` | Nothing pre-approved the request, so headless mode refused it | Pre-approve it before the run: for a file edit pass `--permission-mode acceptEdits` (or an `--allow` rule); for a shell command pass an `--allow` rule (`acceptEdits` does not approve shell commands); `--always-approve` covers both. Trusting the folder helps only when its project config (permission rules) allows the call. Trust alone approves nothing |
 | `yolo_had_no_allow_option` | `--yolo` was passed, but a deny rule or protected path left the request with no allow option to select | Remove the matching entry from `--deny` or from the permissions config |
 | `execution_token_budget_exhausted` | The execution's total-token budget is spent | Raise the goal's token budget (`/goal <objective> --budget <tokens>`) or clear the goal (`/goal clear`). Tokens already spent are not refunded |
 | `execution_output_token_budget_exhausted` | The output-token budget granted to this workflow child is spent | Raise `output_token_budget` for the child. Output tokens already spent are not refunded |

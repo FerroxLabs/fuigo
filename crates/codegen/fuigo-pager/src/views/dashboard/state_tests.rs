@@ -6134,9 +6134,22 @@ fn rename_set_text_applies_the_tag_pass() {
 /// Tags never enter a rename through typing, and the other widened classes are rejected on every path
 #[test]
 fn rename_rejects_widened_unsafe_characters_on_every_path() {
-    for c in ['\u{00AD}', '\u{2028}', '\u{2029}', '\u{180E}', '\u{FFF9}', '\u{13430}', '\u{1BCA0}', '\u{E0001}', '\u{E0041}'] {
+    for c in [
+        '\u{00AD}',
+        '\u{2028}',
+        '\u{2029}',
+        '\u{180E}',
+        '\u{FFF9}',
+        '\u{13430}',
+        '\u{1BCA0}',
+        '\u{E0001}',
+        '\u{E0041}',
+    ] {
         let mut draft = RenameDraft::new(DashboardRowId::TopLevel(AgentId(0)), "ab");
-        handle_rename_key(&mut draft, &KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        handle_rename_key(
+            &mut draft,
+            &KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+        );
         assert_eq!(draft.text(), "ab", "typed U+{:04X}", c as u32);
 
         let mut pasted = RenameDraft::new(DashboardRowId::TopLevel(AgentId(0)), "");
@@ -6157,7 +6170,11 @@ fn rename_flag_tag_run_bounds_are_exact() {
     let uppercase = "\u{1f3f4}\u{e0041}\u{e007f}";
     let no_cancel = "\u{1f3f4}\u{e0067}\u{e0062}";
     let digits = "\u{1f3f4}\u{e0031}\u{e0039}\u{e007f}";
-    let text_of = |raw: &str| RenameDraft::new(DashboardRowId::TopLevel(AgentId(0)), raw).text().to_owned();
+    let text_of = |raw: &str| {
+        RenameDraft::new(DashboardRowId::TopLevel(AgentId(0)), raw)
+            .text()
+            .to_owned()
+    };
 
     assert_eq!(text_of(seven), seven);
     assert_eq!(text_of(digits), digits);
@@ -6165,4 +6182,289 @@ fn rename_flag_tag_run_bounds_are_exact() {
     assert_eq!(text_of(empty), "\u{1f3f4}");
     assert_eq!(text_of(uppercase), "\u{1f3f4}");
     assert_eq!(text_of(no_cancel), "\u{1f3f4}");
+}
+
+/// An empty Enter within a second of a send is an echo of that send (key auto-repeat, a bouncing key switch, a double tap).
+/// It must not click `+ New Agent` or open the selected row.
+#[test]
+fn empty_enter_right_after_send_is_swallowed() {
+    let mut state = DashboardState::new();
+    let reg = crate::actions::ActionRegistry::defaults();
+    let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    state.focus_new_agent_button();
+    state.list_focused = false;
+    state.dispatch.set_text("fix the bug");
+    assert!(matches!(
+        state.handle_input(&enter, &reg),
+        InputOutcome::Action(Action::DashboardDispatch { .. })
+    ));
+    // The dispatcher clears the input after creating the session
+    state.dispatch.set_text("");
+
+    assert!(
+        matches!(state.handle_input(&enter, &reg), InputOutcome::Unchanged),
+        "echoed Enter must not create an empty session"
+    );
+    // The window stays open while Enter keeps repeating
+    assert!(matches!(
+        state.handle_input(&enter, &reg),
+        InputOutcome::Unchanged
+    ));
+
+    // The same window swallows Enter on the selected row
+    state.focus_row(DashboardRowId::TopLevel(AgentId(0)));
+    state.list_focused = true;
+    assert!(matches!(
+        state.handle_input(&enter, &reg),
+        InputOutcome::Unchanged
+    ));
+
+    // `AppView` clears `last_send_at` on any key other than Enter
+    state.last_send_at = None;
+    assert!(matches!(
+        state.handle_input(&enter, &reg),
+        InputOutcome::Action(Action::DashboardAttach(_))
+    ));
+
+    // A draft typed inside the window still sends
+    state.focus_new_agent_button();
+    state.list_focused = false;
+    state.dispatch.set_text("again");
+    state.last_send_at = Some(Instant::now());
+    assert!(matches!(
+        state.handle_input(&enter, &reg),
+        InputOutcome::Action(Action::DashboardDispatch { .. })
+    ));
+}
+
+#[test]
+fn send_echo_window_is_one_second() {
+    use std::time::Duration;
+    assert!(send_echo_window_open(Duration::from_millis(900)));
+    assert!(!send_echo_window_open(Duration::from_millis(1000)));
+}
+
+/// Shift+Enter, Alt+Enter, and bare Enter in multiline mode insert a newline.
+/// They still do so on the empty input right after a send.
+#[test]
+fn newline_enter_right_after_send_still_inserts_newline() {
+    let mut state = DashboardState::new();
+    let reg = crate::actions::ActionRegistry::defaults();
+    state.focus_new_agent_button();
+    state.list_focused = false;
+
+    for (multiline, modifiers) in [
+        (false, KeyModifiers::SHIFT),
+        (false, KeyModifiers::ALT),
+        (true, KeyModifiers::NONE),
+    ] {
+        state.multiline_mode = multiline;
+        state.dispatch.set_text("");
+        state.last_send_at = Some(Instant::now());
+        let outcome =
+            state.handle_input(&Event::Key(KeyEvent::new(KeyCode::Enter, modifiers)), &reg);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "multiline={multiline} {modifiers:?}: expected a newline edit, got {outcome:?}"
+        );
+        assert_eq!(
+            state.dispatch.text(),
+            "\n",
+            "multiline={multiline} {modifiers:?}: the input must contain the newline"
+        );
+    }
+}
+
+/// The dashboard's own dispatch input opens a `/model` row's other routes on Right-arrow or Tab,
+/// the same as `/model` in a session (one implementation: `PromptWidget::slash_open_model_routes`).
+mod dispatch_model_routes {
+    use super::*;
+    use agent_client_protocol as acp;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    fn model(id: &str, name: &str, meta: serde_json::Value) -> (acp::ModelId, acp::ModelInfo) {
+        let id = acp::ModelId::new(std::sync::Arc::from(id));
+        (id.clone(), acp::ModelInfo::new(id, name.to_string()).meta(meta.as_object().cloned()))
+    }
+
+    fn route(key: &str, word: &str, reason: &str) -> serde_json::Value {
+        serde_json::json!({ "key": key, "label": word, "badge": word, "reason": reason, "word": word, "ready": true })
+    }
+
+    fn dashboard_with_models(text: &str) -> DashboardState {
+        let mut state = DashboardState::new();
+        for (id, info) in [
+            model("grok-4.7", "Grok 4.7", serde_json::json!({ "routes": [
+                route("grok-4.7", "flux", "via Flux Router: $2.5 in / $10 out per 1M tokens"),
+                route("xai/grok-4.7", "grok", "included in your Grok subscription: no per-token charge"),
+            ]})),
+            model("xai/grok-4.7", "grok-4.7 (Grok subscription)", serde_json::json!({ "altRouteOf": "grok-4.7" })),
+            model("solo", "Solo", serde_json::json!({})),
+        ] {
+            state.models.available.insert(id, info);
+        }
+        state.models.current = Some(acp::ModelId::new(std::sync::Arc::from("grok-4.7")));
+        state.dispatch.set_text(text);
+        state.dispatch.set_cursor(text.len());
+        state.dispatch.refresh_slash(&state.models);
+        state
+    }
+
+    #[test]
+    fn right_arrow_and_tab_open_the_routes_in_the_dispatch_input() {
+        for code in [KeyCode::Right, KeyCode::Tab] {
+            let mut state = dashboard_with_models("/model ");
+            assert!(state.dispatch.slash_open());
+            let registry = crate::actions::ActionRegistry::defaults();
+            let _ = state.handle_input(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)), &registry);
+            assert_eq!(state.dispatch.text(), "/model Grok 4.7 via ", "{code:?}");
+            let rows: Vec<String> = state
+                .dispatch
+                .slash_snapshot()
+                .matches
+                .iter()
+                .map(|r| r.description.clone())
+                .collect();
+            assert_eq!(rows.len(), 2, "{rows:?}");
+            assert_eq!(rows[0], "via Flux Router: $2.5 in / $10 out per 1M tokens");
+        }
+    }
+
+    /// A model with one route leaves Tab to its usual completion.
+    #[test]
+    fn a_single_route_model_keeps_tab_as_completion() {
+        let mut state = dashboard_with_models("/model Sol");
+        let registry = crate::actions::ActionRegistry::defaults();
+        let _ = state.handle_input(&Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)), &registry);
+        assert!(!state.dispatch.text().contains(" via "), "{}", state.dispatch.text());
+    }
+}
+
+/// Row 59.4: a peek reply stashed behind a clipboard probe is cancelled, with a toast, the moment the panel closes (Esc) or the cursor moves to
+/// another row, rather than when the probe finally returns.
+#[test]
+fn stashed_peek_reply_is_cancelled_at_once_when_the_panel_closes() {
+    let mut state = state_with_open_peek(); // peeks TopLevel(AgentId(0))
+    state.paste_probe_in_flight = 1;
+    state.deferred_peek_send = Some(DeferredPeekSend {
+        row: DashboardRowId::TopLevel(AgentId(0)),
+        attach: false,
+    });
+    state.set_peek(None);
+    assert!(state.deferred_peek_send.is_none(), "the stash is dropped when the panel closes");
+    assert!(
+        state.error_toast.as_deref().is_some_and(|t| t.contains("Reply canceled")),
+        "the cancel is announced: {:?}",
+        state.error_toast
+    );
+}
+
+#[test]
+fn stashed_peek_reply_is_cancelled_at_once_when_the_cursor_moves_rows() {
+    let mut state = state_with_open_peek();
+    state.paste_probe_in_flight = 1;
+    state.deferred_peek_send = Some(DeferredPeekSend {
+        row: DashboardRowId::TopLevel(AgentId(0)),
+        attach: false,
+    });
+    let mut moved = state.peek.take().expect("peek open");
+    moved.row = DashboardRowId::TopLevel(AgentId(7));
+    state.set_peek(Some(moved));
+    assert!(state.deferred_peek_send.is_none());
+    assert!(state.error_toast.is_some(), "moving rows announces the cancel");
+}
+
+#[test]
+fn stashed_peek_reply_survives_a_refresh_of_the_same_row() {
+    let mut state = state_with_open_peek();
+    state.paste_probe_in_flight = 1;
+    state.deferred_peek_send = Some(DeferredPeekSend {
+        row: DashboardRowId::TopLevel(AgentId(0)),
+        attach: false,
+    });
+    let same = super::super::peek::PeekPanelState::new(
+        DashboardRowId::TopLevel(AgentId(0)),
+        peek_fields_for_test("Idle"),
+    );
+    state.set_peek(Some(same));
+    assert!(state.deferred_peek_send.is_some(), "a same-row refresh keeps the stash");
+    assert!(state.error_toast.is_none());
+}
+
+// -- Row 61.3: drag-select the peek box's live tail --------------------------
+
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use ratatui::buffer::Buffer;
+
+fn tail_mouse(state: &mut DashboardState, kind: MouseEventKind, column: u16, row: u16) -> InputOutcome {
+    state.handle_mouse(&MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
+fn state_with_painted_tail() -> (DashboardState, Rect) {
+    let mut state = state_with_open_peek();
+    let rect = Rect::new(2, 5, 12, 3);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 30, 12));
+    for (i, line) in ["first line", "second line", "third"].iter().enumerate() {
+        buf.set_string(2, 5 + i as u16, line, ratatui::style::Style::default());
+    }
+    state.peek_tail_rect = Some(rect);
+    state.peek_tail_cells = super::super::peek_select::capture_cells(&buf, rect);
+    (state, rect)
+}
+
+/// Dragging across the tail selects the painted text, and releasing the button copies it.
+#[test]
+fn dragging_over_the_peek_tail_copies_the_selected_text_on_release() {
+    let (mut state, _) = state_with_painted_tail();
+    assert!(matches!(
+        tail_mouse(&mut state, MouseEventKind::Down(MouseButton::Left), 2, 5),
+        InputOutcome::Changed
+    ));
+    assert!(state.peek_tail_selection.is_some(), "the press starts a selection");
+    assert!(state.peek_tail_last_copy.is_none(), "nothing is copied before the release");
+    let _ = tail_mouse(&mut state, MouseEventKind::Drag(MouseButton::Left), 6, 5);
+    let _ = tail_mouse(&mut state, MouseEventKind::Up(MouseButton::Left), 6, 5);
+    assert_eq!(state.peek_tail_last_copy.as_deref(), Some("first"));
+    assert!(state.peek_tail_selection.is_some(), "the highlight stays after the copy");
+}
+
+/// A drag across several rows copies them in reading order, and may run past the box edge.
+#[test]
+fn a_multi_row_drag_past_the_edge_copies_every_row() {
+    let (mut state, _) = state_with_painted_tail();
+    let _ = tail_mouse(&mut state, MouseEventKind::Down(MouseButton::Left), 2, 5);
+    let _ = tail_mouse(&mut state, MouseEventKind::Drag(MouseButton::Left), 90, 40);
+    let _ = tail_mouse(&mut state, MouseEventKind::Up(MouseButton::Left), 90, 40);
+    assert_eq!(
+        state.peek_tail_last_copy.as_deref(),
+        Some("first line\nsecond line\nthird")
+    );
+}
+
+/// A plain click selects and copies nothing.
+#[test]
+fn clicking_the_peek_tail_without_dragging_copies_nothing() {
+    let (mut state, _) = state_with_painted_tail();
+    let _ = tail_mouse(&mut state, MouseEventKind::Down(MouseButton::Left), 4, 6);
+    let _ = tail_mouse(&mut state, MouseEventKind::Up(MouseButton::Left), 4, 6);
+    assert!(state.peek_tail_last_copy.is_none());
+    assert!(state.peek_tail_selection.is_none());
+}
+
+/// Closing the panel forgets the selection and the tail geometry.
+#[test]
+fn closing_the_peek_drops_the_tail_selection() {
+    let (mut state, _) = state_with_painted_tail();
+    let _ = tail_mouse(&mut state, MouseEventKind::Down(MouseButton::Left), 2, 5);
+    let _ = tail_mouse(&mut state, MouseEventKind::Drag(MouseButton::Left), 6, 5);
+    state.set_peek(None);
+    assert!(state.peek_tail_selection.is_none());
+    assert!(state.peek_tail_rect.is_none());
+    assert!(state.peek_tail_cells.is_empty());
 }

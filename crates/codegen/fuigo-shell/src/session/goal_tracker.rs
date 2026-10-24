@@ -592,7 +592,12 @@ pub struct GoalTracker {
     session_dir: PathBuf,
     active_since: Option<Instant>,
     planner_run: Option<GoalPlannerRunState>,
+    /// Consecutive goal continuations that ended without a single tool call (runtime only, never persisted).
+    idle_continuations: u32,
 }
+
+/// Consecutive continuations with no tool call after which a goal pauses instead of burning more turns.
+pub(crate) const GOAL_IDLE_CONTINUATION_THRESHOLD: u32 = 3;
 
 #[derive(Debug)]
 pub(crate) struct GoalPlannerRunState {
@@ -607,7 +612,19 @@ impl GoalTracker {
             session_dir,
             active_since: None,
             planner_run: None,
+            idle_continuations: 0,
         }
+    }
+
+    /// Count one more continuation that made no tool call; returns the running streak.
+    pub(crate) fn note_idle_continuation(&mut self) -> u32 {
+        self.idle_continuations = self.idle_continuations.saturating_add(1);
+        self.idle_continuations
+    }
+
+    /// Forget the idle streak (a tool call, a human turn, a resume or a new goal).
+    pub(crate) fn reset_idle_continuations(&mut self) {
+        self.idle_continuations = 0;
     }
 
     /// Restore from a persisted snapshot.
@@ -673,6 +690,7 @@ impl GoalTracker {
             session_dir,
             active_since,
             planner_run: None,
+            idle_continuations: 0,
         }
     }
 
@@ -844,6 +862,7 @@ impl GoalTracker {
                 false
             }
         };
+        self.idle_continuations = 0;
         self.orchestration = Some(GoalOrchestration {
             goal_id,
             objective,
@@ -970,6 +989,7 @@ impl GoalTracker {
             o.reset_strategist_fields();
             o.reset_classifier_stall_fields();
             o.reset_evaluator_blocker_fields();
+            self.idle_continuations = 0;
             self.active_since = Some(Instant::now());
             self.record_event(GoalEvent::GoalResumed, None);
             return true;
@@ -1051,6 +1071,7 @@ impl GoalTracker {
         self.remove_scratch_root();
         self.orchestration = None;
         self.active_since = None;
+        self.idle_continuations = 0;
     }
 
     /// Best-effort scratch-root removal shared by every terminal transition.
