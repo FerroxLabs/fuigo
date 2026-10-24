@@ -278,6 +278,20 @@ pub(super) fn handle_exit_plan_mode(
         return false;
     };
 
+    // A dialog the user is answering stays open: park this review and show it when the last such dialog closes.
+    if agent.plan_review_must_wait() {
+        tracing::info!(
+            tool_call_id = %params.tool_call_id,
+            "exit_plan_mode while a dialog is open; parked until it closes"
+        );
+        agent.drop_parked_plan_request();
+        agent.parked_plan_request = Some(crate::app::agent_view::ParkedPlanRequest {
+            tool_call_id: params.tool_call_id,
+            ext,
+        });
+        return false;
+    }
+
     if let Some(mut old) = agent.plan_approval_view.take() {
         tracing::warn!(
             old_tool_call_id = %old.tool_call_id,
@@ -364,6 +378,29 @@ pub(super) fn handle_exit_plan_mode(
 
     // An approval parked on a background session renders when the user switches to it; only the active view needs an immediate redraw
     is_active
+}
+
+/// Open every parked plan review whose blocking dialogs have all closed.
+/// Returns true when a view changed and needs a redraw.
+pub(crate) fn release_parked_plan_requests(app: &mut AppView) -> bool {
+    let ready: Vec<_> = app
+        .agents
+        .iter()
+        .filter(|(_, agent)| agent.parked_plan_request.is_some() && !agent.plan_review_must_wait())
+        .map(|(id, _)| *id)
+        .collect();
+    let mut redraw = false;
+    for id in ready {
+        let Some(parked) = app
+            .agents
+            .get_mut(&id)
+            .and_then(|agent| agent.parked_plan_request.take())
+        else {
+            continue;
+        };
+        redraw |= handle_exit_plan_mode(parked.ext, app);
+    }
+    redraw
 }
 
 pub(super) fn plan_review_source_for_tool(

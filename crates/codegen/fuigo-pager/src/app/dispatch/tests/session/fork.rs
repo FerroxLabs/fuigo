@@ -1776,3 +1776,39 @@ fn dispatch_fork_is_blocked_while_a_card_waits_for_an_answer() {
         assert!(toast.0.contains("waiting for your answer"), "got: {}", toast.0);
     }
 }
+
+/// A fork inherits the parent's live model and effort: the launch `-m` / `--effort` must not be
+/// re-applied on top of the session the fork loads.
+#[test]
+fn fork_does_not_reapply_cli_model_or_effort_override() {
+    let mut app = fork_test_app();
+    app.cli_model_override = Some(acp::ModelId::new(std::sync::Arc::from("launch-model-a")));
+    app.cli_effort_token = Some("high".into());
+    dispatch(Action::Fork(fork_args(Some(false), None)), &mut app);
+    let fork_id = AgentId(1);
+    assert!(
+        app.agents[&fork_id].session.deferred_model_switch.is_none(),
+        "the fork placeholder must not stash the launch -m override"
+    );
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            attempt: 0,
+            agent_id: fork_id,
+            session_id: acp::SessionId::new("sess-fork"),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SwitchModel { .. })),
+        "a fork must not switch the model back to the launch model/effort: {effects:?}"
+    );
+    assert!(!app.agents[&fork_id].session.model_switch_pending);
+}

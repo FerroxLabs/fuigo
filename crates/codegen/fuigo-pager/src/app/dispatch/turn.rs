@@ -377,6 +377,7 @@ fn cancel_agent_turn(
     agent.cancel_turn_view = None;
     agent.cancel_turn_buttons.clear();
     drain_permission_queue(agent);
+    agent.drop_parked_plan_request();
     if let Some(mut pav) = agent.plan_approval_view.take() {
         pav.send_stale_cancel();
         agent.plan_next_comment_id = pav.next_comment_id;

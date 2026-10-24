@@ -1837,6 +1837,20 @@ fn headless_materialize_ctx(
     }
 }
 
+/// `--permission-mode plan` has no headless meaning. Plan mode ends with `exit_plan_mode`, which waits for a person to
+/// approve the plan, and a headless run has nobody to ask. Running in some other mode instead would quietly give the
+/// caller something they did not ask for, so the flag is refused up front, before the agent starts.
+pub fn reject_headless_plan_mode(permission_mode: Option<&str>) -> Result<()> {
+    if permission_mode == Some("plan") {
+        anyhow::bail!(
+            "--permission-mode plan is not supported in headless mode (-p): plan mode ends by asking you to approve the plan, \
+             and a headless run has nobody to ask. Run `fuigo --permission-mode plan` interactively to plan, or choose \
+             another mode for -p (default, acceptEdits, bypassPermissions)."
+        );
+    }
+    Ok(())
+}
+
 /// Run a headless single-turn prompt: spawn the agent, drive the ACP lifecycle, stream to stdout.
 ///
 /// Returns [`HeadlessOutcome`], not `()`: a permission denial ends the run as a distinct,
@@ -2133,6 +2147,7 @@ async fn run_single_turn_inner(
     emitter: &mut HeadlessEmitter,
     interrupt: InterruptWatch,
 ) -> Result<HeadlessOutcome> {
+    reject_headless_plan_mode(options.permission_mode_flag.as_deref())?;
     // Stamp proxy requests as headless before the agent issues its first request.
     fuigo_shell::http::set_process_client_mode_headless();
 

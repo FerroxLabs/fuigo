@@ -104,6 +104,13 @@ pub(crate) fn apply_deferred_model_switch(
     cli_effort_token: Option<&str>,
 ) -> Option<DeferredModelSwitch> {
     let stashed = agent.session.deferred_model_switch.take();
+    // A fork inherits the parent's live model and effort from the session it loads; the launch `-m` / `--effort` are for fresh sessions only.
+    let is_fork = agent.session.forked_from.is_some() || agent.pending_fork_banner.is_some();
+    let (stashed, cli_effort_token) = if is_fork {
+        (None, None)
+    } else {
+        (stashed, cli_effort_token)
+    };
     let outcome = take_deferred_model_switch(stashed, &agent.session.models, cli_effort_token);
     apply_deferred_switch_outcome(agent, outcome).map(|mut switch| {
         if agent.session.models.current.as_ref() != Some(&switch.model_id) {
@@ -1137,6 +1144,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_with_id(
 pub(in crate::app::dispatch) fn refuse_chat_mode_build_agent(app: &mut AppView, agent_id: AgentId) {
     app.show_toast(crate::app::session_startup::CHAT_MODE_LOCAL_BUILD_REFUSAL);
     let fallback = app.agents.keys().copied().find(|id| *id != agent_id);
+    let salvaged = take_orphan_input(app, agent_id);
     remove_agent_and_cleanup(app, agent_id);
     if let Some(target) = fallback {
         switch_to_agent(app, target, SwitchCause::Picker);
@@ -1191,6 +1199,11 @@ pub(in crate::app::dispatch) fn handle_session_created(
             agent.session.models = app.models.clone();
         }
         let deferred = apply_deferred_model_switch(agent, app.cli_effort_token.as_deref());
+        // `--permission-mode plan`: the first session starts in plan mode, through the same deferred push Shift+Tab uses
+        if std::mem::take(&mut app.launch_plan_mode) && agent.deferred_session_mode.is_none() {
+            agent.deferred_session_mode = Some(fuigo_tools::types::SessionMode::Plan);
+            agent.plan_mode_pending = Some(true);
+        }
         let deferred_mode = agent.deferred_session_mode.take();
         let cwd = agent.session.cwd.clone();
         if deferred.is_some() {
@@ -1416,6 +1429,91 @@ fn restore_dashboard_attach_after_orphan_remove(
         None => d.close_popup(),
     }
 }
+/// Pull everything the user typed into a session that never came up: its queued prompts, then its composer draft.
+/// The caller removes the agent afterwards, so without this the text would be dropped with it.
+fn take_orphan_input(
+    app: &mut AppView,
+    agent_id: AgentId,
+) -> Option<crate::views::prompt_widget::StashedPrompt> {
+    let agent = app.agents.get_mut(&agent_id)?;
+    let queued: Vec<_> = agent.session.pending_prompts.drain(..).collect();
+    let composer = agent.prompt.stash();
+    let mut text = String::new();
+    let mut images = Vec::new();
+    let mut chips: Vec<crate::app::agent::ChipElement> = Vec::new();
+    let mut append = |part: &str,
+                      part_images: Vec<crate::prompt_images::PastedImage>,
+                      part_chips: Vec<crate::app::agent::ChipElement>| {
+        if part.trim().is_empty() && part_images.is_empty() {
+            return;
+        }
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        let offset = text.len();
+        text.push_str(part);
+        images.extend(part_images);
+        chips.extend(
+            part_chips
+                .into_iter()
+                .map(|chip| crate::app::agent::ChipElement {
+                    range: chip.range.start + offset..chip.range.end + offset,
+                    ..chip
+                }),
+        );
+    };
+    for queued in queued {
+        append(&queued.text, queued.images, queued.chip_elements);
+    }
+    let (composer_text, composer_images, composer_chips) = composer.into_submission();
+    append(&composer_text, composer_images, composer_chips);
+    if text.trim().is_empty() && images.is_empty() {
+        return None;
+    }
+    Some(crate::views::prompt_widget::StashedPrompt::from_submission(
+        text, images, chips,
+    ))
+}
+/// Put salvaged input back into whichever prompt the user is now looking at.
+/// Text already in that prompt is kept after the salvaged text.
+fn return_orphan_input(
+    app: &mut AppView,
+    salvaged: Option<crate::views::prompt_widget::StashedPrompt>,
+) {
+    let Some(salvaged) = salvaged else {
+        return;
+    };
+    let prompt = match app.active_view {
+        ActiveView::Agent(id) if app.agents.contains_key(&id) => {
+            &mut app.agents.get_mut(&id).unwrap().prompt
+        }
+        ActiveView::AgentDashboard if app.dashboard.is_some() => {
+            &mut app.dashboard.as_mut().unwrap().dispatch
+        }
+        _ => &mut app.welcome_prompt,
+    };
+    let existing = prompt.stash();
+    if existing.is_effectively_empty() {
+        prompt.restore(salvaged);
+        return;
+    }
+    let (existing_text, existing_images, existing_chips) = existing.into_submission();
+    let (text, mut images, mut chips) = salvaged.into_submission();
+    let offset = text.len() + 1;
+    let merged = format!("{text}\n{existing_text}");
+    images.extend(existing_images);
+    chips.extend(
+        existing_chips
+            .into_iter()
+            .map(|chip| crate::app::agent::ChipElement {
+                range: chip.range.start + offset..chip.range.end + offset,
+                ..chip
+            }),
+    );
+    prompt.restore(crate::views::prompt_widget::StashedPrompt::from_submission(
+        merged, images, chips,
+    ));
+}
 /// Failed plain `CreateSession`: drop orphan placeholders, clear the starting-session spinner, and report the error.
 /// The report is a toast when an agent remains; on the welcome screen, which has no toast, it is a startup warning.
 pub(in crate::app::dispatch) fn handle_session_failed(
@@ -1438,6 +1536,7 @@ pub(in crate::app::dispatch) fn handle_session_failed(
     if is_orphan {
         let failed_was_active = matches!(app.active_view, ActiveView::Agent(id) if id == agent_id);
         let fallback = app.agents.keys().copied().find(|id| *id != agent_id);
+        let salvaged = take_orphan_input(app, agent_id);
         remove_agent_and_cleanup(app, agent_id);
         if let Some(target) = fallback {
             if failed_was_active {
@@ -1460,6 +1559,7 @@ pub(in crate::app::dispatch) fn handle_session_failed(
             restore_dashboard_attach_after_orphan_remove(app, agent_id, None);
             push_session_create_failure_warning(app, &msg);
         }
+        return_orphan_input(app, salvaged);
     } else if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.pending_extensions_fetch = false;
         agent.session.prompt_history_loading = false;
@@ -1491,6 +1591,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_failed(
         .is_some_and(|a| a.session.session_id.is_none() && a.session.forked_from.is_none());
     if is_orphan {
         let fallback = app.agents.keys().copied().find(|id| *id != agent_id);
+        let salvaged = take_orphan_input(app, agent_id);
         remove_agent_and_cleanup(app, agent_id);
         if let Some(target) = fallback {
             switch_to_agent(app, target, SwitchCause::Picker);
@@ -1505,6 +1606,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_failed(
             app.session_picker_content_loading = false;
             restore_dashboard_attach_after_orphan_remove(app, agent_id, None);
         }
+        return_orphan_input(app, salvaged);
         let msg = format!("Cannot create worktree: {error}");
         if !app.startup_warnings.iter().any(|w| w.message == msg) {
             app.startup_warnings.push(crate::startup::StartupWarning {

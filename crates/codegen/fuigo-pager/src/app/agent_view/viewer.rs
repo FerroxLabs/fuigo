@@ -160,6 +160,26 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
+        // The first key after the review opens is text for the notes, never a shortcut: a stray `a` or `q` must not approve or abandon the plan.
+        if in_plan_approval
+            && self
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|pav| !pav.shortcuts_armed)
+            && matches!(key.code, KeyCode::Char('a' | 'q'))
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            if let Some(ref mut pav) = self.plan_approval_view {
+                pav.focus = PlanApprovalFocus::Prompt;
+            }
+            return self.handle_plan_feedback_key(key);
+        }
+        if let Some(ref mut pav) = self.plan_approval_view {
+            pav.shortcuts_armed = true;
+        }
+
         if in_plan_approval && crate::input::key::RowWalk::from_key(key).is_some() {
             if let Some(ref mut pav) = self.plan_approval_view {
                 pav.focus = PlanApprovalFocus::Prompt;

@@ -1531,7 +1531,7 @@ pub(crate) async fn spawn_session_actor(
                 cwd_path,
                 &rebuild_spec.compat,
                 own_plugins.as_deref(),
-                project_trusted,
+                crate::util::hooks::HookTrust::new(project_trusted, startup_hints.headless_session),
             );
             for e in &errors {
                 tracing::warn!(error = ?e, "hook loading error");

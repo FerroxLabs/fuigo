@@ -79,9 +79,10 @@ pub(crate) fn git_clean_fd(worktree_path: &Path, include_ignored: bool) -> Resul
 
 /// Run `git checkout <ref>`. Blocking.
 pub(crate) fn checkout_ref(worktree_path: &Path, git_ref: &str) -> Result<()> {
+    let git_ref = crate::git::operand::validate_git_ref(git_ref).map_err(|e| anyhow::anyhow!(e))?;
     let output = git_command()
         .current_dir(worktree_path)
-        .args(["checkout", git_ref])
+        .args(["checkout", git_ref, "--"])
         .output()
         .context("failed to run git checkout")?;
 

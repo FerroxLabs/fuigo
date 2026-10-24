@@ -56,6 +56,99 @@
     }
 
     #[test]
+    fn plan_review_parks_while_a_question_dialog_is_open() {
+        use crate::views::question_view::QuestionViewState;
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let stashed = agent.prompt.stash();
+            agent.question_view = Some(QuestionViewState::new("call-q".into(), vec![], stashed));
+        }
+        let (ext, _rx) = make_exit_plan_ext_with_tool_call_id("call-plan", Some("# Plan"));
+        handle_exit_plan_mode(ext, &mut app);
+        let agent = &app.agents[&AgentId(0)];
+        assert!(
+            agent.question_view.is_some(),
+            "the open question dialog must not be discarded"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "the plan review must wait for the open dialog instead of covering it"
+        );
+    }
+
+    #[test]
+    fn plan_review_parks_while_a_queued_prompt_is_being_edited() {
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.prompt_mode = crate::app::agent_view::PromptMode::EditingQueued {
+                id: 7,
+                original: "queued".into(),
+                server_id: None,
+                kind: crate::app::agent::QueueEntryKind::Prompt,
+            };
+        }
+        let (ext, _rx) = make_exit_plan_ext_with_tool_call_id("call-plan", Some("# Plan"));
+        handle_exit_plan_mode(ext, &mut app);
+        let agent = &app.agents[&AgentId(0)];
+        assert!(
+            matches!(
+                agent.prompt_mode,
+                crate::app::agent_view::PromptMode::EditingQueued { .. }
+            ),
+            "the queued-prompt edit must stay open"
+        );
+        assert!(agent.plan_approval_view.is_none());
+    }
+
+    #[test]
+    fn parked_plan_review_opens_when_the_dialog_closes() {
+        use crate::views::question_view::QuestionViewState;
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let stashed = agent.prompt.stash();
+            agent.question_view = Some(QuestionViewState::new("call-q".into(), vec![], stashed));
+        }
+        let (ext, mut rx) = make_exit_plan_ext_with_tool_call_id("call-plan", Some("# Plan"));
+        handle_exit_plan_mode(ext, &mut app);
+        assert!(app.agents[&AgentId(0)].parked_plan_request.is_some());
+
+        // Still open: nothing is released.
+        assert!(!release_parked_plan_requests(&mut app));
+        assert!(app.agents[&AgentId(0)].plan_approval_view.is_none());
+
+        app.agents.get_mut(&AgentId(0)).unwrap().question_view = None;
+        assert!(release_parked_plan_requests(&mut app));
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.parked_plan_request.is_none());
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.tool_call_id.as_str()),
+            Some("call-plan"),
+            "the parked review must open once the last dialog closes"
+        );
+        assert!(rx.try_recv().is_err(), "the review is still waiting for the user, not answered");
+    }
+
+    #[test]
+    fn cancelling_the_turn_answers_a_parked_plan_review() {
+        use crate::views::question_view::QuestionViewState;
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let stashed = agent.prompt.stash();
+            agent.question_view = Some(QuestionViewState::new("call-q".into(), vec![], stashed));
+        }
+        let (ext, mut rx) = make_exit_plan_ext_with_tool_call_id("call-plan", Some("# Plan"));
+        handle_exit_plan_mode(ext, &mut app);
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(agent.dismiss_resolved_interaction("call-plan"));
+        assert!(agent.parked_plan_request.is_none());
+        assert!(rx.try_recv().is_ok(), "the shell is answered, not left hanging");
+    }
+
+    #[test]
     fn interaction_resolved_is_noop_for_unknown_tool_call_id() {
         let mut app = make_app_with_agent("sess-1");
         let (msg, _rx) = make_permission_message("sess-1");

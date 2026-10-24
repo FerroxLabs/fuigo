@@ -1408,7 +1408,9 @@ impl SessionActor {
             scheduler: tool_names.iter().any(|n| {
                 n == fuigo_tools::implementations::fuigo_build::SCHEDULER_CREATE_TOOL_NAME
             }),
-            hooks: self.hook_registry.borrow().is_some(),
+            // Always on: an untrusted folder now loads no hooks at all, and /hooks-trust (the way out) and /hooks-add (the way in)
+            // must stay reachable with an empty registry
+            hooks: true,
             plugins: self.plugin_registry.borrow().is_some(),
             goal,
             workflows: tool_names.iter().any(|n| {

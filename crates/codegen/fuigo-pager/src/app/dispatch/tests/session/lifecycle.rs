@@ -2106,6 +2106,130 @@ fn session_failed_orphan_restores_dashboard_attach_to_survivor() {
         "row focus must follow attach to the survivor",
     );
 }
+/// Make `id` an orphan (create in flight) that holds a queued prompt and unsent composer text.
+fn make_orphan_with_typed_input(app: &mut AppView, id: AgentId, queued: &str, composer: &str) {
+    let a = app.agents.get_mut(&id).unwrap();
+    a.session.session_id = None;
+    a.session.forked_from = None;
+    a.session.enqueue_prompt(queued.to_string());
+    a.prompt.set_text(composer);
+}
+/// A failed `session/new` from the welcome screen hands the typed text back to the welcome prompt.
+#[test]
+fn session_failed_orphan_returns_typed_text_to_welcome_prompt() {
+    let mut app = test_app_with_agent();
+    make_orphan_with_typed_input(&mut app, AgentId(0), "ship the fix", "and add tests");
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionFailed {
+            agent_id: AgentId(0),
+            error: "auth error".to_string(),
+        }),
+        &mut app,
+    );
+    assert!(matches!(app.active_view, ActiveView::Welcome));
+    let text = app.welcome_prompt.text().to_string();
+    assert!(
+        text.contains("ship the fix"),
+        "queued prompt lost: {text:?}"
+    );
+    assert!(
+        text.contains("and add tests"),
+        "composer text lost: {text:?}"
+    );
+}
+/// A failed worktree create returns the typed text too.
+#[test]
+fn worktree_session_failed_orphan_returns_typed_text_to_welcome_prompt() {
+    let mut app = test_app_with_agent();
+    make_orphan_with_typed_input(&mut app, AgentId(0), "ship the fix", "and add tests");
+    dispatch(
+        Action::TaskComplete(TaskResult::WorktreeSessionFailed {
+            agent_id: AgentId(0),
+            error: "auth error".to_string(),
+        }),
+        &mut app,
+    );
+    assert!(matches!(app.active_view, ActiveView::Welcome));
+    let text = app.welcome_prompt.text().to_string();
+    assert!(
+        text.contains("ship the fix"),
+        "queued prompt lost: {text:?}"
+    );
+    assert!(
+        text.contains("and add tests"),
+        "composer text lost: {text:?}"
+    );
+}
+/// A dashboard dispatch that fails while other sessions exist hands the text back to the dashboard input.
+#[test]
+fn session_failed_orphan_returns_typed_text_to_dashboard_dispatch() {
+    let mut app = test_app_with_two_agents();
+    ensure_dashboard_state(&mut app);
+    app.active_view = ActiveView::AgentDashboard;
+    make_orphan_with_typed_input(&mut app, AgentId(1), "ship the fix", "");
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionFailed {
+            agent_id: AgentId(1),
+            error: "auth error".to_string(),
+        }),
+        &mut app,
+    );
+    assert!(!app.agents.contains_key(&AgentId(1)));
+    assert!(matches!(app.active_view, ActiveView::AgentDashboard));
+    let text = app.dashboard.as_ref().unwrap().dispatch.text().to_string();
+    assert!(
+        text.contains("ship the fix"),
+        "queued prompt lost: {text:?}"
+    );
+}
+/// A failed worktree create lands the user on the surviving session (the handler always switches there), so the text goes to its composer.
+#[test]
+fn worktree_session_failed_orphan_returns_typed_text_to_the_session_the_user_lands_on() {
+    let mut app = test_app_with_two_agents();
+    ensure_dashboard_state(&mut app);
+    app.active_view = ActiveView::AgentDashboard;
+    make_orphan_with_typed_input(&mut app, AgentId(1), "ship the fix", "");
+    dispatch(
+        Action::TaskComplete(TaskResult::WorktreeSessionFailed {
+            agent_id: AgentId(1),
+            error: "auth error".to_string(),
+        }),
+        &mut app,
+    );
+    assert!(!app.agents.contains_key(&AgentId(1)));
+    let ActiveView::Agent(landed) = app.active_view else {
+        panic!("expected the user to land on the surviving session");
+    };
+    let text = app.agents[&landed].prompt.text().to_string();
+    assert!(
+        text.contains("ship the fix"),
+        "queued prompt lost: {text:?}"
+    );
+}
+/// When the user falls back onto a surviving session, the text lands in that session's composer.
+#[test]
+fn session_failed_orphan_returns_typed_text_to_surviving_agent() {
+    let mut app = test_app_with_two_agents();
+    switch_to_agent(&mut app, AgentId(1), SwitchCause::New);
+    make_orphan_with_typed_input(&mut app, AgentId(1), "ship the fix", "and add tests");
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionFailed {
+            agent_id: AgentId(1),
+            error: "auth error".to_string(),
+        }),
+        &mut app,
+    );
+    assert!(matches!(app.active_view, ActiveView::Agent(AgentId(0))));
+    let text = app.agents[&AgentId(0)].prompt.text().to_string();
+    assert!(
+        text.contains("ship the fix"),
+        "queued prompt lost: {text:?}"
+    );
+    assert!(
+        text.contains("and add tests"),
+        "composer text lost: {text:?}"
+    );
+}
 /// Last-session orphan failure clears overlay attach when returning to Welcome.
 #[test]
 fn session_failed_last_orphan_clears_dashboard_attach() {
@@ -3084,4 +3208,70 @@ fn session_id_resolver_round_trip_subagent() {
     );
     let back = resolver.to_persisted(&live).expect("must reverse");
     assert_eq!(back, pid);
+}
+
+fn session_created(app: &mut AppView, id: AgentId, session_id: &acp::SessionId) -> Vec<Effect> {
+    let agent_id = id;
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionCreated {
+            agent_id,
+            session_id: session_id.clone(),
+            models: None,
+            scheduler_background_loops: None,
+        }),
+        app,
+    )
+}
+
+fn sets_plan_mode(effects: &[Effect], session_id: &acp::SessionId) -> bool {
+    effects.iter().any(|e| {
+        matches!(e, Effect::SetSessionMode { session_id: s, mode_id }
+            if s == session_id && &*mode_id.0 == "plan")
+    })
+}
+
+/// `--permission-mode plan` starts the first session in plan mode: the launch flag becomes the same deferred plan push
+/// Shift+Tab stages before a session exists, and the badge shows plan at once.
+#[test]
+fn launch_plan_mode_flag_puts_the_first_session_in_plan_mode() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let session_id: acp::SessionId = "launch-plan-session".into();
+    app.agents.get_mut(&id).unwrap().session.session_id = None;
+    app.launch_plan_mode = true;
+    let effects = session_created(&mut app, id, &session_id);
+    assert!(
+        sets_plan_mode(&effects, &session_id),
+        "SessionCreated must push plan mode when launched with --permission-mode plan, got {effects:?}"
+    );
+    assert_eq!(app.agents[&id].plan_mode_pending, Some(true));
+    assert!(!app.launch_plan_mode, "the launch flag applies to the first session only");
+}
+
+/// Without the flag a new session is not pushed into plan mode.
+#[test]
+fn no_launch_plan_flag_leaves_the_session_out_of_plan_mode() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let session_id: acp::SessionId = "no-plan-session".into();
+    app.agents.get_mut(&id).unwrap().session.session_id = None;
+    let effects = session_created(&mut app, id, &session_id);
+    assert!(!sets_plan_mode(&effects, &session_id), "got {effects:?}");
+    assert_ne!(app.agents[&id].plan_mode_pending, Some(true));
+}
+
+/// A session created after the first one is a normal session: the flag was consumed.
+#[test]
+fn launch_plan_flag_does_not_carry_to_a_second_session() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.session_id = None;
+    app.launch_plan_mode = true;
+    let first: acp::SessionId = "first".into();
+    let _ = session_created(&mut app, id, &first);
+    app.agents.get_mut(&id).unwrap().session.session_id = None;
+    app.agents.get_mut(&id).unwrap().plan_mode_pending = None;
+    let second: acp::SessionId = "second".into();
+    let effects = session_created(&mut app, id, &second);
+    assert!(!sets_plan_mode(&effects, &second), "got {effects:?}");
 }

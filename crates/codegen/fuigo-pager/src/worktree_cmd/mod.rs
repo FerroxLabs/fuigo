@@ -22,9 +22,10 @@ enum WorktreeCommand {
     /// Create a worktree the way `fuigo -w` does, without starting a session
     Create {
         /// Worktree name; generated when omitted
+        #[arg(value_parser = fuigo_fast_worktree::parse_worktree_name_arg)]
         name: Option<String>,
         /// Branch, tag, or commit to base the worktree on; without it, HEAD plus uncommitted changes
-        #[arg(long = "ref", value_name = "REF")]
+        #[arg(long = "ref", value_name = "REF", value_parser = fuigo_fast_worktree::parse_git_ref_arg)]
         git_ref: Option<String>,
     },
     /// List tracked worktrees
@@ -481,6 +482,25 @@ mod tests {
                 assert!(git_ref.is_none());
             }
             _ => panic!("expected Create variant"),
+        }
+    }
+    #[test]
+    fn create_refuses_option_shaped_ref_and_name() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            command: WorktreeCommand,
+        }
+        for args in [
+            vec!["test", "create", "--ref=-x"],
+            vec!["test", "create", "--ref=--upload-pack=x"],
+            vec!["test", "create", "--", "-x"],
+        ] {
+            let err = Cli::try_parse_from(args.clone())
+                .err()
+                .unwrap_or_else(|| panic!("{args:?} must be refused"));
+            assert!(err.to_string().contains("may not begin with '-'"), "{args:?}: {err}");
         }
     }
     /// A-R8-3: `83112ed` converted this file's other renders to `data.message` and left the envelope

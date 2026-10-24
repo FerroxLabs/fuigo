@@ -47,16 +47,18 @@ Hooks are discovered from several places (all are merged):
 
 | Scope     | Path                              | Trusted?     | Notes |
 |-----------|-----------------------------------|--------------|-------|
-| Global    | `~/.fuigo/hooks/*.json`            | Always       | Best for personal hooks |
-| Global    | `~/.claude/settings.json`         | Always       | Claude Code compatibility |
+| Global    | `~/.fuigo/hooks/*.json`            | Requires trust (headless: always) | Best for personal hooks |
+| Global    | `~/.claude/settings.json`         | Requires trust (headless: always) | Claude Code compatibility |
 | Project   | `<project>/.fuigo/hooks/*.json`    | Requires trust | Per-repo automation |
 | Project   | `<project>/.claude/settings.json` | Requires trust | Claude compatibility |
-| Config    | `config.toml`, `managed_config.toml`, `requirements.toml` | Always | Hooks shipped in your (or your organization's) config |
-| Plugin    | Bundled inside installed plugins  | Per-plugin   | Shared team hooks |
+| Config    | `config.toml`, `managed_config.toml`, `requirements.toml` | Managed (system) layers always; your own need trust (headless: always) | Hooks shipped in your (or your organization's) config |
+| Plugin    | Bundled inside installed plugins  | Per-plugin, and requires trust | Shared team hooks |
 
 Config-file hooks use the same schema in TOML form; see the [Hooks user guide](user-guide/10-hooks.md#hooks-in-config-files) for details.
 
 **Trusting a project**: The first time you open a project with hooks, open the hooks modal (`Ctrl+L` outside the VS Code family, or `/hooks` on any terminal) or run `/hooks-trust`. This is the same folder-trust gate as `--trust`, recorded in `~/.fuigo/trusted_folders.toml`. Trust prevents untrusted repos from running arbitrary code.
+
+**Untrusted folders**: until you trust a folder, an interactive session runs only managed hooks from your organization (the root-owned `requirements.toml` and `managed_config.toml` under `/etc/fuigo`, and the MDM requirements layer). Your own hooks (`~/.fuigo/hooks`, `~/.claude`, `~/.cursor`, and the `[hooks]` in your `config.toml`, `$FUIGO_HOME/managed_config.toml` and `$FUIGO_HOME/requirements.toml`), project hooks, plugin hooks and agent hooks all stay off, and Fuigo logs one line per folder saying so. Run `/hooks-trust` (or launch with `--trust`) to turn them on. A headless (`-p`) session has nobody to ask, so it treats your own hooks as trusted; project, plugin and agent hooks still wait for folder trust there.
 
 ## The Hook JSON Format
 
@@ -259,7 +261,7 @@ The full event envelope is POSTed as JSON. Useful for webhooks, analytics, or se
 ## Security Notes
 
 - Global hooks (`~/.fuigo/...`) run with your user permissions. Treat them like shell scripts.
-- Project hooks require explicit trust (run `/hooks-trust` or use the modal) to prevent supply-chain attacks from malicious repos.
+- User, project, plugin and agent hooks require explicit trust (only managed hooks from your organization run in an untrusted folder) (run `/hooks-trust` or use the modal) to prevent supply-chain attacks from malicious repos.
 - HTTP hooks send session data. Only use trusted endpoints.
 
 ## Troubleshooting

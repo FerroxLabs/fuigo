@@ -27,12 +27,12 @@ impl SessionActor {
         };
         let mut out = Vec::new();
         for plugin in plugins.active_plugins() {
-            if plugin.scope == fuigo_agent::plugins::discovery::PluginScope::Project
-                && !project_trusted
-            {
+            // Every plugin's hooks wait for folder trust, whatever its scope: a user plugin is the user's own code,
+            // but an untrusted folder runs only managed hooks until it is trusted
+            if !project_trusted {
                 tracing::debug!(
                     plugin = %plugin.name,
-                    "project plugin hooks skipped: folder not trusted"
+                    "plugin hooks skipped: folder not trusted"
                 );
                 continue;
             }
@@ -72,13 +72,15 @@ impl SessionActor {
         cwd: &std::path::Path,
         compat: &fuigo_tools::types::compat::CompatConfig,
         plugins: Option<&fuigo_agent::plugins::PluginRegistry>,
-        project_trusted: bool,
+        trust: impl Into<crate::util::hooks::HookTrust>,
     ) -> (
         fuigo_hooks::discovery::HookRegistry,
         Vec<fuigo_hooks::error::HookError>,
     ) {
-        let (mut registry, errors) = crate::util::hooks::discover_hooks_for_cwd(cwd, compat, project_trusted);
-        registry.append_specs(Self::plugin_hook_specs(plugins, project_trusted));
+        let trust = trust.into();
+        let (mut registry, errors) = crate::util::hooks::discover_hooks_for_cwd(cwd, compat, trust);
+        // Plugin hooks follow folder trust alone: a headless session still needs the folder trusted for them
+        registry.append_specs(Self::plugin_hook_specs(plugins, trust.folder));
         (registry, errors)
     }
 
@@ -144,9 +146,8 @@ impl SessionActor {
             );
             return Vec::new();
         }
-        if !crate::agent::folder_trust::agent_inline_hooks_allowed(definition.scope, || {
-            project_trusted
-        }) {
+        // An untrusted folder runs no agent hooks, whatever the agent's scope
+        if !crate::agent::folder_trust::agent_hooks_allowed(|| project_trusted) {
             return Vec::new();
         }
         let (specs, errors) = fuigo_hooks::config::parse_hooks_from_value_with_dir(
@@ -1015,7 +1016,7 @@ impl SessionActor {
             cwd,
             &self.rebuild_spec.compat,
             plugins_now.as_deref(),
-            is_trusted,
+            crate::util::hooks::HookTrust::new(is_trusted, self.startup_hints.headless_session),
         );
         // The session's agent hooks are part of its registry too (the spawn override put them there): re-derive them on the same verdict
         let agent_specs = Self::agent_inline_hook_specs(
@@ -1204,7 +1205,10 @@ impl SessionActor {
                         session_cwd,
                         &self.rebuild_spec.compat,
                         None,
-                        project_trusted,
+                        crate::util::hooks::HookTrust::new(
+                            project_trusted,
+                            self.startup_hints.headless_session,
+                        ),
                     );
                     new_reg.append_specs(new_specs);
                     *reg = Some(Arc::new(new_reg));
@@ -1440,8 +1444,8 @@ mod p07_plugin_hook_tests {
         );
         assert_eq!(
             plugin_names(&SessionActor::plugin_hook_specs(reg, false)),
-            vec!["cligate"],
-            "untrusted now: the stale snapshot's project plugin must contribute nothing"
+            Vec::<String>::new(),
+            "untrusted now: no plugin contributes a hook, neither the stale snapshot's project plugin nor the CLI one"
         );
     }
 
@@ -1642,9 +1646,14 @@ mod p07_plugin_hook_tests {
         }))
         .unwrap();
         assert_eq!(
-            SessionActor::agent_inline_hook_specs(&def, dir.path(), false, false).len(),
+            SessionActor::agent_inline_hook_specs(&def, dir.path(), true, false).len(),
             1,
-            "a built-in agent's own hook is admitted"
+            "a built-in agent's own hook is admitted in a trusted folder"
+        );
+        assert_eq!(
+            SessionActor::agent_inline_hook_specs(&def, dir.path(), false, false).len(),
+            0,
+            "an untrusted folder runs no agent hooks, built-in agents included"
         );
         def.plugin_name = Some("someplugin".to_string());
         for is_subagent in [false, true] {
@@ -1781,14 +1790,17 @@ mod p07_plugin_hook_tests {
             ..Default::default()
         };
         let handle = SharedPluginRegistryHandle::new(None, vec![]);
-        let plugins = handle.build_for_cwd(repo.path(), &cfg, &[cli_plugin], false);
-        let (registry, _errors) = SessionActor::build_session_hook_registry(
-            repo.path(),
-            &fuigo_tools::types::compat::CompatConfig::default(),
-            plugins.as_deref(),
-            false,
-        );
+        let plugins = handle.build_for_cwd(repo.path(), &cfg, &[cli_plugin], true);
+        let compat = fuigo_tools::types::compat::CompatConfig::default();
+        let (registry, _errors) =
+            SessionActor::build_session_hook_registry(repo.path(), &compat, plugins.as_deref(), true);
         assert_eq!(plugin_names(registry.all_hooks()), vec!["cligate"]);
+        let (untrusted, _errors) =
+            SessionActor::build_session_hook_registry(repo.path(), &compat, plugins.as_deref(), false);
+        assert!(
+            plugin_names(untrusted.all_hooks()).is_empty(),
+            "an untrusted folder loads no plugin hooks"
+        );
     }
 }
 

@@ -386,6 +386,7 @@ impl AgentView {
             esc_pressed_at: None,
             rewind_suppress_deadline: None,
             pending_first_prompt: None,
+            parked_plan_request: None,
             pending_fork_banner: None,
             load_failed: false,
             load_return_to: None,

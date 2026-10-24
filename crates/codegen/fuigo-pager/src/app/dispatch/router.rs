@@ -159,6 +159,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
     app.dispatch_depth = app.dispatch_depth.saturating_sub(1);
     if app.dispatch_depth == 0 {
         flush_image_notices(app);
+        // A dialog this action closed may have been holding a plan review back.
+        crate::app::acp_handler::release_parked_plan_requests(app);
     }
     app.note_focus_change_since(before);
     effects

@@ -730,11 +730,11 @@ pub struct PagerArgs {
     /// Start the session in a new git worktree, optionally named.
     /// With `--resume` of a remote session, pass `--restore-code` to apply the snapshot codebase (conversation is restored either way).
     /// Headless (`-p`) creates the worktree too and runs the prompt inside it.
-    #[arg(short = 'w', long = "worktree", num_args = 0..= 1, default_missing_value = "")]
+    #[arg(short = 'w', long = "worktree", num_args = 0..= 1, default_missing_value = "", value_parser = fuigo_fast_worktree::parse_worktree_name_arg)]
     pub worktree: Option<String>,
     /// Branch, tag, or commit to base the worktree on (with `--worktree`).
     /// Defaults to the current HEAD of the source checkout when omitted.
-    #[arg(long = "worktree-ref", visible_alias = "ref", requires = "worktree")]
+    #[arg(long = "worktree-ref", visible_alias = "ref", requires = "worktree", value_parser = fuigo_fast_worktree::parse_git_ref_arg)]
     pub worktree_ref: Option<String>,
     /// Restore the original session's repository snapshot when resuming.
     /// Remote sessions require `--worktree` (never checks out into the current directory).
@@ -1842,6 +1842,24 @@ mod tests {
         let c = PagerArgs::try_parse_from(["fuigo", "-w", "x"]).expect("-w x parses");
         assert_eq!(c.worktree.as_deref(), Some("x"));
         assert_eq!(c.initial_prompt(), None);
+    }
+    #[test]
+    fn option_shaped_worktree_ref_or_name_is_refused_at_parse() {
+        for args in [
+            ["fuigo", "--worktree", "--worktree-ref=-x"],
+            ["fuigo", "--worktree", "--ref=--upload-pack=x"],
+            ["fuigo", "--worktree=-x", "--ref=main"],
+        ] {
+            let err = PagerArgs::try_parse_from(args)
+                .expect_err("a ref or name starting with '-' must be refused");
+            assert!(
+                err.to_string().contains("may not begin with '-'"),
+                "{args:?}: {err}"
+            );
+        }
+        let ok = PagerArgs::try_parse_from(["fuigo", "--worktree=caf\u{e9}", "--ref=origin/main"])
+            .expect("a normal name and ref parse");
+        assert_eq!(ok.worktree.as_deref(), Some("caf\u{e9}"));
     }
     #[test]
     fn trust_flag_parses_on_pager_and_alias() {

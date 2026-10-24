@@ -345,3 +345,10 @@ The upstream-vendor egress guard refuses *names*, and an IP address has none. A 
 | Recovery    | Must trust the agent       | Kernel enforces boundaries      |
 
 The sandbox enforces limits at the OS level -- through Landlock or a mount namespace on Linux, and Seatbelt on macOS -- not a separate VM.
+
+## Worktrees under `enforce`
+
+Worktrees keep working in `enforce` mode, and Fuigo does not refuse or hide them.
+The sandbox wraps the shell commands the agent runs, one command at a time.
+Creating a worktree (`fuigo -w`, `fuigo worktree create`, `/fork` into a worktree, a subagent's worktree) is done by Fuigo itself, outside any wrapped command, so it writes under `~/.fuigo/worktrees/` as it does with the sandbox off.
+A session served from inside a Fuigo worktree is the one writable tree under the Fuigo home, so its commands can write in their own worktree and nowhere else there.

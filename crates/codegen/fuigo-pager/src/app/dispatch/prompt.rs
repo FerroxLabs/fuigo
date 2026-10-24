@@ -1542,6 +1542,7 @@ pub(super) fn handle_prompt_response(
         drain_permission_queue_at_turn_end(agent);
 
         // Dismiss any active plan approval or review: the turn that produced it has completed, so the state is stale
+        agent.drop_parked_plan_request();
         if let Some(mut pav) = agent.plan_approval_view.take() {
             pav.send_stale_cancel();
             agent.plan_next_comment_id = pav.next_comment_id;

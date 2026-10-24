@@ -999,6 +999,9 @@ pub struct AppView {
     pub cli_effort_token: Option<String>,
     /// Default YOLO for new sessions, seeded at startup from `effective_yolo_for_launch`.
     pub default_yolo: bool,
+    /// `--permission-mode plan` on the command line: the first session created enters plan mode (consumed once)
+    /// by `handle_session_created`, through the same deferred-mode push Shift+Tab uses before a session exists.
+    pub launch_plan_mode: bool,
     /// Soft-default still owns the mode: settings/update may rewrite the UI and `default_yolo`.
     /// Cleared on user Shift+Tab / settings / CLI claim.
     /// Not inferred from the rendered permission string.
@@ -1721,6 +1724,7 @@ impl AppView {
             cli_model_override: None,
             cli_effort_token: None,
             default_yolo: false,
+            launch_plan_mode: false,
             permission_mode_from_soft_default: true,
             out_of_date_leader_mode_notice_shown: false,
             auto_mode_gate: fuigo_shell::util::config::auto_permission_mode_enabled_from_disk(),
@@ -6033,6 +6037,7 @@ impl AppView {
         let mut needs_redraw = false;
         needs_redraw |= self.drain_relay_notices();
         needs_redraw |= self.drain_leader_notices();
+        needs_redraw |= crate::app::acp_handler::release_parked_plan_requests(self);
         needs_redraw |= self.minimal_state.needs_frames();
         needs_redraw |= self.poll_clipboard_focus_tip();
         if matches!(self.active_view, ActiveView::Welcome) {

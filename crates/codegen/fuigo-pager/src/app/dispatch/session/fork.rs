@@ -297,7 +297,8 @@ fn build_fork_placeholder(
             hook_block_hold: false,
             blocked_prompt: None,
             user_model_preference: None,
-            deferred_model_switch: app.deferred_model_switch_from_cli(),
+            // A fork resumes the parent's session and inherits its live model and effort; the launch `-m` must not override them.
+            deferred_model_switch: None,
             bg_tasks: std::collections::BTreeMap::new(),
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),

@@ -823,3 +823,31 @@ fn shift_y_is_consumed_so_it_does_not_reach_the_list() {
     let mut agent = agent_with_markdown_viewer(CODE_REPLY);
     assert!(agent.block_viewer.as_mut().unwrap().handle_key(&shift_y()));
 }
+
+fn plain_key(c: char) -> crossterm::event::KeyEvent {
+    crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char(c), KeyModifiers::NONE)
+}
+
+/// A stray `a` that reaches the preview as the review opens types into the notes instead of approving.
+#[test]
+fn first_a_in_the_preview_after_open_does_not_approve() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.plan_approval_view.as_mut().unwrap().focus = PlanApprovalFocus::Preview;
+    let _ = agent.handle_line_viewer_key(&plain_key('a'));
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "the first key after open must not approve the plan"
+    );
+    assert_eq!(agent.prompt.text(), "a");
+}
+
+/// Once a key has reached the review, `a` in the preview approves as before.
+#[test]
+fn a_in_the_preview_approves_once_the_review_has_seen_a_key() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.plan_approval_view.as_mut().unwrap().focus = PlanApprovalFocus::Preview;
+    let _ = agent.handle_line_viewer_key(&plain_key('j'));
+    agent.plan_approval_view.as_mut().unwrap().focus = PlanApprovalFocus::Preview;
+    let _ = agent.handle_line_viewer_key(&plain_key('a'));
+    assert!(agent.plan_approval_view.is_none(), "`a` approves after the first key");
+}

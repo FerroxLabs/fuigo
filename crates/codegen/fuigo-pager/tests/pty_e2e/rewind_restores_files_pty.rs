@@ -97,10 +97,12 @@ async fn rewind_conversation_and_files_restores_the_edited_file() {
         "rewind with files must restore the original, got {text:?}\nscreen:\n{}",
         harness.screen_contents()
     );
+    // The file is restored on disk before the pager has rendered the result, and FIXTURE is already on screen in the
+    // Edit block of the agent turn, so wait for the real event: the rewind result message naming the reverted file.
     harness
-        .wait_for_text(FIXTURE, Duration::from_secs(10))
-        .unwrap_or_else(|_| panic!("the restored file must be named:\n{}", harness.screen_contents()));
-    assert!(harness.contains_text("Reverted conversation and 1 file"), "{}", harness.screen_contents());
+        .wait_for_text("Reverted conversation and 1 file", Duration::from_secs(15))
+        .unwrap_or_else(|_| panic!("the rewind result must be reported:\n{}", harness.screen_contents()));
+    assert!(harness.contains_text(FIXTURE), "the restored file must be named:\n{}", harness.screen_contents());
     harness.quit().expect("clean quit");
 }
 

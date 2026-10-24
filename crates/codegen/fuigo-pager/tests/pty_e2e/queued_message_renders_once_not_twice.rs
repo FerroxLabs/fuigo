@@ -152,6 +152,14 @@ async fn queued_message_renders_once_not_twice() {
         "drained message must render exactly once\nscreen:\n{}",
         harness.screen_contents()
     );
+    // The screen shows the drained block as soon as the row leaves the queue; the request that
+    // carries it is recorded a moment later (longer under load). Wait for that event, then count.
+    let _ = poll_for(Duration::from_secs(60), || {
+        all_user_message_blobs(&content)
+            .iter()
+            .any(|u| u.contains(QUEUED_TEXT))
+            .then_some(())
+    });
     let users = all_user_message_blobs(&content);
     assert_eq!(
         users.iter().filter(|u| u.contains(QUEUED_TEXT)).count(),

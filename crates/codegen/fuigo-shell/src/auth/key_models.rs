@@ -210,19 +210,45 @@ pub async fn refresh(
     out
 }
 
+/// Whether `FUIGO_DISABLE_MODEL_REFRESH` turns the background model-list fetches off: any
+/// non-empty value except `0`. Shared with the subscription catalogue refresh so both fetches
+/// read the switch the same way.
+pub fn model_refresh_disabled(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| !v.is_empty() && v != "0")
+}
+
 /// Background refresh at startup: real environment, real home, the providers' own endpoints (or
-/// the user's `[model_providers.<id>].base_url`). Returns whether any list changed.
+/// the user's `[model_providers.<id>].base_url`). Returns whether any list changed. With
+/// `FUIGO_DISABLE_MODEL_REFRESH` set it makes no request and the cache (or built-in list) stands.
 pub async fn refresh_stale(user_base_urls: impl Fn(&str) -> Option<String>) -> bool {
     let Some(home) = fuigo_dirs::resolve_fuigo_home() else {
         return false;
     };
-    refresh(
+    let disabled = model_refresh_disabled(
+        std::env::var_os("FUIGO_DISABLE_MODEL_REFRESH").as_deref(),
+    );
+    refresh_stale_in(
         Path::new(&home),
         |name| std::env::var(name).ok(),
-        None,
-        false,
-        |p| base_url_for(p, user_base_urls(p.id).as_deref()),
+        disabled,
+        user_base_urls,
     )
+    .await
+}
+
+/// `refresh_stale` with its home, environment and switch passed in.
+async fn refresh_stale_in(
+    home: &Path,
+    lookup: impl Fn(&str) -> Option<String>,
+    disabled: bool,
+    user_base_urls: impl Fn(&str) -> Option<String>,
+) -> bool {
+    if disabled {
+        return false;
+    }
+    refresh(home, lookup, None, false, |p| {
+        base_url_for(p, user_base_urls(p.id).as_deref())
+    })
     .await
     .iter()
     .any(|r| r.result.is_ok())
@@ -442,5 +468,42 @@ mod tests {
         let proxied = model_overrides(home.path(), env(&pairs), |id| (id == "openai").then(|| "http://proxy.test/v1".to_owned()), &Default::default());
         assert_eq!(proxied.iter().find(|(k, _)| k == "openai-key/gpt-5").unwrap().1.base_url.as_deref(), Some("http://proxy.test/v1"));
         assert!(model_overrides(home.path(), env(&[]), |_| None, &Default::default()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_disable_switch_stops_the_background_fetch_and_keeps_the_cache() {
+        let home = tempfile::tempdir().unwrap();
+        write_cached_model_ids(home.path(), "openai", &["cached-model".to_owned()]).unwrap();
+        // Make the cache stale so only the switch can stop the request.
+        let stale = now() - STALE_SECS - 10;
+        let path = cache_path(home.path(), "openai");
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        raw["fetched_at"] = stale.into();
+        std::fs::write(&path, raw.to_string()).unwrap();
+        assert!(cache_is_stale(home.path(), "openai"), "{raw}");
+        let (base, seen) = mock(serde_json::json!({ "data": [{ "id": "gpt-5", "created": 1 }]})).await;
+        let pairs = [("OPENAI_API_KEY", OPENAI_KEY)];
+        let url = |_: &str| Some(base.clone());
+
+        let changed = refresh_stale_in(home.path(), env(&pairs), true, url).await;
+        assert!(!changed);
+        assert!(seen.0.lock().unwrap().is_empty(), "switch on: no request");
+        assert_eq!(cached_model_ids(home.path(), "openai"), ["cached-model"]);
+
+        // Control: the same setup with the switch off does ask.
+        let changed = refresh_stale_in(home.path(), env(&pairs), false, url).await;
+        assert!(changed);
+        assert_eq!(seen.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_switch_reads_any_non_empty_value_but_zero() {
+        use std::ffi::OsStr;
+        assert!(!model_refresh_disabled(None));
+        assert!(!model_refresh_disabled(Some(OsStr::new(""))));
+        assert!(!model_refresh_disabled(Some(OsStr::new("0"))));
+        assert!(model_refresh_disabled(Some(OsStr::new("1"))));
+        assert!(model_refresh_disabled(Some(OsStr::new("true"))));
     }
 }

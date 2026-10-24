@@ -4637,3 +4637,18 @@ fn the_remedy_fits_the_refused_tool() {
     assert!(redirect.remedy().contains("--always-approve") && redirect.remedy().contains("redirect"));
     assert!(!redirect.remedy().contains("--allow rule that covers"), "{}", redirect.remedy());
 }
+
+#[test]
+fn headless_refuses_permission_mode_plan_with_a_clear_error() {
+    let err = super::reject_headless_plan_mode(Some("plan")).expect_err("plan must be refused headless");
+    let msg = err.to_string();
+    assert!(msg.contains("--permission-mode plan"), "{msg}");
+    assert!(msg.contains("headless"), "{msg}");
+}
+
+#[test]
+fn headless_accepts_every_other_permission_mode() {
+    for mode in [None, Some("default"), Some("acceptEdits"), Some("auto"), Some("dontAsk"), Some("bypassPermissions")] {
+        super::reject_headless_plan_mode(mode).unwrap_or_else(|e| panic!("{mode:?} must be accepted: {e}"));
+    }
+}

@@ -164,6 +164,13 @@ pub(crate) fn agent_inline_hooks_allowed(
     scope != fuigo_agent::config::AgentScope::Project || trusted()
 }
 
+/// Agent inline hooks wait for folder trust whatever the agent's scope (unlike agent `mcpServers`, see
+/// [`agent_inline_hooks_allowed`]): an untrusted folder runs only managed hooks.
+/// `trusted` is evaluated lazily so a caller can defer the filesystem-walking trust verdict.
+pub(crate) fn agent_hooks_allowed(trusted: impl FnOnce() -> bool) -> bool {
+    trusted()
+}
+
 fn record(workspace_key: &Path, allowed: bool) {
     DECISIONS
         .lock()
@@ -776,6 +783,13 @@ mod tests {
         // ...while user/built-in agents (not cwd-sourced) keep their hooks.
         assert!(allowed(AgentScope::User));
         assert!(allowed(AgentScope::BuiltIn));
+        // Agent HOOKS are stricter: an untrusted folder runs none, whatever the agent's scope.
+        for scope in [AgentScope::Project, AgentScope::User, AgentScope::BuiltIn] {
+            assert!(
+                !agent_hooks_allowed(|| project_scope_allowed(tmp.path())),
+                "untrusted: no agent hooks for {scope:?}"
+            );
+        }
 
         // Grant trust and reconcile the cache (as the post-grant reload flow does): the project agent's inline hooks are appended
         let mut store = TrustStore::load();
@@ -785,6 +799,7 @@ mod tests {
             allowed(def.scope),
             "trusted project agent inline hooks must be appended"
         );
+        assert!(agent_hooks_allowed(|| project_scope_allowed(tmp.path())));
     }
 
     use fuigo_test_support::EnvGuard;

@@ -74,6 +74,9 @@ pub use discovery::{
     managed_worktree_roots, path_under_managed_worktree_roots, path_under_worktree_roots,
     rebuild_worktree_db, rebuild_worktree_db_with_grove_data,
 };
+pub use git::operand::{
+    parse_git_ref_arg, parse_worktree_name_arg, validate_git_operand, validate_git_ref, validate_worktree_name,
+};
 pub use git::checkout::{
     dropped_uninitialised_gitlinks, parse_gitlinks, rehydrate_worktree_from_ref, snapshot_worktree_to_ref, transfer_snapshot_to_repo,
 };
