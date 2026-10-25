@@ -8,6 +8,7 @@ use crate::git::checkout::git_command;
 
 /// Create a git worktree with `--no-checkout`. Blocking.
 pub(crate) fn worktree_add_no_checkout(source: &Path, dest: &str, git_ref: &str) -> Result<()> {
+    let git_ref = crate::git::operand::validate_git_ref(git_ref).map_err(|e| anyhow::anyhow!(e))?;
     let output = git_command()
         .current_dir(source)
         .args([
@@ -15,6 +16,7 @@ pub(crate) fn worktree_add_no_checkout(source: &Path, dest: &str, git_ref: &str)
             "add",
             "--detach",
             "--no-checkout",
+            "--",
             dest,
             git_ref,
         ])

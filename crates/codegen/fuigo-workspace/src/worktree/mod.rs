@@ -694,15 +694,15 @@ pub const META_KEY_USER_PROVIDED: &str = "user_provided";
 /// Sanitize a user-provided label into a filesystem-safe directory name.
 ///
 /// Lowercases, maps spaces and underscores to hyphens, and strips every other character that is not alphanumeric or a hyphen.
-/// Dots are stripped too, so `.` and `..` are impossible.
-/// Consecutive hyphens collapse to one, leading and trailing hyphens are trimmed, and the result truncates to [`MAX_LABEL_LEN`] characters.
+/// Alphanumeric means Unicode letters and digits, so a name such as "café" survives; dots, slashes and punctuation are stripped, so `.` and `..` are impossible.
+/// Consecutive hyphens collapse to one, leading and trailing hyphens are trimmed, and the result truncates to [`MAX_LABEL_LEN`] bytes (on a character boundary).
 pub fn sanitize_label(name: &str) -> String {
     let lower = name.to_lowercase();
     let mut out = String::with_capacity(lower.len());
     for ch in lower.chars() {
         match ch {
             ' ' | '_' => out.push('-'),
-            c if c.is_ascii_alphanumeric() || c == '-' => out.push(c),
+            c if c.is_alphanumeric() || c == '-' => out.push(c),
             _ => {}
         }
     }
@@ -735,8 +735,11 @@ pub fn truncate_label(s: &str) -> String {
     if s.len() <= MAX_LABEL_LEN {
         return s.to_owned();
     }
-    let truncated = &s[..MAX_LABEL_LEN];
-    truncated.trim_end_matches('-').to_owned()
+    let mut end = MAX_LABEL_LEN;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].trim_end_matches('-').to_owned()
 }
 
 /// Generate an automatic label: `YYYY-MM-DD-<uuid_prefix>`.
@@ -804,6 +807,33 @@ pub fn resolve_label_collision(base_dir: &Path, label: &str) -> String {
     auto_label()
 }
 
+/// Whether the user typed a name that yields a usable label.
+/// A missing, blank or all-punctuation name is auto-generated instead, so it never counts as typed.
+pub fn is_user_typed_label(requested: Option<&str>) -> bool {
+    requested.is_some_and(|n| !n.trim().is_empty() && !sanitize_label(n).is_empty())
+}
+
+/// Resolve the directory name for a worktree request under `base_dir`.
+///
+/// A name the user typed that is already taken is refused, naming it, rather than silently becoming `name-2`.
+/// "Taken" means the folder exists: a worktree whose folder was deleted by hand leaves its name free to reuse.
+/// An auto-generated name keeps the numeric suffix on collision.
+pub fn resolve_worktree_dir_name(base_dir: &Path, requested: Option<&str>) -> Result<String> {
+    let label = derive_worktree_label(requested);
+    if is_user_typed_label(requested) && base_dir.join(&label).exists() {
+        let typed = requested.map(str::trim).unwrap_or_default();
+        let named = if typed == label {
+            format!("'{label}'")
+        } else {
+            format!("'{typed}' (folder '{label}')")
+        };
+        anyhow::bail!(
+            "A worktree named {named} already exists. Choose a different name, or remove that worktree first."
+        );
+    }
+    Ok(resolve_label_collision(base_dir, &label))
+}
+
 // ============================================================================
 // Worktree Base Directory Resolution
 // ============================================================================
@@ -843,15 +873,14 @@ pub fn worktree_base_dir_for_source(source_path: &Path) -> Result<std::path::Pat
     }
 }
 
-fn resolve_worktree_path(req: &CreateWorktreeRequest, git_root: &Path) -> String {
+fn resolve_worktree_path(req: &CreateWorktreeRequest, git_root: &Path) -> Result<String> {
     if let Some(ref path) = req.worktree_path {
-        return path.clone();
+        return Ok(path.clone());
     }
 
     let base = worktree_base_dir(git_root);
-    let label = derive_worktree_label(req.label.as_deref());
-    let dir_name = resolve_label_collision(&base, &label);
-    base.join(dir_name).to_string_lossy().to_string()
+    let dir_name = resolve_worktree_dir_name(&base, req.label.as_deref())?;
+    Ok(base.join(dir_name).to_string_lossy().to_string())
 }
 
 /// Build the label metadata JSON to persist in the worktree DB record.
@@ -933,7 +962,24 @@ pub fn touch_worktree_for_cwd(cwd: &str) {
 // Worktree Lifecycle: Create
 // ============================================================================
 
+/// Refuse a ref or typed name that git would parse as an option, before any path is resolved or work started.
+fn validate_request_operands(git_ref: Option<&str>, label: Option<&str>) -> Result<()> {
+    if let Some(git_ref) = git_ref {
+        fuigo_fast_worktree::validate_git_ref(git_ref).map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    if let Some(label) = label {
+        fuigo_fast_worktree::validate_worktree_name(label).map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    Ok(())
+}
+
 pub async fn prepare_worktree_creation(req: &CreateWorktreeRequest) -> PrepareWorktreeResult {
+    if let Err(e) = validate_request_operands(req.git_ref.as_deref(), req.label.as_deref()) {
+        return PrepareWorktreeResult {
+            response: Err(e),
+            spawn_task: false,
+        };
+    }
     let source_path = Path::new(&req.source_path);
     let git_root = match find_main_repo_root_from_path(source_path) {
         Ok(root) => root,
@@ -945,7 +991,15 @@ pub async fn prepare_worktree_creation(req: &CreateWorktreeRequest) -> PrepareWo
         }
     };
 
-    let worktree_path = resolve_worktree_path(req, &git_root);
+    let worktree_path = match resolve_worktree_path(req, &git_root) {
+        Ok(path) => path,
+        Err(e) => {
+            return PrepareWorktreeResult {
+                response: Err(e),
+                spawn_task: false,
+            };
+        }
+    };
     let source_git_root = find_git_root_from_path(source_path)
         .ok()
         .map(|p| p.to_string_lossy().to_string());
@@ -1050,6 +1104,12 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
     let start = std::time::Instant::now();
     let source_path = Path::new(&req.source_path);
     let session_id = req.session_id.clone();
+    if let Err(e) = validate_request_operands(req.git_ref.as_deref(), req.label.as_deref()) {
+        return WorktreeStatus::Error {
+            session_id,
+            message: e.to_string(),
+        };
+    }
     let git_root = match find_main_repo_root_from_path(source_path) {
         Ok(root) => root,
         Err(e) => {
@@ -1067,7 +1127,15 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
         }
     };
 
-    let worktree_path_str = resolve_worktree_path(req, &git_root);
+    let worktree_path_str = match resolve_worktree_path(req, &git_root) {
+        Ok(path) => path,
+        Err(e) => {
+            return WorktreeStatus::Error {
+                session_id,
+                message: e.to_string(),
+            };
+        }
+    };
 
     tracing::info!(
         target: WORKTREE_LOG,
@@ -1141,11 +1209,7 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
     );
     let session_id_for_builder = session_id.clone();
     let btrfs_delegate = btrfs_delegate_from_env();
-    let user_provided_label = req.worktree_path.is_none()
-        && req
-            .label
-            .as_ref()
-            .is_some_and(|n| !n.trim().is_empty() && !sanitize_label(n).is_empty());
+    let user_provided_label = req.worktree_path.is_none() && is_user_typed_label(req.label.as_deref());
     let label_for_meta = label_from_path(&worktree_path_str);
     let label_metadata = build_label_metadata(&label_for_meta, user_provided_label);
     let report = match tokio::task::spawn_blocking(move || {
@@ -1696,8 +1760,7 @@ fn resolve_fork_worktree_path(
     label: Option<&str>,
 ) -> Result<String> {
     let base = worktree_base_dir_for_source(source_worktree_path)?;
-    let dir_name = derive_worktree_label(label);
-    let dir_name = resolve_label_collision(&base, &dir_name);
+    let dir_name = resolve_worktree_dir_name(&base, label)?;
     Ok(base.join(dir_name).to_string_lossy().into_owned())
 }
 
@@ -1705,6 +1768,12 @@ fn resolve_fork_worktree_path(
 pub async fn prepare_worktree_from_worktree(
     req: &CreateWorktreeFromWorktreeRequest,
 ) -> PrepareWorktreeResult {
+    if let Err(e) = validate_request_operands(req.git_ref.as_deref(), req.label.as_deref()) {
+        return PrepareWorktreeResult {
+            response: Err(e),
+            spawn_task: false,
+        };
+    }
     let source_path = Path::new(&req.source_worktree_path);
 
     if git_cli(source_path, &["rev-parse", "--git-dir"])
@@ -1826,6 +1895,12 @@ pub async fn create_worktree_from_worktree_streaming<N: WorktreeNotificationSend
     let start = std::time::Instant::now();
     let source_path = Path::new(&req.source_worktree_path);
     let session_id = req.new_session_id.clone();
+    if let Err(e) = validate_request_operands(req.git_ref.as_deref(), req.label.as_deref()) {
+        return WorktreeStatus::Error {
+            session_id,
+            message: e.to_string(),
+        };
+    }
 
     tracing::info!(
         target: WORKTREE_LOG,
@@ -2087,6 +2162,7 @@ pub async fn create_worktree_from_worktree_streaming<N: WorktreeNotificationSend
 pub async fn create_worktree_from_worktree_sync(
     req: &CreateWorktreeFromWorktreeRequest,
 ) -> Result<CreateWorktreeFromWorktreeResponse> {
+    validate_request_operands(req.git_ref.as_deref(), req.label.as_deref())?;
     let source_path = Path::new(&req.source_worktree_path);
     let source_git_root = find_git_root_from_path(source_path)
         .ok()
@@ -2470,6 +2546,7 @@ async fn jj_commit_id(cwd: &Path) -> Option<String> {
 pub async fn create_jj_workspace(
     req: &CreateWorktreeFromWorktreeRequest,
 ) -> Result<CreateWorktreeFromWorktreeResponse> {
+    validate_request_operands(req.git_ref.as_deref(), req.label.as_deref())?;
     let source_path = Path::new(&req.source_worktree_path);
     let source_git_root = find_git_root_from_path(source_path)
         .ok()
@@ -3778,6 +3855,81 @@ mod tests {
             "the winning creator must have created the worktree"
         );
     }
+    #[test]
+    fn typed_name_that_is_taken_is_refused_and_named() {
+        let base = tempfile::tempdir().unwrap();
+        std::fs::create_dir(base.path().join("feature-x")).unwrap();
+        let err = resolve_worktree_dir_name(base.path(), Some("Feature X"))
+            .expect_err("a taken typed name must be refused, not suffixed");
+        let msg = err.to_string();
+        assert!(msg.contains("feature-x"), "message must name the worktree: {msg}");
+        assert!(msg.contains("already"), "{msg}");
+        assert!(!base.path().join("feature-x-2").exists());
+    }
+
+    #[test]
+    fn typed_name_whose_folder_was_deleted_by_hand_is_reusable() {
+        let base = tempfile::tempdir().unwrap();
+        std::fs::create_dir(base.path().join("feature-x")).unwrap();
+        std::fs::remove_dir(base.path().join("feature-x")).unwrap();
+        assert_eq!(resolve_worktree_dir_name(base.path(), Some("feature-x")).unwrap(), "feature-x");
+    }
+
+    #[test]
+    fn untyped_or_unusable_name_still_suffixes_on_collision() {
+        let base = tempfile::tempdir().unwrap();
+        assert_eq!(resolve_label_collision(base.path(), "a"), "a");
+        std::fs::create_dir(base.path().join("a")).unwrap();
+        assert_eq!(resolve_label_collision(base.path(), "a"), "a-2");
+        // Nothing typed, or a name that sanitises to nothing, is auto-generated: it never refuses.
+        for requested in [None, Some(""), Some("   "), Some("!!!")] {
+            let name = resolve_worktree_dir_name(base.path(), requested).unwrap();
+            assert!(!name.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_refuses_option_shaped_ref_and_name_before_touching_git() {
+        let make = |git_ref: Option<&str>, label: Option<&str>| CreateWorktreeRequest {
+            session_id: "refuse-dash".to_owned(),
+            source_path: "/nonexistent-source".to_owned(),
+            worktree_path: None,
+            copy_mode: WorktreeCopyMode::Clean,
+            git_ref: git_ref.map(str::to_owned),
+            copy_ignored_in_background: false,
+            ignored_skip_patterns: vec![],
+            worktree_type: None,
+            label: label.map(str::to_owned),
+            grove_worktree: None,
+        };
+        for req in [
+            make(Some("--upload-pack=x"), None),
+            make(Some("-b"), None),
+            make(None, Some("-x")),
+        ] {
+            let result = prepare_worktree_creation(&req).await;
+            assert!(!result.spawn_task);
+            let msg = result.response.expect_err("must be refused").to_string();
+            assert!(msg.contains("may not begin with '-'"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn sanitize_label_keeps_unicode_letters() {
+        assert_eq!(sanitize_label("Caf\u{e9}"), "caf\u{e9}");
+        assert_eq!(sanitize_label("\u{65e5}\u{672c}\u{8a9e} fix_1"), "\u{65e5}\u{672c}\u{8a9e}-fix-1");
+        assert_eq!(sanitize_label("na\u{ef}ve!?"), "na\u{ef}ve");
+    }
+
+    #[test]
+    fn sanitize_label_truncates_on_a_char_boundary() {
+        let long = "\u{e9}".repeat(100);
+        let out = sanitize_label(&long);
+        assert!(!out.is_empty());
+        assert!(out.len() <= MAX_LABEL_LEN, "{} bytes", out.len());
+        assert!(out.chars().all(|c| c == '\u{e9}'));
+    }
+
 }
 
 #[cfg(test)]

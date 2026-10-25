@@ -132,6 +132,7 @@ pub(crate) fn test_app() -> AppView {
         cli_model_override: None,
         cli_effort_token: None,
         default_yolo: false,
+        launch_plan_mode: false,
         permission_mode_from_soft_default: true,
         out_of_date_leader_mode_notice_shown: false,
         auto_mode_gate: true,

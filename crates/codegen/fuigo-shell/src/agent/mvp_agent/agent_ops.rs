@@ -3835,7 +3835,10 @@ impl MvpAgent {
             );
             std::sync::Arc::new(TerminalRunner::new(notifier, session_info.id.clone()))
         };
-        let startup_hints = startup_hints_from_meta(session_meta, init.meta.as_ref());
+        let startup_hints = crate::session::StartupHints {
+            headless_session: is_headless,
+            ..startup_hints_from_meta(session_meta, init.meta.as_ref())
+        };
         let hunk_plan = plan_hunk_tracking(
             init
                 .client_capabilities
@@ -4401,7 +4404,7 @@ impl MvpAgent {
                             cwd,
                             &compat,
                             session_plugin_registry.as_deref(),
-                            hooks_trusted,
+                            crate::util::hooks::HookTrust::new(hooks_trusted, is_headless),
                         )
                     };
                     for e in &disk_errors {

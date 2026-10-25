@@ -137,7 +137,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/dispatch/rewind.rs", 9), // LEFTOVERS: +1 `agent_id: AgentId` parameter of `start_forced` (the TUI /rewind files restore); pager-local tab id, passed in-process; never a request body. Keep. Earlier: pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/router.rs", 19), // 26-6d: the `Effect::SetContextWindow` constructor repeats the in-process `agent_id`; no body site
     ("crates/codegen/fuigo-pager/src/app/dispatch/session/fork.rs", 5),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/session/lifecycle.rs", 6), // 26-6d: `handle_context_window_set(agent_id)`, in-process routing key; no body site
+    ("crates/codegen/fuigo-pager/src/app/dispatch/session/lifecycle.rs", 7), // U33-TUI: in-process `agent_id` params/test literals, never a request body. Keep. // 26-6d: `handle_context_window_set(agent_id)`, in-process routing key; no body site
     ("crates/codegen/fuigo-pager/src/app/dispatch/session/load.rs", 4),
     ("crates/codegen/fuigo-pager/src/app/dispatch/session/modal.rs", 2),
     ("crates/codegen/fuigo-pager/src/app/dispatch/settings/setters.rs", 1),
@@ -154,8 +154,8 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/queue_release.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/rewind.rs", 21), // LEFTOVERS: +8 `agent_id:` fields of `TaskResult::RewindExecuteComplete` test literals and `files_response` fixtures (rewind files restore); pager-local tab id, in-process, no body. Keep. Earlier: pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/router.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/fork.rs", 16), // ROWS-A2 (5103ae922): +2 `agent_id:` test-literal fields, the pager-local tab id of an in-process action; never a request body. Keep.
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/lifecycle.rs", 25), // P66 (97efd30a) deleted the dead local-workspace tests; pager-local fixtures, no body site (re-pinned by P54-K, R080 §11)
+    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/fork.rs", 17), // U33-TUI: in-process `agent_id` params/test literals, never a request body. Keep. // ROWS-A2 (5103ae922): +2 `agent_id:` test-literal fields, the pager-local tab id of an in-process action; never a request body. Keep.
+    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/lifecycle.rs", 30), // U33-TUI: in-process `agent_id` params/test literals, never a request body. Keep. // P66 (97efd30a) deleted the dead local-workspace tests; pager-local fixtures, no body site (re-pinned by P54-K, R080 §11)
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/load.rs", 64), // Rows B2b: +1 `agent_id:` field of a test literal (pager-local tab id, no body). Keep. P30-PERM-R2: +2 `agent_id:` fields of `TaskResult::SessionCreated` (1) and `TaskResult::SessionLoadFailed` (1) test literals (refused-/resume closes the picker); pager-local tab id, no body. Keep. P30-PERM: +4 `agent_id:` fields of `TaskResult::SessionCreated` (1) and `TaskResult::SessionLoadFailed` (3) test literals (refused-/resume tests); pager-local tab id, no body. Keep. R-guard54: +9 `agent_id:` fields of `TaskResult::SessionLoadFailed/SessionRestoreFailed/SessionCreated/ForkSessionFailed` test literals (P193: 8ef61a39, 7b190af9, e661ed68); pager-local tab id, no body. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/modal.rs", 6),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/settings.rs", 4),

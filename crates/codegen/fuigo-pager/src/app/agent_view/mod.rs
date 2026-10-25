@@ -838,6 +838,12 @@ pub(crate) enum AgentDeferredSend {
     /// Ctrl+S / Alt+S: set the draft aside once its image lands.
     Stash,
 }
+/// A plan-review request held back until the dialog that is open closes.
+pub(crate) struct ParkedPlanRequest {
+    pub(crate) tool_call_id: String,
+    pub(crate) ext: fuigo_acp_lib::AcpArgs<agent_client_protocol::ExtRequest>,
+}
+
 /// Per-agent view-model.
 ///
 /// Owns both business state (session, entries) and UI state (scroll,
@@ -1669,6 +1675,9 @@ pub struct AgentView {
     /// directive runs ahead of any prompts the user typed during the
     /// placeholder window.
     pub(crate) pending_first_prompt: Option<String>,
+    /// An `exit_plan_mode` request that arrived while a dialog the user is working in (question, elicitation, `/feedback`, queued-prompt edit, cancel-turn confirm) was open.
+    /// It is shown, not discarded, once the last of those closes (see `release_parked_plan_requests`).
+    pub(crate) parked_plan_request: Option<ParkedPlanRequest>,
     /// Deferred fork banner to push at the bottom of the scrollback once
     /// the fork session finishes loading (in `TaskResult::SessionLoaded`).
     /// Set by `dispatch_fork_resolved`; stores the parent session id and

@@ -4,6 +4,36 @@ use fuigo_config::resolve_global_hook_sources;
 use fuigo_hooks::discovery::HookSource;
 use fuigo_hooks::error::HookError;
 
+/// Which hook tiers may run in this session.
+///
+/// `folder` is the folder-trust verdict: project hook files, plugin hooks and agent hooks need it.
+/// `user` gates the user's own hooks (config layers other than managed policy, and the hook files under the user's home).
+/// An interactive session treats `user` like `folder`, so an untrusted folder runs only managed-policy hooks (the root-owned
+/// requirements and system `managed_config.toml` layers, see `HookProvenance::is_managed_policy`).
+/// A headless (`-p`) session has no one to ask, so its user hooks run regardless; its project, plugin and agent hooks still
+/// follow folder trust.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HookTrust {
+    pub folder: bool,
+    pub user: bool,
+}
+
+impl HookTrust {
+    pub(crate) fn new(folder_trusted: bool, headless: bool) -> Self {
+        Self {
+            folder: folder_trusted,
+            user: folder_trusted || headless,
+        }
+    }
+}
+
+/// A bare folder verdict is the interactive rule: user hooks follow it.
+impl From<bool> for HookTrust {
+    fn from(folder_trusted: bool) -> Self {
+        Self::new(folder_trusted, false)
+    }
+}
+
 /// Owned paths for hook sources. Callers borrow via `as_sources()`.
 pub(crate) struct HookSourcePaths {
     pub global: Vec<PathBuf>,
@@ -11,13 +41,19 @@ pub(crate) struct HookSourcePaths {
 }
 
 impl HookSourcePaths {
-    /// Borrow as `HookSource` refs. Project sources are excluded when untrusted.
+    /// Borrow as `HookSource` refs. Global (user) sources are excluded unless user hooks are trusted,
+    /// project sources unless the folder is trusted.
     pub(crate) fn as_sources(
         &self,
-        include_project: bool,
+        trust: impl Into<HookTrust>,
     ) -> (Vec<HookSource<'_>>, Vec<HookSource<'_>>) {
-        let global = self.global.iter().map(|p| path_to_source(p)).collect();
-        let project = if include_project {
+        let trust = trust.into();
+        let global = if trust.user {
+            self.global.iter().map(|p| path_to_source(p)).collect()
+        } else {
+            vec![]
+        };
+        let project = if trust.folder {
             self.project.iter().map(|p| path_to_source(p)).collect()
         } else {
             vec![]
@@ -168,7 +204,7 @@ fn discover_hook_source_paths_with_dirs(
 pub(crate) fn discover_hooks(
     git_root: Option<&Path>,
     compat: &fuigo_tools::types::compat::CompatConfig,
-    trusted: bool,
+    trusted: impl Into<HookTrust>,
 ) -> (fuigo_hooks::discovery::HookRegistry, Vec<HookError>) {
     // Read fresh each call (not cached): a mid-session `/hooks` reload must see an updated `config.toml` or `managed_config.toml`
     // This is lighter than `ConfigLayers::load` (only the small per-layer files, no campaigns, version overrides, or MDM)
@@ -181,8 +217,9 @@ pub(crate) fn discover_hooks(
 pub(crate) fn discover_hooks_for_cwd(
     cwd: &Path,
     compat: &fuigo_tools::types::compat::CompatConfig,
-    trusted: bool,
+    trusted: impl Into<HookTrust>,
 ) -> (fuigo_hooks::discovery::HookRegistry, Vec<HookError>) {
+    let trusted = trusted.into();
     let git_root = fuigo_workspace::session::git::find_git_root_from_path(cwd).ok();
     let subdirs = git_root.as_deref().map(|root| project_hook_subdirs(cwd, root)).unwrap_or_default();
     let config_layers = fuigo_config::hook_config_layers();
@@ -193,7 +230,41 @@ pub(crate) fn discover_hooks_for_cwd(
         &subdirs,
         compat,
     );
+    if !trusted.user || !trusted.folder {
+        note_hooks_skipped_untrusted(cwd, trusted, &config_layers, &sources);
+    }
     assemble_hooks_from_sources(&config_layers, &sources, trusted)
+}
+
+/// Tell the user, once per folder, that hooks were left out because the folder is not trusted.
+/// Same channel as the project-plugin gate (`tracing`); nothing is said when nothing was actually skipped.
+fn note_hooks_skipped_untrusted(
+    cwd: &Path,
+    trust: HookTrust,
+    config_layers: &[fuigo_config::HookConfigLayer],
+    sources: &HookSourcePaths,
+) {
+    use std::collections::HashSet;
+    use std::sync::{LazyLock, Mutex};
+    static TOLD: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+    let user_skipped = !trust.user
+        && (config_layers.iter().any(|l| !l.provenance().is_managed_policy())
+            || sources.global.iter().any(|p| p.exists()));
+    let project_skipped = !trust.folder && sources.project.iter().any(|p| p.exists());
+    if !user_skipped && !project_skipped {
+        return;
+    }
+    let first = TOLD
+        .lock()
+        .map(|mut told| told.insert(cwd.to_path_buf()))
+        .unwrap_or(false);
+    if first {
+        tracing::warn!(
+            folder = %cwd.display(),
+            "hooks skipped: folder not trusted; only managed hooks from your organization run until you trust it (/hooks-trust)"
+        );
+    }
 }
 
 /// Combine config-layer hooks with the file-source hooks discovered under the user's home and
@@ -205,7 +276,7 @@ pub(crate) fn assemble_hooks(
     config_layers: &[fuigo_config::HookConfigLayer],
     git_root: Option<&Path>,
     compat: &fuigo_tools::types::compat::CompatConfig,
-    trusted: bool,
+    trusted: impl Into<HookTrust>,
 ) -> (fuigo_hooks::discovery::HookRegistry, Vec<HookError>) {
     assemble_hooks_from_sources(
         config_layers,
@@ -220,10 +291,16 @@ pub(crate) fn assemble_hooks(
 fn assemble_hooks_from_sources(
     config_layers: &[fuigo_config::HookConfigLayer],
     source_paths: &HookSourcePaths,
-    trusted: bool,
+    trusted: impl Into<HookTrust>,
 ) -> (fuigo_hooks::discovery::HookRegistry, Vec<HookError>) {
-    let (mut specs, mut errors) =
-        fuigo_hooks::config::parse_hooks_from_config_layers(config_layers);
+    let trusted = trusted.into();
+    // Only managed-policy layers are exempt from the trust gate; the user's own config layers wait for trust
+    let admitted: Vec<fuigo_config::HookConfigLayer> = config_layers
+        .iter()
+        .filter(|l| trusted.user || l.provenance().is_managed_policy())
+        .cloned()
+        .collect();
+    let (mut specs, mut errors) = fuigo_hooks::config::parse_hooks_from_config_layers(&admitted);
 
     let (global_sources, project_sources) = source_paths.as_sources(trusted);
     let (file_specs, file_errors) =
@@ -270,6 +347,95 @@ mod tests {
             sources.global
         );
         assemble_hooks_from_sources(layers, &sources, false)
+    }
+
+    /// Folder-trust fixture: one hook in every tier, so a test reads which tiers ran from the registry.
+    /// - managed: `requirements.toml` in the (root-owned) system dir, a managed-policy layer;
+    /// - user config: `config.toml` under the user's fuigo home;
+    /// - user file: `<fuigo home>/hooks/user.json`;
+    /// - project file: `<repo>/.fuigo/hooks/project.json`.
+    struct TierFixture {
+        _dirs: Vec<tempfile::TempDir>,
+        layers: Vec<fuigo_config::HookConfigLayer>,
+        sources: HookSourcePaths,
+    }
+
+    fn tier_fixture() -> TierFixture {
+        let system = tempfile::tempdir().unwrap();
+        let fuigo_home = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let toml_hook = |cmd: &str| {
+            format!(
+                "[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"{cmd}\"\ntimeout = 5\n"
+            )
+        };
+        let json_hook = |cmd: &str| {
+            serde_json::json!({ "hooks": { "Stop": [ { "hooks": [
+                { "type": "command", "command": cmd }
+            ] } ] } })
+            .to_string()
+        };
+        std::fs::write(system.path().join("requirements.toml"), toml_hook("/opt/policy/managed.sh")).unwrap();
+        std::fs::write(fuigo_home.path().join("config.toml"), toml_hook("/home/u/user-config.sh")).unwrap();
+        std::fs::create_dir_all(fuigo_home.path().join("hooks")).unwrap();
+        std::fs::write(fuigo_home.path().join("hooks/user.json"), json_hook("/home/u/user-file.sh")).unwrap();
+        std::fs::create_dir_all(repo.path().join(".fuigo/hooks")).unwrap();
+        std::fs::write(repo.path().join(".fuigo/hooks/project.json"), json_hook("/repo/project-file.sh")).unwrap();
+
+        let layers = fuigo_config::hook_config_layers_at(Some(system.path()), Some(fuigo_home.path()));
+        let compat = fuigo_tools::types::compat::CompatConfig::default();
+        let sources = discover_hook_source_paths_in(
+            Some(fuigo_home.path()),
+            Some(home.path()),
+            Some(repo.path()),
+            &compat,
+        );
+        TierFixture { _dirs: vec![system, fuigo_home, home, repo], layers, sources }
+    }
+
+    fn running(fx: &TierFixture, trust: impl Into<HookTrust>) -> Vec<String> {
+        let (registry, errors) = assemble_hooks_from_sources(&fx.layers, &fx.sources, trust);
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        let mut cmds: Vec<String> = registry
+            .all_hooks()
+            .into_iter()
+            .filter_map(|s| s.command_raw.clone())
+            .map(|c| c.rsplit('/').next().unwrap().to_owned())
+            .collect();
+        cmds.sort();
+        cmds
+    }
+
+    #[test]
+    fn untrusted_interactive_runs_only_managed_hooks() {
+        let fx = tier_fixture();
+        assert_eq!(
+            running(&fx, HookTrust::new(false, false)),
+            ["managed.sh"],
+            "user config, user file and project hooks must stay off; the managed-policy hook must run"
+        );
+        // A bare folder verdict is the interactive rule
+        assert_eq!(running(&fx, false), ["managed.sh"]);
+    }
+
+    #[test]
+    fn trusted_runs_every_tier() {
+        let fx = tier_fixture();
+        let all = ["managed.sh", "project-file.sh", "user-config.sh", "user-file.sh"];
+        assert_eq!(running(&fx, HookTrust::new(true, false)), all);
+        assert_eq!(running(&fx, true), all);
+        assert_eq!(running(&fx, HookTrust::new(true, true)), all);
+    }
+
+    #[test]
+    fn headless_untrusted_runs_user_and_managed_but_not_project() {
+        let fx = tier_fixture();
+        assert_eq!(
+            running(&fx, HookTrust::new(false, true)),
+            ["managed.sh", "user-config.sh", "user-file.sh"],
+            "headless treats user hooks as trusted; project hooks still follow folder trust"
+        );
     }
 
     /// A temp policy layer pins hooks for `SessionStart`, `UserPromptSubmit`, and `PreToolUse`.

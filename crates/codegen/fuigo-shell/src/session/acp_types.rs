@@ -541,6 +541,10 @@ pub struct StartupHints {
     pub(crate) execution_parent_grant: Option<std::sync::Arc<crate::session::execution_state::ChildGrant>>,
     #[serde(default)]
     pub non_interactive: bool,
+    /// This is a headless (`-p`) session, so its user-level hooks count as trusted in an untrusted folder.
+    /// Stamped by the agent from the session's own kind, never accepted from client metadata.
+    #[serde(skip)]
+    pub(crate) headless_session: bool,
     #[serde(default)]
     pub skip_git_status: bool,
     /// Parent project cwd for a child/worktree seat's overlay kill switch. Not on the wire.

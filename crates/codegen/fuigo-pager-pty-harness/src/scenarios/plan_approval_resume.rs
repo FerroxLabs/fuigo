@@ -113,6 +113,9 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     }
 
     // Approve: the shell leaves plan mode and injects the implement turn.
+    // The first key after a review opens is notes text, never a shortcut (a stray `a` must not approve), so hand focus to the preview with Esc first.
+    resumed.inject_keys(b"\x1b").context("press Esc to focus the preview")?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     resumed.inject_keys(b"a").context("press 'a' to approve")?;
     resumed
         .wait_for_text(IMPLEMENT_SENTINEL, Duration::from_secs(30))

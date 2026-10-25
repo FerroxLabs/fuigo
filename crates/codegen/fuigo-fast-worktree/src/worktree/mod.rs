@@ -1707,4 +1707,33 @@ mod tests {
             "partial standalone dest must be reclaimed on a hard error"
         );
     }
+
+    #[test]
+    fn option_shaped_ref_is_refused_before_git_runs() {
+        fuigo_test_utils::require_git!();
+
+        let temp = TempDir::new().unwrap();
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        std::fs::write(repo_path.join("file.txt"), "content").unwrap();
+        git_commit_all(&repo_path, "initial");
+
+        for (i, bad) in ["--upload-pack=touch pwned", "-b", "-"].into_iter().enumerate() {
+            for standalone in [false, true] {
+                let dest = temp.path().join(format!("wt-{i}-{standalone}"));
+                let err = WorktreeBuilder::new(repo_path.clone(), dest.clone())
+                    .standalone(standalone)
+                    .git_ref(bad)
+                    .create()
+                    .expect_err("an option-shaped ref must be refused");
+                let msg = format!("{err:#}");
+                assert!(
+                    msg.contains("may not begin with '-'"),
+                    "ref {bad:?} (standalone={standalone}) must be refused up front, got: {msg}"
+                );
+                assert!(!dest.exists(), "nothing may be created for {bad:?}");
+            }
+        }
+    }
 }

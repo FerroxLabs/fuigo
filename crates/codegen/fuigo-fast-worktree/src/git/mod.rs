@@ -4,6 +4,7 @@ pub(crate) mod checkout;
 pub(crate) mod dirs;
 pub(crate) mod discovery;
 pub(crate) mod index;
+pub(crate) mod operand;
 pub(crate) mod probe;
 pub(crate) mod reason;
 pub(crate) mod reclaimed;

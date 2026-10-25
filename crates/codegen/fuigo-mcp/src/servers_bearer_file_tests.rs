@@ -215,6 +215,9 @@ impl tracing::Subscriber for Everything {
 async fn nothing_logged_at_any_level_holds_the_token() {
     let logs = Everything::default();
     let _guard = tracing::subscriber::set_default(logs.clone());
+    // Callsite interest is cached process-wide: a callsite first hit by a parallel test with no subscriber stays "never" for this
+    // thread-local capture until the cache is rebuilt, which would silently drop the very refusal line asserted below.
+    tracing::callsite::rebuild_interest_cache();
     let dir = tempfile::tempdir().unwrap();
     let file = token_file(dir.path(), &format!("{TOKEN}\n"));
     let (base, _seen) = recording_mock().await;

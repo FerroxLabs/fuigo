@@ -406,6 +406,8 @@ impl WorktreeBuilder {
     /// This is a **blocking** operation. Callers should use `spawn_blocking`
     /// when calling from async contexts.
     pub fn create(self) -> Result<WorktreeReport> {
+        // Every creation mode ends in `git checkout <ref>` / `git worktree add <ref>`: refuse an option-shaped ref before any work or partial dest.
+        crate::git::operand::validate_git_ref(&self.git_ref).map_err(|e| anyhow::anyhow!(e))?;
         // One canonical dest for the plan id, IPC idempotency key, and DB id.
         let dest = crate::worktree::plan::canonicalize_for_id(&self.dest);
         let worktree_id = {

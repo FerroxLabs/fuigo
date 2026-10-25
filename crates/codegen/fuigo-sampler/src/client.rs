@@ -236,6 +236,33 @@ impl FuigoRequestHeaders<'_> {
     }
 }
 
+/// Inject a neutral `action` into `web_search_call` items that omit it.
+/// The typed model requires `action`, but an in-progress (or minimal) backend item legitimately carries none, and failing closed there aborts the whole turn.
+/// The default is a search with an EMPTY query and no sources: the UI treats an empty query as "no search detail" (never a fake query).
+/// Only a missing/null `action` on a `web_search_call` is repaired; every other malformation still fails closed.
+fn repair_web_search_calls(value: &mut serde_json::Value) {
+    fn repair_item(item: &mut serde_json::Value) {
+        let is_ws = item.get("type").and_then(|t| t.as_str()) == Some("web_search_call");
+        if let (true, Some(obj)) = (is_ws, item.as_object_mut())
+            && obj.get("action").is_none_or(|a| a.is_null())
+        {
+            obj.insert(
+                "action".to_string(),
+                serde_json::json!({ "type": "search", "query": "" }),
+            );
+        }
+    }
+    if let Some(item) = value.get_mut("item") {
+        repair_item(item);
+    }
+    if let Some(items) = value
+        .pointer_mut("/response/output")
+        .and_then(|v| v.as_array_mut())
+    {
+        items.iter_mut().for_each(repair_item);
+    }
+}
+
 /// Parse the `Retry-After` response header as delta-seconds.
 /// Our inference backends only emit integer seconds (never HTTP-date), so we only handle that form.
 /// HTTP-dates silently return `None` and the caller falls back to exponential backoff.
@@ -260,6 +287,7 @@ fn deserialize_response_event(data: &str) -> Result<Option<rs::ResponseStreamEve
         Err(first_err) => {
             // Try sanitizing: parse as Value, strip unknown tools, retry.
             if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(data) {
+                repair_web_search_calls(&mut value);
                 // Strip tools that async_openai's rs::Tool can't deserialize (e.g., Ferrox Labs-specific "x_search")
                 // Instead of maintaining a hardcoded allowlist, try deserializing each tool entry; if it fails, drop it
                 if let Some(tools) = value
@@ -4217,6 +4245,66 @@ mod tests {
             deserialize_response_event(raw).is_err(),
             "a known event type with a malformed body must not be silently skipped"
         );
+    }
+
+    /// A Responses `web_search_call` item may arrive WITHOUT `action` (in-progress, or a backend
+    /// that omits it). `action` is required by the typed model, so one such frame used to abort
+    /// the whole turn. A recorded stream containing it must now parse end to end, and the item
+    /// must carry a neutral empty-query search so no fake query is ever shown.
+    #[test]
+    fn web_search_call_without_action_does_not_abort_the_turn() {
+        let ws = r#"{"type":"web_search_call","id":"ws_1","status":"in_progress"}"#;
+        let frames = [
+            format!(r#"{{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{ws}}}"#),
+            r#"{"type":"response.web_search_call.in_progress","sequence_number":2,"output_index":0,"item_id":"ws_1"}"#.to_owned(),
+            format!(r#"{{"type":"response.output_item.done","sequence_number":3,"output_index":0,"item":{ws}}}"#),
+        ];
+        for raw in &frames {
+            let event = deserialize_response_event(raw)
+                .unwrap_or_else(|e| panic!("action-less web_search_call must not abort: {e:?}\n{raw}"))
+                .expect("modelled event");
+            let item = match event {
+                rs::ResponseStreamEvent::ResponseOutputItemAdded(e) => Some(e.item),
+                rs::ResponseStreamEvent::ResponseOutputItemDone(e) => Some(e.item),
+                _ => None,
+            };
+            if let Some(rs::OutputItem::WebSearchCall(call)) = item {
+                match call.action {
+                    rs::WebSearchToolCallAction::Search(s) => {
+                        assert!(s.query.is_empty(), "injected default must carry no query");
+                        assert!(s.sources.is_none());
+                    }
+                    other => panic!("expected neutral search action, got {other:?}"),
+                }
+            }
+        }
+        // The same omission inside the terminal `response.output` array.
+        let completed = format!(
+            r#"{{"type":"response.completed","sequence_number":4,"response":{{"id":"resp_1","object":"response","created_at":0,"model":"m","status":"completed","output":[{ws}]}}}}"#
+        );
+        assert!(
+            deserialize_response_event(&completed).is_ok_and(|e| e.is_some()),
+            "response.completed carrying an action-less web_search_call must parse"
+        );
+    }
+
+    /// The repair is for the one benign omission only: a web_search_call with a MALFORMED
+    /// action, or no id, is still a corrupt event and must fail closed.
+    #[test]
+    fn web_search_call_with_corrupt_body_still_errors() {
+        for ws in [
+            r#"{"type":"web_search_call","id":"ws_1","status":"completed","action":"nope"}"#,
+            r#"{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search"}}"#,
+            r#"{"type":"web_search_call","status":"in_progress"}"#,
+        ] {
+            let raw = format!(
+                r#"{{"type":"response.output_item.done","sequence_number":3,"output_index":0,"item":{ws}}}"#
+            );
+            assert!(
+                deserialize_response_event(&raw).is_err(),
+                "corrupt web_search_call must still fail closed: {ws}"
+            );
+        }
     }
 
     /// The Messages backend has the same open vocabulary as the Responses backend: Anthropic ships

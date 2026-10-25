@@ -862,16 +862,26 @@ mod tests {
             "project source paths should be non-empty for a git_root"
         );
 
+        // Interactive and untrusted: the user's global sources wait for trust too
         let (global_untrusted, project) = paths.as_sources(false);
-        assert_eq!(
-            global_untrusted.len(),
-            paths.global.len(),
-            "global sources must survive untrusted"
+        assert!(
+            global_untrusted.is_empty(),
+            "untrusted interactive: global (user) sources must be dropped"
         );
         assert!(
             project.is_empty(),
             "untrusted: as_sources(false) must drop all project sources"
         );
+
+        // Headless and untrusted: user sources are trusted, project sources are not
+        let (global_headless, project) =
+            paths.as_sources(crate::util::hooks::HookTrust::new(false, true));
+        assert_eq!(
+            global_headless.len(),
+            paths.global.len(),
+            "headless: global sources must survive an untrusted folder"
+        );
+        assert!(project.is_empty(), "headless untrusted: project sources stay off");
 
         let (_global, project) = paths.as_sources(true);
         assert!(

@@ -1300,6 +1300,14 @@ impl AgentView {
             return true;
         }
         if self
+            .parked_plan_request
+            .as_ref()
+            .is_some_and(|parked| parked.tool_call_id == tool_call_id)
+        {
+            self.drop_parked_plan_request();
+            return true;
+        }
+        if self
             .plan_approval_view
             .as_ref()
             .is_some_and(|pav| pav.tool_call_id == tool_call_id)

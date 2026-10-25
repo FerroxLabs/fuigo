@@ -378,7 +378,35 @@ impl AgentView {
     pub(super) fn discard_in_progress_comment(&mut self) {
         self.leave_plan_commenting_restore_freeform();
     }
+    /// A dialog the user is working in is open, so a new plan review must wait for it instead of covering or closing it.
+    /// A permission is handled separately (the review opens, but its prefill waits for the queue).
+    pub(crate) fn plan_review_must_wait(&self) -> bool {
+        self.question_view.is_some()
+            || self.elicitation_view.is_some()
+            || self.pending_elicitation.is_some()
+            || !self.queued_elicitations.is_empty()
+            || self.cancel_turn_view.is_some()
+            || matches!(self.prompt_mode, super::PromptMode::EditingQueued { .. })
+    }
+    /// Answer a parked plan request as cancelled, because the turn that raised it is over or the request was resolved elsewhere.
+    pub(crate) fn drop_parked_plan_request(&mut self) {
+        if let Some(parked) = self.parked_plan_request.take() {
+            crate::views::plan_approval_view::send_exit_plan_response(
+                parked.ext.response_tx,
+                "cancelled",
+                None,
+            );
+        }
+    }
+    /// Consume the "first key since open" guard: true once a key has already reached this review.
+    fn take_plan_shortcut_guard(&mut self) -> bool {
+        self.plan_approval_view
+            .as_mut()
+            .map(|pav| std::mem::replace(&mut pav.shortcuts_armed, true))
+            .unwrap_or(true)
+    }
     pub(super) fn handle_plan_feedback_key(&mut self, key: &KeyEvent) -> InputOutcome {
+        let shortcuts_armed = self.take_plan_shortcut_guard();
         let is_commenting = self
             .plan_approval_view
             .as_ref()
@@ -434,6 +462,7 @@ impl AgentView {
             return InputOutcome::Changed;
         }
         if !is_commenting
+            && shortcuts_armed
             && key.code == KeyCode::Char('a')
             && key.modifiers.is_empty()
             && self.prompt.text_without_image_chips().trim().is_empty()
@@ -989,11 +1018,28 @@ mod plan_approval_enter_tests {
         "The comment in progress is a slash command: finish or discard it before approving.";
     /// A complete pager builtin with free args (Fuigo has no vendor `/feedback`; the rule is generic).
     const BUILTIN_SLASH: &str = "/btw does the agent understand plan mode";
+    /// A plan review the user is already interacting with: shortcuts are live.
     fn agent_with_revise_prompt() -> AgentView {
         agent_with_revise_prompt_and_response().0
     }
-    /// Like [`agent_with_revise_prompt`] but keeps the shell-side receiver so a test can prove nothing was sent.
+    /// A review that has just opened: no key has reached it yet.
+    fn agent_with_fresh_plan_review() -> AgentView {
+        fresh_plan_review_and_response().0
+    }
     fn agent_with_revise_prompt_and_response() -> (
+        AgentView,
+        tokio::sync::oneshot::Receiver<
+            fuigo_acp_lib::AcpResult<agent_client_protocol::ExtResponse>,
+        >,
+    ) {
+        let (mut agent, rx) = fresh_plan_review_and_response();
+        if let Some(pav) = agent.plan_approval_view.as_mut() {
+            pav.shortcuts_armed = true;
+        }
+        (agent, rx)
+    }
+    /// Like [`agent_with_revise_prompt`] but keeps the shell-side receiver so a test can prove nothing was sent.
+    fn fresh_plan_review_and_response() -> (
         AgentView,
         tokio::sync::oneshot::Receiver<
             fuigo_acp_lib::AcpResult<agent_client_protocol::ExtResponse>,
@@ -1099,6 +1145,23 @@ mod plan_approval_enter_tests {
             outcome,
             InputOutcome::Action(Action::Interject { .. })
         ));
+    }
+    /// A key typed while the review is opening must land in the notes, never trigger the `a` shortcut.
+    #[test]
+    fn first_key_after_open_types_into_notes_instead_of_approving() {
+        let mut agent = agent_with_fresh_plan_review();
+        let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let _ = agent.handle_plan_feedback_key(&key('a'));
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "the first key after open must not approve the plan"
+        );
+        assert_eq!(agent.prompt.text(), "a");
+        for c in "dd tests".chars() {
+            let _ = agent.handle_plan_feedback_key(&key(c));
+        }
+        assert!(agent.plan_approval_view.is_some());
+        assert_eq!(agent.prompt.text(), "add tests");
     }
     #[test]
     fn a_with_nonempty_freeform_types_letter() {

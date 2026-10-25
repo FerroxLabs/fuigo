@@ -204,8 +204,9 @@ pub fn startup_refresh_allowed(debug_build: bool, disabled_by_env: bool) -> bool
 /// Start the stale-cache refresh in the background; never blocks, never in a debug build.
 /// Call from inside the tokio runtime.
 pub fn spawn_startup_refresh() {
-    let disabled = std::env::var_os("FUIGO_DISABLE_MODEL_REFRESH")
-        .is_some_and(|v| !v.is_empty() && v != "0");
+    let disabled = crate::auth::key_models::model_refresh_disabled(
+        std::env::var_os("FUIGO_DISABLE_MODEL_REFRESH").as_deref(),
+    );
     if startup_refresh_allowed(cfg!(debug_assertions), disabled) {
         tokio::spawn(refresh_stale_catalogs());
     }

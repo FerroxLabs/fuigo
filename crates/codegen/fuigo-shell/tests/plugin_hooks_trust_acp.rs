@@ -13,9 +13,10 @@
 //! Three phases, each a parent turn that spawns a foreground child; child and parent each `read_file` a probe file
 //! whose name marks the call in the hook envelope:
 //!
-//! - **A, untrusted (session-start load, subagent inheritance, agent-hooks override):** only
-//!   `userplug` fires, in parent and child, and in a second session whose agent definition carries
-//!   inline hooks (the `spawn_and_register_session` override). The repo's hooks stay dark.
+//! - **A, untrusted (session-start load, subagent inheritance, agent-hooks override):** nothing
+//!   fires, in parent and child, and in a second session whose agent definition carries inline hooks
+//!   (the `spawn_and_register_session` override): an untrusted folder runs no plugin hooks (user
+//!   plugins included) and no agent hooks.
 //! - **B, after `/hooks-trust` (`fuigo/hooks/action` `trust`):** the child spawned AFTER the grant
 //!   fires `project` and `projplug`. Red before P07a: a subagent copied its parent's registry from
 //!   a `SessionHandle` field written once at spawn, so the reload the grant triggered never reached
@@ -331,7 +332,7 @@ async fn slash(conn: &acp::ClientSideConnection, session: &acp::SessionId, comma
 fn assert_single_read(logs: &Path, session: &acp::SessionId, label: &str, repo: usize, why: &str) {
     let id = session.0.to_string();
     for tag in TAGS {
-        let want = if tag == "userplug" { 1 } else { repo };
+        let want = repo;
         assert_eq!(
             tagged_runs(logs, tag, &id, label),
             want,
@@ -414,8 +415,8 @@ fn plugin_hooks_follow_folder_trust_in_sessions_and_their_subagents() {
         run_phase(&conn, &mock, &session, &cwd, "a").await;
         assert_eq!(
             probe_runs(&logs, "userplug", "a", &parent),
-            (1, 1),
-            "A: a user plugin's hook fires from the first turn, in parent and child"
+            (0, 0),
+            "A: untrusted folder: a user plugin's hook must not fire, in parent or child"
         );
         for tag in REPO_TAGS {
             assert_eq!(
@@ -430,15 +431,14 @@ fn plugin_hooks_follow_folder_trust_in_sessions_and_their_subagents() {
         let hooked_id = hooked.0.to_string();
         assert_eq!(
             tagged_runs(&logs, "agentinline", &hooked_id, "a-hooked"),
-            1,
-            "A: the agent's own (built-in scope) hook fires"
+            0,
+            "A: untrusted folder: the agent's own (built-in scope) hook must not fire"
         );
         for tag in TAGS {
-            let want = usize::from(tag == "userplug");
             assert_eq!(
                 tagged_runs(&logs, tag, &hooked_id, "a-hooked"),
-                want,
-                "A: agent-hooks session in an untrusted folder: `{tag}` must fire {want} time(s)"
+                0,
+                "A: agent-hooks session in an untrusted folder: `{tag}` must not fire"
             );
         }
 
@@ -471,8 +471,8 @@ fn plugin_hooks_follow_folder_trust_in_sessions_and_their_subagents() {
         run_phase(&conn, &mock, &session, &cwd, "c").await;
         assert_eq!(
             probe_runs(&logs, "userplug", "c", &parent),
-            (1, 1),
-            "C: a user plugin is not folder-gated and keeps firing"
+            (0, 0),
+            "C: after /hooks-untrust a user plugin's hook must not fire either"
         );
         for tag in REPO_TAGS {
             assert_eq!(
@@ -525,8 +525,16 @@ fn plugin_hooks_follow_folder_trust_in_sessions_and_their_subagents() {
         );
         assert_eq!(
             tagged_runs(&logs, "agentinline", &hooked_id, "e-hooked"),
+            0,
+            "E: the agent's own hook stays off after an untrusting reload"
+        );
+        // And a trusting reload brings it back
+        slash(&conn, &hooked, "/hooks-trust").await;
+        run_single_read(&conn, &mock, &hooked, &cwd, "e-hooked-trusted").await;
+        assert_eq!(
+            tagged_runs(&logs, "agentinline", &hooked_id, "e-hooked-trusted"),
             1,
-            "E: the agent's own hook survives the reload"
+            "E: the agent's own hook runs again once the folder is trusted"
         );
 
         tokio::time::timeout(

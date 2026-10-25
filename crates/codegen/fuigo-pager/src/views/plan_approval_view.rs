@@ -67,6 +67,9 @@ pub struct PlanApprovalViewState {
     pub commenting_range: Option<std::ops::Range<usize>>,
 
     pub stashed_feedback_prompt: Option<StashedPrompt>,
+    /// Whether a key has reached this review since it opened.
+    /// The first key is taken as text for the notes, so a keystroke already in flight when the review appears (the user was typing) cannot fire a one-key shortcut such as `a` (approve).
+    pub shortcuts_armed: bool,
 }
 
 impl PlanApprovalViewState {
@@ -104,6 +107,7 @@ impl PlanApprovalViewState {
             editing_comment_id: None,
             commenting_range: None,
             stashed_feedback_prompt: None,
+            shortcuts_armed: false,
         }
     }
 

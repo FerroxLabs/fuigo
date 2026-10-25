@@ -1556,6 +1556,63 @@ mod tests {
         );
     }
 
+    /// A user `.zshrc` that replaces `run-help` (oh-my-zsh and distro rc files alias it to
+    /// `man` or redefine it) and aliases `grep` must not break replay. The wrapper turns
+    /// aliases off, runs `unalias -m '*'`, and evals the snapshot (functions before aliases),
+    /// so a function body is never alias-expanded at definition time and the replayed
+    /// `grep` alias is only what the user command sees. The snapshot here is produced by the
+    /// real init path (`-ilc` dump) from a real startup file, not hand-written.
+    #[tokio::test]
+    async fn test_zsh_startup_run_help_and_grep_alias_replay() {
+        if !zsh_available() {
+            return;
+        }
+        let variants = [
+            ("alias", "alias run-help=man\nalias grep=\"grep --color=never\""),
+            ("function", "run-help() { echo hijacked-run-help; }\nalias grep=\"grep --color=never\""),
+            (
+                "function-then-alias",
+                "run-help() { echo hijacked-run-help; }\nalias run-help=man\nalias grep=\"grep --color=never\"",
+            ),
+        ];
+        for (name, rc) in variants {
+            let zdotdir = tempfile::tempdir().unwrap();
+            std::fs::write(zdotdir.path().join(".zshrc"), format!("{rc}\n")).unwrap();
+            let dump = ShellKind::Zsh.dump_script();
+            let script = format!(
+                "{dump} builtin printf '{INIT_STATE_MARKER}\\n'; {}",
+                ShellKind::Zsh.dump_function_name()
+            );
+            let out = std::process::Command::new(ShellKind::Zsh.binary_path())
+                .args(["-o", "extendedglob", "-ilc", &script])
+                .env("ZDOTDIR", zdotdir.path())
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .unwrap();
+            let full = String::from_utf8_lossy(&out.stdout).into_owned();
+            let (cwd, snapshot) = parse_dump(ShellKind::Zsh, parse_after_marker(&full, INIT_STATE_MARKER))
+                .unwrap_or_else(|| panic!("[{name}] dump must parse, got: {full:?}"));
+            let mut state = ShellState { cwd, snapshot, shell: ShellKind::Zsh };
+
+            // `grep` is aliased to `grep --color=never` in the startup file: the replayed alias is the user
+            // environment, but the wrapper itself (and its `command grep` dump filters) must not
+            // be affected, so the dump still round-trips and the command runs.
+            let (code, stdout) = run_command(&mut state, "printf 'a\\nb\\n' | grep b").await;
+            assert_eq!(code, 0, "[{name}] command using grep must succeed, stdout={stdout:?}");
+            assert_eq!(stdout.trim(), "b", "[{name}] unexpected output: {stdout:?}");
+
+            // State dumped after the run must still replay (functions + aliases survived).
+            let (code, stdout) = run_command(&mut state, "echo still-alive").await;
+            assert_eq!(code, 0, "[{name}] second command must run, stdout={stdout:?}");
+            assert!(stdout.contains("still-alive"), "[{name}] got {stdout:?}");
+            assert!(
+                !stdout.contains("parse error") && !stdout.contains("defining function based on alias"),
+                "[{name}] replay must not hit alias-expansion errors: {stdout:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_function_persists_across_commands() {
         if !bash_available() {

@@ -18,6 +18,12 @@ isolated checkout — no stepping on each other's changes, no stashing.
 
   (Use `=` — otherwise the prompt is taken as the worktree name.)
 
+## Names and refs
+
+- A worktree name keeps Unicode letters and digits (`café` stays `café`); spaces and underscores become hyphens, and other punctuation is dropped.
+- A name you type that is already taken is refused, with a message naming it; Fuigo no longer quietly makes `name-2`. If you deleted that worktree's folder by hand, the name is free again. Names Fuigo generates for you (no name typed) still get a numeric suffix when they collide.
+- `--worktree-ref` (alias `--ref`) and `fuigo worktree create --ref` take a branch, tag or commit. A ref or a name that starts with `-` is refused with "may not begin with '-'", because git would read it as an option.
+
 ## Why this is great
 
 - Run two or three Fuigo sessions on the same repo simultaneously.

@@ -63,20 +63,24 @@ Hooks are discovered from several places (all are merged):
 
 | Scope | Path | Trusted? | Notes |
 |-------|------|----------|-------|
-| Global | `~/.fuigo/hooks/*.json` | Always | Personal hooks |
-| Global | `~/.claude/settings.json` (and `settings.local.json`) | Always | Claude Code compatibility (configurable) |
-| Global | `~/.cursor/hooks.json` | Always | Cursor compatibility (configurable) |
+| Global | `~/.fuigo/hooks/*.json` | Requires trust (headless: always) | Personal hooks |
+| Global | `~/.claude/settings.json` (and `settings.local.json`) | Requires trust (headless: always) | Claude Code compatibility (configurable) |
+| Global | `~/.cursor/hooks.json` | Requires trust (headless: always) | Cursor compatibility (configurable) |
 | Project | `<project>/.fuigo/hooks/*.json` | Requires trust | Per-repo automation |
 | Project | `<project>/.claude/settings.json` (and `settings.local.json`) | Requires trust | Claude compatibility (configurable) |
 | Project | `<project>/.cursor/hooks.json` | Requires trust | Cursor compatibility (configurable) |
-| Config | `~/.fuigo/config.toml` | Always | Your hooks alongside the rest of your config |
-| Config | `managed_config.toml` (`$FUIGO_HOME` and `/etc/fuigo`) | Always | Organization-distributed hooks (server-synced and on-device) |
-| Config | `requirements.toml` (user and system) | Always | Organization-distributed hooks in the requirements layer |
-| Plugin | Bundled inside installed plugins | Per-plugin | Shared team hooks |
+| Config | `~/.fuigo/config.toml` | Requires trust (headless: always) | Your hooks alongside the rest of your config |
+| Config | `managed_config.toml` (`/etc/fuigo`) | Always (managed) |
+| Config | `managed_config.toml` (`$FUIGO_HOME`) | Requires trust (headless: always) | Organization-distributed hooks (server-synced and on-device) |
+| Config | `requirements.toml` (system) | Always (managed) |
+| Config | `requirements.toml` (`$FUIGO_HOME`) | Requires trust (headless: always) | Organization-distributed hooks in the requirements layer |
+| Plugin | Bundled inside installed plugins | Per-plugin, and requires trust | Shared team hooks |
 
 Config-file hooks live in the same TOML your organization already controls; see [Hooks in Config Files](#hooks-in-config-files) for the format. The compatible vendor hook sources are scanned by default. To disable scanning for a specific vendor, set `[compat.<vendor>] hooks = false` in `~/.fuigo/config.toml` or the corresponding environment variable. See [Configuration](05-configuration.md#harness-compatibility) for details.
 
-**Trusting a project**: The first time you open a project with hooks, you must trust it before its project hooks will run; until then they are silently skipped. Grant trust by running `/hooks-trust` (or launching with `--trust`); the decision is recorded in the unified folder-trust store (`~/.fuigo/trusted_folders.toml`), the same gate that governs repo-local MCP/LSP servers. Global hooks in `~/.fuigo/hooks/` are always trusted and need no entry. This prevents untrusted repos from running arbitrary code.
+**Trusting a project**: The first time you open a project with hooks, you must trust it before its project hooks will run; until then they are silently skipped. Grant trust by running `/hooks-trust` (or launching with `--trust`); the decision is recorded in the unified folder-trust store (`~/.fuigo/trusted_folders.toml`), the same gate that governs repo-local MCP/LSP servers. This prevents untrusted repos from running arbitrary code.
+
+**Untrusted folders**: until you trust a folder, an interactive session runs only managed hooks from your organization (the root-owned `requirements.toml` and `managed_config.toml` under `/etc/fuigo`, and the MDM requirements layer). Your own hooks (`~/.fuigo/hooks`, `~/.claude`, `~/.cursor`, and the `[hooks]` in your `config.toml`, `$FUIGO_HOME/managed_config.toml` and `$FUIGO_HOME/requirements.toml`), project hooks, plugin hooks and agent hooks all stay off, and Fuigo logs one line per folder saying so. Run `/hooks-trust` (or launch with `--trust`) to turn them on. A headless (`-p`) session has nobody to ask, so it treats your own hooks as trusted; project, plugin and agent hooks still wait for folder trust there.
 
 Because hooks are unified under folder-trust, a `--trust` / `/hooks-trust` grant trusts the whole folder for **MCP, LSP, hooks, project instructions, and project skills** together, and covers subdirectories of the same repository. A nested git checkout under that folder is a separate workspace and is not covered. Conversely, disabling folder-trust (`FUIGO_FOLDER_TRUST=0` or `[folder_trust] enabled = false`) ungates those surfaces together.
 
@@ -631,7 +635,7 @@ echo '{"decision": "allow"}'
 ## Security Notes
 
 - Global hooks (`~/.fuigo/hooks/`) run with your user permissions; treat them like shell scripts.
-- Project hooks require folder trust (`/hooks-trust` or `--trust`, the same gate as repo-local MCP/LSP) to prevent supply-chain attacks from malicious repos.
+- User, project, plugin and agent hooks require folder trust (only managed hooks run in an untrusted folder; headless sessions treat user hooks as trusted) (`/hooks-trust` or `--trust`, the same gate as repo-local MCP/LSP) to prevent supply-chain attacks from malicious repos.
 - HTTP hooks send session data; only use trusted endpoints.
 - A `PostToolUse` hook decides what the model reads for that tool call — it can add instructions or replace the output outright — so trust one the way you trust a `PreToolUse` gate. The scrollback and the transcript keep the real output, so a replacement is always visible to you.
 

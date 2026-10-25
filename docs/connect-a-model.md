@@ -64,6 +64,8 @@ Fuigo does not store a third-party key. Export it in your shell (`OPENAI_API_KEY
 
 When a provider key is found, Fuigo asks that provider's standard `/models` endpoint for the models the key can use (once a day, in the background, and when you run `fuigo login --provider openai`), keeps only the model IDs under `~/.fuigo/provider-keys/`, and lists them in `/model` with no setup. A model the key and Flux Router both reach is one row, Flux Router first. `/provider` is still there for a model you want to name yourself: it writes the provider's endpoint and the **name** of the environment variable to `~/.fuigo/config.toml`, never the key.
 
+Apps that embed Fuigo can turn off every background model-list fetch, this one and the daily refresh of ChatGPT and Grok subscription lists, by setting `FUIGO_DISABLE_MODEL_REFRESH` to any non-empty value except `0` (so `1` and `true` turn it off; `0` and empty leave it on). Fuigo then makes no request and uses the cached list, or the built-in list if there is none. It covers the terminal app, headless `-p` and ACP. `fuigo login --provider <id>` still fetches, because you asked.
+
 If the default model you set yourself cannot be used (for example it is a Flux Router model and no Flux key is set), the welcome screen says why and shows "Pick a model:" with the models you can use. Choosing one starts on it for that session and leaves your default alone; switch on "Make my pick the default model" first to save it.
 
 ## Checking a route

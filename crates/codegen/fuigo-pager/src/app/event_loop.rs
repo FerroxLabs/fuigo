@@ -1376,6 +1376,8 @@ pub(crate) async fn run(
         remote_permission_mode,
     );
     app.default_yolo = launch_yolo.yolo;
+    // `--permission-mode plan` starts the first session in plan mode (applied in `handle_session_created`)
+    app.launch_plan_mode = args.permission_mode_flag.as_deref() == Some("plan");
     // Hoisted so it can be re-applied after `load_initial_ui_config()` replaces `current_ui` below
     let launch_auto = fuigo_shell::util::config::effective_auto_for_launch(
         args.yolo,

@@ -1449,6 +1449,7 @@ fn execute_git_checkout_worktree(plan: WorktreePlan) -> Result<CreateWorktreeRes
             "worktree",
             "add",
             "--detach",
+            "--",
             &dest.to_string_lossy(),
             git_ref,
         ])

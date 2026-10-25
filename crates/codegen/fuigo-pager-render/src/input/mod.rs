@@ -3,6 +3,7 @@ pub mod keyboard_normalizer;
 pub mod line_editor;
 #[cfg(target_os = "macos")]
 pub mod macos_modifiers;
+pub(crate) mod modifier_gate;
 pub mod mouse;
 pub(crate) mod scroll_log;
 pub mod terminal_support;
