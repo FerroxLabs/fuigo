@@ -63,6 +63,10 @@ pub enum HookSkipReason {
     ManagedOnly,
 }
 
+/// The note shown when a hook is refused because `FUIGO_MANAGED_HOOKS_ONLY` is on for this process.
+pub const MANAGED_HOOKS_ONLY_ENV_NOTE: &str = "Only managed hooks run (FUIGO_MANAGED_HOOKS_ONLY): the app running \
+     Fuigo turns off user, project and plugin hooks.";
+
 /// The note shown when a hook is refused under `allow_managed_hooks_only` (P169).
 pub const MANAGED_HOOKS_ONLY_NOTE: &str = "Only managed hooks run: your organization's policy \
      (allow_managed_hooks_only) turns off user, project and plugin hooks.";
@@ -74,6 +78,8 @@ pub const MANAGED_HOOKS_ONLY_NOTE: &str = "Only managed hooks run: your organiza
 pub struct DisabledHooks {
     names: std::collections::HashSet<String>,
     managed_only: bool,
+    /// The managed-only pin is on because of `FUIGO_MANAGED_HOOKS_ONLY` (no policy file pins it).
+    managed_only_by_env: bool,
     /// The disabled-hooks file exists but could not be read. Which hooks the user disabled is then unknown, so every
     /// non-managed hook is skipped rather than running one the user turned off.
     unreadable: bool,
@@ -90,6 +96,7 @@ impl DisabledHooks {
         Self {
             names: names.into_iter().collect(),
             managed_only,
+            managed_only_by_env: false,
             unreadable: false,
         }
     }
@@ -106,10 +113,33 @@ impl DisabledHooks {
     /// Read the disabled-hooks file and the `allow_managed_hooks_only` pin (every managed-config and requirements
     /// layer plus the Claude managed-settings file; an unreadable policy layer engages it).
     pub fn load() -> Self {
-        let managed_only = fuigo_config::policy_sources::managed_hooks_only_pin().is_disabled();
-        match disabled_hooks_file_path() {
-            Some(file) => Self::from_file(&file, managed_only),
-            None => Self::new(Vec::new(), managed_only),
+        let pin = fuigo_config::policy_sources::managed_hooks_only_pin();
+        let mut loaded = match disabled_hooks_file_path() {
+            Some(file) => Self::from_file(&file, pin.is_disabled()),
+            None => Self::new(Vec::new(), pin.is_disabled()),
+        };
+        loaded.managed_only_by_env = pin.is_from_env();
+        loaded
+    }
+
+    /// Mark the managed-only pin as engaged by `FUIGO_MANAGED_HOOKS_ONLY` (tests and `load`).
+    pub fn with_managed_only_by_env(mut self) -> Self {
+        self.managed_only = true;
+        self.managed_only_by_env = true;
+        self
+    }
+
+    /// The pin is on because of `FUIGO_MANAGED_HOOKS_ONLY`, not a policy file.
+    pub fn managed_only_by_env(&self) -> bool {
+        self.managed_only_by_env
+    }
+
+    /// The note for a hook refused under the managed-only pin, naming the env var when that is why.
+    pub fn managed_only_note(&self) -> &'static str {
+        if self.managed_only_by_env {
+            MANAGED_HOOKS_ONLY_ENV_NOTE
+        } else {
+            MANAGED_HOOKS_ONLY_NOTE
         }
     }
 

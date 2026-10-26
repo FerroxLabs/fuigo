@@ -608,6 +608,11 @@ impl PolicyPin {
         matches!(self, Self::Disabled { .. })
     }
 
+    /// Whether the pin was engaged by the process environment switch ([`MANAGED_HOOKS_ONLY_ENV`]) rather than a policy file.
+    pub fn is_from_env(&self) -> bool {
+        matches!(self, Self::Disabled { source, .. } if source.as_os_str() == MANAGED_HOOKS_ONLY_ENV_SOURCE)
+    }
+
     /// The policy layer that engaged the pin, if any.
     pub fn source(&self) -> Option<&Path> {
         match self {
@@ -687,9 +692,49 @@ pub fn resolve_bool_pin(pin: BoolPin, sources: &[PolicySource]) -> PolicyPin {
     out
 }
 
+/// The per-process switch that has the same effect as `allow_managed_hooks_only = true`, for an app that embeds Fuigo.
+pub const MANAGED_HOOKS_ONLY_ENV: &str = "FUIGO_MANAGED_HOOKS_ONLY";
+
+/// The "source" a pin engaged by [`MANAGED_HOOKS_ONLY_ENV`] reports in place of a file path.
+pub const MANAGED_HOOKS_ONLY_ENV_SOURCE: &str = "env:FUIGO_MANAGED_HOOKS_ONLY";
+
+/// Whether [`MANAGED_HOOKS_ONLY_ENV`] is on: any non-empty value except `0` (the same reading as
+/// `FUIGO_DISABLE_MODEL_REFRESH`).
+pub fn managed_hooks_only_env_on(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Fold the environment switch into a pin computed from the policy files. It can only tighten: a pin the files already
+/// engaged is returned unchanged (managed policy keeps the attribution), and `env_on == false` never lifts anything.
+pub fn with_env_managed_hooks_only(file_pin: PolicyPin, env_on: bool) -> PolicyPin {
+    if env_on && !file_pin.is_disabled() {
+        PolicyPin::Disabled {
+            source: PathBuf::from(MANAGED_HOOKS_ONLY_ENV_SOURCE),
+            ownership: PolicyLayerOwnership::User,
+        }
+    } else {
+        file_pin
+    }
+}
+
+/// [`MANAGED_HOOKS_ONLY_ENV`] as this process has it right now.
+pub fn managed_hooks_only_env_now() -> bool {
+    managed_hooks_only_env_on(std::env::var_os(MANAGED_HOOKS_ONLY_ENV).as_deref())
+}
+
 /// The `allow_managed_hooks_only` pin as the policy files are now. P183 round 9 (Grok r5 H2): read on every call, cached by
 /// the sources it was built from, so a file that breaks after a good first read engages it without a restart.
+/// The environment switch ([`MANAGED_HOOKS_ONLY_ENV`]) is folded in here, the one place the pin is computed.
 pub fn managed_hooks_only_pin() -> &'static PolicyPin {
+    static ENV_PIN: std::sync::OnceLock<PolicyPin> = std::sync::OnceLock::new();
+    let file_pin = managed_hooks_only_file_pin();
+    if managed_hooks_only_env_now() && !file_pin.is_disabled() {
+        return ENV_PIN.get_or_init(|| with_env_managed_hooks_only(PolicyPin::Unpinned, true));
+    }
+    file_pin
+}
+
+fn managed_hooks_only_file_pin() -> &'static PolicyPin {
     static CACHE: std::sync::Mutex<Option<(String, &'static PolicyPin)>> = std::sync::Mutex::new(None);
     let sources = policy_sources();
     let key = format!("{sources:?}");

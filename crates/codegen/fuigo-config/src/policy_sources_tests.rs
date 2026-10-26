@@ -430,3 +430,70 @@ fn valid_and_unknown_key_admin_toml_agree_with_identical_pins_p183r12() {
     let layer: toml::Value = toml::from_str(&kept).unwrap();
     assert_eq!(layer.get("allow_managed_hooks_only"), Some(&toml::Value::Boolean(true)));
 }
+
+// ── FUIGO_MANAGED_HOOKS_ONLY (1.0.34) ─────────────────────────────────────────────────────────
+
+#[test]
+fn managed_hooks_only_env_reads_like_the_model_refresh_switch() {
+    use std::ffi::OsStr;
+    assert!(!managed_hooks_only_env_on(None), "unset is off");
+    assert!(!managed_hooks_only_env_on(Some(OsStr::new(""))), "empty is off");
+    assert!(!managed_hooks_only_env_on(Some(OsStr::new("0"))), "0 is off");
+    for on in ["1", "true", "yes", "anything", "00", " "] {
+        assert!(managed_hooks_only_env_on(Some(OsStr::new(on))), "{on:?}");
+    }
+}
+
+#[test]
+fn env_off_leaves_the_file_pin_exactly_as_it_was() {
+    assert_eq!(with_env_managed_hooks_only(PolicyPin::Unpinned, false), PolicyPin::Unpinned);
+    let d = dirs();
+    write(&d.sys, "requirements.toml", "allow_managed_hooks_only = true\n");
+    let file_pin = resolve_bool_pin(BoolPin::NonManagedHooks, &sources(&d, None));
+    assert!(file_pin.is_disabled());
+    assert_eq!(with_env_managed_hooks_only(file_pin.clone(), false), file_pin);
+}
+
+#[test]
+fn env_on_turns_the_pin_on_and_names_the_env_var() {
+    let pin = with_env_managed_hooks_only(PolicyPin::Unpinned, true);
+    assert!(pin.is_disabled());
+    assert!(pin.is_from_env());
+    assert_eq!(pin.source(), Some(Path::new(MANAGED_HOOKS_ONLY_ENV_SOURCE)));
+}
+
+#[test]
+fn env_on_never_replaces_or_lifts_a_managed_pin() {
+    let d = dirs();
+    write(&d.sys, "requirements.toml", "allow_managed_hooks_only = true\n");
+    let file_pin = resolve_bool_pin(BoolPin::NonManagedHooks, &sources(&d, None));
+    let with_env = with_env_managed_hooks_only(file_pin.clone(), true);
+    assert_eq!(with_env, file_pin, "the managed layer keeps the attribution");
+    assert!(!with_env.is_from_env());
+    // Managed policy that says false does not un-pin the env switch either (the pin only tightens).
+    let d = dirs();
+    write(&d.sys, "requirements.toml", "allow_managed_hooks_only = false\n");
+    let off = resolve_bool_pin(BoolPin::NonManagedHooks, &sources(&d, None));
+    assert!(!off.is_disabled());
+    assert!(with_env_managed_hooks_only(off, true).is_disabled());
+}
+
+/// The public pin reads the real environment; one test owns the variable so parallel tests cannot race on it.
+#[test]
+fn managed_hooks_only_pin_follows_the_process_environment() {
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let prior = std::env::var_os(MANAGED_HOOKS_ONLY_ENV);
+    // Every case compares with the unset baseline, so a host policy file cannot change the verdict.
+    // SAFETY: this crate's tests do not read this variable anywhere else, and the lock serializes these cases.
+    unsafe { std::env::remove_var(MANAGED_HOOKS_ONLY_ENV) };
+    let baseline = managed_hooks_only_pin().is_disabled();
+    for (value, expect_on) in [("0", false), ("", false), ("1", true)] {
+        unsafe { std::env::set_var(MANAGED_HOOKS_ONLY_ENV, value) };
+        assert_eq!(managed_hooks_only_pin().is_disabled(), baseline || expect_on, "value {value:?}");
+    }
+    match prior {
+        Some(v) => unsafe { std::env::set_var(MANAGED_HOOKS_ONLY_ENV, v) },
+        None => unsafe { std::env::remove_var(MANAGED_HOOKS_ONLY_ENV) },
+    }
+}

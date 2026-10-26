@@ -161,7 +161,11 @@ pub(crate) fn managed_policy_rows(
         rows.push(PolicyRow {
             kind: "managedHooksOnly",
             source: path_of(Some(p)),
-            detail: "only managed hooks run (allow_managed_hooks_only = true)".to_string(),
+            detail: if ms.non_managed_hooks.is_from_env() {
+                "only managed hooks run (FUIGO_MANAGED_HOOKS_ONLY)".to_string()
+            } else {
+                "only managed hooks run (allow_managed_hooks_only = true)".to_string()
+            },
         });
     }
     rows

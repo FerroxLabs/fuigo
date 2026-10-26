@@ -28,6 +28,10 @@ fn eligible_or_record_skip(
     match disabled.skip_reason(spec) {
         Some(reason) => {
             match reason {
+                crate::trust::HookSkipReason::ManagedOnly if disabled.managed_only_by_env() => tracing::info!(
+                    hook_name = %spec.name,
+                    "hook skipped (only managed hooks run: FUIGO_MANAGED_HOOKS_ONLY)"
+                ),
                 crate::trust::HookSkipReason::ManagedOnly => tracing::info!(
                     hook_name = %spec.name,
                     "hook skipped (allow_managed_hooks_only: only managed hooks run)"
@@ -2498,6 +2502,36 @@ mod tests {
         assert_eq!(unpinned.skip_reason(&on), None);
         assert_eq!(unpinned.skip_reason(&off), Some(HookSkipReason::UserDisabled));
         assert!(!unpinned.managed_only() && pinned.managed_only());
+    }
+
+    /// `FUIGO_MANAGED_HOOKS_ONLY`: the pin engaged by the environment skips every non-managed hook like the policy pin,
+    /// keeps managed hooks, and the reasons shown name the environment variable.
+    #[test]
+    fn env_managed_only_pin_skips_non_managed_hooks_and_names_the_env_var() {
+        use crate::config::HookProvenance;
+        use crate::trust::{DisabledHooks, HookSkipReason, MANAGED_HOOKS_ONLY_ENV_NOTE, MANAGED_HOOKS_ONLY_NOTE};
+        let by_env = DisabledHooks::new(Vec::<String>::new(), false).with_managed_only_by_env();
+        let mut results = Vec::new();
+        for (name, layer) in [
+            ("global/user-hook", HookProvenance::User),
+            ("project/repo-hook", HookProvenance::File),
+            ("plugin/p:hook", HookProvenance::Plugin),
+        ] {
+            let mut spec = make_command_spec(name, None, true, "echo ok");
+            spec.layer = layer;
+            assert_eq!(by_env.skip_reason(&spec), Some(HookSkipReason::ManagedOnly), "{name}");
+            assert!(!eligible_or_record_skip(&spec, None, &mut results, &by_env, ""), "{name}");
+            let diag = crate::health::diagnose(&spec, "s", "/tmp", &by_env);
+            assert!(diag.reason.unwrap().contains("FUIGO_MANAGED_HOOKS_ONLY"), "{name}");
+        }
+        let mut managed = make_command_spec("requirements/system:x[0].hooks[0]", None, true, "echo ok");
+        managed.layer = HookProvenance::Requirements;
+        assert_eq!(by_env.skip_reason(&managed), None);
+        assert!(eligible_or_record_skip(&managed, None, &mut results, &by_env, ""));
+        assert_eq!(by_env.managed_only_note(), MANAGED_HOOKS_ONLY_ENV_NOTE);
+        assert!(MANAGED_HOOKS_ONLY_ENV_NOTE.contains("FUIGO_MANAGED_HOOKS_ONLY"));
+        // A policy-file pin keeps the old wording.
+        assert_eq!(DisabledHooks::new(Vec::<String>::new(), true).managed_only_note(), MANAGED_HOOKS_ONLY_NOTE);
     }
 
     #[tokio::test]

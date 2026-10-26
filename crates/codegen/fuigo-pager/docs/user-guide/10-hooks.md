@@ -84,6 +84,8 @@ Config-file hooks live in the same TOML your organization already controls; see 
 
 Because hooks are unified under folder-trust, a `--trust` / `/hooks-trust` grant trusts the whole folder for **MCP, LSP, hooks, project instructions, and project skills** together, and covers subdirectories of the same repository. A nested git checkout under that folder is a separate workspace and is not covered. Conversely, disabling folder-trust (`FUIGO_FOLDER_TRUST=0` or `[folder_trust] enabled = false`) ungates those surfaces together.
 
+**Embedding apps**: an app that runs Fuigo can set `FUIGO_MANAGED_HOOKS_ONLY` (any non-empty value except `0`) to get the same result as `allow_managed_hooks_only = true` for one process, without touching any file. Only hooks from `/etc/fuigo/managed_config.toml` and `/etc/fuigo/requirements.toml` run; every other hook is skipped and shows as "only managed hooks run (FUIGO_MANAGED_HOOKS_ONLY)". It can only tighten: it never lifts a pin your organization set. See [Embedding Fuigo](14-headless-mode.md#embedding-fuigo).
+
 ---
 
 ## Hook Events
