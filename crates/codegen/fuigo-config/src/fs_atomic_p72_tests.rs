@@ -344,6 +344,12 @@ fn a_ticket_stamped_in_the_future_stays_ahead_of_a_newcomer() {
 /// progress for this process's threads queued behind the one that was
 /// waiting on it: here the thread behind would otherwise give up while the
 /// thread ahead of it, granted just now, still holds well inside the limit.
+///
+/// The test releases the other process itself (EOF on its stdin) once the
+/// thread behind has used most of its limit, so the outcome never depends on
+/// how promptly a child's sleep ends: without the restart the thread behind
+/// waits at least 70% + 50% of its limit and must give up; with it, it has a
+/// whole limit from the release for a hold of half of one.
 #[test]
 fn the_last_holder_ahead_leaving_restarts_the_wait_of_threads_behind() {
     let _alone = HEAVY_IO
@@ -352,16 +358,16 @@ fn the_last_holder_ahead_leaving_restarts_the_wait_of_threads_behind() {
     let dir = tempfile::tempdir().unwrap();
     let lock = dir.path().join("handoff.lock");
     enable_trace(&lock);
-    let holder = spawn_role(&format!("hold|{}|800|1", lock.display()));
+    let mut holder = spawn_role(&format!("wedge|{}", lock.display()));
     spin_until("the other process to hold the lock", Duration::from_secs(30), || {
         trace_of(&lock).iter().any(|(w, _)| w == "G")
     });
-    let stall = Duration::from_secs(1);
+    let stall = Duration::from_secs(2);
     let key = turn::key_for(&lock);
     let (a, b) = std::thread::scope(|s| {
         let a = s.spawn(|| {
             let l = lock_at_within(&lock, Duration::from_secs(30))?;
-            std::thread::sleep(Duration::from_millis(400));
+            std::thread::sleep(stall / 2);
             drop(l);
             Ok::<_, std::io::Error>(())
         });
@@ -369,6 +375,11 @@ fn the_last_holder_ahead_leaving_restarts_the_wait_of_threads_behind() {
             turn::outstanding(&key) >= 1
         });
         let b = s.spawn(|| lock_at_within(&lock, stall).map(drop));
+        spin_until("the thread behind to queue", Duration::from_secs(10), || {
+            turn::outstanding(&key) >= 2
+        });
+        std::thread::sleep(stall * 7 / 10);
+        drop(holder.stdin.take());
         (a.join().unwrap(), b.join().unwrap())
     });
     wait_ok(holder, "holder");

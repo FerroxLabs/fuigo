@@ -27,7 +27,7 @@ Apache-2.0. Yours to own.
 
 [![Install: npm i -g fuigo](https://img.shields.io/badge/install-npm%20i%20--g%20fuigo-FF6A1A?style=for-the-badge&labelColor=1B1B20&logo=npm&logoColor=white)](#install)
 
-[Install](#install) · [Why Fuigo](#why-fuigo) · [Three ways to work](#three-ways-to-work) · [Features](#features) · [Models](#model-routes) · [Memory](#memory) · [Benchmark](docs/benchmark.md) · [Docs](#documentation) · [Release notes](docs/release-notes-1.0.33.md)
+[Install](#install) · [Why Fuigo](#why-fuigo) · [Three ways to work](#three-ways-to-work) · [Features](#features) · [Models](#model-routes) · [Memory](#memory) · [Benchmark](docs/benchmark.md) · [Docs](#documentation) · [Release notes](docs/release-notes-1.0.34.md)
 
 </div>
 

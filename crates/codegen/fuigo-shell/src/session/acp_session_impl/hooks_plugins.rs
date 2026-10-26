@@ -336,7 +336,7 @@ impl SessionActor {
         names: impl IntoIterator<Item = &'a str>,
     ) -> Option<fuigo_hooks_plugins_types::ActionOutcome> {
         managed_hooks_only_refusal(
-            fuigo_config::policy_sources::managed_hooks_only_pin().is_disabled(),
+            fuigo_config::policy_sources::managed_hooks_only_pin(),
             names,
             |name| self.is_managed_policy_hook(name),
         )
@@ -1361,11 +1361,11 @@ impl SessionActor {
 /// The managed-hooks-only refusal rule (P169), split out so it is testable without a session: `Some` when the pin is
 /// engaged and any of `names` is not a managed-policy hook.
 fn managed_hooks_only_refusal<'a>(
-    pinned: bool,
+    pin: &fuigo_config::policy_sources::PolicyPin,
     names: impl IntoIterator<Item = &'a str>,
     is_managed_policy_hook: impl Fn(&str) -> bool,
 ) -> Option<fuigo_hooks_plugins_types::ActionOutcome> {
-    if !pinned {
+    if !pin.is_disabled() {
         return None;
     }
     names
@@ -1373,7 +1373,12 @@ fn managed_hooks_only_refusal<'a>(
         .any(|name| !is_managed_policy_hook(name))
         .then(|| fuigo_hooks_plugins_types::ActionOutcome {
             status: fuigo_hooks_plugins_types::OutcomeStatus::ValidationError,
-            message: fuigo_hooks::trust::MANAGED_HOOKS_ONLY_NOTE.to_owned(),
+            message: if pin.is_from_env() {
+                fuigo_hooks::trust::MANAGED_HOOKS_ONLY_ENV_NOTE
+            } else {
+                fuigo_hooks::trust::MANAGED_HOOKS_ONLY_NOTE
+            }
+            .to_owned(),
             requires_reload: false,
             requires_restart: false,
         })
@@ -1814,24 +1819,41 @@ mod agent_mcp_tests;
 #[cfg(test)]
 mod p169_managed_hooks_only_tests {
     use super::managed_hooks_only_refusal;
+    use fuigo_config::policy_sources::{PolicyPin, with_env_managed_hooks_only};
 
     /// P169 (S11): enabling or adding anything outside managed policy is refused with the policy note; managed hooks
     /// pass, and nothing is refused without the pin. Ported from upstream `refuse_enable_under_managed_only`.
     #[test]
     fn refusal_rule() {
         let managed = |name: &str| name.starts_with("requirements/system:");
-        assert!(managed_hooks_only_refusal(false, ["global/x"], managed).is_none());
-        let refused = managed_hooks_only_refusal(true, ["global/x"], managed).unwrap();
+        let off = PolicyPin::Unpinned;
+        let on = fuigo_config::policy_sources::PolicyPin::Disabled {
+            source: "/etc/fuigo/requirements.toml".into(),
+            ownership: fuigo_config::policy_sources::PolicyLayerOwnership::Admin,
+        };
+        assert!(managed_hooks_only_refusal(&off, ["global/x"], managed).is_none());
+        let refused = managed_hooks_only_refusal(&on, ["global/x"], managed).unwrap();
         assert_eq!(refused.message, fuigo_hooks::trust::MANAGED_HOOKS_ONLY_NOTE);
         assert!(matches!(
             refused.status,
             fuigo_hooks_plugins_types::OutcomeStatus::ValidationError
         ));
-        assert!(managed_hooks_only_refusal(true, ["requirements/system:a[0].hooks[0]"], managed).is_none());
+        assert!(managed_hooks_only_refusal(&on, ["requirements/system:a[0].hooks[0]"], managed).is_none());
         assert!(
-            managed_hooks_only_refusal(true, ["requirements/system:a[0].hooks[0]", "plugin/p:h"], managed).is_some(),
+            managed_hooks_only_refusal(&on, ["requirements/system:a[0].hooks[0]", "plugin/p:h"], managed).is_some(),
             "one non-managed name in a bulk enable refuses the whole action"
         );
-        assert!(managed_hooks_only_refusal(true, [""], managed).is_some(), "adding a hook path is refused");
+        assert!(managed_hooks_only_refusal(&on, [""], managed).is_some(), "adding a hook path is refused");
+    }
+
+    /// `FUIGO_MANAGED_HOOKS_ONLY`: the same refusal, with a note that names the environment variable.
+    #[test]
+    fn env_pin_refuses_with_the_env_note() {
+        let managed = |name: &str| name.starts_with("requirements/system:");
+        let env_pin = with_env_managed_hooks_only(PolicyPin::Unpinned, true);
+        let refused = managed_hooks_only_refusal(&env_pin, ["global/x"], managed).unwrap();
+        assert_eq!(refused.message, fuigo_hooks::trust::MANAGED_HOOKS_ONLY_ENV_NOTE);
+        assert!(refused.message.contains("FUIGO_MANAGED_HOOKS_ONLY"));
+        assert!(managed_hooks_only_refusal(&env_pin, ["requirements/system:a[0].hooks[0]"], managed).is_none());
     }
 }

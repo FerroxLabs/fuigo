@@ -673,7 +673,7 @@ These top-level policy keys are read from `requirements.toml` and from `managed_
 | `allow_managed_mcp_servers_only` | `boolean` | Only servers an allow list names run; an admin file's lock accepts only admin files' allow entries. |
 | `enable_all_project_mcp_servers` | `boolean` | `false` drops a repository's MCP servers unless an allow list names them. |
 | `strict_known_marketplaces` | array of `{ source = "git", url }` or `{ source = "github", repo }` | Only these marketplaces can be added, and only plugins installed from them load, install or enable. Other plugins (project, `[plugins].paths`, `--plugin-dir`, Claude-imported) do not load. Empty blocks all. |
-| `allow_managed_hooks_only` | `boolean` | `true` runs only hooks from `/etc/fuigo/managed_config.toml` and `/etc/fuigo/requirements.toml`; other hooks are skipped and enabling one is refused. |
+| `allow_managed_hooks_only` | `boolean` | `true` runs only hooks from `/etc/fuigo/managed_config.toml` and `/etc/fuigo/requirements.toml`; other hooks are skipped and enabling one is refused. The environment variable `FUIGO_MANAGED_HOOKS_ONLY` (any non-empty value except `0`) has the same effect for one process and can never lift this pin. |
 
 ## What happens when a setting is refused
 

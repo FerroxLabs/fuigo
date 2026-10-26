@@ -802,6 +802,7 @@ The key ones. See the README for the complete list.
 | Variable | Description |
 |----------|-------------|
 | `FUIGO_HOME` | Override config directory (default: `~/.fuigo`) |
+| `FUIGO_MANAGED_HOOKS_ONLY` | Any non-empty value except `0` runs only managed hooks for this process, like `allow_managed_hooks_only = true`; see [Embedding Fuigo](14-headless-mode.md#embedding-fuigo) |
 | `FUIGO_RESPECT_GITIGNORE` | Force gitignore filtering on (`1`) or off (`0`); overrides `[tools] respect_gitignore` |
 
 ### Telemetry

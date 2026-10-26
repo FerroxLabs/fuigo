@@ -618,6 +618,7 @@ Key environment variables that affect headless mode:
 | `FUIGO_HEADLESS_TIMEOUT_SECS`   | Fallback for `--timeout`: hard cap on the whole headless run, in whole seconds. Unset, empty, `0` or unparsable means no cap. Ignored by the interactive TUI. See [Run timeout](#run-timeout) |
 | `FUIGO_HEADLESS_LIFECYCLE_TIMEOUT_SECS` | Cap on the `initialize`/`authenticate` handshakes, in whole seconds (default `120`). `0` removes the cap; empty or unparsable keeps the default. Headless only. See [Run timeout](#run-timeout) |
 | `FUIGO_HOME`                    | Override config directory (default: `~/.fuigo`)                |
+| `FUIGO_MANAGED_HOOKS_ONLY`      | Any non-empty value except `0` runs only managed hooks for this process, like `allow_managed_hooks_only = true`. See [Embedding Fuigo](#embedding-fuigo) |
 | `FUIGO_LOG_FILE`                | Path to a log file (used verbatim as the path; works in headless and TUI, honors `RUST_LOG`) |
 | `RUST_LOG`                     | Log level filter (e.g. `debug`). Headless logs to stderr.     |
 
@@ -834,6 +835,20 @@ To avoid a permission `3`, pre-approve the work: `--allow`, a higher `--permissi
 or a trusted folder whose project permission rules allow it. None of these lifts a budget. A
 budget denial needs the budget raised or cleared, as its remedy says. See [Always-approve for automation](#always-approve-for-automation) and
 [22-permissions-and-safety.md](22-permissions-and-safety.md).
+
+---
+
+## Embedding Fuigo
+
+An app that starts Fuigo as a child process can set these for one run.
+
+**Turn off every hook that is not managed.** Set `FUIGO_MANAGED_HOOKS_ONLY` to any non-empty value except `0` (so `1` and `true` turn it on; `0`, empty and unset leave it off). Fuigo then behaves as if managed policy had set `allow_managed_hooks_only = true`: only hooks from `/etc/fuigo/managed_config.toml` and `/etc/fuigo/requirements.toml` run. Your own hooks (`~/.fuigo/hooks`, `~/.claude`, `~/.cursor`, the hooks in `config.toml`), project hooks, plugin hooks and agent hooks are all skipped, they show as disabled in `/hooks`, and enabling or adding one is refused with a note that names the variable. It covers the terminal app, headless `-p` and ACP. The switch can only tighten: it never turns off a pin your organization set, and with it unset nothing changes.
+
+```bash
+FUIGO_MANAGED_HOOKS_ONLY=1 fuigo -p "Summarize this repo"
+```
+
+**Isolating a child's home.** To keep a child run out of the real user's files, point Fuigo at its own folders. On Linux and macOS Fuigo finds the home folder from `HOME`. On Windows it comes from `USERPROFILE`, not `HOME`, so an embedder isolating a child there must set `USERPROFILE` (and `FUIGO_HOME`), not only `HOME`. Setting all three on every platform is safe.
 
 ---
 

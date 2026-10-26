@@ -4,6 +4,7 @@ Each release has its own notes under `docs/`. Binaries and npm platform packages
 
 | Version | Notes | Highlights |
 | --- | --- | --- |
+| 1.0.34 | [release notes](docs/release-notes-1.0.34.md) | New `FUIGO_MANAGED_HOOKS_ONLY` switch lets an app that embeds Fuigo run only managed hooks for one run; the docs now say that on Windows Fuigo's home folder comes from `USERPROFILE`. |
 | 1.0.33 | [release notes](docs/release-notes-1.0.33.md) | Hooks stay off in untrusted folders until you trust them; worktree refs and names starting with `-` are refused; one switch turns off every background model-list fetch for embedding apps; `--permission-mode plan` starts in plan mode; a stray key can no longer approve a plan; fixes for the `/fork` model, failed session starts, web-search events and a macOS-over-SSH hang. |
 | 1.0.32 | [release notes](docs/release-notes-1.0.32.md) | One sign-in picker for ChatGPT, Grok, Flux Router and provider keys, and one ranked model list that names the route each model uses; opt-in per-command sandbox; smaller install; new welcome screen; many MCP, hook, permission, worktree, goal and terminal fixes. |
 | 1.0.31 | [release notes](docs/release-notes-1.0.31.md) | Fix: switching provider with `/model` no longer replays reasoning the new provider rejects; `/remember` reports the real file it wrote or that the note was not saved; session rules survive a model switch; MCP tool progress reaches the client; untrusted-folder tests; project-rules guide corrected; new README, brand and community files. |

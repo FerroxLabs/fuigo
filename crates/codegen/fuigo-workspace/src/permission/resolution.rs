@@ -815,15 +815,24 @@ pub fn managed_settings() -> &'static ManagedSettings {
     // P183 round 10 (Grok r6 H): the value also depends on whether a validated copy of each admin file exists (it decides
     // "enforce the copy" against "deny every tool"), which the sources' text alone does not show. A copy that appears or is
     // forgotten changes the key, so a stale "a copy exists" answer is never served.
-    let key = managed_settings_cache_key(&sources, fuigo_config::admin_requirements_copy_id);
+    let env_hooks_only = fuigo_config::policy_sources::managed_hooks_only_env_now();
+    let key = format!(
+        "{}|env_hooks_only={env_hooks_only}",
+        managed_settings_cache_key(&sources, fuigo_config::admin_requirements_copy_id)
+    );
     let mut guard = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some((k, ms)) = guard.as_ref()
         && *k == key
     {
         return ms;
     }
-    let ms: &'static ManagedSettings =
-        Box::leak(Box::new(managed_policy::load_managed_settings_from(sources)));
+    let mut built = managed_policy::load_managed_settings_from(sources);
+    // `FUIGO_MANAGED_HOOKS_ONLY` folds into the pin, so `inspect` shows it like the file-pinned form.
+    built.non_managed_hooks = fuigo_config::policy_sources::with_env_managed_hooks_only(
+        std::mem::take(&mut built.non_managed_hooks),
+        env_hooks_only,
+    );
+    let ms: &'static ManagedSettings = Box::leak(Box::new(built));
     *guard = Some((key, ms));
     ms
 }

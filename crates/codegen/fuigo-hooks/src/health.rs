@@ -279,8 +279,13 @@ pub fn diagnose(
             return skipped("disabled".to_string(), "Enable it again in /hooks.".to_string());
         }
         Some(HookSkipReason::ManagedOnly) => {
+            let why = if disabled.managed_only_by_env() {
+                "only managed hooks run (FUIGO_MANAGED_HOOKS_ONLY)"
+            } else {
+                "only managed hooks run (allow_managed_hooks_only)"
+            };
             return skipped(
-                "only managed hooks run (allow_managed_hooks_only)".to_string(),
+                why.to_string(),
                 "Managed policy decides this; ask your administrator.".to_string(),
             );
         }
