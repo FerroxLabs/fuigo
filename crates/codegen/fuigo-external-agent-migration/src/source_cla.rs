@@ -5,7 +5,7 @@ use fuigo_config_types::McpServerConfig;
 use tracing::{debug, info};
 
 use super::config_values::{ClaudeSettingsSnapshot, ImportPlan, ImportableItem, PathKind};
-use super::hooks_cla::extract_hooks_from_settings_file;
+use super::hooks_cla::extract_hooks_from_settings_file_in;
 use super::scope::find_project_root;
 
 /// Build an import plan from the source settings.
@@ -34,6 +34,8 @@ pub fn scan_importable_settings(
     // The home used for the global/project split must match the resolution everywhere else that reads `~/.claude`,
     // or the scan and the hash tiers disagree.
     let home = fuigo_dirs::home_dir();
+    // Project settings are repository content: pin the project root once and read their hooks contained to it.
+    let project_root = fuigo_dirs::contained::PinnedRoot::pin(&find_project_root(cwd)).ok();
 
     for path in settings_paths {
         let Some(settings) = snapshot(path) else {
@@ -59,7 +61,13 @@ pub fn scan_importable_settings(
             target.push(ImportableItem::EnvVar { key, value });
         }
         // Re-read from the JSON: the snapshot does not model `hooks`.
-        target.extend(extract_hooks_from_settings_file(path));
+        if is_global {
+            target.extend(extract_hooks_from_settings_file_in(path, None));
+        } else if let Some(root) = project_root.as_ref() {
+            target.extend(extract_hooks_from_settings_file_in(path, Some(root)));
+        } else {
+            debug!(path = %path.display(), "Cannot pin the project root; project hooks not imported");
+        }
     }
 
     for (name, config) in claude_json_servers {

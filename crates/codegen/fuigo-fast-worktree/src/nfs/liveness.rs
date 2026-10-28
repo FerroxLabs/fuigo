@@ -543,8 +543,7 @@ fn pin_ref_for(worktree_id: &str) -> Result<String> {
 /// a "no": [`gc_orphan_pins`] must age such an id rather than forget it.
 fn pin_exists(source: &Path, worktree_id: &str) -> Result<bool> {
     let pin = pin_ref_for(worktree_id)?;
-    let out = crate::git::checkout::git_command()
-        .current_dir(source)
+    let out = crate::git::checkout::git_command_judged(source)?
         .args(["show-ref", "--verify", "--quiet", &pin])
         .output()
         .with_context(|| format!("git show-ref {pin} in {}", source.display()))?;
@@ -568,8 +567,7 @@ fn pin_exists(source: &Path, worktree_id: &str) -> Result<bool> {
 /// through this same gate instead of growing a weaker sibling of it.
 pub(super) fn delete_pin_ref_gated(source: &Path, worktree_id: &str) -> Result<()> {
     let pin = pin_ref_for(worktree_id)?;
-    let out = crate::git::checkout::git_command()
-        .current_dir(source)
+    let out = crate::git::checkout::git_command_judged(source)?
         .args(["update-ref", "-d", &pin])
         .output()
         .with_context(|| format!("git update-ref -d {pin} in {}", source.display()))?;

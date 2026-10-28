@@ -32,6 +32,8 @@ pub use definition::{FunctionTool, ToolDefinition, ToolType};
 pub use memory_backend::MemoryBackend;
 pub use process_manager::{KillOutcome, KillSource, TaskSnapshot, format_system_time_rfc3339};
 pub use schema::FuigoIntegerSchema;
-pub use session_mode::SessionMode;
+pub use session_mode::{
+    BROWSER_USE_MODE_ID, SUPPORTED_MODE_IDS, SessionMode, is_supported_mode_id,
+};
 pub use tool_index::{SearchSnapshot, ServerSummary, ToolIndex, ToolSearchIndex, ToolSearchResult};
 pub use tool_io::{MCPToolInput, ToolInput};

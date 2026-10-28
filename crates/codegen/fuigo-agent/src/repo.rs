@@ -42,6 +42,13 @@ impl RepoDirChain {
             // Home is compared canonically to match the symlink handling in the walk below
             .filter(|root| !is_home_dir(root));
 
+        // A cwd reached through a link checked into a repo can canonicalize outside the discovered worktree: it is then
+        // its own root (no reads of the outer repo's files through the link).
+        let git_root = git_root.filter(|root| {
+            let root_canonical = dunce::canonicalize(root).unwrap_or_else(|_| root.clone());
+            dunce::canonicalize(cwd).is_ok_and(|c| c.starts_with(&root_canonical))
+        });
+
         let mut dirs = Vec::new();
         if let Some(ref root) = git_root {
             // Canonicalize only for the stop test
@@ -177,6 +184,22 @@ mod tests {
                 None => unsafe { std::env::remove_var(self.key) },
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn m6_cwd_linked_outside_the_repo_is_its_own_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git2::Repository::init(&repo).unwrap();
+        std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(base.join("elsewhere"), repo.join("link")).unwrap();
+        let cwd = repo.join("link");
+        let chain = RepoDirChain::resolve(&cwd);
+        assert_eq!(chain.git_root, None);
+        assert_eq!(chain.dirs, vec![cwd]);
     }
 
     #[test]

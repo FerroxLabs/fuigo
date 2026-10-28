@@ -128,3 +128,43 @@ fn summary_redacts_env_values_and_lists_each_kind() {
     assert!(text.contains("1 extra rule dir(s)"), "{text}");
     assert_eq!(ImportPlan::default().summary(dir.path()), "No Claude settings found to import.");
 }
+
+/// A project `.claude` linked outside the repository contributes no hooks to the import plan; the same hooks inside
+/// the repository are imported.
+#[cfg(unix)]
+#[test]
+fn m5_project_settings_hooks_linked_outside_the_repository_are_not_imported() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    git2::Repository::init(&repo).unwrap();
+    let hooks = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo outside"}]}]}}"#;
+    std::fs::write(outside.join("settings.json"), hooks).unwrap();
+    std::os::unix::fs::symlink(&outside, repo.join(".claude")).unwrap();
+    let linked = repo.join(".claude/settings.json");
+    let plan = scan_importable_settings(
+        &repo,
+        std::slice::from_ref(&linked),
+        |_| Some(ClaudeSettingsSnapshot::default()),
+        vec![],
+        vec![],
+    );
+    assert!(
+        !plan.project_items.iter().any(|i| matches!(i, ImportableItem::Hook { .. })),
+        "hooks from a settings file outside the repository must not be imported"
+    );
+
+    std::fs::remove_file(repo.join(".claude")).unwrap();
+    std::fs::create_dir_all(repo.join(".claude")).unwrap();
+    std::fs::write(repo.join(".claude/settings.json"), hooks).unwrap();
+    let plan = scan_importable_settings(
+        &repo,
+        std::slice::from_ref(&linked),
+        |_| Some(ClaudeSettingsSnapshot::default()),
+        vec![],
+        vec![],
+    );
+    assert!(plan.project_items.iter().any(|i| matches!(i, ImportableItem::Hook { .. })));
+}

@@ -6,6 +6,12 @@ use std::path::{Path, PathBuf};
 use super::*;
 use crate::ENV_TEST_LOCK as ENV_LOCK;
 use crate::TestEnvGuard as EnvVarGuard;
+use crate::trust::workspace_key;
+
+/// Whether `key` is trusted by the live decision (u35 t1: there is no process-local grant to inspect).
+fn trusted_now(key: &Path) -> bool {
+    !folder_trust_inert() && decide_key(key, false).is_trusted()
+}
 
 fn repo_tmp() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
@@ -44,10 +50,7 @@ fn p167_grant_over_corrupt_store_keeps_file_and_grants_nothing() {
         before,
         "a grant must never rewrite an unreadable store from an empty document"
     );
-    assert!(
-        !is_trusted_this_process(&key),
-        "an unread store must not become process-local trusted"
-    );
+    assert!(!trusted_now(&key), "an unread store must not make the folder trusted");
 }
 
 // ── Ported from upstream (75810042 / a28ee2b2), adapted to Fuigo's paths and wording ──
@@ -68,21 +71,20 @@ fn p167_resolution_classifies_each_grant_outcome() {
         GrantOutcome::AlreadyDurable { key: key.clone() }.resolution()
     );
     assert_eq!(
-        GrantResolution::SessionLocal,
+        GrantResolution::Unrecorded,
         GrantOutcome::Granted {
             key,
-            persist: PersistStatus::ProcessLocalOnly {
+            persist: PersistStatus::NotSaved {
                 error: std::io::Error::other("denied"),
             },
         }
         .resolution()
     );
-    for reason in [GrantRefuse::InertBuild, GrantRefuse::UnsafeRoot] {
-        let outcome = GrantOutcome::Refused { reason };
-        assert_eq!(GrantResolution::Trusted, outcome.resolution());
-        assert!(outcome.dismisses_gate());
-    }
-    for reason in [GrantRefuse::NoHome, GrantRefuse::Unreadable, GrantRefuse::KeyMoved] {
+    let inert = GrantOutcome::Refused { reason: GrantRefuse::InertBuild };
+    assert_eq!(GrantResolution::Trusted, inert.resolution());
+    assert!(inert.dismisses_gate());
+    // u35 t1: home and root folders are never trusted, so a grant there answers nothing.
+    for reason in [GrantRefuse::UnsafeRoot, GrantRefuse::NoHome, GrantRefuse::Unreadable, GrantRefuse::KeyMoved] {
         let outcome = GrantOutcome::Refused { reason };
         assert_eq!(GrantResolution::Unrecorded, outcome.resolution());
         assert!(!outcome.dismisses_gate());
@@ -104,12 +106,12 @@ fn p167_refuse_display_names_the_next_step_in_fuigo_terms() {
     assert!(no_home.contains("no home directory") && no_home.contains("FUIGO_HOME"), "{no_home}");
     let local = GrantOutcome::Granted {
         key: PathBuf::from("/tmp/x"),
-        persist: PersistStatus::ProcessLocalOnly {
+        persist: PersistStatus::NotSaved {
             error: std::io::Error::other("denied"),
         },
     }
     .to_string();
-    assert!(local.contains("this session only") && local.contains("fuigo --trust"), "{local}");
+    assert!(local.contains("stays untrusted") && local.contains("fuigo --trust"), "{local}");
     for text in [text, no_home, local] {
         assert!(!text.to_ascii_lowercase().contains("grok"), "no upstream branding: {text}");
     }
@@ -136,11 +138,11 @@ fn p167_directory_at_the_store_path_is_unreadable_not_process_local() {
         matches!(outcome, GrantOutcome::Refused { reason: GrantRefuse::Unreadable }),
         "a directory at the store path is not an empty document: {outcome:?}"
     );
-    assert!(!is_trusted_this_process(&key), "an unread store must not record process-local trust");
+    assert!(!trusted_now(&key), "an unread store must not trust the folder");
 }
 
 #[test]
-fn p167_publish_failure_after_a_missing_store_is_process_local() {
+fn p167_publish_failure_after_a_missing_store_stays_untrusted() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _sim = simulate_release_build();
     let home = tempfile::tempdir().unwrap();
@@ -155,13 +157,13 @@ fn p167_publish_failure_after_a_missing_store_is_process_local() {
         matches!(
             outcome,
             GrantOutcome::Granted {
-                persist: PersistStatus::ProcessLocalOnly { .. },
+                persist: PersistStatus::NotSaved { .. },
                 ..
             }
         ),
         "{outcome:?}"
     );
-    assert!(is_trusted_this_process(&key), "the explicit grant holds for this process");
+    assert!(!trusted_now(&key), "u35 t1: an unsaved grant leaves the folder untrusted");
     assert_eq!(std::fs::read(&blocker).unwrap(), b"x", "nothing written over the blocker");
 }
 
@@ -205,7 +207,7 @@ fn p167_unreadable_store_grant_keeps_bytes_and_records_nothing() {
     let outcome = grant_folder_trust_key_in(&fixture, &key);
     assert!(matches!(outcome, GrantOutcome::Refused { reason: GrantRefuse::Unreadable }), "{outcome:?}");
     assert_eq!(std::fs::read(&store_path).unwrap(), before);
-    assert!(!PROCESS_DECISIONS.lock().contains_key(&key), "no process-local trust either");
+    assert!(!trusted_now(&key), "no trust either");
 }
 
 /// The pre-check: a key that no longer resolves to itself (deleted, or a non-canonical spelling) is refused before
@@ -291,5 +293,5 @@ fn p167_persist_trust_over_unreadable_store_is_refused() {
     let outcome = persist_trust(&mut store, &key);
     assert!(matches!(outcome, GrantOutcome::Refused { reason: GrantRefuse::Unreadable }), "{outcome:?}");
     assert_eq!(std::fs::read(&store_path).unwrap(), b"[[[");
-    assert!(!PROCESS_DECISIONS.lock().contains_key(&key));
+    assert!(!trusted_now(&key));
 }

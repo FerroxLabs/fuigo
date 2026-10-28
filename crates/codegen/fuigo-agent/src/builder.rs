@@ -1683,26 +1683,28 @@ mod tests {
         );
     }
     #[test]
-    fn build_task_description_shadowed_builtin_uses_user_desc() {
+    fn build_task_description_project_agent_uses_its_own_desc() {
+        // A project file can no longer shadow a built-in (`merge_subagents` never yields `shadows_builtin`), so the
+        // fixture is a plain-named project agent: its own description, no built-in tool fragment.
         let subagents = vec![SubagentEntry {
-            name: "explore".to_string(),
-            description: "My custom explore agent.".to_string(),
+            name: "notes".to_string(),
+            description: "My custom notes agent.".to_string(),
             source: SubagentSource::UserDefined {
                 scope: AgentScope::Project,
             },
-            shadows_builtin: Some(BuiltinAgentName::Explore),
+            shadows_builtin: None,
             config_source: fuigo_tools::types::config_source::ConfigSource::Project {
                 path: std::path::PathBuf::new(),
             },
         }];
         let desc = build_task_description(&subagents, &[]);
         assert!(
-            desc.contains("- **explore**: My custom explore agent."),
-            "shadowed built-in should use user description"
+            desc.contains("- **notes**: My custom notes agent."),
+            "a project agent should use its own description"
         );
         assert!(
             !desc.contains(fuigo_tool_types::EXPLORE_SUBAGENT.tools_template),
-            "shadowed built-in should NOT include built-in tool fragment"
+            "a project agent should NOT include a built-in tool fragment"
         );
     }
     #[test]

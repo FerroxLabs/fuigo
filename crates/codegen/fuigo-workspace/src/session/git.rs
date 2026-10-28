@@ -64,15 +64,7 @@ pub struct DiffSizeExceededFile {
 /// See `git(1)` and `GIT_OPTIONAL_LOCKS`.
 pub async fn git_cli(cwd: &Path, args: &[&str]) -> Result<String> {
     tracing::debug!(cwd = %cwd.display(), args = ?args, "git_cli");
-    let mut cmd = Command::new("git");
-    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
-    cmd.current_dir(cwd).arg("--no-optional-locks");
-    for &(key, val) in fuigo_tty_utils::GIT_AUTH_SUPPRESSION_ENVS.iter() {
-        cmd.env(key, val);
-    }
-    cmd.stdin(std::process::Stdio::null());
-    fuigo_tools::util::detach_command(&mut cmd);
-    cmd.envs(fuigo_tools::util::pager_env());
+    let mut cmd = Command::from(fuigo_tty_utils::git_command_in(cwd)?);
     let output = match cmd.args(args).output().await {
         Ok(o) => o,
         Err(e) => {
@@ -129,12 +121,8 @@ pub async fn jj_cli_mut(cwd: &Path, args: &[&str]) -> Result<String> {
 }
 async fn jj_cli_inner(cwd: &Path, args: &[&str], ignore_wc: bool) -> Result<String> {
     tracing::debug!(cwd = %cwd.display(), args = ?args, ignore_wc, "jj_cli");
-    let mut cmd = Command::new("jj");
-    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
-    cmd.current_dir(cwd)
-        .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null());
-    fuigo_tools::util::detach_command(&mut cmd);
+    let mut cmd = Command::from(fuigo_tty_utils::jj_command_in(cwd)?);
+    cmd.stderr(std::process::Stdio::piped());
     if ignore_wc {
         cmd.arg("--ignore-working-copy");
     }
@@ -2805,16 +2793,8 @@ pub async fn restage_git_paths(cwd: &Path, git_ref: &GitStateRef, session_id: &s
 /// Errors only on spawn failure.
 async fn git_cli_raw(cwd: &Path, args: &[&str]) -> Result<(bool, String)> {
     tracing::debug!(cwd = %cwd.display(), args = ?args, "git_cli_raw");
-    let mut cmd = Command::new("git");
-    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
-    cmd.current_dir(cwd).arg("--no-optional-locks");
-    for &(key, val) in fuigo_tty_utils::GIT_AUTH_SUPPRESSION_ENVS.iter() {
-        cmd.env(key, val);
-    }
+    let mut cmd = Command::from(fuigo_tty_utils::git_command_in(cwd)?);
     cmd.env("LC_ALL", "C");
-    cmd.stdin(std::process::Stdio::null());
-    fuigo_tools::util::detach_command(&mut cmd);
-    cmd.envs(fuigo_tools::util::pager_env());
     let output = cmd.args(args).output().await?;
     let mut combined = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -2829,16 +2809,8 @@ async fn git_cli_raw(cwd: &Path, args: &[&str]) -> Result<(bool, String)> {
 /// Like [`git_cli_raw`] but returns the process exit code (`-1` if none).
 async fn git_cli_status(cwd: &Path, args: &[&str]) -> Result<(i32, String)> {
     tracing::debug!(cwd = %cwd.display(), args = ?args, "git_cli_status");
-    let mut cmd = Command::new("git");
-    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
-    cmd.current_dir(cwd).arg("--no-optional-locks");
-    for &(key, val) in fuigo_tty_utils::GIT_AUTH_SUPPRESSION_ENVS.iter() {
-        cmd.env(key, val);
-    }
+    let mut cmd = Command::from(fuigo_tty_utils::git_command_in(cwd)?);
     cmd.env("LC_ALL", "C");
-    cmd.stdin(std::process::Stdio::null());
-    fuigo_tools::util::detach_command(&mut cmd);
-    cmd.envs(fuigo_tools::util::pager_env());
     let output = cmd.args(args).output().await?;
     let mut combined = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

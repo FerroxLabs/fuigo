@@ -387,6 +387,10 @@ impl fuigo_tool_runtime::Tool for BashTool {
 
         // --- Foreground execution ---
         let request = TerminalRunRequest {
+            request_cwd: Some(session_cwd.clone()),
+            approved_without_grant: crate::sandbox_launch::ApprovedWithoutGrant::of(
+                ctx.extensions.get::<crate::sandbox_launch::ApprovedWithoutGrant>().as_deref(),
+            ),
             command: input.command.clone(),
             working_directory: cwd.clone(),
             env,

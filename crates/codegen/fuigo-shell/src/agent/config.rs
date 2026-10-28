@@ -1073,6 +1073,11 @@ pub struct PluginsConfig {
     /// CLI `--plugin-dir` paths (populated by CLI arg processing, not config file).
     #[serde(skip)]
     pub cli_plugin_dirs: Vec<std::path::PathBuf>,
+    /// `[plugins].paths` entries from a trusted repository's `.fuigo/config.toml`, kept apart from the user's own
+    /// `paths` (source provenance): each is `(plugin dir, repository folder it must stay inside)`. They load as
+    /// project plugins (contained, not auto-enabled, not auto-trusted); see [`crate::config::resolve_effective_plugins_config`].
+    #[serde(skip)]
+    pub project_paths: Vec<(std::path::PathBuf, std::path::PathBuf)>,
 }
 impl PluginsConfig {
     /// Reads the `[plugins]` table of a whole config, field by field.
@@ -1190,6 +1195,7 @@ impl PluginsConfig {
             auto_discover: self.auto_discover,
             cli_plugin_dirs: self.cli_plugin_dirs.clone(),
             config_paths: self.paths.iter().map(std::path::PathBuf::from).collect(),
+            project_config_paths: self.project_paths.clone(),
             disabled: self.disabled.clone(),
             enabled: self.enabled.clone(),
             source_restriction: None,
@@ -1197,6 +1203,7 @@ impl PluginsConfig {
         if let Some(restriction) = restriction {
             config.cli_plugin_dirs.clear();
             config.config_paths.clear();
+            config.project_config_paths.clear();
             restriction.retain_enabled(&mut config.enabled);
             config.source_restriction = Some(restriction);
         }
@@ -1619,9 +1626,12 @@ impl crate::util::TrustRecordSink for UnifiedLogTrustSink {
 /// start, before any code that can write the trust set; the Config paths call it
 /// too as a backstop for embedders. Idempotent; writes made before the first call are
 /// held by the base crate and replayed on install, so no caller can bypass the record.
+/// Also installs the folder-trust check for project agent files, so every path that reaches this sink (the product
+/// binary at start, the Config backstop paths) gates `.fuigo/agents` / `.claude/agents` on trust.
 #[cfg(not(test))]
 pub fn install_trust_record_sink() {
     crate::util::install_trust_record_sink(std::sync::Arc::new(UnifiedLogTrustSink));
+    crate::agent::folder_trust::install_project_agent_trust();
 }
 
 #[cfg(not(test))]
@@ -2324,6 +2334,8 @@ const NON_SERDE_CONFIG_PATHS: &[&str] = &[
     crate::util::config::SLASH_COMMAND_TAGS_CONFIG_PATH,
     // P93: read from the user config file alone (`agent::relay_opt_in`), never through the merged `Config`.
     crate::agent::relay_opt_in::TRUSTED_RELAY_ORIGINS_CONFIG_PATH,
+    // u35: the user's own always-approve lock, read from the user config file alone (`user_config_lock`).
+    "ui.disable_bypass_permissions_mode",
 ];
 /// [`NON_SERDE_CONFIG_PATHS`] plus the multi-path groups, every registered feature, and every [`UNMIRRORED_BOOLEAN_FEATURES`] key.
 fn is_non_serde_config_path(path: &str) -> bool {

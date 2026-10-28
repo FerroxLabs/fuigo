@@ -503,12 +503,20 @@ fn clone_repo_to_path(
     }
 
     // git_command applies the same auth/LFS/SSH suppression as the marketplace cache clones
-    let mut cmd = fuigo_tty_utils::git_command();
+    // An install the user typed: not judged. It runs in the directory that will hold the clone (absolute, so the
+    // target path means the same thing there), which is not a repository the clone could read configuration from.
+    let target_abs = std::path::absolute(target).unwrap_or_else(|_| target.to_path_buf());
+    let run_in = target_abs
+        .parent()
+        .filter(|p| p.is_dir())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    let mut cmd = fuigo_tty_utils::git_command_user_invoked(&run_in);
     cmd.arg("clone").arg("--depth").arg("1");
     if let Some(r) = git_ref {
         cmd.arg("--branch").arg(r);
     }
-    cmd.arg("--").arg(url).arg(target);
+    cmd.arg("--").arg(url).arg(&target_abs);
     let output = cmd.output().map_err(|e| InstallError::InstallFailed {
         detail: format!("failed to run git clone: {e}"),
     })?;
@@ -564,8 +572,9 @@ fn run_git_in(cwd: &Path, args: &[&str]) -> Result<(), String> {
 }
 
 fn run_git_in_capture(cwd: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    let mut cmd = fuigo_tty_utils::git_command();
-    cmd.args(args).current_dir(cwd);
+    // The user's install of the plugin checkout it just cloned (not judged).
+    let mut cmd = fuigo_tty_utils::git_command_user_invoked(cwd);
+    cmd.args(args);
     let output = cmd
         .output()
         .map_err(|e| format!("failed to run git {}: {e}", args.first().unwrap_or(&"")))?;

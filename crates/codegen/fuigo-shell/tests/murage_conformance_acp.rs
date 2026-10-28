@@ -31,7 +31,8 @@
 //! E.3 auth negotiation: `initialize_advertises_fuigo_api_key_and_names_it_default`,
 //!   `no_credential_yields_empty_auth_methods_and_minus_32000`.
 //! E.4 protocol version: `protocol_version_one_is_accepted`.
-//! E.5 / E.5a folder trust: `folder_trust_round_trip_without_trust_flag`, `trust_flag_suppresses_the_round_trip`.
+//! E.5 / E.5a folder trust: `folder_trust_round_trip_without_trust_flag`, `trust_flag_suppresses_the_round_trip`,
+//!   `v1_only_client_is_never_asked_and_commands_ask` (u35: the round-trip needs `fuigo/folderTrust.v2`).
 //! E.6 / E.5a MCP ready and the other `_fuigo/*` names Murage binds: `mcp_ready_notification_wire_name_is_pinned`,
 //!   `murage_mcp_server_elicit_and_ready_wire_names`, `ask_user_question_round_trip_wire_name_is_pinned`,
 //!   `ask_user_question_waits_for_murage_past_the_non_interactive_cap` (P04 consult).
@@ -88,13 +89,24 @@ fn catalog() -> Vec<MockModelEntry> {
 
 /// Murage's `initialize` params, verbatim in shape (`server/drivers/acp/core.ts`, the `initialize` request):
 /// `protocolVersion: 1`, no `clientInfo`, and the folder-trust capability under `clientCapabilities._meta`.
+/// u35 (1.0.35, design d2 §5.3): only a client advertising `fuigo/folderTrust.v2` is asked (and can grant) trust,
+/// for the folder's settings AND its shell commands. Murage must advertise `{"v2": true}` (it sent
+/// `{"interactive": true}`, the v1 shape, before 1.0.35); [`MURAGE_V1_FOLDER_TRUST`] keeps the old shape covered.
 fn murage_initialize_params() -> Value {
+    murage_initialize_params_with(json!({ "v2": true }))
+}
+
+/// The pre-1.0.35 (v1) folder-trust capability Murage advertised. Never asked, never grants (design d2 §5.3).
+const MURAGE_V1_FOLDER_TRUST: &str = r#"{"interactive": true}"#;
+
+/// [`murage_initialize_params`] with `folder_trust` as the `fuigo/folderTrust` capability.
+fn murage_initialize_params_with(folder_trust: Value) -> Value {
     json!({
         "protocolVersion": 1,
         "clientCapabilities": {
             "fs": { "readTextFile": false, "writeTextFile": false },
             "elicitation": { "form": {}, "url": {} },
-            "_meta": { "fuigo/folderTrust": { "interactive": true } }
+            "_meta": { "fuigo/folderTrust": folder_trust }
         }
     })
 }
@@ -192,6 +204,8 @@ struct Murage {
     server: MockInferenceServer,
     workspace: std::path::PathBuf,
     next_id: u32,
+    /// The `initialize` params [`Self::initialize`] sends; [`murage_initialize_params`] unless a test changes it.
+    init_params: Value,
 }
 
 impl Murage {
@@ -209,6 +223,7 @@ impl Murage {
             server,
             workspace,
             next_id: 0,
+            init_params: murage_initialize_params(),
         }
     }
 
@@ -227,7 +242,8 @@ impl Murage {
 
     /// `initialize` with Murage's params; returns the whole reply.
     async fn initialize(&mut self) -> Value {
-        self.call("initialize", murage_initialize_params(), refuse).await
+        let params = self.init_params.clone();
+        self.call("initialize", params, refuse).await
     }
 
     /// Murage's sequence: `initialize`, `authenticate {methodId: "fuigo.api_key"}`, `session/new`. Returns the session id.
@@ -985,7 +1001,8 @@ async fn protocol_version_one_is_accepted() {
 
 /// E.5 / E.5a: without `--trust`, a workspace with project config produces the agent-to-client request
 /// whose WIRE name is exactly `_fuigo/folder_trust/request`, with params `{sessionId, cwd, workspace,
-/// configKinds}`; answering `{"outcome":"trust"}` persists the grant and applies the project config.
+/// configKinds, scope, reason}` (`scope: "configAndCommands"`, `reason: "new"`); answering the v2 grant
+/// `{"outcome":"trust","scope":"configAndCommands"}` persists the grant and applies the project config.
 #[tokio::test(flavor = "current_thread")]
 async fn folder_trust_round_trip_without_trust_flag() {
     let mut m = Murage::spawn(
@@ -1023,9 +1040,11 @@ async fn folder_trust_round_trip_without_trust_flag() {
     let params = &request["params"];
     assert_eq!(
         object_keys(params),
-        sorted(&["sessionId", "cwd", "workspace", "configKinds"]),
+        sorted(&["sessionId", "cwd", "workspace", "configKinds", "scope", "reason"]),
         "folder trust params: {params}"
     );
+    assert_eq!(params["scope"], "configAndCommands", "{params}");
+    assert_eq!(params["reason"], "new", "{params}");
     assert_eq!(params["sessionId"], session.as_str());
     let ws = m.workspace.to_string_lossy().into_owned();
     let ws_canon = dunce_canon(&m.workspace);
@@ -1068,7 +1087,7 @@ async fn folder_trust_round_trip_without_trust_flag() {
 
     // Murage's grant. Only now may the project config apply.
     m.client
-        .respond(&request["id"], json!({ "outcome": "trust" }), RPC)
+        .respond(&request["id"], json!({ "outcome": "trust", "scope": "configAndCommands" }), RPC)
         .await;
     let applied = m
         .seen_or_wait("project config applied", RPC, lists_project_server, &hold)
@@ -1087,6 +1106,77 @@ async fn folder_trust_round_trip_without_trust_flag() {
     assert!(
         m.messages_named("fuigo/folder_trust/request").is_empty(),
         "the un-prefixed source spelling leaked onto the wire"
+    );
+    assert_hermetic(m.sandbox(), m.child_pid());
+}
+
+/// E.5 (u35, design d2 §5.3): a client that advertises only the pre-1.0.35 v1 capability
+/// (`{"interactive": true}`) is never sent the trust request and can never grant. Its session does not hang:
+/// project config stays gated, nothing is written to the trust store, and a shell command in the untrusted
+/// folder asks through `session/request_permission` (even `ls`, which a trusted folder runs unasked) and
+/// runs once approved; the turn ends normally.
+#[tokio::test(flavor = "current_thread")]
+async fn v1_only_client_is_never_asked_and_commands_ask() {
+    let mut m = Murage::spawn(
+        AgentSpawnSpec {
+            leading_args: GLOBAL_DEFAULT,
+            agent_args: AGENT_MURAGE,
+            extra_env: &[TEST_VERSION],
+            ..AgentSpawnSpec::default()
+        },
+        plant_project_mcp,
+    )
+    .await;
+    m.init_params = murage_initialize_params_with(serde_json::from_str(MURAGE_V1_FOLDER_TRUST).expect("v1 capability"));
+    let scripted = script_terminal_call(&m.server, "call_v1_ls", "ls");
+    let mut trust_requests = Vec::new();
+    let mut questions = Vec::new();
+    let mut answer = |req: &Value| {
+        match method_of(req) {
+            Some(n) if n.contains("folder_trust") => trust_requests.push(req.clone()),
+            Some("session/request_permission") => {
+                questions.push(req.clone());
+                let allow = req["params"]["options"]
+                    .as_array()
+                    .and_then(|o| o.iter().find(|o| o["kind"] == "allow_once"))
+                    .unwrap_or_else(|| panic!("no allow_once option offered: {req}"));
+                return Some(json!({ "outcome": { "outcome": "selected", "optionId": allow["optionId"] } }));
+            }
+            _ => {}
+        }
+        None
+    };
+    let session = m.connect(&mut answer).await;
+    let reply = m.prompt(&session, "list the files", &mut answer).await;
+    assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}\nstderr:\n{}", m.stderr());
+    scripted.assert_satisfied();
+    assert_eq!(
+        questions.len(),
+        1,
+        "a command in a folder a v1 client cannot trust must ask exactly once; asked {questions:?}"
+    );
+    let late = m
+        .client
+        .wait_for_message(
+            "late folder trust request",
+            Duration::from_secs(3),
+            |msg| method_of(msg).is_some_and(|n| n.contains("folder_trust")),
+            refuse,
+        )
+        .await;
+    assert!(late.is_none() && trust_requests.is_empty(), "a v1 client must never be asked; got {late:?} {trust_requests:?}");
+    assert!(
+        !m.methods_seen().iter().any(|n| n.contains("folder_trust")),
+        "a v1 client must never be asked; methods seen: {:?}",
+        m.methods_seen()
+    );
+    assert!(
+        !m.messages().iter().any(lists_project_server),
+        "project config applied in a folder a v1 client cannot trust"
+    );
+    assert!(
+        !m.sandbox().fuigo_home().join("trusted_folders.toml").exists(),
+        "a trust grant was persisted without a v2 client"
     );
     assert_hermetic(m.sandbox(), m.child_pid());
 }

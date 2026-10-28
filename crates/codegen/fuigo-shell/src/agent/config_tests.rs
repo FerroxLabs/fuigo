@@ -9690,3 +9690,18 @@ async fn a_signed_in_subscription_alone_is_a_credential_so_first_run_skips_the_k
         "a signed-in subscription is a credential: no key screen"
     );
 }
+/// u35 B: the user's own always-approve lock is read by `user_config_lock`, not through `Config`, so the scan must not
+/// report it as an unrecognized key.
+#[test]
+fn user_always_approve_lock_key_is_not_reported_unused() {
+    let unused = unused_keys_from_toml(
+        r#"
+            [ui]
+            disable_bypass_permissions_mode = true
+        "#,
+    );
+    assert!(
+        !unused.iter().any(|k| k == "ui.disable_bypass_permissions_mode"),
+        "the user lock key must not warn as unrecognized: {unused:?}"
+    );
+}

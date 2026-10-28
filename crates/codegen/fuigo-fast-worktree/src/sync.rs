@@ -28,7 +28,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 
 use crate::copy::cow::{clone_file, replace_symlink};
-use crate::git::checkout::{git_clean_fd, git_command, git_reset_hard_command};
+use crate::git::checkout::{git_clean_fd, git_command_judged, git_reset_hard_command};
 use crate::git::discovery::get_head_commit;
 
 /// Pre-collected dirty state from a source repository.
@@ -61,9 +61,8 @@ impl SourceDirtyState {
 ///
 /// This is a **blocking** function — call from `spawn_blocking` in async contexts.
 pub fn collect_source_dirty_state(source: &Path) -> Result<SourceDirtyState> {
-    let output = git_command()
+    let output = git_command_judged(source)?
         .args(["status", "--porcelain=v2", "-z", "--untracked-files=all"])
-        .current_dir(source)
         .output()
         .context("failed to run git status")?;
 
@@ -300,9 +299,8 @@ impl<'a> WorktreeSync<'a> {
 
         // Sub-phase 1: git status on source.
         let t = Instant::now();
-        let output = git_command()
+        let output = git_command_judged(self.source)?
             .args(["status", "--porcelain=v2", "-z", "--untracked-files=all"])
-            .current_dir(self.source)
             .output()
             .context("failed to run git status")?;
         report.git_status_ms = t.elapsed().as_millis() as u64;
@@ -605,8 +603,7 @@ fn replay_staged_changes(
     if !staged_adds.is_empty() {
         use std::io::Write;
         #[allow(clippy::disallowed_methods)] // git command, waited on below
-        let mut child = git_command()
-            .current_dir(worktree)
+        let mut child = git_command_judged(worktree)?
             .args(["update-index", "-z", "--index-info"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -644,9 +641,8 @@ fn replay_staged_changes(
     // Batch `git rm --cached` for staged deletions.
     // This removes the entry from the index while leaving the file on disk.
     if !staged_deletes.is_empty() {
-        let mut cmd = git_command();
-        cmd.current_dir(worktree)
-            .arg("rm")
+        let mut cmd = git_command_judged(worktree)?;
+        cmd.arg("rm")
             .arg("--cached")
             .arg("--ignore-unmatch")
             .arg("--");

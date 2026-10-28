@@ -139,15 +139,17 @@ impl WorkflowRegistry {
         if let Some(cwd) = session_cwd
             && crate::agent::folder_trust::project_scope_allowed(cwd)
         {
-            dirs.push((
-                project_root(cwd).join(".fuigo").join("workflows"),
-                "project",
-            ));
+            // Project workflows are repository content: pin the project root once and read every script contained to it
+            let root = project_root(cwd);
+            match fuigo_dirs::contained::PinnedRoot::pin(&root) {
+                Ok(pinned) => dirs.push((root.join(".fuigo").join("workflows"), "project", Some(pinned))),
+                Err(error) => tracing::debug!(%error, "cannot pin project root; skipping project workflows"),
+            }
         }
-        dirs.push((user_workflow_dir(), "user"));
+        dirs.push((user_workflow_dir(), "user", None));
 
-        for (dir, source_label) in dirs {
-            let mut scoped = scan_directory(&dir, source_label);
+        for (dir, source_label, contain) in dirs {
+            let mut scoped = scan_directory_in(&dir, source_label, contain.as_ref());
             reject_same_scope_duplicates(&mut scoped, source_label, &mut duplicate_names);
             merge_scope(&mut entries, scoped);
         }
@@ -234,10 +236,26 @@ fn reject_same_scope_duplicates(
 }
 
 fn scan_directory(dir: &Path, source_label: &'static str) -> Vec<RegistryEntry> {
+    scan_directory_in(dir, source_label, None)
+}
+
+/// With `contain` set (project scope), the folder must resolve inside the pinned project root and each script is
+/// read contained to it, so a `.fuigo` linked out of the project contributes nothing.
+fn scan_directory_in(
+    dir: &Path,
+    source_label: &'static str,
+    contain: Option<&fuigo_dirs::contained::PinnedRoot>,
+) -> Vec<RegistryEntry> {
     let Ok(dir_meta) = std::fs::symlink_metadata(dir) else {
         return Vec::new();
     };
     if dir_meta.file_type().is_symlink() || !dir_meta.is_dir() {
+        return Vec::new();
+    }
+    if let Some(root) = contain
+        && !fuigo_dirs::contained::is_contained(dir, root)
+    {
+        tracing::debug!(dir = %dir.display(), "workflow folder links outside the project; skipped");
         return Vec::new();
     }
 
@@ -254,7 +272,7 @@ fn scan_directory(dir: &Path, source_label: &'static str) -> Vec<RegistryEntry> 
     paths
         .into_iter()
         .filter_map(|path| {
-            let script = read_trusted_source(&path).ok()?;
+            let script = read_trusted_source_in(&path, contain).ok()?;
             let meta = parse_workflow(&script, Some(&path)).ok()?;
             // A GCS update of a compiled-in name stays privileged (fork context, telemetry name, not user-savable)
             let compiled_in = source_label == "bundled"
@@ -363,7 +381,13 @@ pub(crate) fn resolve_by_path(
         });
     }
 
-    let script = read_trusted_source(&canonical)?;
+    // A project-only path is read contained to the pinned project root, so an ancestor swapped for a link after the
+    // checks above cannot redirect the read
+    let contain = match (&project, in_project && !in_user_or_session) {
+        (Some(root), true) => Some(fuigo_dirs::contained::PinnedRoot::from_canonical(root.clone())),
+        _ => None,
+    };
+    let script = read_trusted_source_in(&canonical, contain.as_ref())?;
     let in_session_runs = session_runs
         .as_ref()
         .is_some_and(|root| canonical.starts_with(root));
@@ -442,7 +466,10 @@ fn is_valid_workflow_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
-fn read_trusted_source(path: &Path) -> Result<String, ResolveError> {
+fn read_trusted_source_in(
+    path: &Path,
+    contain: Option<&fuigo_dirs::contained::PinnedRoot>,
+) -> Result<String, ResolveError> {
     let path_display = path.display().to_string();
     let meta = std::fs::symlink_metadata(path).map_err(|error| ResolveError::Io {
         path: path_display.clone(),
@@ -468,7 +495,11 @@ fn read_trusted_source(path: &Path) -> Result<String, ResolveError> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
     }
-    let file = options.open(path).map_err(|error| ResolveError::Io {
+    let opened = match contain {
+        Some(root) => fuigo_dirs::contained::open_contained(path, root),
+        None => options.open(path),
+    };
+    let file = opened.map_err(|error| ResolveError::Io {
         path: path.display().to_string(),
         error: error.to_string(),
     })?;
@@ -1003,6 +1034,28 @@ mod tests {
             dunce::canonicalize(&project)
                 .unwrap()
                 .join(".fuigo/workflows/safe.rhai")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn m5_project_workflows_under_a_config_dir_linked_outside_are_not_loaded() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let attacker = dir.path().join("attacker");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(attacker.join("workflows")).unwrap();
+        std::fs::write(attacker.join("workflows/evil.rhai"), script("evil")).unwrap();
+        // `.fuigo` itself is the link; `workflows` under it is a plain directory in the attacker's tree.
+        symlink(&attacker, project.join(".fuigo")).unwrap();
+        crate::agent::folder_trust::record_for_test(&project, true);
+
+        let registry = WorkflowRegistry::scan(Some(&project));
+        assert!(
+            registry.resolve_by_name("evil").is_err(),
+            "a workflow outside the project must not load"
         );
     }
 

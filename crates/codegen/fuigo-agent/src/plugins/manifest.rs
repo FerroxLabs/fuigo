@@ -67,14 +67,15 @@ impl PathOrPaths {
     }
 }
 
-/// Canonicalizes both sides (resolving symlinks and `..`) before the prefix check.
+/// Canonicalizes both sides (resolving symlinks and `..`) before the prefix check. Fails closed: a path or root that
+/// cannot be resolved is not contained (a raw path with `..` would otherwise pass a prefix check). dunce keeps the
+/// verbatim form for over-260-char paths, so the check fails closed there too; see crates/codegen/clippy.toml.
+///
+/// Used when a plugin is admitted (discovery, install): the root is pinned for this check. Every later READ of a
+/// component is held to the plugin's `canonical_root` pinned at discovery ([`fuigo_dirs::contained::PinnedRoot`]).
 fn is_path_contained(resolved: &Path, plugin_root: &Path) -> bool {
-    let canonical_root =
-        dunce::canonicalize(plugin_root).unwrap_or_else(|_| plugin_root.to_path_buf());
-    let canonical_resolved =
-        dunce::canonicalize(resolved).unwrap_or_else(|_| resolved.to_path_buf());
-    // dunce keeps the verbatim form for over-260-char paths, so this containment check fails closed; see crates/codegen/clippy.toml
-    canonical_resolved.starts_with(&canonical_root)
+    fuigo_dirs::contained::PinnedRoot::pin(plugin_root)
+        .is_ok_and(|root| fuigo_dirs::contained::is_contained(resolved, &root))
 }
 
 /// Resolve a plugin component path (hooks, MCP, LSP) from a manifest field.
@@ -102,10 +103,26 @@ fn resolve_component_path(
             resolved.is_file().then_some(resolved)
         }
         Some(PathOrInline::Inline(_)) => None,
-        None => {
-            let default = plugin_root.join(default_file);
-            default.is_file().then_some(default)
-        }
+        None => contained_default(plugin_root, default_file, label),
+    }
+}
+
+/// A default component file (`hooks/hooks.json`, `.mcp.json`, `.lsp.json`) at the plugin root, held to the plugin
+/// folder like a manifest-declared one: a default file linking outside the plugin is not used.
+fn contained_default(plugin_root: &Path, default_file: &str, label: &str) -> Option<PathBuf> {
+    let default = plugin_root.join(default_file);
+    if !default.is_file() {
+        return None;
+    }
+    if is_path_contained(&default, plugin_root) {
+        Some(default)
+    } else {
+        tracing::warn!(
+            path = %default.display(),
+            plugin_root = %plugin_root.display(),
+            "default {label} file links outside the plugin root; skipping"
+        );
+        None
     }
 }
 
@@ -179,6 +196,16 @@ impl PluginManifest {
         resolve_dirs(&self.agents, plugin_root, "agents")
     }
 
+    /// How many skills, commands and agents dirs (manifest-declared or default) exist but resolve outside the plugin
+    /// root, and so are not loaded: `(skills, commands, agents)`.
+    pub fn component_dirs_outside(&self, plugin_root: &Path) -> (usize, usize, usize) {
+        (
+            dirs_outside(&self.skills, plugin_root, "skills"),
+            dirs_outside(&self.commands, plugin_root, "commands"),
+            dirs_outside(&self.agents, plugin_root, "agents"),
+        )
+    }
+
     /// Returns the manifest-specified path or the default `hooks/hooks.json`.
     pub fn hooks_path(&self, plugin_root: &Path) -> Option<PathBuf> {
         resolve_component_path(&self.hooks, plugin_root, "hooks/hooks.json", "hooks")
@@ -186,8 +213,7 @@ impl PluginManifest {
 
     pub fn mcp_config_path(&self, plugin_root: &Path) -> Option<PathBuf> {
         if matches!(self.mcp_servers, Some(PathOrInline::Inline(_))) {
-            let default = plugin_root.join(".mcp.json");
-            return default.is_file().then_some(default);
+            return contained_default(plugin_root, ".mcp.json", "MCP config");
         }
         resolve_component_path(&self.mcp_servers, plugin_root, ".mcp.json", "MCP config")
     }
@@ -248,13 +274,35 @@ fn resolve_dirs(
         Some(paths) => paths.resolve(plugin_root),
         None => {
             let default = plugin_root.join(default_name);
-            if default.is_dir() {
+            // The default dir gets the same containment as a declared one: a `skills/` symlinked out of the plugin
+            // folder is not followed.
+            if !default.is_dir() {
+                vec![]
+            } else if is_path_contained(&default, plugin_root) {
                 vec![default]
             } else {
+                tracing::debug!(
+                    path = %default.display(),
+                    plugin_root = %plugin_root.display(),
+                    "default {default_name} dir links outside the plugin root; skipping"
+                );
                 vec![]
             }
         }
     }
+}
+
+/// Existing component dirs that [`resolve_dirs`] dropped because they resolve outside the plugin root.
+fn dirs_outside(field: &Option<PathOrPaths>, plugin_root: &Path, default_name: &str) -> usize {
+    let candidates = match field {
+        Some(PathOrPaths::Single(p)) => vec![plugin_root.join(p)],
+        Some(PathOrPaths::Multiple(ps)) => ps.iter().map(|p| plugin_root.join(p)).collect(),
+        None => vec![plugin_root.join(default_name)],
+    };
+    candidates
+        .iter()
+        .filter(|dir| dir.exists() && !is_path_contained(dir, plugin_root))
+        .count()
 }
 
 // ── Manifest loading ──────────────────────────────────────────────────
@@ -273,13 +321,28 @@ pub enum ManifestLoadResult {
     NotFound,
 }
 
-/// Tries manifest files in priority order (see [`MANIFEST_PATHS`]).
+/// Tries manifest files in priority order (see [`MANIFEST_PATHS`]). The manifest is read only from inside the plugin
+/// folder: one that links outside it is an error (the plugin is skipped), checked on the opened file.
 pub fn load_manifest(plugin_root: &Path) -> Result<ManifestLoadResult, ManifestError> {
+    let pinned = fuigo_dirs::contained::PinnedRoot::pin(plugin_root).map_err(|e| ManifestError::IoError {
+        path: plugin_root.to_path_buf(),
+        source: e,
+    })?;
+    load_manifest_in(plugin_root, &pinned)
+}
+
+/// [`load_manifest`] held to a root pinned by the caller: discovery passes the plugin folder it already resolved
+/// (and checked against the repository), so the manifest is read from that very folder even if the path is swapped
+/// for a link in between.
+pub fn load_manifest_in(
+    plugin_root: &Path,
+    pinned: &fuigo_dirs::contained::PinnedRoot,
+) -> Result<ManifestLoadResult, ManifestError> {
     for rel_path in MANIFEST_PATHS {
         let manifest_path = plugin_root.join(rel_path);
         if manifest_path.is_file() {
-            let content =
-                std::fs::read_to_string(&manifest_path).map_err(|e| ManifestError::IoError {
+            let content = fuigo_dirs::contained::read_contained(&manifest_path, pinned)
+                .map_err(|e| ManifestError::IoError {
                     path: manifest_path.clone(),
                     source: e,
                 })?;
@@ -820,5 +883,95 @@ mod tests {
             "foo": { "command": "./server" }
         }));
         assert!(manifest.mcp_config_path(&root).is_none());
+    }
+
+    /// The default `skills/` / `commands/` / `agents/` dirs get the same containment as manifest-declared ones: a
+    /// default dir symlinked out of the plugin folder is not followed, one linked inside it still is.
+    #[cfg(unix)]
+    #[test]
+    fn m3_default_component_dir_linked_outside_plugin_is_not_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("p");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(root.join("real-agents")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("skills")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("commands")).unwrap();
+        std::os::unix::fs::symlink(root.join("real-agents"), root.join("agents")).unwrap();
+        let manifest: PluginManifest = serde_json::from_str(r#"{"name": "p"}"#).unwrap();
+        assert!(manifest.skill_dirs(&root).is_empty(), "default skills/ linked out was followed");
+        assert!(manifest.command_dirs(&root).is_empty(), "default commands/ linked out was followed");
+        assert_eq!(manifest.agent_dirs(&root), vec![root.join("agents")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn m3_component_dirs_outside_counts_declared_and_default_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("p");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(root.join("cmds")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("skills")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("ext-agents")).unwrap();
+        let manifest: PluginManifest = serde_json::from_str(
+            r#"{"name": "p", "commands": ["cmds", "missing"], "agents": ["ext-agents", "../outside"]}"#,
+        )
+        .unwrap();
+        assert_eq!(manifest.component_dirs_outside(&root), (1, 0, 2));
+        assert!(manifest.command_dirs(&root).contains(&root.join("cmds")));
+        assert!(manifest.agent_dirs(&root).is_empty());
+    }
+
+    /// m4 (Fable m3 Medium): default `hooks/hooks.json`, `.mcp.json` and `.lsp.json` linking outside the plugin are not
+    /// used (the inline-MCP sibling too); in-plugin links still are.
+    #[cfg(unix)]
+    #[test]
+    fn m4_default_component_files_linked_outside_plugin_are_not_used() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("x.json"), "{}").unwrap();
+        let root = base.join("plugin");
+        std::fs::create_dir_all(root.join("hooks")).unwrap();
+        std::os::unix::fs::symlink(outside.join("x.json"), root.join("hooks").join("hooks.json")).unwrap();
+        std::os::unix::fs::symlink(outside.join("x.json"), root.join(".mcp.json")).unwrap();
+        std::os::unix::fs::symlink(outside.join("x.json"), root.join(".lsp.json")).unwrap();
+
+        let m: PluginManifest = serde_json::from_str(r#"{"name": "p"}"#).unwrap();
+        assert!(m.hooks_path(&root).is_none(), "linked-out default hooks.json used");
+        assert!(m.mcp_config_path(&root).is_none(), "linked-out default .mcp.json used");
+        assert!(m.lsp_config_path(&root).is_none(), "linked-out default .lsp.json used");
+        let inline: PluginManifest =
+            serde_json::from_str(r#"{"name": "p", "mcpServers": {"s": {"command": "x"}}}"#).unwrap();
+        assert!(inline.mcp_config_path(&root).is_none(), "linked-out .mcp.json beside inline servers used");
+
+        std::fs::write(root.join("real.json"), "{}").unwrap();
+        std::fs::remove_file(root.join(".mcp.json")).unwrap();
+        std::os::unix::fs::symlink(root.join("real.json"), root.join(".mcp.json")).unwrap();
+        assert!(m.mcp_config_path(&root).is_some(), "in-plugin link refused");
+    }
+
+    /// m4: a manifest linking outside the plugin is refused (the plugin is skipped), read from the opened file.
+    #[cfg(unix)]
+    #[test]
+    fn m4_manifest_linked_outside_plugin_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        std::fs::write(base.join("outside").join("plugin.json"), r#"{"name": "outsider"}"#).unwrap();
+        let root = base.join("plugin");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(base.join("outside").join("plugin.json"), root.join("plugin.json")).unwrap();
+        assert!(load_manifest(&root).is_err(), "manifest linked outside the plugin was loaded");
+    }
+
+    /// Fable m3 Low 4: a path that cannot be resolved is not contained (fails closed, like the skill walk).
+    #[test]
+    fn m4_unresolvable_component_path_is_not_contained() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_path_contained(&tmp.path().join("missing").join("..").join("x"), tmp.path()));
+        assert!(!is_path_contained(tmp.path(), &tmp.path().join("missing-root")));
     }
 }

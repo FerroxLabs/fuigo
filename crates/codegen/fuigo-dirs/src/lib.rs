@@ -10,12 +10,16 @@
 //! - [`resolve_fuigo_home_with_source`]: [`resolve_fuigo_home`] plus where the path came from.
 //! - [`home_dir`]: the home directory itself, for sibling dot dirs (`~/.claude`, `~/.agents`, ...).
 //!
+//! [`contained`] reads repository- and plugin-scoped files only from inside their folder.
+//!
 //! TODO: collapse these getters by threading the path through config as an
 //! explicit value.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+pub mod contained;
 
 /// Where a resolved fuigo home came from, so "why did fuigo pick this
 /// directory?" is answerable in diagnostics without re-reading the
@@ -149,9 +153,25 @@ pub fn fuigo_home() -> PathBuf {
     path
 }
 
-/// Like [`fuigo_home`], but `None` when no home resolves (no cwd fallback).
+/// Like [`fuigo_home`], but `None` when no home resolves (no cwd fallback), and `None` when `$FUIGO_HOME` is relative.
+///
+/// u35 t1 (Astra d2 H1): every user-tier authority input (the user `config.toml` and its permission rules and launch
+/// mode, `managed_config.toml`, the folder-trust store) is read through this. A relative `$FUIGO_HOME` (`.fuigo`)
+/// would resolve against the current folder, so a cloned repository could supply the "user" config; it is ignored
+/// with a warning instead, as if no home resolved.
 pub fn user_fuigo_home() -> Option<PathBuf> {
-    resolve_fuigo_home().is_some().then(fuigo_home)
+    let (home, _) = resolve_fuigo_home_with_source()?;
+    if !home.is_absolute() {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                home = %home.display(),
+                "FUIGO_HOME is a relative path: Fuigo settings and folder trust are ignored; set it to an absolute directory"
+            );
+        });
+        return None;
+    }
+    Some(fuigo_home())
 }
 
 #[cfg(test)]

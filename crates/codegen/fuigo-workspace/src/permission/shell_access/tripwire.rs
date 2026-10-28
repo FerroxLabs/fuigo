@@ -655,8 +655,9 @@ fn emit_plain(chunk: &str, out: &mut Vec<String>) {
             if !stripped.is_empty() {
                 out.push(stripped.to_owned());
             }
-            if !token.starts_with("--") && token.len() > 2 {
-                out.push(token[2..].to_owned());
+            // u35 r3: the attached value starts after the second character, which may be non-ASCII.
+            if let Some((at, _)) = token.char_indices().nth(2).filter(|_| !token.starts_with("--")) {
+                out.push(token[at..].to_owned());
             }
         } else {
             out.push(token.to_owned());
@@ -843,7 +844,7 @@ pub(super) fn tripwire(program: &str, words: &[String], inner: &[String], extras
     // `find` only reads unless it has an action that writes or runs something (P166 r12 item 5).
     let read_only_find = program == "find"
         && !inner.iter().any(|word| {
-            matches!(word.as_str(), "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fprint" | "-fprint0" | "-fprintf" | "-fls")
+            matches!(word.as_str(), "-delete" | "-rm" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fprint" | "-fprint0" | "-fprintf" | "-fls")
         });
     if (!reader || reader_writes) && !read_only_find {
         for value in &extras.assignments {

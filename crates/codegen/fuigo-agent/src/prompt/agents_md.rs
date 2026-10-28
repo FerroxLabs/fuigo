@@ -23,23 +23,55 @@ pub struct AgentConfigFile {
 
 /// `filenames` is the (compat-gated) recognized list, precomputed once by the caller so the cwd-to-root walk doesn't re-allocate it per directory.
 /// When all compat cells are on it equals the legacy `AGENT_FILENAMES` list exactly.
-fn find_agent_files(dir: &Path, filenames: &[&str]) -> Vec<PathBuf> {
+/// `contain`: for a project root, the folder every file must resolve inside; a file linking outside it is skipped here
+/// (and its read is held to the folder again, see [`read_agent_file`]).
+fn find_agent_files(dir: &Path, filenames: &[&str], contain: Option<&fuigo_dirs::contained::PinnedRoot>) -> Vec<PathBuf> {
     filenames
         .iter()
         .filter_map(|name| {
             let path = dir.join(name);
-            path.exists().then_some(path)
+            (path.exists() && admitted(&path, contain)).then_some(path)
         })
         .collect()
 }
 
+/// Whether a project file or dir resolves inside `contain` (always true for user scope). An outside one is logged.
+fn admitted(path: &Path, contain: Option<&fuigo_dirs::contained::PinnedRoot>) -> bool {
+    let Some(root) = contain else {
+        return true;
+    };
+    if fuigo_dirs::contained::is_contained(path, root) {
+        return true;
+    }
+    tracing::debug!(
+        path = %path.display(),
+        root = %root.path().display(),
+        "project instruction file or rules dir links outside the project; skipping"
+    );
+    false
+}
+
+/// Read an instruction or rules file: held to `contain` (project scope) on the opened file, so a link swapped in after
+/// discovery is refused at the read; user scope follows links.
+fn read_agent_file(path: &Path, contain: Option<&fuigo_dirs::contained::PinnedRoot>) -> Option<String> {
+    match fuigo_dirs::contained::read_scoped(path, contain) {
+        Ok(content) => Some(content),
+        Err(e) => {
+            if contain.is_some() && e.kind() == fuigo_dirs::contained::OUTSIDE_ROOT {
+                tracing::debug!(path = %path.display(), error = %e, "project instruction file not read");
+            }
+            None
+        }
+    }
+}
+
 /// Find `*.md` files in `.fuigo/rules/`, `.claude/rules/`, and `.cursor/rules/`, sorted alphabetically.
 /// `rules_subdirs` is the (compat-gated) list, precomputed once by the caller so the walk doesn't re-allocate it per directory.
-fn find_rules_files(dir: &Path, rules_subdirs: &[&str]) -> Vec<PathBuf> {
+fn find_rules_files(dir: &Path, rules_subdirs: &[&str], contain: Option<&fuigo_dirs::contained::PinnedRoot>) -> Vec<PathBuf> {
     let mut results = Vec::new();
     for rules_subdir in rules_subdirs {
         let rules_dir = dir.join(rules_subdir);
-        if !rules_dir.is_dir() {
+        if !rules_dir.is_dir() || !admitted(&rules_dir, contain) {
             continue;
         }
         let mut entries: Vec<PathBuf> = match std::fs::read_dir(&rules_dir) {
@@ -51,6 +83,7 @@ fn find_rules_files(dir: &Path, rules_subdirs: &[&str]) -> Vec<PathBuf> {
                         .and_then(|ext| ext.to_str())
                         .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
                 })
+                .filter(|p| admitted(p, contain))
                 .collect(),
             Err(_) => continue,
         };
@@ -69,6 +102,10 @@ struct DiscoveryRoot {
     canonical_path: PathBuf,
     scan_named_files: bool,
     rules_subdirs: Vec<&'static str>,
+    /// Project roots: the folder (the repository, or the session folder outside one) every file must resolve inside.
+    /// `None` for user scope (`~/.fuigo`, `~/.claude`, `~/.cursor`, the workspace-user dir): links followed. Pinned
+    /// (resolved once) when discovery starts.
+    contain: Option<fuigo_dirs::contained::PinnedRoot>,
 }
 
 fn add_discovery_root(
@@ -76,6 +113,7 @@ fn add_discovery_root(
     path: PathBuf,
     scan_named_files: bool,
     rules_subdirs: &[&'static str],
+    contain: Option<fuigo_dirs::contained::PinnedRoot>,
 ) {
     let canonical_path = canonical_for_dedup(&path);
     if let Some(root) = roots
@@ -91,6 +129,7 @@ fn add_discovery_root(
         canonical_path,
         scan_named_files,
         rules_subdirs: rules_subdirs.to_vec(),
+        contain,
     });
 }
 
@@ -98,6 +137,9 @@ struct DiscoveredCandidate {
     path: PathBuf,
     is_rule: bool,
     is_project: bool,
+    /// See [`DiscoveryRoot::contain`]. A file first reached through a user root keeps `None` (it is the user's own file)
+    /// when a project root reaches it too.
+    contain: Option<fuigo_dirs::contained::PinnedRoot>,
 }
 
 fn add_discovered_candidate(
@@ -106,6 +148,7 @@ fn add_discovered_candidate(
     path: PathBuf,
     is_rule: bool,
     is_project: bool,
+    contain: Option<&fuigo_dirs::contained::PinnedRoot>,
 ) {
     let canonical_path = canonical_for_dedup(&path);
     if let Some(index) = seen_canonical.get(&canonical_path).copied() {
@@ -130,6 +173,7 @@ fn add_discovered_candidate(
         path,
         is_rule,
         is_project,
+        contain: contain.cloned(),
     });
 }
 
@@ -206,7 +250,7 @@ async fn read_agents_config_with_roots(
     let project_rules_dirs = compat.rules_dirs();
 
     let mut home_roots = Vec::new();
-    add_discovery_root(&mut home_roots, fuigo_home, true, HOME_RULES_DIRS);
+    add_discovery_root(&mut home_roots, fuigo_home, true, HOME_RULES_DIRS, None);
     if let Some(home) = home_dir {
         if compat.claude.agents || compat.claude.rules {
             add_discovery_root(
@@ -218,6 +262,7 @@ async fn read_agents_config_with_roots(
                 } else {
                     &[]
                 },
+                None,
             );
         }
         if compat.cursor.agents || compat.cursor.rules {
@@ -230,17 +275,25 @@ async fn read_agents_config_with_roots(
                 } else {
                     &[]
                 },
+                None,
             );
         }
     }
 
+    // Project instruction and rules files must resolve inside the project: the repository, or the session folder
+    // outside one. The workspace-user dir is the user's own and follows links.
+    // Pinned once here; a folder that cannot be resolved is used as given, which fails closed.
+    let project_root = git_root.clone().unwrap_or_else(|| cwd.clone());
+    let project_root = fuigo_dirs::contained::PinnedRoot::pin(&project_root).unwrap_or_else(|_| fuigo_dirs::contained::PinnedRoot::from_canonical(project_root));
     let mut project_roots = Vec::new();
     for dir in project_sources.instruction_dirs() {
+        let in_chain = project_sources.chain.dirs.iter().any(|d| d == dir);
         add_discovery_root(
             &mut project_roots,
             dir.to_path_buf(),
             true,
             &project_rules_dirs,
+            in_chain.then(|| project_root.clone()),
         );
     }
 
@@ -255,8 +308,9 @@ async fn read_agents_config_with_roots(
         if is_project && !project_trusted {
             continue;
         }
+        let contain = root.contain.as_ref();
         if root.scan_named_files {
-            for path in find_agent_files(&root.path, &agent_filenames) {
+            for path in find_agent_files(&root.path, &agent_filenames, contain) {
                 if !is_ignored(&path, gitignore.as_ref(), git_root.as_deref()) {
                     add_discovered_candidate(
                         &mut candidates,
@@ -264,11 +318,12 @@ async fn read_agents_config_with_roots(
                         path,
                         false,
                         is_project,
+                        contain,
                     );
                 }
             }
         }
-        for path in find_rules_files(&root.path, &root.rules_subdirs) {
+        for path in find_rules_files(&root.path, &root.rules_subdirs, contain) {
             if !is_ignored(&path, gitignore.as_ref(), git_root.as_deref()) {
                 add_discovered_candidate(
                     &mut candidates,
@@ -276,6 +331,7 @@ async fn read_agents_config_with_roots(
                     path,
                     true,
                     is_project,
+                    contain,
                 );
             }
         }
@@ -284,7 +340,7 @@ async fn read_agents_config_with_roots(
     candidates
         .into_iter()
         .filter_map(|candidate| {
-            let content = std::fs::read_to_string(&candidate.path).ok()?;
+            let content = read_agent_file(&candidate.path, candidate.contain.as_ref())?;
             let content = if candidate.is_rule {
                 fuigo_tools::implementations::skills::skill::extract_skill_body(&content)
             } else {
@@ -380,7 +436,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("AGENTS.md"), "# Instructions").unwrap();
 
-        let files = find_agent_files(tmp.path(), &CompatConfig::default().agent_filenames());
+        let files = find_agent_files(tmp.path(), &CompatConfig::default().agent_filenames(), None);
         // On case-insensitive filesystems (macOS), both "Agents.md" and "AGENTS.md" resolve to the same file, so we may get more than 1 result
         assert!(!files.is_empty());
         assert!(
@@ -403,14 +459,14 @@ mod tests {
             fs::write(&path, format!("# {name}")).unwrap();
         }
 
-        let files = find_agent_files(tmp.path(), &filenames);
+        let files = find_agent_files(tmp.path(), &filenames, None);
         assert_eq!(files.len(), filenames.len());
     }
 
     #[test]
     fn find_agent_files_empty_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let files = find_agent_files(tmp.path(), &CompatConfig::default().agent_filenames());
+        let files = find_agent_files(tmp.path(), &CompatConfig::default().agent_filenames(), None);
         assert!(files.is_empty());
     }
 
@@ -419,6 +475,7 @@ mod tests {
         let files = find_agent_files(
             Path::new("/nonexistent/dir"),
             &CompatConfig::default().agent_filenames(),
+            None,
         );
         assert!(files.is_empty());
     }
@@ -430,7 +487,7 @@ mod tests {
         fs::create_dir_all(&claude_dir).unwrap();
         fs::write(claude_dir.join("CLAUDE.md"), "# Project instructions").unwrap();
 
-        let files = find_agent_files(tmp.path(), &CompatConfig::default().agent_filenames());
+        let files = find_agent_files(tmp.path(), &CompatConfig::default().agent_filenames(), None);
         assert!(
             files
                 .iter()
@@ -447,7 +504,7 @@ mod tests {
         fs::write(rules_dir.join("style.md"), "# Style rules").unwrap();
         fs::write(rules_dir.join("safety.md"), "# Safety rules").unwrap();
 
-        let files = find_rules_files(tmp.path(), &CompatConfig::default().rules_dirs());
+        let files = find_rules_files(tmp.path(), &CompatConfig::default().rules_dirs(), None);
         assert_eq!(files.len(), 2);
         assert!(files[0].to_string_lossy().contains("safety.md"));
         assert!(files[1].to_string_lossy().contains("style.md"));
@@ -1175,5 +1232,109 @@ mod tests {
 
         assert!(has_direct, "Direct CLAUDE.md should be found");
         assert!(has_subdir, ".claude/CLAUDE.md should be found");
+    }
+
+    /// m4 tests: project instruction and rules files linking outside the project are refused; in-project links and the
+    /// user's own links still load.
+    #[cfg(unix)]
+    mod m4_containment {
+        use super::*;
+        use std::os::unix::fs::symlink;
+
+        struct Fixture {
+            _tmp: tempfile::TempDir,
+            base: PathBuf,
+            repo: PathBuf,
+            fuigo_home: PathBuf,
+            secret: PathBuf,
+        }
+
+        fn fixture() -> Fixture {
+            let tmp = tempfile::tempdir().unwrap();
+            let base = dunce::canonicalize(tmp.path()).unwrap();
+            let repo = base.join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            git2::Repository::init(&repo).unwrap();
+            std::fs::create_dir_all(base.join("outside")).unwrap();
+            let secret = base.join("outside").join("notes.md");
+            std::fs::write(&secret, "TOP SECRET").unwrap();
+            let fuigo_home = base.join("fuigo-home");
+            std::fs::create_dir_all(&fuigo_home).unwrap();
+            Fixture { _tmp: tmp, base, repo, fuigo_home, secret }
+        }
+
+        async fn load(f: &Fixture) -> Vec<AgentConfigFile> {
+            read_agents_config_with_roots(
+                f.repo.to_str().unwrap(),
+                None,
+                CompatConfig::default(),
+                f.fuigo_home.clone(),
+                None,
+                true,
+            )
+            .await
+        }
+
+        fn leaked(configs: &[AgentConfigFile]) -> bool {
+            configs.iter().any(|c| c.content.contains("TOP SECRET"))
+        }
+
+        #[tokio::test]
+        async fn m4_symlinked_agents_md_and_claude_md_outside_project_are_refused() {
+            let f = fixture();
+            symlink(&f.secret, f.repo.join("AGENTS.md")).unwrap();
+            symlink(&f.secret, f.repo.join("CLAUDE.md")).unwrap();
+            let configs = load(&f).await;
+            assert!(!leaked(&configs), "outside file reached the prompt: {configs:?}");
+        }
+
+        #[tokio::test]
+        async fn m4_symlinked_rules_file_outside_project_is_refused() {
+            let f = fixture();
+            let rules = f.repo.join(".fuigo").join("rules");
+            std::fs::create_dir_all(&rules).unwrap();
+            std::fs::write(rules.join("own.md"), "own rule").unwrap();
+            symlink(&f.secret, rules.join("leak.md")).unwrap();
+            let configs = load(&f).await;
+            assert!(!leaked(&configs), "outside rules file reached the prompt");
+            assert!(configs.iter().any(|c| c.content.contains("own rule")), "own rule missing");
+        }
+
+        #[tokio::test]
+        async fn m4_symlinked_rules_dir_outside_project_is_refused() {
+            let f = fixture();
+            std::fs::create_dir_all(f.repo.join(".claude")).unwrap();
+            symlink(f.base.join("outside"), f.repo.join(".claude").join("rules")).unwrap();
+            let configs = load(&f).await;
+            assert!(!leaked(&configs), "rules dir linked outside the project was walked");
+        }
+
+        #[tokio::test]
+        async fn m4_in_project_instruction_link_still_loads() {
+            let f = fixture();
+            std::fs::write(f.repo.join("AGENTS.md"), "shared rules").unwrap();
+            let sub = f.repo.join("sub");
+            std::fs::create_dir_all(&sub).unwrap();
+            symlink(f.repo.join("AGENTS.md"), f.repo.join("CLAUDE.md")).unwrap();
+            symlink(f.repo.join("AGENTS.md"), sub.join("CLAUDE.md")).unwrap();
+            let configs = read_agents_config_with_roots(
+                sub.to_str().unwrap(),
+                None,
+                CompatConfig::default(),
+                f.fuigo_home.clone(),
+                None,
+                true,
+            )
+            .await;
+            assert!(configs.iter().any(|c| c.content.contains("shared rules")), "{configs:?}");
+        }
+
+        #[tokio::test]
+        async fn m4_user_scope_instruction_link_is_still_followed() {
+            let f = fixture();
+            symlink(&f.secret, f.fuigo_home.join("AGENTS.md")).unwrap();
+            let configs = load(&f).await;
+            assert!(leaked(&configs), "the user's own linked AGENTS.md must still load");
+        }
     }
 }

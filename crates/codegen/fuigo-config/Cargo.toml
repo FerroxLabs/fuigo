@@ -36,12 +36,12 @@ fuigo-version = { workspace = true }
 core-foundation = { workspace = true }
 
 # libc / windows: `write_through` carries xattrs/ACLs (Linux, macOS) and the
-# DACL (Windows) onto a replaced file.
+# DACL (Windows) onto a replaced file. SystemInformation: shell.rs reads the real system directory.
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+windows = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

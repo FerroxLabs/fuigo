@@ -857,6 +857,7 @@ fn spawn_with_argv(
     {
         use process_wrap::tokio::{CommandWrap, KillOnDrop, ProcessSession};
 
+        let mut path_set = false;
         let mut cmd = CommandWrap::with_new(program, |cmd| {
             set_argv(cmd);
             // P113 r3: the user's environment, without Fuigo's own secrets; explicit variables after.
@@ -867,19 +868,21 @@ fn spawn_with_argv(
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            path_set = fuigo_tools::util::spawn::child_path_is_set(cmd.as_std());
 
             fuigo_sandbox::child_net::restrict_child_network(cmd);
         });
         // setsid: detach from the TTY and start a new process group for tree teardown
         cmd.wrap(ProcessSession);
         cmd.wrap(KillOnDrop);
-        cmd.spawn()
+        cmd.spawn().inspect_err(|e| log_spawn_failure(program, e, path_set))
     }
     #[cfg(not(unix))]
     {
         use process_wrap::tokio::{CommandWrap, CreationFlags, JobObject, KillOnDrop};
         use windows::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 
+        let mut path_set = false;
         let mut cmd = CommandWrap::with_new(program, |cmd| {
             set_argv(cmd);
             // P113 r3: the user's environment, without Fuigo's own secrets; explicit variables after.
@@ -890,14 +893,27 @@ fn spawn_with_argv(
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            path_set = fuigo_tools::util::spawn::child_path_is_set(cmd.as_std());
         });
         // CreationFlags must precede JobObject per process-wrap docs.
         cmd.wrap(CreationFlags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW));
         // JobObject and KillOnDrop: dropping terminates every descendant
         cmd.wrap(JobObject);
         cmd.wrap(KillOnDrop);
-        cmd.spawn()
+        cmd.spawn().inspect_err(|e| log_spawn_failure(program, e, path_set))
     }
+}
+
+/// Warn with the OS error code, the program path and whether `PATH` was set on the child (never
+/// an environment value), so a "program not found" on a user's machine can be diagnosed.
+fn log_spawn_failure(program: &str, err: &std::io::Error, path_set: bool) {
+    fuigo_tools::util::spawn::ShellSpawnFailure::new(
+        "streaming_local_terminal",
+        std::ffi::OsStr::new(program),
+        err,
+        path_set,
+    )
+    .log();
 }
 
 fn extract_exit_status(status: std::process::ExitStatus) -> ExitStatus {
@@ -1505,5 +1521,32 @@ mod tests {
                 release_terminal(&session_b, &id_b).await;
             })
             .await;
+    }
+
+    /// u35-winenv: a shell that fails to start is logged at THIS spawn site with its program path,
+    /// the OS error and whether PATH was set on the child, and with no environment value.
+    #[tokio::test]
+    async fn failed_spawn_is_logged_with_program_error_and_path_flag_but_no_env_value() {
+        let capture = fuigo_tools::util::spawn::capture::CaptureEvents::default();
+        let _guard = tracing::subscriber::set_default(capture.clone());
+        let missing = "/nonexistent-u35-winenv/fuigo-missing-shell";
+        let env: HashMap<String, String> = [
+            ("PATH".to_string(), "/u35-canary-path-value".to_string()),
+            ("U35_CANARY".to_string(), "u35-canary-env-value".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let cwd = std::env::current_dir().unwrap();
+        assert!(spawn_program_with_args(missing, &[], &cwd, &env).is_err());
+        let logged = capture.text();
+        let line = logged
+            .lines()
+            .find(|line| line.contains(missing))
+            .unwrap_or_else(|| panic!("no spawn-failure event: {logged}"));
+        assert!(line.starts_with("WARN:"), "{line}");
+        assert!(line.contains("site=\"streaming_local_terminal\""), "{line}");
+        assert!(line.contains("os_error=Some("), "{line}");
+        assert!(line.contains("path_set=true"), "{line}");
+        assert!(!logged.contains("u35-canary"), "an environment value was logged: {logged}");
     }
 }

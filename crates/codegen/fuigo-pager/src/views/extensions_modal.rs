@@ -357,6 +357,7 @@ pub(crate) fn test_plugin_info(
         marketplace_source: None,
         origin,
         conflict: None,
+        skipped_links: 0,
     }
 }
 
@@ -2680,6 +2681,12 @@ fn build_plugin_fields(plugin: &fuigo_hooks_plugins_types::PluginInfo) -> Vec<St
         }
         McpStatus::None => {}
     }
+    if plugin.skipped_links > 0 {
+        components.push(format!(
+            "{} skipped: links outside the plugin folder",
+            plugin.skipped_links
+        ));
+    }
     components
 }
 
@@ -4970,6 +4977,7 @@ mod tests {
             paths: None,
             enabled: true,
             body: None,
+            content_root: None,
         }
     }
 
@@ -5401,6 +5409,22 @@ mod tests {
 
     fn make_plugin(name: &str) -> fuigo_hooks_plugins_types::PluginInfo {
         test_plugin_info(name, None)
+    }
+
+    /// m3: the expanded plugin row says how many skills/commands/agents were skipped for linking outside the plugin
+    /// folder, and says nothing when none were.
+    #[test]
+    fn m3_plugin_fields_show_skipped_links() {
+        let mut plugin = make_plugin("linky");
+        assert!(build_plugin_fields(&plugin).iter().all(|f| !f.contains("skipped")));
+        plugin.skipped_links = 3;
+        assert!(
+            build_plugin_fields(&plugin)
+                .iter()
+                .any(|f| f == "3 skipped: links outside the plugin folder"),
+            "{:?}",
+            build_plugin_fields(&plugin)
+        );
     }
 
     fn make_plugin_with_origin(

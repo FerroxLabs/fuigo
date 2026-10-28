@@ -1247,7 +1247,9 @@ async fn off_starts_no_proxy_and_the_real_child_sees_no_sandbox() {
     assert_eq!(Some(&Value::Null), status.get("proxy"));
     let handle = fx.handle(sandbox.clone());
 
-    let command = "echo PPID=$PPID; tr '\\0' ' ' </proc/$$/cmdline; echo; env";
+    // The wrapper script between `-c` and `--` is long (the restore guard), and the tool shortens long output lines, so
+    // only the shell's first four and last two argv words are printed.
+    let command = "echo PPID=$PPID; printf ARGV_HEAD=; tr '\\0' '\\n' </proc/$$/cmdline | head -4 | tr '\\n' ' '; echo; printf ARGV_TAIL=; tr '\\0' '\\n' </proc/$$/cmdline | tail -2 | tr '\\n' ' '; echo; env";
     let result = run_bash(&handle, command).await;
     let value = result.outcome.clone().expect("off runs everything");
     assert_eq!(0, exit_code(&value), "{result:?}");
@@ -1271,18 +1273,22 @@ async fn off_starts_no_proxy_and_the_real_child_sees_no_sandbox() {
             text.contains(&format!("PPID={}", std::process::id())),
             "the shell's parent is this process, no wrapper in between: {text}"
         );
-        let cmdline = text
-            .lines()
-            .find(|line| line.contains("-O extglob -c "))
-            .unwrap_or_else(|| panic!("the shell's own argv is in the output: {text}"));
-        let argv0 = cmdline.split(' ').next().unwrap_or_default();
+        let argv_line = |marker: &str| {
+            text.lines()
+                .find_map(|line| line.strip_prefix(marker))
+                .unwrap_or_else(|| panic!("the shell's own argv is in the output: {text}"))
+        };
+        let head = argv_line("ARGV_HEAD=");
+        assert!(head.contains("-O extglob -c "), "the shell runs a -c script: {head}");
+        let argv0 = head.split(' ').next().unwrap_or_default();
         assert!(
             argv0.ends_with("bash"),
-            "argv[0] is the shell itself, not a wrapper: {cmdline}"
+            "argv[0] is the shell itself, not a wrapper: {head}"
         );
+        let tail = argv_line("ARGV_TAIL=");
         assert!(
-            cmdline.trim_end().ends_with(&format!("-- {command}")),
-            "the tool's `-- <command>` closes the argv: {cmdline}"
+            tail.trim_end().ends_with(&format!("-- {command}")),
+            "the tool's `-- <command>` closes the argv: {tail}"
         );
     }
     assert_eq!(0, kernel.wraps.load(Ordering::SeqCst));

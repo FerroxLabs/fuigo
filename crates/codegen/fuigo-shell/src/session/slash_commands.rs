@@ -140,9 +140,10 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     },
     BuiltinCommand {
         name: "hooks-trust",
-        description: "Trust this project for hook execution",
+        // u35 t1 (design d2 §5.4): one folder trust for the folder's settings and its shell commands.
+        description: "Trust this folder: load its settings and run shell commands here without asking each time",
         argument_hint: None,
-        aliases: &[],
+        aliases: &["trust"],
         model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::Hooks,
         workflow_projection: WorkflowProjection::None,
@@ -196,9 +197,9 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     },
     BuiltinCommand {
         name: "hooks-untrust",
-        description: "Remove trust for the current project",
+        description: "Stop trusting this folder: its settings stop loading and shell commands ask",
         argument_hint: None,
-        aliases: &[],
+        aliases: &["untrust"],
         model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::Hooks,
         workflow_projection: WorkflowProjection::None,

@@ -32,14 +32,47 @@ use serde::{Deserialize, Serialize};
 /// Filename of the folder-trust store under `~/.fuigo/`.
 pub const TRUST_FILE_NAME: &str = fuigo_config::TRUSTED_FOLDERS_FILENAME;
 
+/// Why a folder has no trust key (it is then untrusted and never recorded).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyError {
+    /// The folder could not be canonicalized.
+    Canonicalize,
+    /// Home, filesystem root, relative, or non-UTF-8: never trusted or recorded.
+    Unrecordable,
+}
+
+/// u35 t1: the consent version a `trusted = true` record needs before it covers shell commands. A record written
+/// before 1.0.35 (no `consent`, or `consent < CONSENT_V`) trusted the folder's settings only: it is **Legacy** and the
+/// user is asked once more. Only [`TrustStore::grant`] writes it; an older binary rewriting the file drops the field,
+/// which makes the record Legacy again (fail closed).
+pub const CONSENT_V: u32 = 2;
+
 /// A single folder's trust record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderTrust {
-    /// Whether the folder (and same-repo descendants) is trusted.
+    /// Whether the folder (and same-key descendants) is trusted.
     pub trusted: bool,
     /// Unix timestamp (seconds) of when the decision was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decided_at: Option<i64>,
+    /// u35 t1: the consent version the user gave ([`CONSENT_V`] = settings and commands). Absent = 0 (Legacy).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub consent: u32,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
+/// What the store says about one trust key ([`TrustStore::coverage`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coverage {
+    /// No record covers the key.
+    None,
+    /// The user declined the key.
+    Declined,
+    /// The key is trusted at this consent version ([`CONSENT_V`] = settings and commands; lower = Legacy).
+    Trusted { consent: u32 },
 }
 
 /// On-disk document shape for `trusted_folders.toml`.
@@ -68,7 +101,7 @@ impl StoreRead {
 
 /// Why a locked write did not publish.
 #[derive(Debug)]
-pub(crate) enum TrustPersistError {
+pub enum TrustPersistError {
     /// The existing store could not be read or parsed; nothing was written, so the user's grants are untouched.
     Unreadable(io::Error),
     /// The store was read (or is missing) but the lock, rename or write failed; no replacement was published.
@@ -93,7 +126,7 @@ impl From<TrustPersistError> for io::Error {
 
 /// Whether a write actually recorded the decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Recorded {
+pub enum Recorded {
     /// Written to disk.
     Durable,
     /// Over-broad root or no backing path: nothing written.
@@ -207,38 +240,67 @@ impl TrustStore {
     ///
     /// Over-broad keys are ignored on read (fail closed): an empty/relative key, the filesystem root, or the user's home directory are never honored.
     /// That holds even if such a record reaches the file via hand-edit or migration; see [`is_unsafe_trust_root`].
-    pub fn is_trusted(&self, key: &Path) -> bool {
-        // An unreadable store is not an empty allow-list; fail closed.
+    pub fn is_trusted(&self, path: &Path) -> bool {
+        matches!(self.coverage_of_path(path), Coverage::Trusted { consent } if consent >= CONSENT_V)
+    }
+
+    /// [`Self::coverage`] for any folder: its physical path and its [`trust_key`] (for a folder that does not exist,
+    /// the key of its nearest existing ancestor). A folder with no trust key (home, root) is covered by nothing.
+    pub fn coverage_of_path(&self, path: &Path) -> Coverage {
+        let physical = canonicalize_or_owned(path);
+        let existing = physical.ancestors().find(|p| p.exists()).unwrap_or(&physical);
+        match trust_key(existing) {
+            Ok(key) => self.coverage(&physical, &key),
+            Err(_) => Coverage::None,
+        }
+    }
+
+    /// u35 t1 (Grok d2 H2, Astra d2 M4): the one identity-qualified coverage rule, for the physical folder `path`
+    /// whose trust key is `key` ([`trust_key`]).
+    ///
+    /// The record whose folder IS `key` applies to every folder with that key, inside it or not (validated linked and
+    /// managed worktrees outside the main checkout, u35 t2), as the least specific record. Any other record applies
+    /// when `path` is the record's folder or inside it, and only when the record's own folder resolves to the SAME trust key ([`trust_key`]): an
+    /// ancestor's grant never covers a nested repository (vendored clone, `node_modules/x/.git`) or a non-git
+    /// descendant with its own key, as today's `workspace_id` equality rule (kept). Records are compared by their
+    /// physical path (a symlinked or `/tmp` vs `/private/tmp` spelling is the same folder), and path containment is by
+    /// components. Among the records that apply, the most specific (deepest) wins, so a child's "no" beats a parent's
+    /// "yes"; on a depth tie any "no" wins and the lowest consent counts (fail closed). An unreadable store covers nothing.
+    pub fn coverage(&self, path: &Path, key: &Path) -> Coverage {
         if !self.disk_readable {
-            return false;
+            return Coverage::None;
         }
-        let query = canonicalize_or_owned(key);
-        let query_id = workspace_id(&query);
-        // Among recorded folders that cover this workspace, the longest match decides
-        // Canonical, code-produced keys are normalized, so that longest match is unique
-        // A hand-edited store could hold non-canonical aliases (e.g. `/a/b` vs `/a/b/`) that tie on depth.
-        // On a tie we require EVERY tied record to be trusted, so a contradictory edit fails closed
-        let mut best_depth: Option<usize> = None;
-        let mut trusted = false;
+        let mut best: Option<(usize, Coverage)> = None;
         for (folder, record) in &self.doc.folders {
-            let folder = Path::new(folder);
-            if is_unsafe_trust_root(folder) || !query.starts_with(folder) {
+            let raw = Path::new(folder);
+            if is_unsafe_trust_root(raw) {
                 continue;
             }
-            if workspace_id(folder) != query_id {
+            let physical = canonicalize_or_owned(raw);
+            if is_unsafe_trust_root(&physical) {
                 continue;
             }
-            let depth = folder.components().count();
-            match best_depth {
-                Some(d) if depth < d => {}
-                Some(d) if depth == d => trusted &= record.trusted,
-                _ => {
-                    best_depth = Some(depth);
-                    trusted = record.trusted;
-                }
+            // u35 t2 (Fable H1, Astra 2): the record OF the key covers every folder with that key, wherever it is
+            // (a validated linked worktree or a `fuigo -w` managed worktree outside the main checkout). Any other
+            // record applies only inside its own folder, and only when that folder has the same key.
+            let contains = path.starts_with(&physical);
+            if !(physical == key || (contains && record_key(&physical).as_deref() == Some(key))) {
+                continue;
             }
+            let this = if record.trusted {
+                Coverage::Trusted { consent: record.consent }
+            } else {
+                Coverage::Declined
+            };
+            // A key record reached without containment is the least specific: any record inside the folder wins.
+            let depth = if contains { physical.components().count() } else { 0 };
+            best = match best {
+                Some((d, _)) if depth < d => best,
+                Some((d, prev)) if depth == d => Some((d, merge_tie(prev, this))),
+                _ => Some((depth, this)),
+            };
         }
-        trusted
+        best.map_or(Coverage::None, |(_, c)| c)
     }
 
     /// Record `workspace_key` as **trusted** and persist to disk.
@@ -251,8 +313,14 @@ impl TrustStore {
     /// `is_trusted` then stays `false` for it on both read and write.
     /// A later [`Self::set_untrusted`] on the same folder flips the stored decision (the insert overwrites).
     /// See `record_decision` for the locked read-modify-write contract and the no-home `Ok(())` no-op.
-    pub fn set_trusted(&mut self, workspace_key: &Path) -> io::Result<()> {
+    pub fn set_trusted_legacy(&mut self, workspace_key: &Path) -> io::Result<()> {
         self.record_decision(workspace_key, true)
+    }
+
+    /// u35 t1: the user said yes to the folder-trust question (`y`, `/trust`, `--trust`): trusted for settings AND
+    /// commands ([`CONSENT_V`]). The only writer of a current consent.
+    pub fn grant(&mut self, workspace_key: &Path) -> Result<Recorded, TrustPersistError> {
+        self.record_decision_with(workspace_key, true, CONSENT_V)
     }
 
     /// Record `workspace_key` as **untrusted** ("Never" / explicitly declined) and persist to disk.
@@ -262,7 +330,8 @@ impl TrustStore {
     /// Recording it lets a consumer tell "explicitly declined" apart from "undecided" (e.g. to avoid re-prompting).
     /// A later [`Self::set_trusted`] flips it back.
     pub fn set_untrusted(&mut self, workspace_key: &Path) -> io::Result<()> {
-        self.record_decision(workspace_key, false)
+        self.record_decision_with(workspace_key, false, CONSENT_V)?;
+        Ok(())
     }
 
     /// Number of recorded folders (for diagnostics / tests).
@@ -312,7 +381,25 @@ impl TrustStore {
         workspace_key: &Path,
         trusted: bool,
     ) -> Result<Recorded, TrustPersistError> {
+        // A `trusted = true` record from this path never carries a current consent (see [`Self::grant`]).
+        self.record_decision_with(workspace_key, trusted, 0)
+    }
+
+    pub(crate) fn record_decision_with(
+        &mut self,
+        workspace_key: &Path,
+        trusted: bool,
+        consent: u32,
+    ) -> Result<Recorded, TrustPersistError> {
         let canonical = canonicalize_or_owned(workspace_key);
+        // u35 t1 (lossless keys): a key that is not UTF-8 cannot be stored exactly; never store a lossy spelling.
+        let Some(key_text) = canonical.to_str().map(str::to_owned) else {
+            tracing::warn!(
+                path = %canonical.display(),
+                "folder trust: refusing to record a folder whose path is not UTF-8; nothing recorded"
+            );
+            return Ok(Recorded::Skipped);
+        };
         if is_unsafe_trust_root(&canonical) {
             tracing::warn!(
                 path = %canonical.display(),
@@ -357,10 +444,11 @@ impl TrustStore {
             .map_err(TrustPersistError::Unreadable)?
             .into_document();
         doc.folders.insert(
-            canonical.to_string_lossy().to_string(),
+            key_text,
             FolderTrust {
                 trusted,
                 decided_at: now_unix(),
+                consent,
             },
         );
 
@@ -450,62 +538,119 @@ impl TrustStore {
     }
 }
 
-/// Compute the trust **workspace key** for a working directory.
-///
-/// The key is the canonicalized git repository root when `cwd` is inside a repo (trust applies to the whole repo), otherwise the canonicalized `cwd`.
-///
-/// A fuigo-managed worktree first collapses onto its recorded source repo's git
-/// ROOT (via the `~/.fuigo/worktrees.db` registry), so every `fuigo -w` worktree
-/// shares one trust key regardless of creation mode (including standalone clones
-/// that git can't link back to their source) and regardless of the subdir
-/// `fuigo -w` was launched from (the recorded source repo may be a repo subdir).
-/// Non-registry git worktrees fall through to the git-topology collapse below.
-///
-/// A linked git worktree collapses onto its MAIN checkout's root so every `fuigo -w` worktree of a repo shares one trust key.
-/// The collapse fires ONLY for the conventional `<workdir>/.git` layout, i.e. the common gitdir resolves back to `<main_workdir>/.git`.
-/// For bare or `--separate-git-dir` repos the common gitdir's inferred workdir would be the gitdir's parent, broader than the real checkout.
-/// There the key falls back to the worktree's own workdir, so it is narrow and never widened.
-/// Resolution is via git2 (honoring `core.worktree`), never by string manipulation of paths.
-///
-/// Finally, an over-broad derived root is rejected in favor of the cwd.
-/// When `$HOME` is itself a git repo (dotfiles in home), the up-walk lands on the home dir.
-/// [`is_unsafe_trust_root`] then re-scopes the key to the cwd, keeping trust bound to the working dir rather than the whole home subtree.
-/// A cwd that IS home is out of scope: no narrower safe fallback exists.
+/// The trust **workspace key** for a working directory, for display and legacy callers: [`trust_key`], or the
+/// canonical `cwd` when the folder has no trust key (such a folder is never trusted; see [`KeyError`]).
 pub fn workspace_key(cwd: &Path) -> PathBuf {
-    let key = git_derived_workspace_key(cwd);
-    if is_unsafe_trust_root(&key) {
-        return canonicalize_or_owned(cwd);
-    }
-    key
+    trust_key(cwd).unwrap_or_else(|_| canonicalize_or_owned(cwd))
 }
 
-/// The workspace key derived from git topology, before [`workspace_key`] rejects an over-broad root in favor of the cwd.
-fn git_derived_workspace_key(cwd: &Path) -> PathBuf {
-    // A fuigo-managed worktree (any creation mode, incl. standalone clones git can't link) collapses onto its recorded source repo so trust is shared.
-    if let Some(source_repo) = crate::worktree::source_repo_for_cwd(&cwd.to_string_lossy()) {
-        // Key on the source repo's git ROOT so every worktree of one repo shares ONE key regardless of the subdir fuigo -w was launched from
-        // This matches the git-topology branch below
-        // Fall back to the recorded path when the source repo is gone (a standalone worktree whose source was deleted still works)
-        let root = git2::Repository::discover(&source_repo)
-            .ok()
-            .and_then(|r| r.workdir().map(canonicalize_or_owned));
-        return root.unwrap_or_else(|| canonicalize_or_owned(&source_repo));
+/// u35 t1 (design d2 §2.1): the trust key of `cwd`, from git topology read with git2 only (nothing is spawned), never
+/// from repository-supplied topology alone.
+///
+/// 1. `c` = the canonical `cwd` (failure: [`KeyError::Canonicalize`]; not UTF-8: [`KeyError::Unrecordable`]).
+/// 2. Physical toplevel: the discovered repository's canonical work tree `T`, used only when it contains `c` (a bare
+///    repository, `core.worktree` pointing elsewhere, or a planted `.git` file whose work tree does not contain `c`
+///    gives key `c`).
+/// 3. A Fuigo-managed worktree: a `worktrees.db` record whose path is exactly `T` (under the user's Fuigo worktree
+///    directory) takes its source repository's key.
+/// 4. A linked worktree takes its main checkout's key only with a validated backlink (its gitdir is physically
+///    `<commondir>/worktrees/<id>`, that gitdir's `gitdir` file points back at `T/.git`, and the main checkout's `.git`
+///    is the common dir); otherwise `T`.
+/// 5. A populated submodule (a gitlink in the index of the repository physically containing it) takes that parent's
+///    key; a nested repository that is not a gitlink keeps its own.
+/// 6. Home, filesystem root or a relative key are never keys ([`KeyError::Unrecordable`]); a repository rooted at
+///    `$HOME` re-scopes to `c`.
+pub fn trust_key(cwd: &Path) -> Result<PathBuf, KeyError> {
+    let c = dunce::canonicalize(cwd).map_err(|_| KeyError::Canonicalize)?;
+    if c.to_str().is_none() {
+        return Err(KeyError::Unrecordable);
     }
-    if let Ok(repo) = git2::Repository::discover(cwd) {
-        // Share one trust key across a repo's worktrees instead of re-prompting per worktree.
-        if repo.is_worktree()
-            && let Ok(main) = git2::Repository::open(repo.commondir())
-            && let Some(main_workdir) = main.workdir()
-            && canonicalize_or_owned(&main_workdir.join(".git"))
-                == canonicalize_or_owned(repo.commondir())
+    let derived = physical_key(&c, 0);
+    let key = if is_unsafe_trust_root(&derived) { c } else { derived };
+    if is_unsafe_trust_root(&key) || key.to_str().is_none() {
+        return Err(KeyError::Unrecordable);
+    }
+    Ok(key)
+}
+
+/// Steps 2-5 of [`trust_key`] for a canonical `c` (`depth` bounds the managed/submodule recursion).
+fn physical_key(c: &Path, depth: u8) -> PathBuf {
+    let Ok(repo) = git2::Repository::discover(c) else {
+        return c.to_path_buf();
+    };
+    let Some(top) = repo.workdir().and_then(|w| dunce::canonicalize(w).ok()) else {
+        return c.to_path_buf();
+    };
+    if !c.starts_with(&top) {
+        return c.to_path_buf();
+    }
+    if depth < 4 {
+        if let Some(source) = crate::worktree::managed_worktree_source_exact(&top)
+            && let Ok(source) = dunce::canonicalize(&source)
         {
-            return canonicalize_or_owned(main_workdir);
+            return physical_key(&source, depth + 1);
         }
-        if let Some(workdir) = repo.workdir() {
-            return canonicalize_or_owned(workdir);
+        if let Some(main) = validated_main_checkout(&repo, &top) {
+            return main;
+        }
+        if let Some(parent) = submodule_parent(&top) {
+            return physical_key(&parent, depth + 1);
         }
     }
-    canonicalize_or_owned(cwd)
+    top
+}
+
+/// Step 4 of [`trust_key`]: the main checkout of a linked worktree, only with a validated backlink.
+fn validated_main_checkout(repo: &git2::Repository, top: &Path) -> Option<PathBuf> {
+    if !repo.is_worktree() {
+        return None;
+    }
+    let gitdir = dunce::canonicalize(repo.path()).ok()?;
+    let common = dunce::canonicalize(repo.commondir()).ok()?;
+    if gitdir.parent()? != common.join("worktrees") {
+        return None;
+    }
+    let backlink = std::fs::read_to_string(gitdir.join("gitdir")).ok()?;
+    let backlink = Path::new(backlink.trim());
+    let backlink = if backlink.is_absolute() { backlink.to_path_buf() } else { gitdir.join(backlink) };
+    if dunce::canonicalize(&backlink).ok()? != dunce::canonicalize(top.join(".git")).ok()? {
+        return None;
+    }
+    let main = git2::Repository::open(&common).ok()?;
+    let main_workdir = dunce::canonicalize(main.workdir()?).ok()?;
+    (dunce::canonicalize(main_workdir.join(".git")).ok()? == common).then_some(main_workdir)
+}
+
+/// Step 5 of [`trust_key`]: the work tree of the repository whose index records `top` as a gitlink (a submodule).
+fn submodule_parent(top: &Path) -> Option<PathBuf> {
+    let parent = git2::Repository::discover(top.parent()?).ok()?;
+    let parent_top = dunce::canonicalize(parent.workdir()?).ok()?;
+    let rel = top.strip_prefix(&parent_top).ok()?;
+    if rel.as_os_str().is_empty() {
+        return None;
+    }
+    let index = parent.index().ok()?;
+    let entry = index.get_path(rel, 0)?;
+    (entry.mode == 0o160_000).then_some(parent_top)
+}
+
+/// The trust key of a stored record's folder (its nearest existing ancestor: a deleted folder keeps its spelling).
+fn record_key(folder: &Path) -> Option<PathBuf> {
+    let existing = folder.ancestors().find(|p| p.exists())?;
+    if existing == folder {
+        trust_key(folder).ok()
+    } else {
+        Some(folder.to_path_buf())
+    }
+}
+
+/// Two records of equal depth that apply to one key: any "no" wins, and the lower consent counts.
+fn merge_tie(a: Coverage, b: Coverage) -> Coverage {
+    match (a, b) {
+        (Coverage::Declined, _) | (_, Coverage::Declined) => Coverage::Declined,
+        (Coverage::Trusted { consent: x }, Coverage::Trusted { consent: y }) => Coverage::Trusted { consent: x.min(y) },
+        (Coverage::None, other) | (other, Coverage::None) => other,
+    }
 }
 
 /// Whether `path` resolves to the user's home directory.
@@ -518,19 +663,14 @@ pub fn is_home_dir(path: &Path) -> bool {
 
 /// Whether `key` is too broad to ever be a safe trust root: refused on write and ignored on read (fail closed).
 ///
-/// Also consumed by [`crate::folder_trust`] as the "key can never be recorded" signal.
-/// Such a key can't be durably gated, so it resolves Trusted instead of prompting on a decision that could never persist.
-/// Public because the shell's revoke path refuses the same roots: an in-process deny for a key the store can never grant could never be lifted.
+/// u35 t1: such a folder (the user's home, the filesystem root) is never trusted: no question, no project settings,
+/// and every shell command asks unless the user's own grant covers it ([`trust_key`] returns
+/// [`KeyError::Unrecordable`]).
 pub fn is_unsafe_trust_root(key: &Path) -> bool {
     !key.is_absolute() || key.parent().is_none() || is_home_dir(key)
 }
 
-/// `workspace_key` of the nearest existing ancestor (git2 discover fails on a missing path).
-fn workspace_id(path: &Path) -> PathBuf {
-    workspace_key(path.ancestors().find(|p| p.exists()).unwrap_or(path))
-}
-
-fn canonicalize_or_owned(path: &Path) -> PathBuf {
+pub(crate) fn canonicalize_or_owned(path: &Path) -> PathBuf {
     dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -632,7 +772,7 @@ fn migrate_legacy_hook_trust_in(legacy_file: &Path, store: &mut TrustStore) -> u
         if store.has_decision(project) {
             continue;
         }
-        if let Err(e) = store.set_trusted(project) {
+        if let Err(e) = store.set_trusted_legacy(project) {
             tracing::warn!(
                 path = %project.display(),
                 error = %e,
@@ -698,7 +838,9 @@ mod tests {
         let mut store = TrustStore::load_from(store_path.clone());
         let migrated = migrate_legacy_hook_trust_in(&legacy, &mut store);
         assert_eq!(migrated, 1);
-        assert!(store.is_trusted(&project_key), "migrated grant is trusted");
+        // u35 t1: a migrated grant is a pre-1.0.35 record (settings only): Legacy, asked again once.
+        assert_eq!(store.coverage_of_path(&project_key), Coverage::Trusted { consent: 0 });
+        assert!(!store.is_trusted(&project_key), "a Legacy record is not trusted until asked");
 
         // Legacy file renamed so it is read only once.
         assert!(!legacy.exists(), "legacy file consumed");
@@ -709,7 +851,7 @@ mod tests {
 
         // The grant persisted to disk.
         let reloaded = TrustStore::load_from(store_path);
-        assert!(reloaded.is_trusted(&project_key));
+        assert_eq!(reloaded.coverage_of_path(&project_key), Coverage::Trusted { consent: 0 });
     }
 
     #[test]
@@ -852,7 +994,7 @@ mod tests {
 
         // set_trusted is a no-op that returns Ok and records nothing.
         store
-            .set_trusted(key)
+            .grant(key)
             .expect("no-home set_trusted is a no-op Ok");
         assert!(
             store.is_empty(),
@@ -880,7 +1022,7 @@ mod tests {
 
         let mut store = TrustStore::load_from(store_path.clone());
         assert!(!store.is_trusted(&key));
-        store.set_trusted(&key).unwrap();
+        store.grant(&key).unwrap();
         assert!(store.is_trusted(&key));
 
         // Reload from disk and verify persistence.
@@ -900,9 +1042,9 @@ mod tests {
         let key_b = canonicalize_or_owned(&repo_b);
 
         let mut store = TrustStore::load_from(store_path.clone());
-        store.set_trusted(&key_a).unwrap();
+        store.grant(&key_a).unwrap();
         // The second persist runs over an already-existing destination file.
-        store.set_trusted(&key_b).unwrap();
+        store.grant(&key_b).unwrap();
 
         // Both decisions survive the overwrite, after reloading from disk.
         let reloaded = TrustStore::load_from(store_path.clone());
@@ -933,7 +1075,7 @@ mod tests {
         let child_key = canonicalize_or_owned(&child);
 
         let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
-        store.set_trusted(&repo_key).unwrap();
+        store.grant(&repo_key).unwrap();
 
         assert!(store.is_trusted(&child_key));
         // A sibling outside the trusted root is NOT trusted.
@@ -958,7 +1100,7 @@ mod tests {
         let nested_key = canonicalize_or_owned(&nested);
 
         let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
-        store.set_trusted(&parent_key).unwrap();
+        store.grant(&parent_key).unwrap();
 
         assert!(
             store.is_trusted(&parent_key),
@@ -985,7 +1127,7 @@ mod tests {
         let sibling_key = canonicalize_or_owned(&sibling);
 
         let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
-        store.set_trusted(&parent_key).unwrap();
+        store.grant(&parent_key).unwrap();
 
         assert!(
             store.is_trusted(&parent_key),
@@ -1018,7 +1160,7 @@ mod tests {
         std::fs::write(tmp.path().join(".git"), "gitdir: /nonexistent\n").unwrap();
 
         let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
-        store.set_trusted(&parent_key).unwrap();
+        store.grant(&parent_key).unwrap();
 
         assert!(
             store.is_trusted(&parent_key),
@@ -1046,7 +1188,7 @@ mod tests {
         let other_key = canonicalize_or_owned(&other);
 
         let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
-        store.set_trusted(&parent_key).unwrap();
+        store.grant(&parent_key).unwrap();
         store.set_untrusted(&child_key).unwrap();
 
         assert!(store.is_trusted(&parent_key), "the ancestor stays trusted");
@@ -1083,7 +1225,7 @@ mod tests {
 
         let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
         store.set_untrusted(&parent_key).unwrap();
-        store.set_trusted(&child_key).unwrap();
+        store.grant(&child_key).unwrap();
 
         assert!(
             !store.is_trusted(&parent_key),
@@ -1114,7 +1256,7 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
 
         let mut store = TrustStore::load_from(store_path.clone());
-        store.set_trusted(&canonicalize_or_owned(&repo)).unwrap();
+        store.grant(&canonicalize_or_owned(&repo)).unwrap();
 
         let mode = std::fs::metadata(&store_path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "trust store must be 0600");
@@ -1134,7 +1276,7 @@ mod tests {
         };
 
         let mut store = TrustStore::load_from(store_path.clone());
-        store.set_trusted(&home).unwrap();
+        store.grant(&home).unwrap();
 
         // Nothing was persisted, and the store still holds no folders.
         assert!(store.is_empty(), "home dir must not be recorded");
@@ -1311,7 +1453,7 @@ mod tests {
 
         // Trust via the symlink alias.
         let mut store = TrustStore::load_from(store_path);
-        store.set_trusted(&link).unwrap();
+        store.grant(&link).unwrap();
 
         let canonical_real = canonicalize_or_owned(&real);
         assert!(
@@ -1348,11 +1490,11 @@ mod tests {
         let key = canonicalize_or_owned(&repo);
 
         let mut store = TrustStore::load_from(store_path.clone());
-        store.set_trusted(&key).unwrap();
+        store.grant(&key).unwrap();
         assert!(store.is_trusted(&key));
         store.set_untrusted(&key).unwrap();
         assert!(!store.is_trusted(&key), "untrust flips the stored bool");
-        store.set_trusted(&key).unwrap();
+        store.grant(&key).unwrap();
         assert!(store.is_trusted(&key), "re-trust flips it back");
         // The insert overwrites: one record per folder, no duplicates
         assert_eq!(store.len(), 1);
@@ -1374,7 +1516,7 @@ mod tests {
         symlink(&real, &link).unwrap();
 
         let mut store = TrustStore::load_from(store_path);
-        store.set_trusted(&canonicalize_or_owned(&real)).unwrap();
+        store.grant(&canonicalize_or_owned(&real)).unwrap();
 
         // A query via the symlink alias resolves to the trusted real dir.
         assert!(
@@ -1397,8 +1539,8 @@ mod tests {
         // Two instances loaded while the file is empty: both start with an empty in-memory doc, mimicking two processes that raced the initial load
         let mut s1 = TrustStore::load_from(store_path.clone());
         let mut s2 = TrustStore::load_from(store_path.clone());
-        s1.set_trusted(&key_a).unwrap();
-        s2.set_trusted(&key_b).unwrap();
+        s1.grant(&key_a).unwrap();
+        s2.grant(&key_b).unwrap();
 
         // The locked re-read-merge means s2's write did not clobber s1's.
         let reloaded = TrustStore::load_from(store_path);
@@ -1426,7 +1568,7 @@ mod tests {
         let key = canonicalize_or_owned(&repo);
 
         let mut store = TrustStore::load_from(store_path);
-        let result = store.set_trusted(&key);
+        let result = store.grant(&key);
         assert!(
             result.is_err(),
             "persist over a directory destination must fail"
@@ -1449,7 +1591,7 @@ mod tests {
         std::fs::create_dir_all(&new).unwrap();
         let (kept, new) = (canonicalize_or_owned(&kept), canonicalize_or_owned(&new));
         let mut store = TrustStore::load_from(store_path.clone());
-        store.set_trusted(&kept).unwrap();
+        store.grant(&kept).unwrap();
         let before = std::fs::read(&store_path).unwrap();
 
         FAIL_PERSIST.with(|f| f.set(true));
@@ -1660,6 +1802,13 @@ mod tests {
         git2::Repository::init(&source_repo).unwrap();
 
         let (_env, wt) = register_fuigo_worktree(&temp, "wt", &source_repo, "standalone");
+        // u35 t1: a standalone worktree is a clone with its own `.git`; the registry record counts because its path is
+        // exactly the clone's physical top level.
+        git2::Repository::init(&wt).unwrap();
+        // A plain folder under the worktrees directory that no record names exactly keys on itself.
+        let plain = wt.parent().unwrap().join("not-registered");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(workspace_key(&plain), canonicalize_or_owned(&plain));
 
         let expected = canonicalize_or_owned(&source_repo);
         assert_eq!(
@@ -1694,6 +1843,7 @@ mod tests {
         std::fs::create_dir_all(&subdir).unwrap();
 
         let (_env, wt) = register_fuigo_worktree(&temp, "wt", &subdir, "standalone");
+        git2::Repository::init(&wt).unwrap();
 
         assert_eq!(
             workspace_key(&wt),
@@ -1754,7 +1904,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         assert!(
-            store.set_trusted(&repo).is_err(),
+            store.grant(&repo).is_err(),
             "a grant over an unreadable store must fail, not write a one-entry store"
         );
         assert_eq!(
@@ -1794,7 +1944,7 @@ mod tests {
 
         let mut store = TrustStore::load_from(store_path.clone());
         assert!(
-            store.set_trusted(&repo).is_err(),
+            store.grant(&repo).is_err(),
             "a dangling store link must not be treated as an absent file"
         );
         let meta = std::fs::symlink_metadata(&store_path).unwrap();
@@ -1916,5 +2066,72 @@ mod tests {
         AFTER_PROBE.with(|a| *a.borrow_mut() = None);
 
         assert!(matches!(result, Ok(StoreRead::Missing)), "removed entry must be Missing");
+    }
+
+    /// A main checkout with one commit and a linked worktree OUTSIDE it: `(tempdir, main, worktree)`.
+    fn main_with_outside_worktree() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let main = root.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let repo = git2::Repository::init(&main).unwrap();
+        let sig = git2::Signature::now("t", "t@t").unwrap();
+        let tree = {
+            let mut idx = repo.index().unwrap();
+            let oid = idx.write_tree().unwrap();
+            repo.find_tree(oid).unwrap()
+        };
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        let wt = root.join("wt");
+        repo.worktree("wt", &wt, None).unwrap();
+        (dir, main, wt)
+    }
+
+    /// u35 t2 (Fable H1, Astra 2): the main checkout's grant covers its validated linked worktree outside it (the
+    /// worktree's trust key IS the main checkout), and a more specific "no" inside the worktree still wins.
+    #[test]
+    fn t2_main_checkout_grant_covers_a_linked_worktree_outside_it() {
+        let (dir, main, wt) = main_with_outside_worktree();
+        let mut store = TrustStore::load_from(dir.path().join(TRUST_FILE_NAME));
+        assert_eq!(trust_key(&wt).unwrap(), trust_key(&main).unwrap());
+        store.grant(&trust_key(&main).unwrap()).unwrap();
+        assert!(store.is_trusted(&main));
+        assert!(store.is_trusted(&wt), "the main checkout's grant covers its linked worktree");
+        let sub = wt.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert!(store.is_trusted(&sub));
+        // A sibling folder that is not a worktree of the main checkout is not covered.
+        let sibling = dir.path().join("sibling");
+        std::fs::create_dir_all(&sibling).unwrap();
+        assert_eq!(store.coverage_of_path(&sibling), Coverage::None);
+        // A "no" recorded for a folder inside the worktree beats the main checkout's "yes" there, and only there.
+        store.set_untrusted(&sub).unwrap();
+        assert_eq!(store.coverage_of_path(&sub), Coverage::Declined);
+        assert!(store.is_trusted(&wt));
+        // A forged worktree (its `.git` file names the main checkout, no backlink) keeps its own key: not covered.
+        let forged = dir.path().join("forged");
+        std::fs::create_dir_all(&forged).unwrap();
+        std::fs::write(forged.join(".git"), format!("gitdir: {}/.git/worktrees/wt\n", main.display())).unwrap();
+        assert_ne!(trust_key(&forged).ok(), trust_key(&main).ok());
+        assert!(!store.is_trusted(&forged));
+    }
+
+    /// u35 t2 (Fable H1): a `fuigo -w` managed worktree outside the source repository is covered by the source's grant.
+    #[test]
+    fn t2_source_grant_covers_a_managed_worktree_outside_it() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let source_repo = root.join("source-repo");
+        std::fs::create_dir_all(&source_repo).unwrap();
+        git2::Repository::init(&source_repo).unwrap();
+        let (_env, wt) = register_fuigo_worktree(&temp, "wt", &source_repo, "standalone");
+        git2::Repository::init(&wt).unwrap();
+        let mut store = TrustStore::load_from(root.join("store").join(TRUST_FILE_NAME));
+        std::fs::create_dir_all(root.join("store")).unwrap();
+        store.grant(&trust_key(&source_repo).unwrap()).unwrap();
+        assert!(store.is_trusted(&wt), "the source repository's grant covers its managed worktree");
     }
 }

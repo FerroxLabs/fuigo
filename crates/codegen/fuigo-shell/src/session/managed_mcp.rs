@@ -583,6 +583,7 @@ fn non_toml_mcp_servers_with_source(
             if let Some(ref mcp_path) = plugin.mcp_config_path {
                 let (servers, _) = load_plugin_mcp_servers(
                     mcp_path,
+                    &plugin.pinned_root(),
                     &plugin.name,
                     &plugin.root_str(),
                     &plugin.data_dir_str(),
@@ -713,13 +714,15 @@ pub(crate) fn discover_mcp_definitions_ignoring_disable(
         .collect()
 }
 
+/// `contain_root`: the plugin's folder pinned at discovery; the MCP file is read only from inside it.
 fn load_plugin_mcp_servers(
     mcp_path: &std::path::Path,
+    contain_root: &fuigo_dirs::contained::PinnedRoot,
     plugin_name: &str,
     plugin_root: &str,
     plugin_data: &str,
 ) -> (Vec<acp::McpServer>, crate::util::config::McpOAuthConfigMap) {
-    let Some(config) = crate::util::config::read_mcp_json_as(mcp_path, false) else {
+    let Some(config) = crate::util::config::read_mcp_json_in(mcp_path, Some(contain_root), false) else {
         return (vec![], crate::util::config::McpOAuthConfigMap::new());
     };
     load_plugin_mcp_servers_from_config(&config, plugin_name, plugin_root, plugin_data)
@@ -811,6 +814,7 @@ pub(crate) fn collect_plugin_servers_and_oauth_configs(
         if let Some(ref mcp_path) = plugin.mcp_config_path {
             take(load_plugin_mcp_servers(
                 mcp_path,
+                &plugin.pinned_root(),
                 &plugin.name,
                 &plugin.root_str(),
                 &plugin.data_dir_str(),

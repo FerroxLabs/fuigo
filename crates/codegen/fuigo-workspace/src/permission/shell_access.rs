@@ -141,12 +141,9 @@ impl CompiledPolicy {
                 forced_ask = true;
             }
             for (path, mode) in special_file_operands(&program_lower, &literal_words) {
-                if shell_arg_is_ambiguous(&path) {
-                    forced_ask = true;
-                }
                 decision = combine_gate_decisions(
                     decision,
-                    self.evaluate_shell_path(&path, base, mode, invocation_cwd_unpinned),
+                    self.evaluate_shell_operand(&invocation.globs, &path, base, mode, invocation_cwd_unpinned),
                 );
             }
             if program_lower == "dd" {
@@ -154,12 +151,9 @@ impl CompiledPolicy {
             }
             if let Some(operands) = path_operands {
                 for (path, mode) in operands {
-                    if shell_arg_is_ambiguous(path) {
-                        forced_ask = true;
-                    }
                     decision = combine_gate_decisions(
                         decision,
-                        self.evaluate_shell_path(path, base, mode, invocation_cwd_unpinned),
+                        self.evaluate_shell_operand(&invocation.globs, path, base, mode, invocation_cwd_unpinned),
                     );
                 }
                 continue;
@@ -173,13 +167,10 @@ impl CompiledPolicy {
                 Some(ShellFileMode::Create) | None => continue,
             };
             for &token in &candidates {
-                if shell_arg_is_ambiguous(token) {
-                    forced_ask = true;
-                }
                 for &mode in modes {
                     decision = combine_gate_decisions(
                         decision,
-                        self.evaluate_shell_path(token, base, mode, invocation_cwd_unpinned),
+                        self.evaluate_shell_operand(&invocation.globs, token, base, mode, invocation_cwd_unpinned),
                     );
                 }
             }
@@ -188,6 +179,89 @@ impl CompiledPolicy {
             }
         }
         combine_gate_decisions(decision, forced_ask.then_some(GateDecision::AskFailClosed))
+    }
+
+    /// One file operand: a literal path is matched as before; an unquoted glob is matched as written (bash passes an
+    /// unmatched pattern through literally) and also as a pattern ([`Self::evaluate_shell_glob`]); undecoded glob
+    /// characters fail closed.
+    fn evaluate_shell_operand(
+        &self,
+        globs: &InvocationGlobs,
+        token: &str,
+        base: &RuleBase<'_>,
+        mode: ShellFileMode,
+        cwd_unpinned: bool,
+    ) -> Option<GateDecision> {
+        let literal = self.evaluate_shell_path(token, base, mode, cwd_unpinned);
+        let extra = match globs.operand(token) {
+            OperandGlob::Literal => None,
+            OperandGlob::Pattern => self.evaluate_shell_glob(token, base, mode, cwd_unpinned),
+            OperandGlob::Ambiguous => Some(GateDecision::AskFailClosed),
+        };
+        combine_gate_decisions(literal, extra)
+    }
+
+    /// An unquoted glob operand: it requires approval when the pattern could match a path a deny or ask rule restricts
+    /// for this access, judged pattern against pattern so a file created later is covered, and when any path it
+    /// matches now (followed through symlinks, as a literal operand is) hits a rule.
+    fn evaluate_shell_glob(
+        &self,
+        token: &str,
+        base: &RuleBase<'_>,
+        mode: ShellFileMode,
+        cwd_unpinned: bool,
+    ) -> Option<GateDecision> {
+        let pattern = normalize_shell_path(token);
+        let is_absolute = is_absolute_shell_path(&pattern);
+        // `..` after a wildcard walks out of whatever directory matched; an unknown cwd anchors nothing.
+        if path_has_parent_dir(Path::new(&normalize_shell_path_raw(token))) || (cwd_unpinned && !is_absolute) {
+            return Some(GateDecision::AskFailClosed);
+        }
+        let mut spellings = vec![pattern.clone()];
+        if !is_absolute {
+            spellings.push(normalize_shell_path(&base.lexical.join(&pattern).to_string_lossy()));
+            if let Some(physical) = base.resolved_physical() {
+                spellings.push(normalize_shell_path(&physical.join(&pattern).to_string_lossy()));
+            }
+        }
+        let probe = shell_access(mode, String::new());
+        if spellings
+            .iter()
+            .any(|spelling| self.restricted_pattern_may_match(&probe, spelling))
+        {
+            return Some(GateDecision::AskFailClosed);
+        }
+        // What the pattern matches now: each match is a literal operand (symlinks followed, rules matched).
+        const MAX_GLOB_MATCHES: usize = 256;
+        let anchored = if let Some(rest) = pattern.strip_prefix("~/") {
+            let Some(home) = fuigo_dirs::home_dir() else {
+                return Some(GateDecision::AskFailClosed);
+            };
+            home.join(rest).to_string_lossy().into_owned()
+        } else if pattern.starts_with('~') {
+            return Some(GateDecision::AskFailClosed);
+        } else if is_absolute {
+            pattern.clone()
+        } else {
+            base.lexical.join(&pattern).to_string_lossy().into_owned()
+        };
+        let Ok(paths) = glob::glob_with(&anchored, fuigo_tools::util::path_match::path_glob_options()) else {
+            return Some(GateDecision::AskFailClosed);
+        };
+        let mut decision = None;
+        for (count, entry) in paths.enumerate() {
+            let Ok(path) = entry else {
+                return Some(GateDecision::AskFailClosed);
+            };
+            if count >= MAX_GLOB_MATCHES {
+                return Some(GateDecision::AskFailClosed);
+            }
+            decision = combine_gate_decisions(
+                decision,
+                self.evaluate_shell_path(&path.to_string_lossy(), base, mode, false),
+            );
+        }
+        decision
     }
 
     fn evaluate_shell_path(
@@ -421,6 +495,70 @@ fn peel_write_command(words: &[String]) -> WritePeel<'_> {
     peel
 }
 
+/// u35 r1: one segment's argv after the single bounded classifier normalisation ([`normalize_for_classification`]).
+pub(crate) struct ClassifiedArgv<'a> {
+    /// The command that actually runs (a tail of the input words).
+    pub(crate) words: &'a [String],
+    /// The program could not be pinned: an unmodelled wrapper option, `env -S`, a hidden command (`flock -c`,
+    /// `sudo -e`), or the peel budget ran out. Callers floor the segment.
+    pub(crate) fail_closed: bool,
+    /// A launcher (`time`, `nohup`, `sudo`, ...) was peeled: the inner command runs under it, so no read-only list or
+    /// routine approval rides through it.
+    pub(crate) launched: bool,
+    /// A peeled launcher is itself an exec vehicle (`nohup`, `sudo`, `watch`, ...): the segment keeps that floor.
+    pub(crate) vehicle: bool,
+    /// u35 g14: a wrapper moved the working directory or root (`env -C`, `sudo -D`, `chroot`), so the directory the
+    /// command runs in is not the segment's.
+    pub(crate) moved: bool,
+}
+
+/// u35 r1: the ONE bounded normalisation every classifier check runs on. It peels the canonical wrappers (`env`
+/// with assignments, `timeout`, `nice`, `ionice`, `chrt`, `stdbuf`), the transparent prefixes (`command`, `builtin`,
+/// `exec`; `command -v`/`-V` stay lookups) and the launchers (`time`, `nohup`, `setsid`, `caffeinate`, `sudo`, `doas`,
+/// `flock`, `watch`, `chroot`) in any order, up to a fixed budget.
+pub(crate) fn normalize_for_classification(words: &[String]) -> ClassifiedArgv<'_> {
+    let mut out = ClassifiedArgv {
+        words,
+        fail_closed: false,
+        launched: false,
+        vehicle: false,
+        moved: false,
+    };
+    for _ in 0..=MAX_WRAPPER_DEPTH {
+        let normalized = normalize_command_words(out.words);
+        out.words = normalized.words;
+        out.moved |= normalized.has_chdir;
+        if normalized.exhausted
+            || normalized.ambiguous
+            || normalized.has_split_string
+            || normalized.env_options_uncertain
+        {
+            out.fail_closed = true;
+            return out;
+        }
+        let vehicle = out
+            .words
+            .first()
+            .is_some_and(|head| crate::permission::exec_surface::is_exec_vehicle(head));
+        match strip_launch_wrapper(out.words) {
+            LaunchStrip::NotWrapper => return out,
+            LaunchStrip::Opaque => {
+                out.fail_closed = true;
+                out.vehicle |= vehicle;
+                return out;
+            }
+            LaunchStrip::Inner { inner, moved, .. } => {
+                out.words = inner;
+                out.moved |= moved;
+                out.launched = true;
+                out.vehicle |= vehicle;
+            }
+        }
+    }
+    out.fail_closed = true;
+    out
+}
+
 enum LaunchStrip<'a> {
     NotWrapper,
     Opaque,
@@ -583,7 +721,7 @@ fn strip_launch_wrapper(words: &[String]) -> LaunchStrip<'_> {
 
 /// The value of a short option at `cluster[at]`: the rest of the cluster, else the next word (`i` is advanced past it).
 fn short_option_value<'a>(cluster: &'a str, at: usize, args: &'a [String], i: &mut usize) -> Option<&'a str> {
-    let rest = &cluster[at + 1..];
+    let rest = &cluster[crate::permission::shell_words::after_char(cluster, at)..];
     if rest.is_empty() {
         let value = args.get(*i).map(String::as_str);
         *i += 1;
@@ -884,7 +1022,7 @@ fn in_place_writes(args: &[String], options: &InterpreterOptions) -> ToolWrites 
             }
             if options.glued_value.contains(option) {
                 inline_code |= options.code.contains(option);
-                if cluster[at + 1..].is_empty() && options.next_word_value.contains(option) {
+                if cluster[crate::permission::shell_words::after_char(cluster, at)..].is_empty() && options.next_word_value.contains(option) {
                     i += 1;
                 }
                 break;
@@ -1506,13 +1644,20 @@ fn decompress_writes(program: &str, args: &[String]) -> Option<ToolWrites> {
     Some(writes)
 }
 
-/// `sed` writes: every file operand of `-i` (as before), and the files of `w FILE`, `W FILE` and the `s///w FILE` flag
-/// in a literal script (P166 Grok r5 LOW 4). A script that cannot be parsed but holds a `w` fails closed. A `-f` script
-/// file is not read (interpreter-limit class).
-fn sed_writes(inner: &[String]) -> ToolWrites {
-    const LONG_WITH_VALUE: &[&str] = &["expression", "file", "line-length"];
+/// The scripts of one `sed` argv: `-e`/`--expression` values, else the first operand; whether a `-f`/`--file` script
+/// file (never read) supplies code; and whether `--sandbox` (no `e`/`r`/`w`) is set.
+struct SedArgv<'a> {
+    scripts: Vec<&'a str>,
+    script_file: bool,
+    sandbox: bool,
+}
+
+/// GNU getopt accepts any unambiguous long-option abbreviation; these are the shortest unique stems.
+const SED_LONG_STEMS: &[(&str, usize)] = &[("expression", 1), ("file", 2), ("line-length", 1), ("sandbox", 2)];
+
+fn sed_argv(inner: &[String]) -> SedArgv<'_> {
     let args = inner.get(1..).unwrap_or_default();
-    let (mut scripts, mut script_file, mut bare_in_place) = (Vec::new(), false, false);
+    let (mut scripts, mut script_file, mut bare_in_place, mut sandbox) = (Vec::new(), false, false, false);
     let (mut operands, mut end, mut i) = (Vec::new(), false, 0);
     while i < args.len() {
         let word = &args[i];
@@ -1526,10 +1671,26 @@ fn sed_writes(inner: &[String]) -> ToolWrites {
             continue;
         }
         if let Some(long) = word.strip_prefix("--") {
-            let (name, value) = long_option(long, args, &mut i, LONG_WITH_VALUE);
+            let (name, glued) = match long.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (long, None),
+            };
+            let name = SED_LONG_STEMS
+                .iter()
+                .find(|(full, stem)| name.len() >= *stem && full.starts_with(name))
+                .map_or(name, |(full, _)| *full);
+            let value = match glued {
+                Some(value) => Some(value),
+                None if matches!(name, "expression" | "file" | "line-length") => {
+                    i += 1;
+                    args.get(i - 1).map(String::as_str)
+                }
+                None => None,
+            };
             match name {
                 "expression" => scripts.extend(value),
                 "file" => script_file = true,
+                "sandbox" => sandbox = true,
                 _ => {}
             }
             continue;
@@ -1547,7 +1708,7 @@ fn sed_writes(inner: &[String]) -> ToolWrites {
                     break;
                 }
                 'i' => {
-                    bare_in_place = cluster[at + 1..].is_empty();
+                    bare_in_place = cluster[crate::permission::shell_words::after_char(cluster, at)..].is_empty();
                     break;
                 }
                 _ => {}
@@ -1563,6 +1724,34 @@ fn sed_writes(inner: &[String]) -> ToolWrites {
         };
         scripts.extend(script);
     }
+    SedArgv {
+        scripts,
+        script_file,
+        sandbox,
+    }
+}
+
+/// u35: whether a `sed` argv can run a command: the `e` command or `s///e` flag in a literal script, a script that
+/// cannot be parsed but holds an `e` (fail closed), a script the normaliser could not pin (u35 r2), or a `-f` script
+/// file (not read). `--sandbox` disables `e`.
+pub(crate) fn sed_runs_code(inner: &[String]) -> bool {
+    let argv = sed_argv(inner);
+    if argv.sandbox {
+        return false;
+    }
+    // u35 r2: a script the normaliser could not pin is not vouched for.
+    argv.script_file
+        || argv.scripts.iter().any(|script| {
+            crate::permission::exec_surface::is_unresolved(script)
+                || sed_script_parse(script).map_or_else(|| script.contains('e'), |parsed| parsed.exec)
+        })
+}
+
+/// `sed` writes: every file operand of `-i` (as before), and the files of `w FILE`, `W FILE` and the `s///w FILE` flag
+/// in a literal script (P166 Grok r5 LOW 4). A script that cannot be parsed but holds a `w` fails closed. A `-f` script
+/// file is not read (interpreter-limit class).
+fn sed_writes(inner: &[String]) -> ToolWrites {
+    let scripts = sed_argv(inner).scripts;
     let mut writes = ToolWrites::default();
     if shell_sed_in_place(inner) {
         writes
@@ -1627,9 +1816,21 @@ fn sed_delimited(s: &[char], i: &mut usize, delimiter: char) -> Option<()> {
 
 /// The files a sed script writes (`w`, `W`, `s///w`); `None` when it cannot be parsed.
 fn sed_script_write_files(script: &str) -> Option<Vec<String>> {
+    sed_script_parse(script).map(|parsed| parsed.files)
+}
+
+/// What one literal sed script does beyond printing: the files it writes and whether it runs a command (`e`, `s///e`).
+struct SedScript {
+    files: Vec<String>,
+    exec: bool,
+}
+
+/// Parse a sed script; `None` when it cannot be parsed.
+fn sed_script_parse(script: &str) -> Option<SedScript> {
     let s: Vec<char> = script.chars().collect();
     let mut i = 0;
     let mut files = Vec::new();
+    let mut exec = false;
     let skip_blanks = |i: &mut usize| {
         while matches!(s.get(*i), Some(' ' | '\t')) {
             *i += 1;
@@ -1652,7 +1853,7 @@ fn sed_script_write_files(script: &str) -> Option<Vec<String>> {
             i += 1;
         }
         let Some(&first) = s.get(i) else {
-            return Some(files);
+            return Some(SedScript { files, exec });
         };
         if first == '#' {
             rest_of_line(&mut i);
@@ -1689,7 +1890,11 @@ fn sed_script_write_files(script: &str) -> Option<Vec<String>> {
             }
             ':' | 'v' => until(&mut i, &[';']),
             'b' | 't' | 'T' => until(&mut i, &[';', '}']),
-            'r' | 'R' | 'e' => {
+            'r' | 'R' => {
+                rest_of_line(&mut i);
+            }
+            'e' => {
+                exec = true;
                 rest_of_line(&mut i);
             }
             'a' | 'i' | 'c' => {
@@ -1735,6 +1940,7 @@ fn sed_script_write_files(script: &str) -> Option<Vec<String>> {
                         if !(flag.is_ascii_digit() || "gpiImMe".contains(flag)) {
                             break;
                         }
+                        exec |= command == 's' && flag == 'e';
                         i += 1;
                     }
                 }
@@ -1744,13 +1950,31 @@ fn sed_script_write_files(script: &str) -> Option<Vec<String>> {
     }
 }
 
-/// A literal `print … > "FILE"` / `printf … >> "FILE"` in an awk program (P166 Grok r5 sweep). awk is an interpreter
-/// (the interpreter-limit class), so this is a tripwire for the plain case: it feeds only the protected-target check,
-/// never the `FileWrite` floor, because `>` is also awk's comparison operator.
-fn awk_literal_redirects(inner: &[String]) -> Vec<String> {
-    const TAKES_VALUE: &str = "Ffvile";
+/// The literal programs of one awk argv (`-e`/`--source` values, else the first operand), and whether the argv can
+/// run code the program-text check does not see. u35 r2 (conservative): a program file or library (`-f`/`--file`,
+/// gawk `-E`/`--exec`, `-i`/`--include`, `-l`/`--load`), an inline `-e`/`--source` program, a `-W` option, and any
+/// option outside a small known set (an abbreviation included, whose value it may consume) all count.
+struct AwkArgv<'a> {
+    programs: Vec<&'a str>,
+    /// Code from a file or library, never read.
+    program_file: bool,
+    /// Code or options the check does not model.
+    unmodelled: bool,
+}
+
+fn awk_argv(inner: &[String]) -> AwkArgv<'_> {
+    /// Long options that take a value and carry no code.
+    const VALUE_LONG: &[&str] = &["assign", "field-separator"];
+    /// Long flags that carry no code and write nothing.
+    const FLAG_LONG: &[&str] = &[
+        "posix", "traditional", "lint", "characters-as-bytes", "use-lc-numeric", "non-decimal-data", "re-interval",
+        "bignum", "optimize", "no-optimize", "csv", "sandbox", "version", "help", "copyright",
+    ];
+    /// Short flags that carry no code and write nothing.
+    const FLAG_SHORT: &str = "bcCghLMnNOPrsStV";
     let args = inner.get(1..).unwrap_or_default();
-    let (mut programs, mut program_file, mut operands, mut i) = (Vec::new(), false, Vec::new(), 0);
+    let mut argv = AwkArgv { programs: Vec::new(), program_file: false, unmodelled: false };
+    let (mut operands, mut i) = (Vec::new(), 0);
     while i < args.len() {
         let word = &args[i];
         i += 1;
@@ -1763,30 +1987,114 @@ fn awk_literal_redirects(inner: &[String]) -> Vec<String> {
             continue;
         }
         if let Some(long) = word.strip_prefix("--") {
-            let (name, value) = long_option(long, args, &mut i, &["file", "source", "assign", "field-separator", "include", "load"]);
+            let (name, glued) = match long.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (long, None),
+            };
             match name {
-                "source" => programs.extend(value),
-                "file" => program_file = true,
-                _ => {}
+                _ if VALUE_LONG.contains(&name) => {
+                    if glued.is_none() {
+                        i += 1;
+                    }
+                }
+                "source" => {
+                    let value = glued.or_else(|| {
+                        i += 1;
+                        args.get(i - 1).map(String::as_str)
+                    });
+                    argv.programs.extend(value);
+                    argv.unmodelled = true;
+                }
+                "file" | "exec" | "include" | "load" => argv.program_file = true,
+                _ if FLAG_LONG.contains(&name) => {}
+                _ => argv.unmodelled = true,
             }
             continue;
         }
         let cluster = &word[1..];
-        if let Some(option) = cluster.chars().next()
-            && TAKES_VALUE.contains(option)
-        {
-            let value = short_option_value(cluster, 0, args, &mut i);
+        for (at, option) in cluster.char_indices() {
             match option {
-                'e' => programs.extend(value),
-                'f' => program_file = true,
-                _ => {}
+                'F' | 'v' => {
+                    short_option_value(cluster, at, args, &mut i);
+                    break;
+                }
+                'e' => {
+                    argv.programs.extend(short_option_value(cluster, at, args, &mut i));
+                    argv.unmodelled = true;
+                    break;
+                }
+                'f' | 'E' | 'i' | 'l' => {
+                    short_option_value(cluster, at, args, &mut i);
+                    argv.program_file = true;
+                    break;
+                }
+                _ if FLAG_SHORT.contains(option) => {}
+                _ => {
+                    argv.unmodelled = true;
+                    break;
+                }
             }
         }
     }
-    if programs.is_empty() && !program_file {
-        programs.extend(operands.first().copied());
+    if argv.programs.is_empty() && !argv.program_file {
+        argv.programs.extend(operands.first().copied());
     }
-    programs.into_iter().flat_map(awk_print_redirect_files).collect()
+    argv
+}
+
+/// A literal `print … > "FILE"` / `printf … >> "FILE"` in an awk program (P166 Grok r5 sweep). awk is an interpreter
+/// (the interpreter-limit class), so this is a tripwire for the plain case: it feeds only the protected-target check,
+/// never the `FileWrite` floor, because `>` is also awk's comparison operator.
+fn awk_literal_redirects(inner: &[String]) -> Vec<String> {
+    awk_argv(inner).programs.into_iter().flat_map(awk_print_redirect_files).collect()
+}
+
+/// u35: whether an awk argv can run a command or read the environment. u35 r2 (conservative default): only a program
+/// given as the first operand, with no option outside a small known set, whose text passes [`awk_program_is_plain`],
+/// is vouched for; anything else (no program, a program file, `-e`/`--source`, a program the normaliser could not pin)
+/// counts.
+pub(crate) fn awk_runs_code(inner: &[String]) -> bool {
+    let argv = awk_argv(inner);
+    argv.program_file
+        || argv.unmodelled
+        || argv.programs.is_empty()
+        || argv.programs.into_iter().any(|program| !awk_program_is_plain(program))
+}
+
+/// u35 r2: an awk program (already through the shell word normaliser) is plain only when it holds none of `system`,
+/// `|` (command pipes, `|&`), `getline`, `ENVIRON`, `PROCINFO`, u35 r3 `SYMTAB`/`FUNCTAB` (gawk's variable and function
+/// tables, which reach `ENVIRON` without naming it), `>` (output redirection; also comparison, which then over-asks),
+/// `@` (gawk `@load`/`@include` and indirect calls), a backslash escape, or a string literal spliced onto an identifier
+/// (`sy"s"tem`). u35 r3 (Fable r2 M2, Astra r2 M): string contents are not judged, so `print "hello"` and
+/// `$1=="foo"` stay plain; only an opening quote right after an identifier character, or a closing quote right before
+/// one, is a splice, and an odd number of quotes asks. No awk parsing: a program that cannot be shown free of these asks.
+fn awk_program_is_plain(program: &str) -> bool {
+    if crate::permission::exec_surface::is_unresolved(program)
+        || program.contains(['|', '>', '@', '\\'])
+        || ["system", "getline", "ENVIRON", "PROCINFO", "SYMTAB", "FUNCTAB"]
+            .iter()
+            .any(|banned| program.contains(banned))
+    {
+        return false;
+    }
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let chars: Vec<char> = program.chars().collect();
+    let mut inside = false;
+    for (at, &c) in chars.iter().enumerate() {
+        if c != '"' {
+            continue;
+        }
+        let spliced = if inside {
+            chars.get(at + 1).is_some_and(|&after| is_ident(after))
+        } else {
+            at.checked_sub(1).is_some_and(|before| is_ident(chars[before]))
+        };
+        if spliced {
+            return false;
+        }
+        inside = !inside;
+    }
+    !inside
 }
 
 fn awk_print_redirect_files(program: &str) -> Vec<String> {
@@ -2213,8 +2521,11 @@ pub(crate) fn git_words_rewrite_worktree(words: &[String]) -> bool {
 
 /// The creation set, shared by the write-path classifier and the auto-allow so they can't drift.
 pub(crate) fn is_creation_program(program: &str) -> bool {
-    matches!(program, "mkdir" | "touch")
+    CREATION_PROGRAMS.contains(&program)
 }
+
+/// The programs [`is_creation_program`] accepts.
+pub(crate) const CREATION_PROGRAMS: &[&str] = &["mkdir", "touch"];
 
 /// The `Create`-mode operands that [`command_words_write_paths`] omits.
 pub(crate) fn command_words_creation_paths(words: &[String]) -> Vec<String> {
@@ -4132,6 +4443,226 @@ fn git_env_assignment_redirects_config(assignment: &str) -> bool {
                 && [".git", ".fuigo", ".claude", ".mcp.json", "hooks"].iter().any(|p| value.contains(p))))
 }
 
+/// u35: what a script's redirect destinations can be, judged on the words bash makes of them (u35 r1: quotes, escapes
+/// and brace expansion through the shared word normaliser, then a lexically normalised path).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RedirectDestinationRisk {
+    /// A destination is bash's socket pseudo-device (`/dev/tcp/HOST/PORT`, `/dev/udp/HOST/PORT`), which opens a network
+    /// connection in either direction instead of a file.
+    pub(crate) socket: bool,
+    /// A destination the normaliser cannot pin to one literal path (an expansion, a glob, a multi-word brace group).
+    pub(crate) unresolved: bool,
+    /// u35 r2: a destination that reads a process environment (`< /proc/self/environ`).
+    pub(crate) environ: bool,
+}
+
+pub(crate) fn tree_redirect_destination_risk(root: Node<'_>, src: &str) -> RedirectDestinationRisk {
+    use crate::permission::shell_words::{GlobMark, normalise_word_marking_globs};
+    let is_socket = |path: &str| {
+        // `/dev//tcp/x`, `/dev/./tcp/x`: compare on the path with empty and `.` components dropped.
+        let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
+        path.starts_with('/') && matches!(parts.as_slice(), ["dev", "tcp" | "udp", _, ..])
+    };
+    let mut risk = RedirectDestinationRisk::default();
+    for target in shell_redirect_targets(root, src) {
+        match normalise_word_marking_globs(&target.raw).as_deref() {
+            Ok([word]) if word.glob == GlobMark::Literal => {
+                risk.socket |= is_socket(&word.text);
+                risk.environ |= crate::permission::exec_surface::names_environ_file(&word.text);
+            }
+            _ => {
+                risk.unresolved = true;
+                risk.socket |= target.raw.contains("/dev/tcp") || target.raw.contains("/dev/udp");
+                risk.environ |= target.raw.contains("environ") || target.raw.contains("/proc");
+            }
+        }
+    }
+    risk
+}
+
+/// u35 r2: whether a `declare`/`typeset`/`export`/`readonly`/`local` declaration prints variables: options only, or
+/// `-p` with or without names (the parser makes these `declaration_command` nodes, which the word-level checks never
+/// see). An argument the normaliser cannot pin may be `-p`, so it counts too.
+pub(crate) fn tree_has_environment_dump_declaration(root: Node<'_>, src: &str) -> bool {
+    use crate::permission::exec_surface::{UNRESOLVED_WORD, is_unresolved, segment_has_exec_surface};
+    use crate::permission::shell_words::{GlobMark, normalise_word_marking_globs};
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "declaration_command" {
+            let mut words: Vec<String> = Vec::new();
+            for i in 0..node.child_count() {
+                let Some(child) = node.child(i) else { continue };
+                let Ok(text) = child.utf8_text(src.as_bytes()) else {
+                    return true;
+                };
+                if matches!(child.kind(), "variable_assignment" | "variable_name" | "comment") {
+                    // A name or an assignment, never an option.
+                    words.push(text.to_owned());
+                    continue;
+                }
+                match normalise_word_marking_globs(text) {
+                    Ok(list) if list.iter().all(|word| word.glob == GlobMark::Literal) => {
+                        words.extend(list.into_iter().map(|word| word.text));
+                    }
+                    _ => words.push(UNRESOLVED_WORD.to_owned()),
+                }
+            }
+            if words.iter().skip(1).any(|word| is_unresolved(word)) || segment_has_exec_surface(&words) {
+                return true;
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
+    }
+    false
+}
+
+/// u35: whether a `cd`/`pushd`/`popd` has an uncertain effect on the commands after it: it runs in a pipeline or a
+/// subshell (so it never moves the shell that runs the next command), or inside an `||` list (so whether it ran depends
+/// on another command's exit status). The ambient git scan follows `cd` in script order, so either shape would have it
+/// scan a directory git does not run in.
+///
+/// u35 r2 (Fable M): a `cd` on the LEFT of an `||` is uncertain only for what can run after it: the right-hand side
+/// (when it may run git) and anything after the whole `||` list. `cd repo && git status || true` runs git only where
+/// the scan looks, so it is certain; `cd repo || git status` and `cd repo && x || y; git log` are not. A `cd` on the
+/// right of an `||` stays uncertain.
+pub(crate) fn tree_has_uncertain_cwd_change(root: Node<'_>, src: &str) -> bool {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "command" && command_node_may_change_cwd(node, src) {
+            if execution_scope(node) != (ExecutionScope { start: 0, end: usize::MAX }) {
+                return true;
+            }
+            // u35 r3 (Astra r2 H5): a `cd` on the right of an `&&` runs only if the left succeeded; when the script goes
+            // on after the whole `&&`/`||` list (`ls /missing && cd clean; git status`), what follows may run in
+            // either directory.
+            let mut top_list = None;
+            let mut current = node;
+            while let Some(parent) = current.parent().filter(|parent| parent.kind() == "list") {
+                let after_and = (0..parent.child_count())
+                    .filter_map(|i| parent.child(i))
+                    .any(|op| op.kind() == "&&" && op.end_byte() <= current.start_byte());
+                if after_and {
+                    top_list = Some(parent);
+                }
+                current = parent;
+            }
+            if let Some(list) = top_list {
+                let mut outer = list;
+                while let Some(parent) = outer.parent().filter(|parent| parent.kind() == "list") {
+                    outer = parent;
+                }
+                if node_has_later_sibling(outer) {
+                    return true;
+                }
+            }
+            let mut current = node;
+            while let Some(parent) = current.parent() {
+                if parent.kind() == "list" {
+                    let or_op = (0..parent.child_count())
+                        .filter_map(|i| parent.child(i))
+                        .find(|op| op.kind() == "||");
+                    if let Some(op) = or_op {
+                        if current.start_byte() >= op.end_byte() {
+                            return true;
+                        }
+                        let right_may_run_git = (0..parent.named_child_count())
+                            .filter_map(|i| parent.named_child(i))
+                            .filter(|child| child.start_byte() >= op.end_byte())
+                            .any(|child| subtree_may_run_git(child, src));
+                        if right_may_run_git || node_has_later_sibling(parent) {
+                            return true;
+                        }
+                    }
+                }
+                current = parent;
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
+    }
+    false
+}
+
+/// u35 r2: whether anything runs after `node` in the script: a later named sibling (not a comment) of it or of any
+/// ancestor.
+fn node_has_later_sibling(node: Node<'_>) -> bool {
+    let mut current = Some(node);
+    while let Some(at) = current {
+        let mut next = at.next_named_sibling();
+        while let Some(sibling) = next {
+            if sibling.kind() != "comment" {
+                return true;
+            }
+            next = sibling.next_named_sibling();
+        }
+        current = at.parent();
+    }
+    false
+}
+
+/// u35 r2: whether a subtree holds a command that may be git: a normalised `git` program, a program word the
+/// normaliser cannot pin, or a wrapper chain it cannot see through.
+fn subtree_may_run_git(root: Node<'_>, src: &str) -> bool {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "command" && command_node_head_matches(node, src, &["git"]) {
+            return true;
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
+    }
+    false
+}
+
+/// u35 r1: whether a `command` node may be `cd`/`pushd`/`popd`, judged on its NORMALISED identity: the words bash makes
+/// (`'c'd`, `\cd`) after the one classifier normalisation (`command cd`, `builtin cd`). A program word the normaliser
+/// cannot pin, or a wrapper chain it cannot see through, may be one.
+fn command_node_may_change_cwd(node: Node<'_>, src: &str) -> bool {
+    command_node_head_matches(node, src, &["cd", "pushd", "popd"])
+}
+
+/// Whether a `command` node's normalised program may be one of `programs` (an unpinnable program word or wrapper
+/// chain may be any of them).
+fn command_node_head_matches(node: Node<'_>, src: &str, programs: &[&str]) -> bool {
+    use crate::permission::shell_words::{GlobMark, normalise_word_node_marking_globs};
+    const UNKNOWN: &str = "\0";
+    let mut words: Vec<String> = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        let word_node = match child.kind() {
+            "variable_assignment" | "file_redirect" | "heredoc_redirect" | "herestring_redirect" => continue,
+            "command_name" => match child.named_child(0) {
+                Some(inner) => inner,
+                None => return true,
+            },
+            _ => child,
+        };
+        match normalise_word_node_marking_globs(word_node, src) {
+            Ok(list) if list.iter().all(|word| word.glob == GlobMark::Literal) => {
+                words.extend(list.into_iter().map(|word| word.text));
+            }
+            _ => words.push(UNKNOWN.to_owned()),
+        }
+    }
+    let norm = normalize_for_classification(&words);
+    if norm.fail_closed {
+        return true;
+    }
+    norm.words
+        .first()
+        .is_some_and(|head| head == UNKNOWN || programs.contains(&shell_program_name(head)))
+}
+
 /// P166 r9: whether any variable assignment in the script (prefix assignment, `export`, `declare`) sets a git
 /// environment variable that retargets the repository or names a program git runs (`GIT_DIR=/tmp/evil git commit`).
 pub(crate) fn tree_has_git_exec_env_assignment(root: Node<'_>, src: &str) -> bool {
@@ -4530,6 +5061,11 @@ fn edit_target_floor(path: &Path) -> Option<ProtectedEditReason> {
     if let Some(reason) = protected_edit_reason(&resolved) {
         return Some(reason);
     }
+    // u35 t1 (Grok d2 H3, Astra d2 M5): the files that decide folder trust, by physical path AND file identity, so a
+    // hard link or another name for the store, the user config or the worktree registry is protected as itself.
+    if crate::folder_trust::is_trust_input(&resolved) {
+        return Some(ProtectedEditReason::FuigoConfig);
+    }
     resolved_path_is_within_root(&resolved, Path::new("/etc"))
         .then_some(ProtectedEditReason::Sensitive)
 }
@@ -4643,10 +5179,17 @@ fn protected_fuigo_config_file_with_home(
         };
         return (in_dot_fuigo || in_fuigo_home()).then_some(ProtectedEditReason::FuigoConfig);
     }
+    // u35 t1: the folder-trust store and the worktree registry (whose records give a worktree its trust key) decide
+    // folder trust: an edit is a trust grant. The registry's per-host variant on a network mount is
+    // `worktrees.h-<host>.db`; its sidecars are `-wal`, `-shm` and `-journal`.
+    let worktree_registry = file.starts_with("worktrees.")
+        && [".db", ".db-wal", ".db-shm", ".db-journal"].iter().any(|ext| file.ends_with(ext));
     let reason = match file {
         fuigo_config::USER_CONFIG_FILENAME
         | fuigo_config::MANAGED_CONFIG_FILENAME
-        | fuigo_config::REQUIREMENTS_FILENAME => ProtectedEditReason::FuigoConfig,
+        | fuigo_config::REQUIREMENTS_FILENAME
+        | fuigo_config::TRUSTED_FOLDERS_FILENAME => ProtectedEditReason::FuigoConfig,
+        _ if worktree_registry => ProtectedEditReason::FuigoConfig,
         // Spawn configs: `lsp.json` starts language servers at the next load; `mcp.json` is the upstream daemon's MCP list.
         "mcp.json" | "lsp.json" => ProtectedEditReason::McpConfig,
         fuigo_config::SANDBOX_CONFIG_FILENAME => ProtectedEditReason::FuigoSandbox,
@@ -4717,7 +5260,8 @@ fn protected_fuigo_hook_root(path: &Path, components: &[&str]) -> bool {
 }
 
 fn protected_git_hooks_path(components: &[&str]) -> bool {
-    components.windows(2).any(|pair| pair == [".git", "hooks"])
+    // u35 t1 (design d2 §2.3): `.git/worktrees/<id>/gitdir` is a linked worktree's backlink, which decides its trust key.
+    components.windows(2).any(|pair| pair == [".git", "hooks"] || pair == [".git", "worktrees"])
         || components.iter().enumerate().any(|(git, component)| {
             *component == ".git"
                 && components.get(git + 1) == Some(&"modules")
@@ -4884,6 +5428,38 @@ struct ShellInvocation {
     wrapper_words: Vec<String>,
     /// What the parser saw but did not decode (P166 r8 tripwire input).
     extras: CommandExtras,
+    /// Glob facts from the shared normaliser, keyed by the word's text (quotes removed).
+    globs: InvocationGlobs,
+}
+
+/// Which words of one invocation are unquoted globs (patterns pathname expansion rewrites) and which carry glob
+/// characters only quoted (literal names). Keyed by text: a text spelled both ways counts as a pattern.
+#[derive(Clone, Default)]
+struct InvocationGlobs {
+    patterns: std::collections::HashSet<String>,
+    quoted: std::collections::HashSet<String>,
+}
+
+/// How the file gate must read one operand.
+enum OperandGlob {
+    /// A literal path.
+    Literal,
+    /// An unquoted glob: checked as a pattern against the restricting rules.
+    Pattern,
+    /// Glob characters the normaliser did not decide (an undecoded word): fail closed as before.
+    Ambiguous,
+}
+
+impl InvocationGlobs {
+    fn operand(&self, token: &str) -> OperandGlob {
+        if self.patterns.contains(token) {
+            OperandGlob::Pattern
+        } else if shell_arg_is_ambiguous(token) && !self.quoted.contains(token) {
+            OperandGlob::Ambiguous
+        } else {
+            OperandGlob::Literal
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -5195,6 +5771,7 @@ fn shell_command_invocations_with(root: Node<'_>, src: &str, fold_home: bool) ->
         if node.kind() == "command" {
             let mut words = Vec::new();
             let mut extras = CommandExtras::default();
+            let mut globs = InvocationGlobs::default();
             for i in 0..node.named_child_count() {
                 let Some(child) = node.named_child(i) else {
                     continue;
@@ -5209,13 +5786,24 @@ fn shell_command_invocations_with(root: Node<'_>, src: &str, fold_home: bool) ->
                     "herestring_redirect" | "heredoc_redirect" => extras.stdin_bodies.push(child_text.to_owned()),
                     _ => {}
                 }
-                let operand = if child.kind() == "command_name" {
-                    child
-                        .named_child(0)
-                        .and_then(|inner| shell_node_arg_with(inner, src, fold_home))
-                } else {
-                    shell_node_arg_with(child, src, fold_home)
-                };
+                let word_node = if child.kind() == "command_name" { child.named_child(0) } else { Some(child) };
+                // The shared normaliser decides every word it can pin down exactly (quotes, escapes, fragments,
+                // unquoted braces); an unresolved word keeps the decoding below (`$HOME` folding, glob tripwires).
+                let normalised = word_node
+                    .filter(|node| matches!(node.kind(), "word" | "number" | "string" | "raw_string" | "concatenation"))
+                    .map(|node| crate::permission::shell_words::normalise_word_node_marking_globs(node, src));
+                if let Some(Ok(list)) = normalised {
+                    for word in list {
+                        if word.glob != crate::permission::shell_words::GlobMark::Literal {
+                            globs.patterns.insert(word.text.clone());
+                        } else if shell_arg_is_ambiguous(&word.text) {
+                            globs.quoted.insert(word.text.clone());
+                        }
+                        words.push(InvocationWord::Literal(word.text));
+                    }
+                    continue;
+                }
+                let operand = word_node.and_then(|inner| shell_node_arg_with(inner, src, fold_home));
                 match operand {
                     Some(ArgText::Literal(word)) => {
                         // Brace expansion makes several words (P166 r8); an unquoted spelling only, write floor only.
@@ -5262,6 +5850,7 @@ fn shell_command_invocations_with(root: Node<'_>, src: &str, fold_home: bool) ->
                 words,
                 wrapper_words,
                 extras,
+                globs,
             });
         }
         for i in 0..node.child_count() {
@@ -5762,6 +6351,8 @@ fn shell_access(mode: ShellFileMode, path: String) -> AccessKind {
 /// Operands that may name a file.
 /// After a bare `--`, tokens are positional even if `-`-prefixed (`rm -- -/../.env`).
 /// `=`-names are kept (a real `VAR=value` is already dropped by the AST).
+/// u35 g3 (Astra r3): a bare `-` is an operand (stdin for most readers, a file named `-` for others) and is kept, so
+/// it still holds its position: dropping it moved `uniq - README.md`'s output into the input slot.
 fn shell_file_candidates(words: &[String]) -> Vec<&str> {
     let mut out = Vec::new();
     let mut end_of_options = false;
@@ -5770,8 +6361,46 @@ fn shell_file_candidates(words: &[String]) -> Vec<&str> {
             end_of_options = true;
             continue;
         }
-        if end_of_options || (token != "-" && !token.starts_with('-')) {
+        if end_of_options || token == "-" || !token.starts_with('-') {
             out.push(token.as_str());
+        }
+    }
+    out
+}
+
+/// u35 g3 (Astra r3): the operands of `uniq [OPTION]... [INPUT [OUTPUT]]` (GNU and BSD). The values of `-f N`, `-s N`,
+/// `-w N` (attached, clustered, or as `--skip-fields N`, `--skip-chars N`, `--check-chars N` and their unique
+/// prefixes) are not operands; `-` is. An obsolete `+N` is kept: it may be a skip option or a file.
+fn uniq_operands(words: &[String]) -> Vec<&str> {
+    const LONG_VALUED: &[&str] = &["--skip-fields", "--skip-chars", "--check-chars"];
+    let mut out = Vec::new();
+    let mut end_of_options = false;
+    let mut i = 1;
+    while let Some(word) = words.get(i) {
+        i += 1;
+        let token = word.as_str();
+        if end_of_options || token == "-" || !token.starts_with('-') {
+            out.push(token);
+            continue;
+        }
+        if token == "--" {
+            end_of_options = true;
+            continue;
+        }
+        if token.starts_with("--") {
+            if !token.contains('=') && LONG_VALUED.iter().any(|full| is_accepted_long_option_prefix(token, full, 3)) {
+                i += 1;
+            }
+            continue;
+        }
+        let cluster = &token[1..];
+        for (at, letter) in cluster.char_indices() {
+            if matches!(letter, 'f' | 's' | 'w') {
+                if at + letter.len_utf8() == cluster.len() {
+                    i += 1;
+                }
+                break;
+            }
         }
     }
     out
@@ -5814,13 +6443,15 @@ fn shell_path_command_operands<'a>(
                 .map(|c| (c, ShellFileMode::Create))
                 .collect(),
         ),
-        // `uniq [INPUT [OUTPUT]]`: a 2nd positional is the output file (Write); the 1st is the input (Read)
+        // `uniq [INPUT [OUTPUT]]`: the 1st operand is the input (Read), and every later one is written (Write): GNU
+        // writes the 2nd, and an obsolete `+N` read as an option shifts which word that is.
         // Fewer operands use stdin/stdout
-        "uniq" => match shell_file_candidates(words).as_slice() {
-            [input, output, ..] => Some(vec![
-                (*input, ShellFileMode::Read),
-                (*output, ShellFileMode::Write),
-            ]),
+        "uniq" => match uniq_operands(words).split_first() {
+            Some((input, outputs)) if !outputs.is_empty() => Some(
+                std::iter::once((*input, ShellFileMode::Read))
+                    .chain(outputs.iter().map(|output| (*output, ShellFileMode::Write)))
+                    .collect(),
+            ),
             _ => None,
         },
         _ => None,
@@ -6077,6 +6708,7 @@ mod tests {
                 ConfigValue::PathLike => ("/tmp/evil", Some("smtp.example.com")),
                 ConfigValue::NotNever => ("always", Some("never")),
                 ConfigValue::Url => ("ext::sh -c evil", Some("https://github.com/a/b")),
+                ConfigValue::TraceTarget => ("/tmp/trace.json", Some("2")),
             };
             assert!(local_git_config_entry_is_exec(&key, command), "ambient: {key}={command}");
             assert!(config_words_set_command_valued(&[key.as_str(), command]), "set (config): {key} {command}");
@@ -6647,6 +7279,30 @@ mod tests {
                 ),
                 "expected deny for {cmd}"
             );
+        }
+    }
+
+    /// u35: an unquoted glob read target is checked against deny rules as a pattern: it asks when it could match a
+    /// denied path (now or once created), and passes when it cannot. A quoted glob is a literal name.
+    #[test]
+    fn glob_read_targets_are_checked_as_patterns() {
+        let policy = compiled(vec![file_rule(RuleAction::Deny, ToolFilter::Read, "**/.env")]);
+        for cmd in ["cat *", "cat ./.e*", "head -n 1 ?env", "cat .[e]nv", "grep x sub/*"] {
+            assert!(
+                matches!(policy.evaluate_shell_file_access(cmd, cwd()), Some(Decision::Ask | Decision::Reject(_))),
+                "a glob that could match .env must not pass: {cmd}"
+            );
+        }
+        for cmd in ["cat src/*.rs", "cat ./*.md", "head -n 1 docs/ch?.txt", "cat '*.env'", "cat \\*"] {
+            assert_eq!(policy.evaluate_shell_file_access(cmd, cwd()), None, "{cmd}");
+        }
+        // A match that is a symlink to a denied file is caught through the expansion.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "x").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.path().join(".env"), dir.path().join("notes.md")).unwrap();
+            assert!(policy.evaluate_shell_file_access("cat ./*.md", dir.path()).is_some());
         }
     }
 

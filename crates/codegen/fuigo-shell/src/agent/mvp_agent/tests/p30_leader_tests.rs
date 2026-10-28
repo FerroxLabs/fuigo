@@ -36,6 +36,7 @@ const GRACE_SHORT: Duration = Duration::from_millis(500);
 const GRACE_MED: Duration = Duration::from_millis(1500);
 
 fn leader_agent() -> MvpAgentHandle {
+    crate::agent::folder_trust::install_project_agent_trust();
     let mut agent = build_minimal_agent_for_tests();
     agent.set_leader_mode();
     agent

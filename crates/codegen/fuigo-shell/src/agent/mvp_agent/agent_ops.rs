@@ -3765,11 +3765,13 @@ impl MvpAgent {
         );
         let load_envrc = self.cfg.borrow().session.load_envrc.unwrap_or(true);
         let project_env_trusted = folder_trust::project_scope_allowed(cwd.as_path());
-        let envrc = envrc
-            .unwrap_or_else(|| fuigo_workspace::envrc::spawn_envrc_load(
-                cwd.as_path().to_path_buf(),
-                load_envrc && project_env_trusted,
-            ));
+        let envrc = envrc.unwrap_or_else(|| {
+            if load_envrc {
+                fuigo_workspace::envrc::spawn_envrc_load(cwd.as_path().to_path_buf())
+            } else {
+                fuigo_workspace::envrc::envrc_load_disabled()
+            }
+        });
         let use_acp_fs = client_fs_read && client_fs_write;
         let fs_notify_config = init
             .client_capabilities
@@ -4171,10 +4173,12 @@ impl MvpAgent {
                 .iter()
                 .flat_map(|reg| reg.active_plugins())
                 .collect();
-            let (plugin_lsp_paths, plugin_names): (Vec<std::path::PathBuf>, Vec<&str>) = active
+            let (plugin_lsp_paths, plugin_names): (Vec<(std::path::PathBuf, std::path::PathBuf)>, Vec<&str>) = active
                 .iter()
                 .filter_map(|p| {
-                    p.lsp_config_path.clone().map(|path| (path, p.name.as_str()))
+                    p.lsp_config_path
+                        .clone()
+                        .map(|path| ((path, p.canonical_root.clone()), p.name.as_str()))
                 })
                 .unzip();
             let (

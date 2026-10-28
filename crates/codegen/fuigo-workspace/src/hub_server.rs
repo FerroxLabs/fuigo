@@ -681,27 +681,30 @@ impl WorkspaceRpcHandler {
             }
             <DiscoverSkillsReq as WorkspaceRpc>::METHOD => {
                 let cwd = self.workspace.root_cwd()?;
-                // Hub clients sit outside the local folder-trust model (same contract as `load_permissions`)
+                // u35 t2 (Grok 3, design d2 §4.3): project skills only when this host trusts the folder.
+                let trusted = crate::folder_trust::dir_trust(&cwd).is_trusted();
                 let skills = crate::discovery::discover_skills(
                     &cwd,
                     self.workspace.shared.skills_config(),
-                    true,
+                    trusted,
                 )
                 .await;
                 Ok(Value::Array(skills))
             }
             <DiscoverAgentsMdReq as WorkspaceRpc>::METHOD => {
                 let cwd = self.workspace.root_cwd()?;
-                let files = crate::discovery::discover_agents_md(&cwd, true).await;
+                let trusted = crate::folder_trust::dir_trust(&cwd).is_trusted();
+                let files = crate::discovery::discover_agents_md(&cwd, trusted).await;
                 Ok(Value::Array(files))
             }
             <DiscoverPluginsReq as WorkspaceRpc>::METHOD => {
                 let cwd = self.workspace.root_cwd()?;
+                let trusted = crate::folder_trust::dir_trust(&cwd).is_trusted();
                 let plugins = crate::discovery::discover_plugins(
                     &cwd,
                     self.workspace.shared.plugin_discovery_config(),
                     &crate::discovery::PluginTrustStore::load(),
-                    true,
+                    trusted,
                 );
                 Ok(Value::Array(plugins))
             }
@@ -713,11 +716,18 @@ impl WorkspaceRpcHandler {
             }
             <LoadProjectConfigReq as WorkspaceRpc>::METHOD => {
                 let cwd = self.workspace.root_cwd()?;
-                Ok(crate::discovery::load_project_config(&cwd))
+                // u35 t2 (Grok 3): the project config only when this host trusts the folder.
+                if crate::folder_trust::dir_trust(&cwd).is_trusted() {
+                    Ok(crate::discovery::load_project_config(&cwd))
+                } else {
+                    Ok(Value::Null)
+                }
             }
             <LoadPermissionsReq as WorkspaceRpc>::METHOD => {
                 let cwd = self.workspace.root_cwd()?;
-                Ok(crate::discovery::load_permissions(&cwd, true).await)
+                // u35 t1 (design d2 §4.2): the project tier only when this host trusts the folder.
+                let trusted = crate::folder_trust::dir_trust(&cwd).is_trusted();
+                Ok(crate::discovery::load_permissions(&cwd, trusted).await)
             }
             <LoadEnvrcReq as WorkspaceRpc>::METHOD => {
                 let cwd = self.workspace.root_cwd()?;
@@ -728,7 +738,7 @@ impl WorkspaceRpcHandler {
                 let sandbox = sandbox.map(|sandbox| {
                     sandbox as std::sync::Arc<dyn fuigo_tools::sandbox_launch::SandboxLaunch>
                 });
-                let env = crate::envrc::spawn_envrc_load_sandboxed(cwd, true, sandbox)
+                let env = crate::envrc::spawn_envrc_load_sandboxed(cwd, sandbox)
                     .join()
                     .await;
                 serde_json::to_value(env).map_err(|e| WorkspaceError::HubError(e.to_string()))
@@ -740,11 +750,12 @@ impl WorkspaceRpcHandler {
             }
             <RefreshPluginsReq as WorkspaceRpc>::METHOD => {
                 let cwd = self.workspace.root_cwd()?;
+                let trusted = crate::folder_trust::dir_trust(&cwd).is_trusted();
                 let plugins = crate::discovery::discover_plugins(
                     &cwd,
                     self.workspace.shared.plugin_discovery_config(),
                     &crate::discovery::PluginTrustStore::load(),
-                    true,
+                    trusted,
                 );
                 Ok(Value::Array(plugins))
             }

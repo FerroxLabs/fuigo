@@ -242,7 +242,7 @@ fn ref_name_for(worktree: &Path) -> String {
 
 fn run_git(at: &Path, args: &[&str], stdin: Vec<u8>) -> std::io::Result<Vec<u8>> {
     let what = args.first().copied().unwrap_or_default();
-    let mut command = safety::probe_command(at);
+    let mut command = safety::probe_command(at).map_err(std::io::Error::from)?;
     command.args(args);
     match run_probe(at, command, stdin, what) {
         Ok(output) => Ok(output.stdout),

@@ -26,22 +26,23 @@ mock:
 steps:
   # 1. The trust question renders before any session exists.
   - action: wait_for_text
-    text: "Do you trust the contents of this directory"
+    text: "Do you trust the files in this folder"
     timeout_ms: 20000
   - action: assert_not_contains
     text: panicked
-  # The decline affordance is on screen (keyboard-driven y/N answer; n = quit).
+  # The decline affordance is on screen (design d2 §5.1: y = trust, n = untrusted, q = quit).
   - action: assert_contains
-    text: "No, quit"
+    text: "No: don't load its settings"
   # 2. Accept the folder.
   - action: keys
     keys: "y"
-  # 3. The question is gone and the normal welcome / prompt is ready.
+  # 3. The question is gone and the normal welcome / prompt is ready. The question's own menu also has a
+  #    "Quit" row, so wait for a row only the welcome menu has.
   - action: wait_for_text
-    text: Quit
+    text: Resume session
     timeout_ms: 20000
   - action: assert_not_contains
-    text: "Do you trust the contents of this directory"
+    text: "Do you trust the files in this folder"
   # 4. Submit a prompt — the session must now start (gate answered).
   - action: type_text
     text: "summarize the trusted repo"

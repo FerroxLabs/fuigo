@@ -12,18 +12,20 @@ use fuigo_acp_lib::AcpAgentGatewaySender as GatewaySender;
 
 use crate::permission::auto_mode::{
     BashSecurityAssessment, ClassifierSecurityFinding, ClassifierVerdict, EnvRisk,
-    KUBECTL_UNSAFE_FLAGS, rg_has_unsafe_flag, script_env_risk,
+    kubectl_word_is_unsafe_flag, rg_has_unsafe_flag, script_env_risk,
 };
 use crate::permission::bash_command_splitting::{
-    is_setup_command, try_parse_shell, try_parse_word_only_commands_sequence, unwrap_wrappers,
+    argv_starts_with_words, is_setup_command, program_identity_is_plain, try_parse_shell,
+    try_parse_word_only_commands_sequence, unwrap_wrappers,
 };
 use crate::permission::bash_permission_script::PermissionScript;
 use crate::permission::branch_switch::{BranchSwitchPlan, GitTreeLister, TreeLister, plan_keeps_floor};
 use crate::permission::exec_risk::{
-    AmbientScanPlan, SAFE_GIT_SUBCOMMANDS, ambient_exec_risk_from_plan,
+    AmbientGitRisk, AmbientScanPlan, SAFE_GIT_SUBCOMMANDS, ambient_git_risk_from_plan, ambient_git_risk_from_plan_in,
     ambient_scan_plan_from_segments, branch_switch_plan_with, git_words_are_read_only_query,
     git_words_have_unsafe_query_option, script_may_invoke_git, segment_exec_facts,
 };
+use crate::permission::exec_surface::segment_has_exec_surface;
 use crate::permission::gate_preflight::{EditTargetSpellings, GatePreflight};
 use std::path::Path;
 use crate::permission::policy::{CompiledPolicy, ShellWord};
@@ -87,6 +89,8 @@ mod p166_r13b_tests;
 pub(crate) mod p166_r13b_branch_tests;
 #[cfg(test)]
 mod p175_tests;
+#[cfg(test)]
+mod u35_classify_tests;
 mod bash_grants;
 pub mod reasons;
 mod bash_policy_allow;
@@ -310,15 +314,15 @@ fn web_fetch_deny_pre_decision(parsed_url: &url::Url, state: &PermissionState) -
 /// A kubeconfig `users[].user.exec` credential plugin runs an arbitrary local process.
 /// A read verb like `get`/`logs`/`describe` is not side-effect-free once any of these flags point kubectl at attacker-supplied config/auth.
 /// Such invocations must not ride the safe-command auto-allow (nor a broader whitelist *prefix* grant, see `evaluate_bash`).
-/// The flag list lives in [`KUBECTL_UNSAFE_FLAGS`] so the two classifiers cannot drift.
+/// The flag test is [`kubectl_word_is_unsafe_flag`] (over `KUBECTL_UNSAFE_FLAGS`) so the two classifiers cannot drift.
 fn kubectl_has_unsafe_flag(words: &[String]) -> bool {
     if crate::permission::policy::normalized_command_head(words).as_deref() != Some("kubectl") {
         return false;
     }
-    words.iter().skip(1).any(|w| {
-        let name = w.split_once('=').map_or(w.as_str(), |(name, _)| name);
-        KUBECTL_UNSAFE_FLAGS.contains(&name)
-    })
+    words
+        .iter()
+        .skip(1)
+        .any(|w| kubectl_word_is_unsafe_flag(w))
 }
 
 /// True when `words` is a `ps` that dumps process environments.
@@ -415,12 +419,16 @@ fn is_safe_command_words(words: &[String]) -> bool {
     if ps_dumps_environment(words) {
         return false;
     }
+    // u35 g3: a listed program in a form that writes, changes state or reads an unnamed file is not read-only.
+    if crate::permission::safe_forms::listed_form_needs_approval(words) {
+        return false;
+    }
     // Git rides its own shared decision helper (verb allowlist and unsafe-option table in `exec_risk.rs`), not the string prefixes below
     if words.first().map(String::as_str) == Some("git") {
         return git_words_are_read_only_query(words);
     }
-    let joined = words.join(" ");
-    is_safe_command_words_str(&joined)
+    // u35 r1: matched on argv boundaries, so one word with a space in it is not a command plus operands.
+    safe_command_prefixes_match(|pattern| argv_starts_with_words(words, pattern, false))
 }
 
 fn matches_command_prefix(cmd: &str, pattern: &str) -> bool {
@@ -439,35 +447,46 @@ fn is_safe_git_query_prefix(cmd: &str) -> bool {
 
 /// Shared prefix check used by both the tree-sitter path and the fallback path.
 fn is_safe_command_words_str(cmd: &str) -> bool {
-    matches_command_prefix(cmd, "ls")
-        || matches_command_prefix(cmd, "cat")
-        || matches_command_prefix(cmd, "pwd")
-        || matches_command_prefix(cmd, "date")
-        || is_safe_git_query_prefix(cmd)
-        || matches_command_prefix(cmd, "whoami")
-        || matches_command_prefix(cmd, "hostname")
-        || matches_command_prefix(cmd, "uptime")
-        || matches_command_prefix(cmd, "grep")
-        || matches_command_prefix(cmd, "rg")
-        || matches_command_prefix(cmd, "kubectl get")
-        || matches_command_prefix(cmd, "kubectl logs")
-        || matches_command_prefix(cmd, "kubectl describe")
-        || matches_command_prefix(cmd, "ps")
-        || matches_command_prefix(cmd, "bin/explorer ls")
-        || matches_command_prefix(cmd, "head")
-        || matches_command_prefix(cmd, "tail")
-        || matches_command_prefix(cmd, "wc")
-        || matches_command_prefix(cmd, "sort")
-        || matches_command_prefix(cmd, "uniq")
-        || matches_command_prefix(cmd, "tr")
-        || matches_command_prefix(cmd, "cut")
-        // Stdout-only; a redirect to a real file floors the script as a request-level `FileWrite` before the safe-list allow
-        // Without these, an `…; echo saved` tail makes the whole chain impossible to cover with a grant
-        || matches_command_prefix(cmd, "echo")
-        || matches_command_prefix(cmd, "printf")
-    // CWE-863: `tee` is not safe-listed; it writes stdin to arbitrary files, so pipelines like `cat data | tee /target` could bypass edit permissions
-    //
-    // `rg --pre` / `--hostname-bin` are excluded at the words level via [`rg_has_unsafe_flag`]; the string form here cannot see flag structure reliably after join
+    is_safe_git_query_prefix(cmd) || SAFE_COMMAND_PREFIXES.iter().any(|pattern| matches_command_prefix(cmd, pattern))
+}
+
+/// Read-only command prefixes, matched on a word boundary (string form) or argv boundaries (words form).
+/// Git read-only queries ride `is_safe_git_query_prefix` / `git_words_are_read_only_query` instead.
+/// `echo` / `printf` are stdout-only; a redirect to a real file floors the script as a request-level `FileWrite` before
+/// the safe-list allow. Without them, an `…; echo saved` tail makes the whole chain impossible to cover with a grant.
+/// CWE-863: `tee` is not safe-listed; it writes stdin to arbitrary files, so pipelines like `cat data | tee /target`
+/// could bypass edit permissions.
+/// `rg --pre` / `--hostname-bin` are excluded at the words level via [`rg_has_unsafe_flag`]; the string form here cannot
+/// see flag structure reliably after join.
+const SAFE_COMMAND_PREFIXES: &[&str] = &[
+    "ls",
+    "cat",
+    "pwd",
+    "date",
+    "whoami",
+    "hostname",
+    "uptime",
+    "grep",
+    "rg",
+    "kubectl get",
+    "kubectl logs",
+    "kubectl describe",
+    "ps",
+    "bin/explorer ls",
+    "head",
+    "tail",
+    "wc",
+    "sort",
+    "uniq",
+    "tr",
+    "cut",
+    "echo",
+    "printf",
+];
+
+/// The argv form of [`is_safe_command_words_str`]'s prefix list.
+fn safe_command_prefixes_match(matches: impl Fn(&str) -> bool) -> bool {
+    SAFE_COMMAND_PREFIXES.iter().any(|pattern| matches(pattern))
 }
 
 /// Commands which are always safe to execute and should never prompt the user.
@@ -520,16 +539,18 @@ fn is_always_safe_command_words(words: &[String]) -> bool {
     if ps_dumps_environment(words) {
         return false;
     }
+    if crate::permission::safe_forms::listed_form_needs_approval(words) {
+        return false;
+    }
     // Git rides its own shared decision helper (verb allowlist and unsafe-option table in `exec_risk.rs`), not the prefix list below
     if words.first().map(String::as_str) == Some("git") {
         return git_words_are_read_only_query(words);
     }
 
-    let joined = words.join(" ");
-
-    // CWE-183: use matches_command_prefix to require a word boundary after the safe prefix, preventing e.g. "tr" from matching "truncate".
+    // CWE-183 / u35 r1: matched on argv boundaries, so "tr" never matches "truncate" and one word with a space in it
+    // (`'ls -la'`) is not a command plus operands.
     for safe_pattern in ALWAYS_SAFE_COMMANDS {
-        if matches_command_prefix(&joined, safe_pattern) {
+        if argv_starts_with_words(words, safe_pattern, false) {
             return true;
         }
     }
@@ -652,6 +673,16 @@ fn is_dangerous_command_words(words: &[String]) -> bool {
         || matches_command_prefix(&joined, "kill")
         || matches_command_prefix(&joined, "killall")
         || matches_command_prefix(&joined, "git push")
+        // u35 r3 (Astra r2 H7): `git --no-pager push`, `git -C dir push`: the verb past the global options.
+        || crate::permission::exec_risk::git_subcommand(words) == Some("push")
+        // u35 t1 (design d2 T11): `fuigo --trust` trusts a folder; only the user decides that.
+        || (joined.starts_with("fuigo ") && words[1..].iter().any(|w| is_trust_flag(w)))
+}
+
+/// u35 t1: a Fuigo option that trusts a folder (`--trust`, `--trust-folder`, `--trust=...`).
+fn is_trust_flag(word: &str) -> bool {
+    let name = word.split_once('=').map_or(word, |(name, _)| name);
+    matches!(name, "--trust" | "--trust-folder")
 }
 
 /// Uses `matches_command_prefix` so user allow/deny entries enforce a word boundary after the prefix.
@@ -685,6 +716,98 @@ pub(crate) enum SegmentEvaluation {
     Unparseable,
 }
 
+/// u35 t1 (design d2 §3.4): the session's compiled policy with the session folder's project tier (`project`, when that
+/// folder is trusted) and without any (`base`), and the trust generation they were built under.
+struct TrustPolicies {
+    generation: u64,
+    project: Option<CompiledPolicy>,
+    project_prompt: PromptPolicy,
+    base: Option<CompiledPolicy>,
+    base_prompt: PromptPolicy,
+}
+
+impl TrustPolicies {
+    /// One policy for every command (no session inputs: tests, configs built by hand).
+    fn fixed(config: Option<crate::permission::types::PermissionConfig>) -> Self {
+        let prompt = config.as_ref().map(|c| c.prompt_policy).unwrap_or_default();
+        Self {
+            generation: 0,
+            base: config.clone().map(CompiledPolicy::new),
+            base_prompt: prompt,
+            project: config.map(CompiledPolicy::new),
+            project_prompt: prompt,
+        }
+    }
+
+    /// Both policies from the session's inputs, under the current folder trust.
+    async fn resolve(inputs: &crate::permission::resolution::SessionPolicyInputs) -> Self {
+        use crate::permission::resolution::resolve_session_policy;
+        let generation = crate::folder_trust::trust_generation();
+        let base = resolve_session_policy(inputs, false).await;
+        let project = if crate::folder_trust::dir_trust(&inputs.cwd).is_trusted() {
+            resolve_session_policy(inputs, true).await
+        } else {
+            base.clone()
+        };
+        let prompt = |c: &Option<crate::permission::types::PermissionConfig>| {
+            c.as_ref().map(|c| c.prompt_policy).unwrap_or_default()
+        };
+        Self {
+            generation,
+            base_prompt: prompt(&base),
+            project_prompt: prompt(&project),
+            base: base.map(CompiledPolicy::new),
+            project: project.map(CompiledPolicy::new),
+        }
+    }
+
+    fn policy_for(&self, untrusted: bool) -> &Option<CompiledPolicy> {
+        if untrusted { &self.base } else { &self.project }
+    }
+
+    fn prompt_policy_for(&self, untrusted: bool) -> PromptPolicy {
+        if untrusted { self.base_prompt } else { self.project_prompt }
+    }
+}
+
+/// u35 t1 (design d2 §3.3 step 7): the actor's answer to a request, checked before it is sent: a shell command
+/// approved without a grant (or with no event to say how it was approved) in a folder that is not trusted is refused.
+/// The routing above means this never fires; it is the last line, beside the shell runner's own check.
+struct FinalShellSend {
+    inner: tokio::sync::oneshot::Sender<PermissionResolution>,
+    untrusted: bool,
+}
+
+impl FinalShellSend {
+    fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    async fn closed(&mut self) {
+        self.inner.closed().await;
+    }
+
+    // The same signature as the oneshot sender it wraps.
+    #[allow(clippy::result_large_err)]
+    fn send(self, mut resolution: PermissionResolution) -> Result<(), PermissionResolution> {
+        let without_grant = resolution.event.as_ref().and_then(|event| event.approved_without_grant);
+        if let Some(refusal) = final_shell_check(self.untrusted, &resolution.decision, without_grant) {
+            resolution.decision = refusal;
+        }
+        self.inner.send(resolution)
+    }
+}
+
+/// [`FinalShellSend`]'s check: the refusal that replaces `decision`, if any. `without_grant`: the event's
+/// [`approved_without_grant`] (`None`, not said, counts as without a grant).
+fn final_shell_check(untrusted: bool, decision: &Decision, without_grant: Option<bool>) -> Option<Decision> {
+    if untrusted && matches!(decision, Decision::Allow) && without_grant.unwrap_or(true) {
+        tracing::error!("internal: a shell command approved without a grant in a folder that is not trusted; refused");
+        return Some(Decision::Reject("internal: ungranted shell command in an untrusted folder".to_owned()));
+    }
+    None
+}
+
 /// One request's parsed Bash authorization facts.
 #[derive(Debug)]
 struct BashEvaluation {
@@ -706,6 +829,323 @@ struct BashEvaluation {
     write_facts: crate::permission::shell_access::ShellWriteFacts,
     /// Strict decomposition failed but every command is a reviewed reader with understood filename positions.
     recovered_eligible: bool,
+    /// u35 r3: prompted segments that the read-only list would cover but for the plain-text gate (the whole script
+    /// when only setup commands ran), so the sandbox card can name the reason as unplain structure.
+    gated_segments: Vec<String>,
+    /// u35 g6/g7: every command's normalised words, for the inherited-environment check the hub and the manager run with
+    /// the request's directory ([`add_inherited_env_finding`]).
+    env_reader_segments: Vec<Vec<String>>,
+    /// u35 g7 (Fable r6 Medium): the inherited variable that switched no-grant auto-approval off, for the ask's log.
+    env_steering: Option<&'static str>,
+    /// u35 g11 (owner decision): the shell the runner will run the command in, when it does not read bash syntax
+    /// (PowerShell or cmd.exe on Windows; [`unvouched_runner_shell`]). The plain-text gate and the read-only lists judge
+    /// bash syntax, so for such a shell no command is approved without a grant.
+    unvouched_shell: Option<&'static str>,
+    /// u35 g12 (Astra r11 High): a git command runs in a repository the ambient scan did not read, so whatever its
+    /// configuration runs is unknown: the command's own git exec option or `GIT_DIR`-style assignment, a `cd` that
+    /// leaves the directory uncertain, or a script not decomposed to words that names git.
+    unscanned_git: bool,
+    /// u35 g12 (Astra r11 High): the ambient scan found repository configuration that runs a program for this git
+    /// command (`core.fsmonitor`, a driver, an alias, a safe-verb hook, ...), or could not read it (fail closed).
+    repository_config_runs: bool,
+    /// u35 g13 (Astra r12 High): a command loads a configuration file the command does not show and which can make it
+    /// run a program (`grep --config` reading a repository `.ugrep`, `cargo --config FILE`, `ssh -F FILE`;
+    /// [`crate::permission::exec_surface::segment_loads_config_file`]), the repository part of a `SpecialExecSurface`;
+    /// or (Grok r12 High) a routine tool loads such a file of the project by default (`.npmrc`, `.yarnrc.yml`, a Cargo
+    /// `[alias]`, `.bazelrc`; [`add_tool_config_finding`]).
+    loads_config_file: bool,
+    /// u35 g14: each command as the project configuration scan reads it ([`add_tool_config_finding`]).
+    tool_segments: Vec<crate::permission::safe_forms::ToolSegment>,
+    /// u35 g14 (Astra/Grok r13 High): a configuration tool runs where no scan looked ([`names_hidden_tool`]); like
+    /// `unscanned_git`, it stops only a classifier allow, so a listed reader naming the tool (`rg npm`) is unaffected.
+    hidden_tool: bool,
+    /// u35 t1 (design d2 §3.3): some directory the command starts in is not in a trusted folder
+    /// ([`crate::permission::run_dirs::run_dirs_trust`]; u35 t3: folders the command names do not count). No approval without a grant stands: the read-only
+    /// lists, the Auto mode fast path and classifier and sandbox auto-allow approve nothing; grants, allow rules of the
+    /// user, the user's answer and the catch-all overrides still do.
+    untrusted_folder: bool,
+}
+
+/// u35 g7: the inherited environment can steer what the script runs (`PATH` not clean, or a variable of
+/// [`crate::permission::exec_risk::inherited_env_steers`] set).
+///
+/// u35 g8 (release gate: a grant is never disabled by the presence rule): the request carries
+/// `InheritedEnvironment`, which is not a grant floor. It switches off only approval without a grant: the read-only
+/// lists ([`no_grant_approval_switched_off`]) and the Auto mode fast path and heuristic pre-pass (the assessment is not
+/// empty, so the classifier sees the finding). Prefix, glob and exact grants, the session blanket, sandbox auto-allow
+/// and configured allow rules still apply.
+fn add_inherited_env_finding(evaluation: &mut BashEvaluation, cwd: &std::path::Path) {
+    // u35 g9: the shell runner judges, by the same rule, the environment it builds for each call approved without a
+    // grant (a login `PATH`, a persistent shell's exports); also installed at manager start.
+    install_runner_env_judge();
+    // u35 g11: judged in each directory the command can run in; the first variable found is the one named.
+    if let Some(var) =
+        crate::permission::exec_risk::inherited_env_steers_script(&evaluation.env_reader_segments, cwd)
+    {
+        evaluation.env_steering.get_or_insert(var);
+        evaluation.assessment.insert(ClassifierSecurityFinding::InheritedEnvironment);
+    }
+}
+
+/// u35 g11 (Astra r10 High): the directories a bash request's command can run in: the request's directory, and the
+/// tool's own working directory when it names another (OpenCode bash `workdir`, relative to the request's). Judged as
+/// well as, never instead of, the request's directory, as the hub judges a `workdir`; the last one is where it runs.
+fn bash_run_dirs(request_cwd: &std::path::Path, exec_cwd: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![request_cwd.to_path_buf()];
+    dirs.extend(exec_cwd.map(|dir| request_cwd.join(dir)).filter(|dir| dir.as_path() != request_cwd));
+    dirs
+}
+
+/// u35 g13 (Grok r12 High): a routine tool of the command loads a configuration file of the project that can make it
+/// run a program (`.npmrc` `onload-script`, `.yarnrc.yml` `yarnPath`, a Cargo `[alias]` for `fmt`, a `.bazelrc`
+/// startup option; [`crate::permission::safe_forms::repository_tool_config_runs`]): repository execution, so no
+/// approval without a grant (the read-only lists, the Auto mode heuristic and model) stands.
+///
+/// u35 g14 (Astra/Grok r13 High): judged in the folder each command runs in (after `cd`, `cargo -C`, `npm --prefix`,
+/// ...), and for the commands of an opaque shell script too (Fable r13 Low).
+fn add_tool_config_finding(evaluation: &mut BashEvaluation, dir: &std::path::Path) {
+    if crate::permission::safe_forms::repository_tool_config_runs(&evaluation.tool_segments, dir) {
+        evaluation.loads_config_file = true;
+    }
+}
+
+/// The ambient git scan's findings: repository config that runs a program (`ExecOrAmbientGit`, a grant floor) and,
+/// u35 g10 (Astra r9 High), the repository's own hooks under a git command that is not a read-only query
+/// (`RepositoryHook`, which switches off only approval without a grant).
+fn add_ambient_git_findings(evaluation: &mut BashEvaluation, risk: AmbientGitRisk) {
+    if risk.exec {
+        evaluation.assessment.insert(ClassifierSecurityFinding::ExecOrAmbientGit);
+        evaluation.repository_config_runs = true;
+    }
+    if risk.hook {
+        evaluation.assessment.insert(ClassifierSecurityFinding::RepositoryHook);
+    }
+}
+
+/// u35 g9: install the shell runner's check for calls approved without a grant ([`child_env_steers`]).
+///
+/// u35 g11 (Fable/Grok r10 Low): the runner refuses such a call when no check is installed. This crate's tests test
+/// the rule directly and judge nothing at the runner, so they install one that passes every environment.
+pub(crate) fn install_runner_env_judge() {
+    #[cfg(not(test))]
+    fuigo_tools::sandbox_launch::install_env_judge(child_env_steers);
+    #[cfg(test)]
+    fuigo_tools::sandbox_launch::install_env_judge(|_, _, _| None);
+}
+
+/// u35 t1 (design d2 §3.6): install the shell runner's folder-trust backstop ([`runner_trust_judge`]).
+pub(crate) fn install_runner_trust_judge() {
+    fuigo_tools::sandbox_launch::install_trust_judge(runner_trust_judge);
+}
+
+/// u35 t1: the shell runner's folder-trust rule ([`fuigo_tools::sandbox_launch::TrustJudge`]): the permission check's
+/// own ([`crate::permission::run_dirs::run_dirs_trust`]) over the directories the runner was given. u35 t3: the
+/// command's text does not change the answer (a folder it names does not count).
+pub(crate) fn runner_trust_judge(_command: &str, dirs: &[&std::path::Path]) -> bool {
+    let run_dirs: Vec<std::path::PathBuf> = dirs.iter().map(|dir| dir.to_path_buf()).collect();
+    crate::permission::run_dirs::run_dirs_trust(&run_dirs).is_trusted()
+}
+
+/// u35 g9 (lead decision after r8): the shell runner's check ([`fuigo_tools::sandbox_launch::EnvJudge`]): the
+/// classifier's own rule ([`crate::permission::exec_risk::inherited_env_steers_script`]) for `command`'s programs,
+/// over `env`, the exact environment the runner builds for a call approved without a grant, in place of Fuigo's.
+pub(crate) fn child_env_steers(command: &str, env: &[(String, String)], dir: &std::path::Path) -> Option<String> {
+    crate::permission::exec_risk::with_env_view(env, || env_steering_of(command, dir)).map(str::to_owned)
+}
+
+/// u35 g9: the inherited variable that makes `command` ask in `dir`, if any (the classifier's rule for its programs).
+pub(crate) fn env_steering_of(command: &str, dir: &std::path::Path) -> Option<&'static str> {
+    let evaluation = evaluate_bash(command, &PermissionState::default(), true);
+    crate::permission::exec_risk::inherited_env_steers_script(&evaluation.env_reader_segments, dir)
+}
+
+/// u35 g8: the inherited environment steers and no grant covers every segment, so the read-only lists do not approve.
+/// u35 g11 (owner decision): the same when the runner's shell does not read bash syntax ([`unvouched_runner_shell`]).
+/// u35 g13 (Grok r12 High): the same when a program loads a configuration file that can make it run a program
+/// ([`BashEvaluation::loads_config_file`]).
+///
+/// u35 t1 (design d2 D3): a configuration file a program loads no longer switches it off in a trusted folder (its
+/// content is the trusted folder's); in a folder that is not trusted ([`BashEvaluation::untrusted_folder`]) nothing
+/// is approved without a grant.
+fn no_grant_approval_switched_off(evaluation: &BashEvaluation) -> bool {
+    (evaluation.env_steering.is_some() || evaluation.unvouched_shell.is_some() || evaluation.untrusted_folder)
+        && !evaluation.all_segments_granted
+        && !evaluation.exact_grant
+}
+
+/// u35 g11 (owner decision): on Windows, when commands run in PowerShell (`pwsh` or `powershell.exe`) or cmd.exe, the
+/// shell's display name. Fuigo's plain-text gate and read-only lists judge a command as bash reads it; those shells
+/// read the same text with other quoting, separators and redirects (cmd.exe does not treat `'` as a quote, so
+/// `echo 'x & y'` runs `y`), so neither can vouch for a command there. Every command without a grant then asks: the
+/// read-only lists, the Auto mode fast path and its classifier approve nothing; grants, allow rules (`--allow`), the
+/// user's answer and the catch-all overrides still apply. Git Bash and every Unix shell are unchanged.
+pub(crate) fn unvouched_runner_shell() -> Option<&'static str> {
+    unvouched_shell(runner_shell_family())
+}
+
+/// u35 g11: [`unvouched_runner_shell`] for a given runner shell (`None`: a Unix shell).
+pub(crate) fn unvouched_shell(shell: Option<fuigo_config::shell::WindowsShellFamily>) -> Option<&'static str> {
+    shell.filter(|family| !family.reads_bash_syntax()).map(|family| family.name())
+}
+
+/// The Windows shell the command runner uses (`None` on Unix); in this crate's tests, the one a test set
+/// ([`TestRunnerShell`]).
+fn runner_shell_family() -> Option<fuigo_config::shell::WindowsShellFamily> {
+    #[cfg(test)]
+    if let Some(shell) = TEST_RUNNER_SHELL.with(std::cell::Cell::get) {
+        return shell;
+    }
+    fuigo_config::shell::runner_windows_shell_family()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_RUNNER_SHELL: std::cell::Cell<Option<Option<fuigo_config::shell::WindowsShellFamily>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// u35 g11: until dropped, this thread's checks see the command runner use `shell` (`None`: a Unix shell). A manager
+/// on a `LocalSet` runs on the test's thread, so it sees it too.
+#[cfg(test)]
+pub(crate) struct TestRunnerShell(Option<Option<fuigo_config::shell::WindowsShellFamily>>);
+
+#[cfg(test)]
+impl TestRunnerShell {
+    pub(crate) fn set(shell: Option<fuigo_config::shell::WindowsShellFamily>) -> Self {
+        Self(TEST_RUNNER_SHELL.with(|cell| cell.replace(Some(shell))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestRunnerShell {
+    fn drop(&mut self) {
+        TEST_RUNNER_SHELL.with(|cell| cell.set(self.0));
+    }
+}
+
+/// u35 g11 (owner decision): in Auto mode a command no grant covers in full is asked about, without the fast path or
+/// the classifier, when the runner's shell does not read bash syntax ([`unvouched_runner_shell`]).
+///
+/// u35 t1: the same in a folder that is not trusted ([`BashEvaluation::untrusted_folder`]).
+fn shell_switches_off_auto(evaluation: Option<&BashEvaluation>) -> bool {
+    evaluation.is_some_and(|e| (e.unvouched_shell.is_some() || e.untrusted_folder) && !e.all_segments_granted && !e.exact_grant)
+}
+
+/// u35 g12 (Astra r11 High): why Fuigo knows content the repository controls runs for a command
+/// ([`repository_execution`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepositoryExecution {
+    /// Repository git configuration runs a program for this git command (`core.fsmonitor`, a driver, an alias, a
+    /// safe-verb hook, `log.showSignature`, ...), or the ambient scan could not read it.
+    GitConfig,
+    /// The repository's own hooks run for this git command (`RepositoryHook`).
+    GitHooks,
+    /// A git command runs in a repository the ambient scan did not read.
+    UnscannedGit,
+    /// u35 g13 (Astra r12 High): a program loads a configuration file that can make it run a program
+    /// ([`BashEvaluation::loads_config_file`]).
+    ConfigFile,
+    /// The inherited environment chooses which program runs or what it loads (`InheritedEnvironment`): a `PATH` entry
+    /// that is relative or in the project, a selector naming a file in it, or a steering variable.
+    Environment,
+}
+
+/// u35 g12 (Astra r11 High; lead decision): the repository-controlled execution Fuigo detected for this command, if
+/// any. Every finding is placed on one side by an exhaustive match: those that say content the repository (or the
+/// environment) controls will run, and those about the command's own text, which the Auto mode model reads and judges
+/// (an opaque or rich script, a write, a destructive command). `ExecOrAmbientGit` is both kinds (an execution
+/// callback in the command's text, or the repository's git configuration), so its repository part is recorded apart
+/// by the ambient scan ([`BashEvaluation::repository_config_runs`], [`BashEvaluation::unscanned_git`]). So is
+/// `SpecialExecSurface` (u35 g13, Astra r12 High): its repository part, a configuration file a program loads, is
+/// [`BashEvaluation::loads_config_file`].
+fn repository_execution(evaluation: &BashEvaluation) -> Option<RepositoryExecution> {
+    use ClassifierSecurityFinding as F;
+    let present = F::ALL.iter().copied().filter(|finding| evaluation.assessment.contains(*finding));
+    let from_findings = present.into_iter().find_map(|finding| match finding {
+        F::RepositoryHook => Some(RepositoryExecution::GitHooks),
+        F::InheritedEnvironment => Some(RepositoryExecution::Environment),
+        F::FailClosedPolicy
+        | F::UnparseableShell
+        | F::UnresolvedArgument
+        | F::OpaqueShell
+        | F::ExecOrAmbientGit
+        | F::EnvInjection
+        | F::UnvettedEnv
+        | F::FileWrite
+        | F::DangerousCommand
+        | F::SpecialExecSurface => None,
+    });
+    from_findings
+        .or_else(|| evaluation.repository_config_runs.then_some(RepositoryExecution::GitConfig))
+        .or_else(|| evaluation.unscanned_git.then_some(RepositoryExecution::UnscannedGit))
+        .or_else(|| (evaluation.loads_config_file || evaluation.hidden_tool).then_some(RepositoryExecution::ConfigFile))
+}
+
+/// u35 g14 (Astra/Grok r13 High): a segment names a configuration tool ([`crate::permission::safe_forms::is_config_tool`])
+/// as a word but is not that tool's own pinned command, so the tool may run where the configuration scan did not look
+/// (`taskset -c 0 npm ls`, `find . -execdir cargo fmt ;`, an `env -S` the normaliser cannot pin). Fail closed on the
+/// word rather than model each wrapper. A `cd` and a listed reader (`which cargo`, `rg npm`) never run their operands;
+/// an opaque shell script is split and scanned instead ([`crate::permission::safe_forms::ToolSegment::Nested`]).
+fn names_hidden_tool(raw_words: &[String], floors: &SegmentFloors<'_>) -> bool {
+    use crate::permission::safe_forms::is_config_tool;
+    let inner = floors.inner;
+    let head = inner.first().map(|head| crate::permission::exec_surface::program_name(head));
+    let pinned_tool = floors.pinned && inner.first().is_some_and(|head| is_config_tool(head));
+    !pinned_tool
+        && !floors.opaque
+        && !matches!(head.as_deref(), Some("cd" | "pushd" | "popd"))
+        && !(floors.pinned && (is_safe_command_words(inner) || is_always_safe_command_words(inner)))
+        && raw_words.iter().any(|word| is_config_tool(word))
+}
+
+/// u35 g14: the configuration scan's view of one segment ([`crate::permission::safe_forms::ToolSegment`]).
+fn tool_segment_of(raw_words: &[String], floors: &SegmentFloors<'_>) -> Option<crate::permission::safe_forms::ToolSegment> {
+    use crate::permission::safe_forms::ToolSegment;
+    if floors.opaque {
+        Some(ToolSegment::Nested(crate::permission::exec_surface::split_script_text(raw_words)))
+    } else {
+        floors.pinned.then(|| ToolSegment::Command { words: floors.inner.to_vec(), moved: floors.moved })
+    }
+}
+
+/// u35 g14: the configuration findings of a script the parser could not decompose: a configuration-loading option
+/// anywhere in it (Grok r13 Low), and a configuration tool named in it.
+fn unparseable_config_findings(cmd: &str) -> (bool, bool) {
+    let hidden_tool = crate::permission::exec_surface::split_script_text(&[cmd.to_owned()])
+        .iter()
+        .flatten()
+        .any(|word| crate::permission::safe_forms::is_config_tool(word));
+    (crate::permission::exec_surface::text_may_load_config_file(cmd), hidden_tool)
+}
+
+/// u35 g11 (Grok r10 Medium), u35 g12 (Astra r11 High; lead decision): a classifier allow is approval without a grant.
+/// When Fuigo detected that content the repository controls runs for this command ([`repository_execution`]: its git
+/// configuration or hooks, a repository it could not scan, an environment that steers what runs), unless a grant
+/// covers it in full the user is asked. Otherwise the model's allow stands: in Auto mode the model judges the commands
+/// the plain-text gate cannot read (an opaque or rich script, a routine build). Not a grant floor: a grant, an allow
+/// rule or "allow all commands" still approves it before the classifier.
+///
+/// u35 t1 (design d2 D3): in a trusted folder the repository's own configuration (git config and hooks, an unscanned
+/// repository, a tool's configuration file) is the trusted folder's content and no longer stops the model's allow; an
+/// environment that steers what runs still does. In a folder that is not trusted no classifier allow stands.
+fn classifier_allow_needs_user(evaluation: Option<&BashEvaluation>) -> bool {
+    evaluation.is_some_and(|e| {
+        (e.untrusted_folder || e.assessment.contains(ClassifierSecurityFinding::InheritedEnvironment))
+            && !e.all_segments_granted
+            && !e.exact_grant
+    })
+}
+
+/// u35 g8 (Fable r7 Medium): the prompt for a command asked about because of the environment names the variable, so a
+/// user can tell why `git status` started asking (`GIT_ASKPASS` from an editor terminal, `LESSOPEN` from a stock
+/// `~/.bashrc`).
+fn with_env_steering_note(update: &acp::ToolCallUpdate, var: Option<&str>) -> acp::ToolCallUpdate {
+    let mut update = update.clone();
+    if let Some(var) = var {
+        let title = update.fields.title.as_deref().map(str::trim).filter(|t| !t.is_empty()).unwrap_or("this command");
+        update.fields.title = Some(format!("{title} (asks because of {var} in your environment)"));
+    }
+    update
 }
 
 fn unparseable_exec_risk(cmd: &str) -> bool {
@@ -753,10 +1193,100 @@ fn bash_protected_write_target(
         })
 }
 
+/// u35 r1: one segment's floor checks, run on the canonical-wrapper-peeled words AND on the one classifier
+/// normalisation ([`crate::permission::shell_access::normalize_for_classification`]), so `command`, `builtin`, `exec`,
+/// `time`, `nohup` and the other transparent wrappers hide no floor. An argv the normaliser cannot pin is floored.
+struct SegmentFloors<'a> {
+    /// The command that runs, after the normalisation.
+    inner: &'a [String],
+    /// A launcher was peeled: no positive approval rides through it.
+    launched: bool,
+    dangerous: bool,
+    /// Exec surface, environment dump, unsafe tool flag, or an unpinnable / exec-vehicle wrapper.
+    special: bool,
+    opaque: bool,
+    /// u35 r3: the segment changes how bash reads later words (see `changes_shell_parsing`).
+    parsing_changed: bool,
+    /// u35 g13: a program loads a configuration file the command does not show (`segment_loads_config_file`).
+    config_file: bool,
+    /// u35 g14: the normaliser pinned the program (`inner` is the command that runs).
+    pinned: bool,
+    /// u35 g14: a wrapper moved the working directory (`env -C`, `sudo -D`).
+    moved: bool,
+}
+
+impl<'a> SegmentFloors<'a> {
+    /// `marked` is `raw` with every word the normaliser could not pin replaced by the unresolved marker (u35 r2): the
+    /// exec-surface check runs on it too, so an unpinned script, program text or format fails closed.
+    fn of(raw: &'a [String], marked: &[String]) -> Self {
+        let peeled = unwrap_wrappers(raw);
+        let norm = crate::permission::shell_access::normalize_for_classification(raw);
+        let inner = norm.words;
+        let forms = [peeled, inner];
+        let marked_norm = crate::permission::shell_access::normalize_for_classification(marked);
+        let marked_special =
+            segment_has_exec_surface(unwrap_wrappers(marked)) || segment_has_exec_surface(marked_norm.words);
+        let loads_config = crate::permission::exec_surface::segment_loads_config_file;
+        let config_file = loads_config(unwrap_wrappers(marked))
+            || loads_config(marked_norm.words)
+            || forms.iter().any(|words| loads_config(words));
+        let special_in = |words: &[String]| {
+            kubectl_has_unsafe_flag(words)
+                || rg_has_unsafe_flag(words)
+                || ps_dumps_environment(words)
+                || git_words_have_unsafe_query_option(words)
+                || segment_has_exec_surface(words)
+        };
+        let opaque_in = |words: &[String]| {
+            let shell_words: Vec<ShellWord<'_>> = words.iter().map(ShellWord::from).collect();
+            words_are_opaque_shell(&shell_words)
+        };
+        SegmentFloors {
+            inner,
+            launched: norm.launched,
+            dangerous: forms.iter().any(|words| is_dangerous_command_words(words)),
+            special: norm.fail_closed || norm.vehicle || marked_special || forms.iter().any(|words| special_in(words)),
+            opaque: forms.iter().any(|words| opaque_in(words)),
+            parsing_changed: forms.iter().any(|words| crate::permission::exec_surface::changes_shell_parsing(words)),
+            config_file,
+            pinned: !norm.fail_closed,
+            moved: norm.moved,
+        }
+    }
+}
+
+/// u35 r1: whether a saved prefix grant covers `words` on an argv boundary: the grant is a prefix of the joined argv
+/// that ends where an argv word ends, and the program word is one unambiguous word (no whitespace).
+fn grant_prefix_matches_argv(words: &[String], grant: &str) -> bool {
+    let joined = words.join(" ");
+    if !matches_whitelist_prefix(&joined, grant) {
+        return false;
+    }
+    if words.first().is_none_or(|head| head.is_empty() || head.chars().any(char::is_whitespace)) {
+        return false;
+    }
+    let mut end = 0usize;
+    for (i, word) in words.iter().enumerate() {
+        end += word.len() + usize::from(i > 0);
+        if end == grant.len() {
+            return true;
+        }
+        if end > grant.len() {
+            return false;
+        }
+    }
+    false
+}
+
 /// Parse and classify one Bash request once.
 /// Ordinary segment outcome stays separate from the script-level real-file-write and unsafe-environment floors.
 fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> BashEvaluation {
     use ClassifierSecurityFinding as Finding;
+    // u35 r3: the strict plain-text gate, checked first. A built-in read-only list may approve a segment only when the
+    // whole command is plain text; a user grant does not need it.
+    let plain_text = crate::permission::plain_text_gate::is_plain_text_command(cmd);
+    // u35 g11 (owner decision): the one check of the shell the runner will use; see `unvouched_runner_shell`.
+    let unvouched_shell = unvouched_runner_shell();
     let exact_grant = state.allowed_bash_commands.contains(cmd);
     let mut assessment = BashSecurityAssessment::default();
     let Some(tree) = try_parse_shell(cmd) else {
@@ -765,6 +1295,7 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         if unparseable_exec_risk(cmd) {
             assessment.insert(Finding::ExecOrAmbientGit);
         }
+        let (loads_config_file, hidden_tool) = unparseable_config_findings(cmd);
         return BashEvaluation {
             segments: raw_deny_rejection(cmd, state).unwrap_or(SegmentEvaluation::Unparseable),
             exact_grant,
@@ -774,6 +1305,17 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             ambient_segments: None,
             write_facts: Default::default(),
             recovered_eligible: false,
+            gated_segments: Vec::new(),
+            env_reader_segments: Vec::new(),
+            env_steering: None,
+            unvouched_shell,
+            unscanned_git: unparseable_exec_risk(cmd)
+                || crate::permission::exec_risk::script_may_invoke_gh(cmd),
+            repository_config_runs: false,
+            loads_config_file,
+            tool_segments: Vec::new(),
+            hidden_tool,
+            untrusted_folder: false,
         };
     };
     let writes = command_write_paths_split(tree.root_node(), cmd);
@@ -796,9 +1338,27 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         assessment.insert(Finding::FileWrite);
     }
     // P166 r9: `GIT_DIR=`/`GIT_WORK_TREE=`/`GIT_EXEC_PATH=`/... assignments are the same exec class as the matching flags.
-    if crate::permission::shell_access::tree_has_git_exec_env_assignment(tree.root_node(), cmd) {
+    // u35 g12: such an assignment points git at a repository the ambient scan does not read (`unscanned_git`).
+    let git_env_assignment = crate::permission::shell_access::tree_has_git_exec_env_assignment(tree.root_node(), cmd);
+    if git_env_assignment {
         assessment.insert(Finding::ExecOrAmbientGit);
     }
+    // u35: a redirect to `/dev/tcp/…` or `/dev/udp/…` opens a network socket (read or write), not a file. u35 r1: judged
+    // on the normalised destination; one the normaliser cannot pin is an unresolved argument.
+    let redirect_risk = crate::permission::shell_access::tree_redirect_destination_risk(tree.root_node(), cmd);
+    // u35 r2: a redirect reading a process environment (`< /proc/self/environ`) is an environment dump.
+    if redirect_risk.socket || redirect_risk.environ {
+        assessment.insert(Finding::SpecialExecSurface);
+    }
+    if redirect_risk.unresolved {
+        assessment.insert(Finding::UnresolvedArgument);
+    }
+    // u35 r2: a declaration that prints variables (`declare -p NAME`, `export -p`, `typeset`) is an environment dump.
+    if crate::permission::shell_access::tree_has_environment_dump_declaration(tree.root_node(), cmd) {
+        assessment.insert(Finding::SpecialExecSurface);
+    }
+    // u35: a `cd` in a pipeline, subshell or `||` list leaves the directory a later git runs in uncertain.
+    let uncertain_cwd = crate::permission::shell_access::tree_has_uncertain_cwd_change(tree.root_node(), cmd);
     let segments = try_parse_word_only_commands_sequence(&tree, cmd);
     if let Some(finding) = env_risk_finding(script_env_risk(
         tree.root_node(),
@@ -815,15 +1375,39 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             assessment.insert(Finding::UnresolvedArgument);
         }
         let projections = recovery.projections();
-        for words in &projections {
-            let words = unwrap_wrappers(words);
-            if is_dangerous_command_words(words) {
+        let floor_projections = recovery.floor_projections();
+        let mut env_reader_segments: Vec<Vec<String>> = Vec::new();
+        let mut loads_config_file = false;
+        let mut tool_segments = Vec::new();
+        let mut hidden_tool = false;
+        // u35 g14 (Grok r13 High): a recovered `gh` command (`out=$(gh pr view 1)`) is scanned like a git command; a
+        // `gh` word in no recovered `gh` command runs where no scan looked.
+        let mut gh_planned = false;
+        let mut hidden_gh = false;
+        for (words, marked) in projections.iter().zip(&floor_projections) {
+            if crate::permission::exec_risk::is_planned_gh_segment(words) {
+                gh_planned = true;
+            } else if words.iter().any(|word| crate::permission::exec_risk::script_may_invoke_gh(word)) {
+                hidden_gh = true;
+            }
+            let floors = SegmentFloors::of(words, marked);
+            env_reader_segments.push(floors.inner.to_vec());
+            tool_segments.extend(tool_segment_of(words, &floors));
+            hidden_tool |= names_hidden_tool(words, &floors);
+            if floors.dangerous {
                 assessment.insert(Finding::DangerousCommand);
             }
-            if rg_has_unsafe_flag(words) {
+            if floors.special {
                 assessment.insert(Finding::SpecialExecSurface);
             }
-            if segment_exec_facts(words).exec_risk {
+            loads_config_file |= floors.config_file;
+            if floors.opaque {
+                assessment.insert(Finding::OpaqueShell);
+            }
+            if floors.parsing_changed {
+                assessment.insert(Finding::UnparseableShell);
+            }
+            if segment_exec_facts(unwrap_wrappers(words)).exec_risk {
                 assessment.insert(Finding::ExecOrAmbientGit);
             }
         }
@@ -837,6 +1421,9 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         if unparseable_exec_risk(cmd) {
             assessment.insert(Finding::ExecOrAmbientGit);
         }
+        hidden_gh |= !gh_planned && crate::permission::exec_risk::script_may_invoke_gh(cmd);
+        let ambient_segments = (gh_planned && !unparseable_exec_risk(cmd))
+            .then(|| projections.iter().map(|words| words.to_vec()).collect::<Vec<Vec<String>>>());
         return BashEvaluation {
             // A persisted deny also matches each recovered command (a wrapped `timeout 5 rm "$LOG"` included).
             segments: raw_deny_rejection(cmd, state)
@@ -850,29 +1437,67 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             all_segments_granted: false,
             assessment,
             redirect_write: redirect_write || !recovery.is_eligible(),
-            ambient_segments: None,
+            ambient_segments,
             // The tree parsed, so its write targets are known even though word-level decomposition failed (`cd "$X" && …`).
             write_facts,
             recovered_eligible: recovery.is_eligible(),
+            gated_segments: Vec::new(),
+            env_reader_segments,
+            env_steering: None,
+            unvouched_shell,
+            unscanned_git: unparseable_exec_risk(cmd) || hidden_gh,
+            repository_config_runs: false,
+            loads_config_file,
+            tool_segments,
+            hidden_tool,
+            untrusted_folder: false,
         };
     };
     // Upgrade the raw-string compare with the dequoted single-command form now that the parse is available (see `whole_script_grant`)
     let exact_grant = whole_script_grant(cmd, &segments, state);
     let mut needs_prompt: Vec<String> = Vec::new();
+    // u35 r3: segments that ask only because the script is not plain text (the read-only list would cover them).
+    let mut gated_segments: Vec<String> = Vec::new();
     let mut via_session_grant = false;
-    let mut all_segments_granted = true;
+    // u35 g10 (Astra/Grok r9 High): "fully granted" is proved, never assumed. It holds only when some segment matched a
+    // grant and no segment that starts a program (a setup one included: `sleep` is a program; the builtin `cd` is
+    // not) went without one, so a call made only of setup segments, or a granted command plus an ungranted `sleep`,
+    // is approved without a grant.
+    let mut granted_segments = 0usize;
+    let mut ungranted_segment = false;
     let mut exec_risk = false;
     let mut has_git_command = false;
+    // u35 g13 (Astra r12 High): git named by a segment the ambient scan does not model as a git command.
+    let mut hidden_git = false;
+    let mut loads_config_file = false;
+    let mut tool_segments = Vec::new();
+    let mut hidden_tool = false;
     let mut ambient_raw: Vec<Vec<String>> = Vec::new();
+    let mut env_reader_segments: Vec<Vec<String>> = Vec::new();
     for parsed in segments {
         let raw_words = parsed.words();
         ambient_raw.push(raw_words.to_vec());
+        // A word kept as spelled (glob, over-cap brace expansion) proves nothing about the argv that runs.
+        let unresolved = parsed.has_unresolved_word();
+        if unresolved {
+            assessment.insert(Finding::UnresolvedArgument);
+        }
         // Peel wrapper commands like `timeout 30 …`, `env FOO=1 …`, `nice -n 5 …` so we classify the *inner* program
         // Without this, `timeout 30 rm -rf /tmp/foo` would be treated as a benign `timeout` invocation and silently auto-allowed
+        // `words` (canonical wrappers peeled) is the form grants match; every floor check below runs on `floors`, the
+        // one classifier normalisation (u35 r1: `command`/`builtin`/`exec` and the launchers peeled too).
         let words = unwrap_wrappers(raw_words);
-        let shell_words: Vec<ShellWord<'_>> = words.iter().map(ShellWord::from).collect();
-        if words_are_opaque_shell(&shell_words) {
+        let floors = SegmentFloors::of(raw_words, parsed.floor_words());
+        env_reader_segments.push(floors.inner.to_vec());
+        tool_segments.extend(tool_segment_of(raw_words, &floors));
+        hidden_tool |= names_hidden_tool(raw_words, &floors);
+        if floors.opaque {
             assessment.insert(Finding::OpaqueShell);
+        }
+        // u35 r3: a segment that changes how later words are read (`set +B`, `shopt -s extglob`, `alias`) leaves every
+        // later word modelled with the wrong rules.
+        if floors.parsing_changed {
+            assessment.insert(Finding::UnparseableShell);
         }
         // Raw words: interleaved normalize lives in segment_exec_facts.
         let facts = segment_exec_facts(raw_words);
@@ -880,81 +1505,114 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             exec_risk = true;
             assessment.insert(Finding::ExecOrAmbientGit);
         }
-        if facts.has_git {
+        // u35 g14 (Grok r13 High): `gh` runs git in its directory (`gh status`, `gh pr checkout`), so the ambient scan
+        // reads the repository there as for a git command.
+        let gh_command = crate::permission::exec_risk::is_planned_gh_segment(raw_words);
+        if facts.has_git || gh_command {
             has_git_command = true;
         }
-        if is_setup_command(words) {
+        // u35 g13 (Astra r12 High), g14 (Fable r13 H1, Astra r13 H3): a segment that names git (or `gh`) but is not a
+        // git command the ambient scan models runs git where no scan looked: a wrapper the normaliser cannot peel, one
+        // that changes directory (`env -C dir git status`), a launcher (`time`, `caffeinate`, `taskset`), or a program
+        // that runs another (`sudo`, `xargs`, `find -exec`, `sh -c`). Fail closed on ANY such word rather than model
+        // each wrapper; a `cd git` or `echo git` then asks after a model allow, and nothing else changes.
+        if !facts.has_git
+            && !gh_command
+            && raw_words.iter().any(|word| {
+                script_may_invoke_git(word) || crate::permission::exec_risk::script_may_invoke_gh(word)
+            })
+        {
+            hidden_git = true;
+        }
+        loads_config_file |= floors.config_file;
+        // `set` / `export` with no operand print every variable: not setup, so they reach the checks below.
+        if is_setup_command(words) && !floors.special {
+            // A shell builtin (`cd`, `export`, ...) runs no program, so it neither grants nor withholds; a setup
+            // program (`sleep`, `timeout`) is a program the runner would start.
+            if setup_runs_a_program(words) {
+                if segment_matches_grant(words, state) {
+                    granted_segments += 1;
+                } else {
+                    ungranted_segment = true;
+                }
+            }
             continue;
         }
         let s = words.join(" ");
+        let inner_s = floors.inner.join(" ");
 
-        // 1. Disallow takes priority: reject the whole script.
+        // 1. Disallow takes priority: reject the whole script (the normalised form too: `command rm …`).
         if let Some(d) = state
             .disallowed_bash_commands
             .iter()
-            .find(|d| matches_whitelist_prefix(&s, d))
+            .find(|d| matches_whitelist_prefix(&s, d) || matches_whitelist_prefix(&inner_s, d))
         {
             return BashEvaluation {
                 segments: SegmentEvaluation::Reject(format!(
                     "User previously rejected `{d}` in this project"
                 )),
                 exact_grant,
-                all_segments_granted,
+                all_segments_granted: false,
                 assessment: std::mem::take(&mut assessment),
                 redirect_write,
                 ambient_segments: None,
                 write_facts: Default::default(),
                 recovered_eligible: false,
+                gated_segments: Vec::new(),
+                env_reader_segments: Vec::new(),
+                env_steering: None,
+                unvouched_shell,
+                unscanned_git: false,
+                repository_config_runs: false,
+                loads_config_file: false,
+                tool_segments: Vec::new(),
+                hidden_tool: false,
+                untrusted_folder: false,
             };
         }
 
-        // Pinned commands run whatever argv follows, so a prefix grant would widen
-        // `docker run nginx` must not match `... --privileged`, nor `sed -n 1p f` match `sed -n 1p f -e 'w /tmp/x'`.
-        // Their saved scope is the full command, so enforce it on the exact segment only
-        let matched_command_grant = if always_allow_scope_pinned(words) {
-            state.allowed_bash_commands.contains(s.as_str())
+        let matched_grant = segment_matches_grant(words, state);
+        if matched_grant {
+            granted_segments += 1;
         } else {
-            state
-                .allowed_bash_commands
-                .iter()
-                .any(|a| matches_whitelist_prefix(&s, a))
-        };
-        let matched_grant = matched_command_grant
-            || state
-                .allowed_bash_globs
-                .iter()
-                .any(|g| matches_bash_glob(&s, g));
-        all_segments_granted &= matched_grant;
+            ungranted_segment = true;
+        }
 
         // 2. Dangerous commands must be prompted even if a whitelist prefix would otherwise match.
-        if is_dangerous_command_words(words) {
+        if floors.dangerous {
             assessment.insert(Finding::DangerousCommand);
             needs_prompt.push(s);
             continue;
         }
 
         // kubectl config/auth flags, `rg --pre` / `--hostname-bin`, and env-dumping `ps` (BSD `e`/`E`) must prompt even under a whitelist prefix or blanket grant
+        // So must a tool in a mode that runs another program or script (`sed e`, `awk system()`, `python -c`, `xargs`, `rsync -e`, ...)
         // So must the git driver/write options (`--textconv`, `--filters`, `--output`, `--ext-diff`, `grep -O`)
         // Always-allow persists only the verb prefix (e.g. "kubectl get", "git cat-file", or a bare "ps" from approving `ps aux`).
         // So a prefix grant cannot be trusted to auto-allow these secret-exposing or exec-capable variants
-        // An exact segment grant still auto-allows below
+        // An exact segment grant still auto-allows the segment, but (u35 r1) the finding is always recorded: only an
+        // exact WHOLE-SCRIPT grant clears a floor, so a grant for one segment cannot carry a script appended to it.
         // Do NOT insert DangerousCommand; that would also block exact grants
-        if (kubectl_has_unsafe_flag(words)
-            || rg_has_unsafe_flag(words)
-            || ps_dumps_environment(words)
-            || git_words_have_unsafe_query_option(words))
-            && !state.allowed_bash_commands.contains(&s)
-        {
+        if floors.special {
             assessment.insert(Finding::SpecialExecSurface);
-            needs_prompt.push(s);
-            continue;
+            if !state.allowed_bash_commands.contains(&s) {
+                needs_prompt.push(s);
+                continue;
+            }
         }
 
         // 3. Auto-allow conditions. Built-in safe lists count only when `honor_safe_lists` is set; an explicit user grant always counts.
-        let matched_safe = honor_safe_lists
-            && (is_safe_command_words(words)
-                || is_always_safe_command_words(words)
-                || is_safe_creation_command(words));
+        // A path-qualified or case-variant program (or wrapper) is not the program the list names.
+        // u35 r1: matched on the normalised argv, never through a launcher (`time`, `nohup`, `sudo`).
+        let inner = floors.inner;
+        let listed = honor_safe_lists
+            && !unresolved
+            && !floors.launched
+            && program_identity_is_plain(raw_words)
+            && (is_safe_command_words(inner)
+                || is_always_safe_command_words(inner)
+                || is_safe_creation_command(inner));
+        let matched_safe = plain_text && listed;
         if matched_grant || matched_safe {
             if matched_grant {
                 via_session_grant = true;
@@ -963,8 +1621,26 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         }
 
         // 4. Otherwise: prompt for this segment.
+        if listed {
+            gated_segments.push(s.clone());
+        }
         needs_prompt.push(s);
     }
+    // u35 r3: setup segments (`cd`, `sleep`, ...) are skipped above; a script that is not plain text and that no user
+    // grant covered must not auto-allow through them alone (`cd /tmp && sleep 5`).
+    if needs_prompt.is_empty() && !plain_text && !via_session_grant {
+        gated_segments.push(cmd.to_owned());
+        needs_prompt.push(cmd.to_owned());
+    }
+    if has_git_command && uncertain_cwd {
+        exec_risk = true;
+        assessment.insert(Finding::ExecOrAmbientGit);
+    }
+    // u35 r1: a redirect destination the normaliser cannot pin is not covered by a read-only list.
+    if redirect_risk.unresolved {
+        needs_prompt.push(cmd.to_owned());
+    }
+    let all_segments_granted = granted_segments > 0 && !ungranted_segment;
     let segments = if needs_prompt.is_empty() {
         SegmentEvaluation::AutoAllow { via_session_grant }
     } else {
@@ -986,7 +1662,50 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         ambient_segments,
         write_facts,
         recovered_eligible: false,
+        gated_segments,
+        env_reader_segments,
+        env_steering: None,
+        unvouched_shell,
+        unscanned_git: (has_git_command && (exec_risk || git_env_assignment)) || hidden_git,
+        repository_config_runs: false,
+        loads_config_file,
+        tool_segments,
+        hidden_tool,
+        untrusted_folder: false,
     }
+}
+
+/// u35 g10: a setup segment ([`is_setup_command`]) that starts a program, as opposed to a shell builtin.
+fn setup_runs_a_program(words: &[String]) -> bool {
+    words
+        .first()
+        .is_some_and(|head| !matches!(head.as_str(), "cd" | "pushd" | "popd" | "export" | "unset" | "set"))
+}
+
+/// Whether a remembered command or glob grant covers one segment (`words`, canonical wrappers peeled).
+/// Pinned commands run whatever argv follows, so a prefix grant would widen
+/// `docker run nginx` must not match `... --privileged`, nor `sed -n 1p f` match `sed -n 1p f -e 'w /tmp/x'`.
+/// Their saved scope is the full command, so enforce it on the exact segment only
+/// u35 r1: a prefix grant matches on argv boundaries (`ls` does not cover the one word `'ls -la'`).
+fn segment_matches_grant(words: &[String], state: &PermissionState) -> bool {
+    let s = words.join(" ");
+    let head_unambiguous = words
+        .first()
+        .is_some_and(|head| !head.is_empty() && !head.chars().any(char::is_whitespace));
+    let matched_command_grant = head_unambiguous
+        && if always_allow_scope_pinned(words) {
+            state.allowed_bash_commands.contains(s.as_str())
+        } else {
+            state
+                .allowed_bash_commands
+                .iter()
+                .any(|a| grant_prefix_matches_argv(words, a))
+        };
+    matched_command_grant
+        || state
+            .allowed_bash_globs
+            .iter()
+            .any(|g| matches_bash_glob(&s, g))
 }
 
 /// The protected-target floor for one request: a direct edit of a protected path (`.git/hooks`, `.ssh`, shell
@@ -1084,20 +1803,24 @@ pub(crate) fn hub_default_prompt(
         causes: Vec::new(),
     };
     match access {
+        // u35 g8 (Astra r7): the program Fuigo's grep tool runs is chosen by the environment
+        AccessKind::Grep { .. } if crate::permission::exec_risk::grep_tool_env_steers(cwd).is_some() => plain(true),
         AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_) => plain(false),
         AccessKind::Tool(name) if is_auto_allowed_tool(name) => plain(false),
         AccessKind::Bash(cmd) => {
             let mut evaluation = evaluate_bash(cmd, &PermissionState::default(), true);
+            // u35 g7: the same inherited-environment check as the local manager, before the scan runs any git.
+            add_inherited_env_finding(&mut evaluation, cwd);
+            add_tool_config_finding(&mut evaluation, cwd);
             // The same ambient git scan the manager runs before any grant or allow decision (`git status` in a repo
             // whose config runs a program is not safe).
             let mut branch_plan = BranchSwitchPlan::NotApplicable;
             if let Some(raw) = evaluation.ambient_segments.take() {
                 branch_plan = branch_switch_plan_with(&raw, cwd, Some(&evaluation.write_facts));
-                if ambient_exec_risk_from_plan(&ambient_scan_plan_from_segments(&raw, cwd)) {
-                    evaluation
-                        .assessment
-                        .insert(ClassifierSecurityFinding::ExecOrAmbientGit);
-                }
+                add_ambient_git_findings(
+                    &mut evaluation,
+                    ambient_git_risk_from_plan(&ambient_scan_plan_from_segments(&raw, cwd)),
+                );
             }
             let floor = bash_request_floor_requires_prompt(Some(&evaluation));
             let needs = if policy_allows {
@@ -1106,7 +1829,9 @@ pub(crate) fn hub_default_prompt(
                     && branch_switch_floor_kept_blocking(&branch_plan, &evaluation, policy, access, &GitTreeLister);
                 broad_allow_deferred(Some(&evaluation), policy, access, true, kept)
             } else {
-                floor || !matches!(evaluation.segments, SegmentEvaluation::AutoAllow { .. })
+                floor
+                    || !matches!(evaluation.segments, SegmentEvaluation::AutoAllow { .. })
+                    || no_grant_approval_switched_off(&evaluation)
             };
             let causes = match cover {
                 Some(cover) if needs => sandbox_card_causes::bash_ask_causes(
@@ -1126,6 +1851,34 @@ pub(crate) fn hub_default_prompt(
         | AccessKind::AgentMessage { .. }
         | AccessKind::Tool(_) => plain(!policy_allows),
     }
+}
+
+/// u35 t1 (design d2 §4.3): [`hub_default_prompt`] for a Bash command whose folder is not trusted. Nothing is approved
+/// without a grant; an allow rule that covers the command (`policy_allows`) still runs it under the floors, which are
+/// judged without running anything the folder configures: the in-process git reader only, and the branch-switch
+/// floor stays.
+pub(crate) fn hub_untrusted_bash_needs_prompt(
+    cmd: &str,
+    policy: Option<&CompiledPolicy>,
+    policy_allows: bool,
+    cwd: &std::path::Path,
+) -> bool {
+    if !policy_allows {
+        return true;
+    }
+    let access = AccessKind::Bash(cmd.to_owned());
+    let mut evaluation = evaluate_bash(cmd, &PermissionState::default(), true);
+    evaluation.untrusted_folder = true;
+    add_inherited_env_finding(&mut evaluation, cwd);
+    add_tool_config_finding(&mut evaluation, cwd);
+    if let Some(raw) = evaluation.ambient_segments.take() {
+        add_ambient_git_findings(
+            &mut evaluation,
+            ambient_git_risk_from_plan_in(&ambient_scan_plan_from_segments(&raw, cwd), false),
+        );
+    }
+    let floor = bash_request_floor_requires_prompt(Some(&evaluation));
+    broad_allow_deferred(Some(&evaluation), policy, &access, true, floor)
 }
 
 #[cfg(test)]
@@ -1316,6 +2069,17 @@ impl PermissionHandle {
             && let Err(e) = cmd_tx.send(PermissionCommand::SetProjectInstructions(instructions))
         {
             tracing::error!(?e, "failed to send project instructions command");
+        }
+    }
+
+    /// u35 t1 (design d2 §3.4): what this session's policy was built from ([`crate::permission::resolution::
+    /// resolve_session_policy`]). Sent right after the manager is spawned, before any request. A command whose folder
+    /// is not trusted is then judged without the project tier, and the policy is rebuilt when folder trust changes.
+    pub fn set_session_policy_inputs(&self, inputs: crate::permission::resolution::SessionPolicyInputs) {
+        if let PermissionHandle::Actor { cmd_tx, .. } = self
+            && let Err(e) = cmd_tx.send(PermissionCommand::SetSessionPolicyInputs(Arc::new(inputs)))
+        {
+            tracing::error!(?e, "failed to send session policy inputs");
         }
     }
 
@@ -1608,6 +2372,16 @@ fn bash_request_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bo
     evaluation.is_some_and(|e| !e.exact_grant && e.assessment.constrains_broad_grant())
 }
 
+/// u35: the floor for session grants (prefix/glob grants and the `allow_bash_execute` blanket) and sandbox auto-allow.
+/// On top of [`bash_request_floor_requires_prompt`], a destructive command (`DangerousCommand`), an argument only the
+/// shell resolves (`UnresolvedArgument`) and structure the classifier cannot decompose (`UnparseableShell`) are not
+/// covered by a grant given for other commands. An exact whole-command grant is the user's authority for this command
+/// and bypasses it. Configured allow rules keep [`bash_request_floor_requires_prompt`]: a narrow rule naming a
+/// destructive command clears `DangerousCommand`, and the catch-all rule is a documented explicit override.
+fn bash_session_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
+    evaluation.is_some_and(|e| !e.exact_grant && e.assessment.constrains_session_grant())
+}
+
 /// Whether a configured allow rule clears the bash request floor in ask/dontAsk.
 /// Requires ALL of the following.
 /// The assessment is `FileWrite`-only (other floor findings describe effects outside the rule's matched words).
@@ -1676,10 +2450,92 @@ fn branch_switch_floor_kept_blocking(
 
 const BRANCH_CHECK_TIMEOUT: std::time::Duration = crate::permission::branch_switch::CHECK_TIMEOUT;
 
+/// u35 g9: what decides, besides the reason, whether a Bash call was approved without a grant.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub(crate) struct NoGrantFacts {
+    /// A grant or an override covers the whole call: a grant for every segment, an exact grant, the session's "allow all
+    /// commands" (or a remembered whole command), or a configured allow rule that matches it (`--allow Bash`).
+    pub(crate) call_granted: bool,
+    /// A session grant approved some segments and the read-only lists the rest (`SegmentEvaluation::AutoAllow` with
+    /// `via_session_grant`): approved as `SESSION_GRANT`, but not wholly by the grant.
+    pub(crate) partly_granted: bool,
+}
+
+impl NoGrantFacts {
+    fn of(
+        cmd: &str,
+        evaluation: &BashEvaluation,
+        state: &PermissionState,
+        yolo_pin: Option<&'static str>,
+        policy_allows: bool,
+    ) -> Self {
+        Self {
+            call_granted: evaluation.all_segments_granted
+                || evaluation.exact_grant
+                || persisted_bash_auto_allows(state, cmd, yolo_pin)
+                || policy_allows,
+            partly_granted: matches!(evaluation.segments, SegmentEvaluation::AutoAllow { via_session_grant: true }),
+        }
+    }
+}
+
+/// u35 g9 (lead decision after r8): the one flag an allowed call carries to the shell runner
+/// ([`fuigo_tools::sandbox_launch::ApprovedWithoutGrant`]): `true` iff some part of the call was approved without a
+/// grant (the read-only lists, the Auto mode fast path, or the Auto mode classifier, heuristic or model, all of which
+/// judged Fuigo's own environment) and no grant or override covers the whole call. A grant, a user's answer (any
+/// prompt), a hook, yolo, a policy allow and sandbox auto-allow give `false`. Not an allow: `true` (the call does not
+/// run).
+///
+/// u35 g10 (Astra/Grok r9 High): the reason is matched exhaustively with no wildcard, so a new reason must say which
+/// side it is on; a reason Fuigo does not know (or none) is `true`.
+pub(crate) fn approved_without_grant(
+    decision: &Decision,
+    user_prompted: bool,
+    reason: Option<&str>,
+    facts: NoGrantFacts,
+) -> bool {
+    use fuigo_telemetry::events::PermissionDecisionReason as R;
+    if !matches!(decision, Decision::Allow) {
+        return true;
+    }
+    if user_prompted {
+        return false;
+    }
+    let Some(reason) = reason.and_then(|r| R::try_from(r).ok()) else {
+        return true;
+    };
+    let without_grant = match reason {
+        // Approved on what the command is, judged on Fuigo's own environment.
+        R::SafeCommand | R::AutoFastPath | R::AutoClassifierAllow => true,
+        // A session grant that covered only some segments, the read-only lists the rest.
+        R::SessionGrant => facts.partly_granted,
+        // The user's grant or answer, or an override the user configured or switched on.
+        R::Yolo | R::PolicyAllow | R::SandboxAuto | R::PersistedGrant | R::StaticAllowlist | R::PromptAllow => false,
+        // Reasons that never approve: an allow under one of them was not granted.
+        R::PolicyDeny
+        | R::PolicyAsk
+        | R::BashCommandGateAsk
+        | R::ShellFileGateAsk
+        | R::AutoClassifierDeny
+        | R::AutoClassifierTimeout
+        | R::AutoClassifierUnavailable
+        | R::AutoDenialLimit
+        | R::SessionDeny
+        | R::PromptDeny
+        | R::NeedsUser
+        | R::BashRequestFloor
+        | R::OpaqueShell
+        | R::HookAsk
+        | R::RequesterGone => true,
+    };
+    without_grant && !facts.call_granted
+}
+
 /// A request has no static-analysis findings at all: the only case where a broad configured policy Allow may bypass the classifier.
 /// Non-Bash access has no Bash findings and is always clear here.
+/// u35 g8: `InheritedEnvironment` alone does not stop a configured allow rule (a grant).
 fn bash_assessment_is_clear(evaluation: Option<&BashEvaluation>) -> bool {
-    evaluation.is_none_or(|e| e.assessment.is_empty())
+    evaluation.is_none_or(|e| e.assessment.is_empty() || e.assessment.is_inherited_environment_only())
 }
 
 /// The trusted classifier assessment for one request.
@@ -1696,8 +2552,11 @@ fn classifier_assessment(
     assessment
 }
 
+/// u35 t1 (design d2 D1): never in a folder that is not trusted.
 fn sandbox_may_auto_allow_bash(evaluation: Option<&BashEvaluation>, sandbox_active: bool) -> bool {
-    sandbox_active && !bash_request_floor_requires_prompt(evaluation)
+    sandbox_active
+        && !bash_session_floor_requires_prompt(evaluation)
+        && !evaluation.is_some_and(|e| e.untrusted_folder)
 }
 
 /// Policy knobs for [`bash_grant_pre_decision`].
@@ -1742,11 +2601,15 @@ fn bash_grant_pre_decision(
     if let SegmentEvaluation::Reject(reason) = &evaluation.segments {
         return Some((Decision::Reject(reason.to_owned()), reasons::SESSION_DENY));
     }
-    if bash_request_floor_requires_prompt(Some(evaluation)) {
+    if bash_session_floor_requires_prompt(Some(evaluation)) {
         return None;
     }
     match &evaluation.segments {
         SegmentEvaluation::Reject(_) => unreachable!(),
+        // u35 g8: with a steering environment the read-only lists approve nothing; the session blanket still does
+        SegmentEvaluation::AutoAllow { .. } if no_grant_approval_switched_off(evaluation) => (opts.allow_blanket
+            && persisted_bash_auto_allows(state, cmd, yolo_pin))
+        .then_some((Decision::Allow, reasons::SESSION_GRANT)),
         SegmentEvaluation::AutoAllow { via_session_grant } => {
             if !opts.honor_safe_lists && !evaluation.all_segments_granted {
                 None
@@ -2036,6 +2899,10 @@ fn spawn_permission_manager_with_pin(
     yolo_pin: Option<&'static str>,
     hub_permission: Option<Arc<dyn crate::permission::PermissionHookTransport>>,
 ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
+    // u35 g9 (Fable r8 Low): the shell runner's check for calls approved without a grant is installed before this
+    // manager approves anything, not on the first Bash evaluation.
+    install_runner_env_judge();
+    install_runner_trust_judge();
     let (tx, mut rx) = mpsc::unbounded_channel::<PermissionCommand>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<PermissionEvent>();
     let initial_yolo = clamp_yolo(initial_yolo, yolo_pin);
@@ -2108,11 +2975,11 @@ fn spawn_permission_manager_with_pin(
         let mut project_instructions: Option<String> = None;
         let mut pin_refusal_logged = false;
         let mut allow_edits_for_session = false;
-        let prompt_policy = permission_config
-            .as_ref()
-            .map(|c| c.prompt_policy)
-            .unwrap_or_default();
-        let compiled_policy = permission_config.map(CompiledPolicy::new);
+        // u35 t1 (design d2 §3.4): the session policy (`project`: with the session folder's project tier when that
+        // folder was trusted) and the same without any project tier (`base`), for a command whose folder is not
+        // trusted. Without session inputs (tests, configs built by hand) both are the given config.
+        let mut policies = TrustPolicies::fixed(permission_config);
+        let mut session_inputs: Option<Arc<crate::permission::resolution::SessionPolicyInputs>> = None;
         let static_domain_matcher = DomainMatcher::new(&web_fetch_allowed_domains);
         let web_fetch_allowlist_is_default = web_fetch_allowed_domains
             .iter()
@@ -2122,7 +2989,7 @@ fn spawn_permission_manager_with_pin(
             match cmd {
                 PermissionCommand::DecideOnly { access, cwd: decide_cwd, respond_to } => {
                     let verdict = match GatePreflight::evaluate(
-                        compiled_policy.as_ref(),
+                        policies.project.as_ref(),
                         &access,
                         &decide_cwd,
                         false,
@@ -2137,7 +3004,10 @@ fn spawn_permission_manager_with_pin(
                 PermissionCommand::SetYoloMode(enabled) => {
                     let clamped = clamp_yolo(enabled, yolo_pin);
                     if enabled && !clamped && !pin_refusal_logged {
-                        tracing::warn!("always-approve enable refused: disabled by managed policy");
+                        tracing::warn!(
+                            reason = yolo_pin.unwrap_or_default(),
+                            "always-approve enable refused: always-approve is locked off"
+                        );
                         pin_refusal_logged = true;
                     }
                     tracing::info!("always-approve set to: {}", clamped);
@@ -2172,6 +3042,10 @@ fn spawn_permission_manager_with_pin(
                 PermissionCommand::SetProjectInstructions(instructions) => {
                     project_instructions = instructions;
                 }
+                PermissionCommand::SetSessionPolicyInputs(inputs) => {
+                    policies = TrustPolicies::resolve(&inputs).await;
+                    session_inputs = Some(inputs);
+                }
                 PermissionCommand::ResetState => {
                     state = PermissionState::default();
                     replace_state_on_disk(&cwd, &state, client_id_ref).await;
@@ -2194,10 +3068,19 @@ fn spawn_permission_manager_with_pin(
                             edit_targets,
                             read_targets,
                             peer_note,
+                            exec_cwd,
                         },
-                    mut respond_to,
+                    respond_to,
                 } => {
                     let request_received = std::time::Instant::now();
+                    let mut respond_to = FinalShellSend { inner: respond_to, untrusted: false };
+                    // u35 t1 (design d2 §3.4): folder trust changed since the policy was built (a grant, a decline,
+                    // `/untrust`, another process's answer): rebuild it.
+                    if let Some(inputs) = &session_inputs
+                        && policies.generation != crate::folder_trust::trust_generation()
+                    {
+                        policies = TrustPolicies::resolve(inputs).await;
+                    }
                     // P184: a multi-file edit (`apply_patch`) is judged per target. The prompt, the events and the
                     // classifier see an `Edit` naming every target; the policy and the protected-edit floor judge
                     // each target; a patch that does not parse (or writes nothing) is refused below.
@@ -2268,6 +3151,10 @@ fn spawn_permission_manager_with_pin(
                     });
                     let classification: std::cell::RefCell<RequestClassification> =
                         std::cell::RefCell::new(RequestClassification::NotClassified);
+                    // u35 g9: what the approved call carries to the shell runner. Set once the command and the policy
+                    // are judged, below: a grant or override covers the whole call, or a session grant approved only
+                    // some of its segments (the rest by the read-only lists).
+                    let no_grant = std::cell::Cell::new(NoGrantFacts::default());
                     let emit_event = |decision: &Decision,
                                       auto_approved: bool,
                                       user_prompted: bool,
@@ -2318,6 +3205,12 @@ fn spawn_permission_manager_with_pin(
                                 .classifier_verdict()
                                 .map(|v| v.wire_str().to_owned()),
                             remember_tool_approvals: Some(remember_tool_approvals),
+                            approved_without_grant: Some(approved_without_grant(
+                                decision,
+                                user_prompted,
+                                decision_reason,
+                                no_grant.get(),
+                            )),
                         };
                         let _ = event_tx.send(event.clone());
                         event
@@ -2357,22 +3250,48 @@ fn spawn_permission_manager_with_pin(
                         state.merge_grants_from(fresh);
                     }
                     let mut branch_plan = BranchSwitchPlan::NotApplicable;
+                    // u35 t1 (design d2 §3.3): the folder trust of a Bash command: Trusted only when every directory
+                    // it starts in is in a trusted folder (u35 t3: a folder it names does not count). Nothing runs
+                    // before it.
+                    let mut bash_trust: Option<crate::folder_trust::CommandTrust> = None;
                     let bash_evaluation = match &access {
                         AccessKind::Bash(cmd) => {
+                            // u35 g11 (Astra r10 High): every directory the command can run in, the tool's own
+                            // working directory (OpenCode bash `workdir`) included, gets every repository check.
+                            let run_dirs = bash_run_dirs(request_cwd, exec_cwd.as_deref());
+                            let trust = crate::permission::run_dirs::run_dirs_trust(&run_dirs);
+                            let folder_trusted = trust.is_trusted();
+                            if !folder_trusted {
+                                tracing::info!(tool = %tool_name, ?trust, "shell command outside a trusted folder");
+                            }
+                            bash_trust = Some(trust);
                             let mut evaluation = evaluate_bash(cmd, &state, true);
+                            evaluation.untrusted_folder = !folder_trusted;
+                            // u35 g7 (Astra/Grok r6): an inherited environment that can steer what runs (`PATH`
+                            // not clean, `LD_PRELOAD`, `GIT_*`, ...), judged before the ambient scan runs any git.
+                            for dir in &run_dirs {
+                                add_inherited_env_finding(&mut evaluation, dir);
+                                add_tool_config_finding(&mut evaluation, dir);
+                            }
                             if let Some(raw) = evaluation.ambient_segments.take() {
-                                let session_cwd = request_cwd.to_path_buf();
-                                branch_plan = branch_switch_plan_with(&raw, &session_cwd, Some(&evaluation.write_facts));
-                                let plan = ambient_scan_plan_from_segments(&raw, &session_cwd);
-                                let ambient_risk = match plan {
-                                    AmbientScanPlan::FailClosed => true,
-                                    plan @ AmbientScanPlan::CheckDirs(_) => {
-                                        tokio::task::spawn_blocking(move || {
-                                            ambient_exec_risk_from_plan(&plan)
-                                        })
-                                        .await
-                                        .unwrap_or(true)
-                                    }
+                                let run_cwd = run_dirs.last().cloned().unwrap_or_else(|| request_cwd.to_path_buf());
+                                branch_plan = branch_switch_plan_with(&raw, &run_cwd, Some(&evaluation.write_facts));
+                                let plans: Vec<AmbientScanPlan> =
+                                    run_dirs.iter().map(|dir| ambient_scan_plan_from_segments(&raw, dir)).collect();
+                                let fail_closed = AmbientGitRisk { exec: true, hook: false };
+                                let ambient_risk = if plans.iter().any(|plan| matches!(plan, AmbientScanPlan::FailClosed)) {
+                                    fail_closed
+                                } else {
+                                    // u35 t1: outside a trusted folder only the in-process reader looks; nothing
+                                    // the repository configures runs.
+                                    tokio::task::spawn_blocking(move || {
+                                        plans.iter().map(|plan| ambient_git_risk_from_plan_in(plan, folder_trusted)).fold(
+                                            AmbientGitRisk::default(),
+                                            |all, one| AmbientGitRisk { exec: all.exec || one.exec, hook: all.hook || one.hook },
+                                        )
+                                    })
+                                    .await
+                                    .unwrap_or(fail_closed)
                                 };
                                 if respond_to.is_closed() {
                                     tracing::info!(
@@ -2388,16 +3307,18 @@ fn spawn_permission_manager_with_pin(
                                     );
                                     continue;
                                 }
-                                if ambient_risk {
-                                    evaluation
-                                        .assessment
-                                        .insert(ClassifierSecurityFinding::ExecOrAmbientGit);
-                                }
+                                add_ambient_git_findings(&mut evaluation, ambient_risk);
                             }
                             Some(evaluation)
                         }
                         _ => None,
                     };
+                    // u35 t1 (design d2 §3.4): a command whose folder is not trusted is judged without any project tier
+                    // (a trusted repository's `Bash(make *)` does not cover `make` with `workdir` in an untrusted folder).
+                    let untrusted_command = bash_trust.as_ref().is_some_and(|t| !t.is_trusted());
+                    respond_to.untrusted = untrusted_command;
+                    let compiled_policy = policies.policy_for(untrusted_command);
+                    let prompt_policy = policies.prompt_policy_for(untrusted_command);
                     // A recovered filename script (`LOG=/x; ls "$LOG"`) must be classified in auto mode unless an exact
                     // whole-script grant already authorizes it: no blanket, prefix, glob, sandbox or prompt-policy allow
                     // may vouch for argument values nobody resolved.
@@ -2464,6 +3385,15 @@ fn spawn_permission_manager_with_pin(
                         ),
                     };
                     let policy_decision = preflight.policy_decision();
+                    if let (AccessKind::Bash(cmd), Some(evaluation)) = (&access, bash_evaluation.as_ref()) {
+                        no_grant.set(NoGrantFacts::of(
+                            cmd,
+                            evaluation,
+                            &state,
+                            yolo_pin,
+                            matches!(policy_decision, Some(Decision::Allow)),
+                        ));
+                    }
                     let policy_forced_prompt = preflight.policy_forced_prompt();
                     let shell_forced_prompt = preflight.shell_forced_prompt();
                     let hook_forced_prompt = hook_ask.is_some();
@@ -2561,9 +3491,21 @@ fn spawn_permission_manager_with_pin(
                         use crate::permission::auto_mode::{
                             AutoFastPath, access_requires_user_interaction, auto_mode_fast_path,
                         };
+                        // u35 g12 (Astra r11 High): the program Fuigo's grep tool runs is chosen by the
+                        // environment (`RG_BIN_PATH`, `RUNFILES_DIR` in the project): asked about, as in Ask mode,
+                        // never fast-path allowed.
+                        let grep_tool_steered = matches!(&access, AccessKind::Grep { .. })
+                            && crate::permission::exec_risk::grep_tool_env_steers(request_cwd).is_some();
                         let needs_user = protected_edit.is_some()
+                            || grep_tool_steered
                             || access_requires_user_interaction(&tool_name, &access);
-                        let fast = auto_mode_fast_path(&access, &tool_name, needs_user);
+                        // u35 g11 (owner decision): under PowerShell or cmd.exe nothing in Auto mode approves a
+                        // command without a grant, so it is asked about without the fast path or the classifier.
+                        let fast = if shell_switches_off_auto(bash_evaluation.as_ref()) {
+                            AutoFastPath::PromptUser
+                        } else {
+                            auto_mode_fast_path(&access, &tool_name, needs_user)
+                        };
                         match fast {
                             AutoFastPath::Allow if hook_forced_prompt => {}
                             AutoFastPath::Allow => {
@@ -2698,7 +3640,19 @@ fn spawn_permission_manager_with_pin(
                                             consecutive: auto_consecutive_denials,
                                             total: auto_total_denials,
                                         });
-                                        if !hook_forced_prompt {
+                                        if !hook_forced_prompt
+                                            && classifier_allow_needs_user(bash_evaluation.as_ref())
+                                        {
+                                            // u35 g11, u35 t1: a steering environment, or a folder that is not
+                                            // trusted; ask.
+                                            auto_forced_prompt = true;
+                                            auto_prompt_reason = Some(reasons::NEEDS_USER);
+                                        } else if !hook_forced_prompt {
+                                            if let Some(kind) = bash_evaluation.as_ref().and_then(repository_execution) {
+                                                // u35 t1 (D3): the trusted folder's own content runs; the model's
+                                                // allow stands.
+                                                tracing::debug!(tool = %tool_name, ?kind, "auto mode: repository content runs in a trusted folder");
+                                            }
                                             let decision = Decision::Allow;
                                             let event = emit_event(
                                                 &decision,
@@ -2829,7 +3783,9 @@ fn spawn_permission_manager_with_pin(
                         && !hook_forced_prompt
                         && bash_request_floor_requires_prompt(bash_evaluation.as_ref())
                     {
-                        branch_switch_floor_kept(
+                        // u35 t1 (design d2 §3.3): outside a trusted folder git is not asked; the floor stays.
+                        bash_trust.as_ref().is_some_and(|t| !t.is_trusted())
+                            || branch_switch_floor_kept(
                             &branch_plan,
                             bash_evaluation.as_ref(),
                             compiled_policy.as_ref(),
@@ -2901,6 +3857,12 @@ fn spawn_permission_manager_with_pin(
                         // An ask rule binds over the built-in safe-listing, as it does for reads
                         AccessKind::WebSearch(_) if policy_forced_prompt => None,
                         AccessKind::WebSearch(_) => Some((Decision::Allow, reasons::SAFE_COMMAND)),
+                        // u35 g8 (Astra r7): the program Fuigo's grep tool runs is chosen by the environment
+                        AccessKind::Grep { .. }
+                            if crate::permission::exec_risk::grep_tool_env_steers(request_cwd).is_some() =>
+                        {
+                            None
+                        }
                         AccessKind::Grep { .. } => Some((Decision::Allow, reasons::SAFE_COMMAND)),
                         // Peer messaging (design row 3a): `send_message` is auto-allowed in every mode, but only here, after the
                         // policy step above: a deny rule has already rejected it and an ask rule (`policy_forced_prompt`) still prompts.
@@ -3055,9 +4017,13 @@ fn spawn_permission_manager_with_pin(
 
                     if prompt_policy == crate::permission::types::PromptPolicy::Deny {
                         tracing::debug!(tool = ?tool_name, "prompt_policy=deny: rejected");
-                        let decision = Decision::PolicyDeny(
-                            "denied by prompt policy (tool not pre-approved)".to_owned(),
-                        );
+                        // u35 t1 (design d2 §5.4): a command refused because its folder is not trusted says so.
+                        let decision = Decision::PolicyDeny(match &bash_trust {
+                            Some(crate::folder_trust::CommandTrust::Untrusted(reason)) => {
+                                crate::folder_trust::untrusted_command_refusal(reason)
+                            }
+                            _ => "denied by prompt policy (tool not pre-approved)".to_owned(),
+                        });
                         let event =
                             emit_event(&decision, false, false, None, Some(reasons::PROMPT_DENY));
                         let _ = respond_to.send(PermissionResolution {
@@ -3120,8 +4086,12 @@ fn spawn_permission_manager_with_pin(
                     }
                     let (decision, outcome_str, user_prompted) = match &access {
                         AccessKind::Bash(cmd) => {
+                            let prompt_update = with_env_steering_note(
+                                &tool_call_update,
+                                bash_evaluation.as_ref().and_then(|e| e.env_steering),
+                            );
                             let prompt_outcome = tokio::select! {
-                                outcome = prompter.request(&access, &tool_call_update, protected_edit, hook_ask.as_ref()) => outcome,
+                                outcome = prompter.request(&access, &prompt_update, protected_edit, hook_ask.as_ref()) => outcome,
                                 _ = respond_to.closed() => PromptOutcome::Cancelled,
                             };
 
@@ -3442,6 +4412,9 @@ mod tests {
 
     #[path = "bash_filename_arguments_tests.rs"]
     mod bash_filename_arguments_tests;
+
+    #[path = "t1_trust_tests.rs"]
+    mod t1_trust_tests;
 
     async fn decide(
         handle: &PermissionHandle,
@@ -4576,6 +5549,90 @@ mod tests {
                     !matches!(neutralized, Decision::Allow),
                     "pin: flag neutralized → must not auto-allow, got {neutralized:?}"
                 );
+            })
+            .await;
+    }
+
+    /// u35 B, RED at base: the user's own `[ui] disable_bypass_permissions_mode = true` pins a live manager exactly like a
+    /// requirements lock (yolo off at spawn, `set_yolo_mode(true)` refused, no `allow_bash_execute` blanket).
+    #[tokio::test]
+    async fn u35_user_config_lock_pins_a_live_manager() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let home = tempfile::tempdir().unwrap();
+                std::fs::write(
+                    home.path().join("config.toml"),
+                    "[ui]\ndisable_bypass_permissions_mode = true\n",
+                )
+                .unwrap();
+
+                // Control: no pin, yolo stays on.
+                let (unlocked, _e0) = test_manager(&cwd, true, None);
+                assert!(unlocked.is_yolo_mode(), "control: an unpinned manager honours initial yolo");
+
+                // The env lock is a std mutex: take what needs FUIGO_HOME, then drop it before any await.
+                let (pin, requirements_lock, public) = {
+                    let _env = crate::LockedTestEnv::lock().set("FUIGO_HOME", home.path());
+                    let pin = crate::permission::resolution::user_config_lock().map(|l| l.reason);
+                    let requirements_lock = fuigo_config::requirements_layers().iter().any(|l| {
+                        l.value
+                            .get("ui")
+                            .and_then(|ui| ui.get("disable_bypass_permissions_mode"))
+                            .and_then(toml::Value::as_bool)
+                            == Some(true)
+                    });
+                    let (tx, _rx) = mpsc::unbounded_channel();
+                    let public = spawn_permission_manager(
+                        acp::SessionId::new(Arc::from("u35-public")),
+                        GatewaySender::new(tx),
+                        cwd.clone(),
+                        ClientType::Generic,
+                        None,
+                        vec![],
+                        vec![],
+                        true,
+                        None,
+                    );
+                    (pin, requirements_lock, public)
+                };
+                assert!(pin.is_some(), "the user's own config.toml must yield a pin");
+
+                let (locked, _e1) = test_manager(&cwd, true, pin);
+                assert!(!locked.is_yolo_mode(), "pinned at spawn");
+                locked.set_yolo_mode(true);
+                assert!(!locked.is_yolo_mode(), "set_yolo_mode(true) stays off under the pin");
+
+                let state = PermissionState {
+                    allow_bash_execute: true,
+                    ..Default::default()
+                };
+                persist_state(&cwd, &state, None).await;
+                let bash = || {
+                    acp::ToolCallUpdate::new(
+                        acp::ToolCallId::new(Arc::from("tc")),
+                        acp::ToolCallUpdateFields::default(),
+                    )
+                };
+                let (pinned, _e2) = test_manager(&cwd, false, pin);
+                let decision =
+                    decide(&pinned, AccessKind::Bash("my-custom-build --release".into()), bash()).await;
+                assert!(
+                    !matches!(decision, Decision::Allow),
+                    "no allow_bash_execute blanket under the user lock, got {decision:?}"
+                );
+
+                // End to end through the public spawn (reads the lock itself).
+                if requirements_lock {
+                    eprintln!("skipping public-spawn half: a requirements layer on this host already locks");
+                } else {
+                    assert!(!public.0.is_yolo_mode(), "public spawn pins from the user's config.toml");
+                }
             })
             .await;
     }
@@ -6611,8 +7668,11 @@ mod tests {
             let local = tokio::task::LocalSet::new();
             local
                 .run_until(async {
+                    // u35 g14 (Astra r13 H4): `--kubeconfig` loads a configuration file, so a model allow of it asks
+                    // (u35_g14_fixed_allow_classifier_asks_for_cargo_build_settings_and_config_options); `--server`
+                    // keeps the special surface without one.
                     for cmd in [
-                        "kubectl get pods --kubeconfig=/tmp/evil.yaml",
+                        "kubectl get pods --server=https://evil.example",
                         "rg --pre ./pre.sh TODO .",
                         "rg --hostname-bin=./payload needle",
                         "ps auxe",
@@ -6666,8 +7726,9 @@ mod tests {
                         ("chmod -R 777 /etc", DangerousCommand),
                         ("kill -9 1", DangerousCommand),
                         ("git push --force origin main", DangerousCommand),
+                        // u35 g14: `--server`, not `--kubeconfig` (a configuration file: the model's allow asks).
                         (
-                            "kubectl get pods --kubeconfig=/tmp/evil.yaml",
+                            "kubectl get pods --server=https://evil.example",
                             SpecialExecSurface,
                         ),
                     ] {
@@ -7491,13 +8552,24 @@ mod tests {
                 mgr.set_auto_mode(true);
                 let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
                 mgr.set_classifier(Some(clf));
-                for cmd in [
-                    UNSAFE_GIT_STATUS,
-                    "LD_PRELOAD=/tmp/e.so ls",
-                    "env -i git status",
+                // u35 g12 (Astra r11 High; lead decision): a git command whose configuration Fuigo did not read (it
+                // is redirected through `GIT_CONFIG_*`) asks after the model allows it; the user
+                // (RecordingClient) rejects. Injection into a program that is not git still follows the model.
+                for (cmd, asks) in [
+                    // u35 t1 (design d2 D3): in a trusted folder the model's allow stands (T1 covers the untrusted ask).
+                    (UNSAFE_GIT_STATUS, false),
+                    ("LD_PRELOAD=/tmp/e.so ls", false),
+                    ("env -i git status", false),
                 ] {
                     let before = seen.lock().unwrap().len();
                     let d = decide(&mgr, AccessKind::Bash(cmd.into()), tool_call()).await;
+                    if asks {
+                        assert!(matches!(d, Decision::Reject(_)), "{cmd}: the user is asked: {d:?}");
+                        assert_eq!(seen.lock().unwrap().len(), before + 1, "{cmd}: the model was asked first");
+                        let ev = events.try_recv().expect("event must be emitted");
+                        assert!(ev.user_prompted, "{cmd}");
+                        continue;
+                    }
                     assert!(matches!(d, Decision::Allow), "{cmd}: {d:?}");
                     assert!(
                         seen.lock().unwrap()[before]
@@ -7512,7 +8584,7 @@ mod tests {
                         "{cmd}"
                     );
                 }
-                assert_eq!(prompts.borrow().len(), 0);
+                assert_eq!(prompts.borrow().len(), 0, "u35 t1 (D3): the model's allow stands in a trusted folder");
             })
             .await;
     }
@@ -7532,8 +8604,16 @@ mod tests {
                 mgr.set_auto_mode(true);
                 let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
                 mgr.set_classifier(Some(clf));
+                // u35 g13 (Astra r12 High): git inside `bash -c` runs where no ambient scan looked, so the model's
+                // allow asks (this client rejects at the prompt); the other opaque scripts follow the model.
+                let hidden = "bash -c 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat git status'";
+                let d = decide(&mgr, AccessKind::Bash(hidden.into()), tool_call()).await;
+                // u35 t1 (design d2 D3): in a trusted folder the model's allow stands.
+                assert!(matches!(d, Decision::Allow), "{hidden}: {d:?}");
+                assert_eq!(seen.lock().unwrap().len(), 1, "the model was asked and allowed");
+                assert_eq!(prompts.borrow().len(), 0, "the user was not asked");
+                let _ = events.try_recv();
                 for cmd in [
-                    "bash -c 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat git status'",
                     "sh -c 'LD_PRELOAD=/x ls'",
                     "bash -c 'echo hi'",
                     "eval 'echo hi'",
@@ -7556,7 +8636,7 @@ mod tests {
                         "{cmd}"
                     );
                 }
-                assert_eq!(prompts.borrow().len(), 0);
+                assert_eq!(prompts.borrow().len(), 0, "u35 t1 (D3): the model's allow stands in a trusted folder");
             })
             .await;
     }
@@ -9258,13 +10338,14 @@ mod tests {
             "kubectl get pods --client-certificate=/tmp/c.crt"
         ));
 
-        // bin/explorer ls
-        assert!(is_safe_command("bin/explorer ls"));
-        assert!(is_safe_command("bin/explorer ls /some/path"));
+        // u35: `bin/explorer` is path-qualified (whatever file sits at `bin/explorer` in the cwd), so it gets no
+        // read-only approval
+        assert!(!is_safe_command("bin/explorer ls"));
+        assert!(!is_safe_command("bin/explorer ls /some/path"));
 
-        // Commands with cd prefix should work
-        assert!(is_safe_command("cd /some/path && ls"));
-        assert!(is_safe_command("cd /some/path && git status"));
+        // u35 r3 (plain-text gate): a cd prefix makes the command not plain text
+        assert!(!is_safe_command("cd /some/path && ls"));
+        assert!(!is_safe_command("cd /some/path && git status"));
 
         // These should NOT be safe: word boundary enforcement
         assert!(!is_safe_command("true"));
@@ -9635,8 +10716,9 @@ mod tests {
 
     #[test]
     fn test_safe_command_pipe_with_cd_prefix() {
-        // cd (setup) then a safe pipeline
-        assert!(is_safe_command("cd /tmp && cat file | grep foo"));
+        // u35 r3 (plain-text gate): `cd` is not a plain program, so even a safe pipeline after it asks
+        assert!(!is_safe_command("cd /tmp && cat file | grep foo"));
+        assert!(is_safe_command("cat file | grep foo"));
         // cd (setup) then an unsafe right-hand side of the pipe
         assert!(!is_safe_command("cd /tmp && cat file | kubectl apply -f -"));
     }
@@ -9914,10 +10996,12 @@ mod tests {
             }
         }
 
+        // u35 r3 (plain-text gate): a `cd` makes the script not plain text, so the read-only list no longer covers it.
         assert!(matches!(
             evaluate_bash_segments("cd repo && git status", &state),
-            SegmentEvaluation::AutoAllow { .. }
+            SegmentEvaluation::NeedsPrompts { .. }
         ));
+        assert!(matches!(evaluate_bash_segments("git status", &state), SegmentEvaluation::AutoAllow { .. }));
     }
 
     #[test]
@@ -10168,6 +11252,8 @@ mod tests {
                 mgr.set_classifier(Some(clf));
                 for (i, cmd) in CMDS.iter().enumerate() {
                     let d = decide(&mgr, AccessKind::Bash((*cmd).into()), tool_call()).await;
+                    // u35 t1 (design d2 D3): in a trusted folder the repository's `core.fsmonitor` no longer stops
+                    // the model's allow (outside one every such command asks: T1).
                     assert!(matches!(d, Decision::Allow), "auto/{cmd}: {d:?}");
                     assert_eq!(seen.lock().unwrap().len(), i + 1, "auto/{cmd}");
                     let findings = seen.lock().unwrap()[i].security_findings.clone();
@@ -10263,7 +11349,6 @@ mod tests {
                     "sort in.csv",
                     "git status",
                     "git diff",
-                    "timeout 1 git status",
                 ] {
                     let d = decide(&mgr, AccessKind::Bash(cmd.into()), tool_call()).await;
                     assert_eq!(d, Decision::Allow, "control: {cmd}");
@@ -10272,16 +11357,16 @@ mod tests {
                 }
                 assert_eq!(prompts.borrow().len(), 0);
 
-                let d = decide(
-                    &mgr,
-                    AccessKind::Bash("command env git status".into()),
-                    tool_call(),
-                )
-                .await;
-                assert!(matches!(d, Decision::Reject(_)), "{d:?}");
-                let ev = events.try_recv().expect("prompt event");
-                assert!(ev.user_prompted && !ev.auto_approved);
-                assert_eq!(prompts.borrow().len(), 1);
+                // u35 r3 (plain-text gate): a wrapper in front is not plain text, so even a read-only git asks.
+                for (asked, cmd) in
+                    [(1, "timeout 1 git status"), (2, "command env git status"), (3, "command env git push origin main")]
+                {
+                    let d = decide(&mgr, AccessKind::Bash(cmd.into()), tool_call()).await;
+                    assert!(matches!(d, Decision::Reject(_)), "{cmd}: {d:?}");
+                    let ev = events.try_recv().expect("prompt event");
+                    assert!(ev.user_prompted && !ev.auto_approved, "{cmd}");
+                    assert_eq!(prompts.borrow().len(), asked, "{cmd}");
+                }
             })
             .await;
     }
@@ -10857,10 +11942,13 @@ mod tests {
         // A `gh pr` grant covers chains whose other segments are safe-listed `echo` markers, which alone used to re-prompt the whole chain
         let mut state = PermissionState::default();
         state.allowed_bash_commands.insert("gh pr".to_string());
-        for cmd in [
-            "gh pr view 277700 --json title && echo done",
-            "cd /repo && gh pr diff 277700 | wc -l; echo saved",
-        ] {
+        // u35 r3 (plain-text gate): the read-only list covers the interstitials only in a plain-text script; in
+        // `cd /repo && gh pr diff 277700 | wc -l; echo saved` the ungranted `wc` and `echo` now ask.
+        assert!(matches!(
+            evaluate_bash_segments("cd /repo && gh pr diff 277700 | wc -l; echo saved", &state),
+            SegmentEvaluation::NeedsPrompts { .. }
+        ));
+        for cmd in ["gh pr view 277700 --json title && echo done", "gh pr diff 277700 | wc -l; echo saved"] {
             match evaluate_bash_segments(cmd, &state) {
                 SegmentEvaluation::AutoAllow { via_session_grant } => {
                     assert!(via_session_grant, "{cmd}")
@@ -11029,9 +12117,16 @@ mod tests {
 
     #[test]
     fn evaluate_wrapper_around_safe_command_auto_allows() {
-        // `timeout 30 ls` should still auto-allow because the inner command is on the always-safe list
+        // u35 r3 (plain-text gate): `timeout 30 ls` is not plain text, so the read-only list no longer covers it;
+        // a grant still does
         let state = PermissionState::default();
         match evaluate_bash_segments("timeout 30 ls /tmp", &state) {
+            SegmentEvaluation::NeedsPrompts { .. } => {}
+            other => panic!("expected NeedsPrompts, got {other:?}"),
+        }
+        let mut granted = PermissionState::default();
+        granted.allowed_bash_commands.insert("ls".to_owned());
+        match evaluate_bash_segments("timeout 30 ls /tmp", &granted) {
             SegmentEvaluation::AutoAllow { .. } => {}
             other => panic!("expected AutoAllow, got {other:?}"),
         }
@@ -11040,11 +12135,16 @@ mod tests {
     #[test]
     fn evaluate_empty_after_setup_commands_auto_allows() {
         // Chain consists only of setup commands: nothing meaningful to execute, but tree-sitter parsed it
-        // Treat as AutoAllow (the shell will just run the setup commands)
+        // Treat as AutoAllow (the shell will just run the setup commands) when it is plain text
         let state = PermissionState::default();
-        match evaluate_bash_segments("cd /tmp && sleep 5 && timeout 60", &state) {
+        match evaluate_bash_segments("sleep 5 && sleep 1", &state) {
             SegmentEvaluation::AutoAllow { .. } => {}
             other => panic!("expected AutoAllow, got {other:?}"),
+        }
+        // u35 r3 (plain-text gate): `cd` and `timeout` are not plain programs, so setup alone no longer auto-allows
+        match evaluate_bash_segments("cd /tmp && sleep 5 && timeout 60", &state) {
+            SegmentEvaluation::NeedsPrompts { .. } => {}
+            other => panic!("expected NeedsPrompts, got {other:?}"),
         }
     }
 
@@ -13034,5 +14134,731 @@ mod tests {
                 );
             })
             .await;
+    }
+
+    /// u35 g9 (lead decision after r8): the one flag an allowed call carries to the shell runner. The runner judges
+    /// the environment of a call some part of which the read-only lists approved, and never refuses a call a grant, an
+    /// answer or an override approved in full.
+    mod u35_g9_no_grant_flag {
+        use super::*;
+
+        async fn resolve(mgr: &PermissionHandle, cmd: &str) -> PermissionResolution {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                mgr.request(PermissionRequest::new(AccessKind::Bash(cmd.to_owned()), tool_call())),
+            )
+            .await
+            .expect("permission request must resolve")
+        }
+
+        /// Fable r8 High: a call the user approved at the prompt is the user's answer and is never refused for its
+        /// environment.
+        #[tokio::test]
+        async fn u35_g9_user_answered_call_is_not_judged_by_the_runner() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let (mgr, _events) = manager_with_recording_client_remember(
+                        &cwd,
+                        None,
+                        SelectingClient::new(true),
+                        ClientType::Generic,
+                        true,
+                    );
+                    let answered = resolve(&mgr, "rm -f build.log").await;
+                    assert_eq!(answered.decision, Decision::Allow);
+                    assert!(answered.event.as_ref().is_some_and(|e| e.user_prompted), "{:?}", answered.event);
+                    assert!(!answered.approved_without_grant(), "an answered call is not judged by the runner");
+                })
+                .await;
+        }
+
+        /// The read-only lists approve `ls` on Fuigo's own environment: the runner judges the one it builds.
+        #[tokio::test]
+        async fn u35_g9_read_only_list_call_is_judged_by_the_runner() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let (mgr, _events) = test_manager(&cwd, false, None);
+                    let listed = resolve(&mgr, "ls -la").await;
+                    assert_eq!(listed.decision, Decision::Allow);
+                    assert!(listed.approved_without_grant());
+                    mgr.set_yolo_mode(true);
+                    let yolo = resolve(&mgr, "ls -la").await;
+                    assert!(!yolo.approved_without_grant(), "always-approve is an override");
+                })
+                .await;
+        }
+
+        /// Astra r8 High 3 and Low: grants that cover every segment, and a configured catch-all allow rule
+        /// (`--allow Bash`) that covers a command the read-only lists also approve, are never judged by the runner.
+        #[tokio::test]
+        async fn u35_g9_fully_granted_calls_are_not_judged_by_the_runner() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let mut seeded = PermissionState::default();
+                    seeded.allowed_bash_commands.insert("cargo test".to_owned());
+                    seeded.allowed_bash_commands.insert("ls".to_owned());
+                    persist_state(&cwd, &seeded, None).await;
+                    let (mgr, _events) = test_manager(&cwd, false, None);
+                    let granted = resolve(&mgr, "cargo test && ls -la").await;
+                    assert_eq!(granted.decision, Decision::Allow);
+                    assert!(!granted.approved_without_grant(), "every segment granted: {:?}", granted.event);
+
+                    let other = tempfile::tempdir().unwrap();
+                    let other = AbsPathBuf::new(other.path().to_path_buf()).unwrap();
+                    let rule = crate::permission::rules::parse_permission_rule(
+                        "Bash",
+                        crate::permission::types::RuleAction::Allow,
+                    )
+                    .unwrap();
+                    let config = crate::permission::types::PermissionConfig::new(vec![rule]);
+                    let (mgr, _events) = test_manager_with_config(&other, config, false);
+                    let ruled = resolve(&mgr, "ls -la").await;
+                    assert_eq!(ruled.decision, Decision::Allow);
+                    assert!(!ruled.approved_without_grant(), "--allow Bash covers it: {:?}", ruled.event);
+                })
+                .await;
+        }
+
+        /// Astra r8 High 3: a session grant for one segment does not exempt the call; the read-only lists approved the
+        /// rest, so the runner judges it.
+        #[tokio::test]
+        async fn u35_g9_partly_granted_call_is_judged_by_the_runner() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let mut seeded = PermissionState::default();
+                    seeded.allowed_bash_commands.insert("cargo test".to_owned());
+                    persist_state(&cwd, &seeded, None).await;
+                    let (mgr, _events) = test_manager(&cwd, false, None);
+                    let partly = resolve(&mgr, "cargo test && ls -la").await;
+                    assert_eq!(partly.decision, Decision::Allow);
+                    assert_eq!(
+                        partly.event.as_ref().and_then(|e| e.decision_reason.as_deref()),
+                        Some(reasons::SESSION_GRANT)
+                    );
+                    assert!(partly.approved_without_grant(), "ls was approved by the read-only lists");
+                })
+                .await;
+        }
+
+        /// u35 g10 (Astra/Grok r9 High): a setup segment (`sleep` is a program) no grant names is approved without a
+        /// grant. A call made only of setup segments, or a granted command followed by one, is judged by the runner;
+        /// a grant that names every segment, the setup one included, is not.
+        #[tokio::test]
+        async fn u35_g10_setup_segments_without_a_grant_are_judged_by_the_runner() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let mut seeded = PermissionState::default();
+                    seeded.allowed_bash_commands.insert("cargo test".to_owned());
+                    persist_state(&cwd, &seeded, None).await;
+                    let (mgr, _events) = test_manager(&cwd, false, None);
+                    for cmd in ["sleep 1", "cargo test && sleep 1"] {
+                        let call = resolve(&mgr, cmd).await;
+                        assert_eq!(call.decision, Decision::Allow, "{cmd}");
+                        assert!(call.approved_without_grant(), "{cmd}: {:?}", call.event);
+                    }
+                    let alone = evaluate_bash("sleep 1", &PermissionState::default(), true);
+                    assert!(!alone.all_segments_granted, "setup segments alone grant nothing");
+
+                    let other = tempfile::tempdir().unwrap();
+                    let other = AbsPathBuf::new(other.path().to_path_buf()).unwrap();
+                    let mut both = PermissionState::default();
+                    both.allowed_bash_commands.insert("cargo test".to_owned());
+                    both.allowed_bash_commands.insert("sleep".to_owned());
+                    persist_state(&other, &both, None).await;
+                    let (mgr, _events) = test_manager(&other, false, None);
+                    let granted = resolve(&mgr, "cargo test && sleep 1").await;
+                    assert_eq!(granted.decision, Decision::Allow);
+                    assert!(!granted.approved_without_grant(), "every segment granted: {:?}", granted.event);
+                })
+                .await;
+        }
+
+        /// u35 g10 (Astra/Grok r9 High): an Auto mode classifier allow (the heuristic pre-pass or the model; both are
+        /// emitted as `AUTO_CLASSIFIER_ALLOW`) judged Fuigo's own environment, so the runner judges the call's.
+        #[tokio::test]
+        async fn u35_g10_auto_classifier_allow_is_judged_by_the_runner() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let (mgr, _events) = test_manager(&cwd, false, None);
+                    mgr.set_auto_mode(true);
+                    let (clf, seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                    mgr.set_classifier(Some(clf));
+                    let allowed = resolve(&mgr, "cargo build").await;
+                    assert_eq!(allowed.decision, Decision::Allow);
+                    assert_eq!(seen.lock().unwrap().len(), 1, "must reach the classifier");
+                    assert_eq!(
+                        allowed.event.as_ref().and_then(|e| e.decision_reason.as_deref()),
+                        Some(reasons::AUTO_CLASSIFIER_ALLOW)
+                    );
+                    assert!(allowed.approved_without_grant(), "{:?}", allowed.event);
+                })
+                .await;
+        }
+
+        /// u35 g10: every reason is placed on one side; a grant covering the call clears every no-grant reason, and a
+        /// reason Fuigo does not know (or none) is judged.
+        #[test]
+        fn u35_g10_every_decision_reason_maps_to_the_flag() {
+            let none = NoGrantFacts::default();
+            let granted = NoGrantFacts { call_granted: true, partly_granted: false };
+            for reason in reasons::ALL {
+                let flag = approved_without_grant(&Decision::Allow, false, Some(reason), none);
+                let expected = !matches!(
+                    *reason,
+                    reasons::YOLO
+                        | reasons::POLICY_ALLOW
+                        | reasons::SANDBOX_AUTO
+                        | reasons::PERSISTED_GRANT
+                        | reasons::STATIC_ALLOWLIST
+                        | reasons::PROMPT_ALLOW
+                        | reasons::SESSION_GRANT
+                );
+                assert_eq!(flag, expected, "{reason}");
+                assert!(!approved_without_grant(&Decision::Allow, false, Some(reason), granted), "{reason}");
+                assert!(!approved_without_grant(&Decision::Allow, true, Some(reason), none), "{reason} answered");
+            }
+            assert!(approved_without_grant(&Decision::Allow, false, Some(reasons::AUTO_CLASSIFIER_ALLOW), none));
+            assert!(approved_without_grant(&Decision::Allow, false, Some("not_a_reason"), none));
+            assert!(approved_without_grant(&Decision::Allow, false, None, none));
+        }
+
+        /// A manager whose user answers every prompt with allow, so a test can tell which calls asked.
+        fn answering_manager(cwd: &AbsPathBuf) -> PermissionHandle {
+            manager_with_recording_client_remember(cwd, None, SelectingClient::new(true), ClientType::Generic, true).0
+        }
+
+        fn prompted(resolution: &PermissionResolution) -> bool {
+            resolution.event.as_ref().is_some_and(|e| e.user_prompted)
+        }
+
+        /// u35 g11 (owner decision; Astra r10 High 2): under PowerShell or cmd.exe every command without a grant asks,
+        /// in Ask mode and in Auto mode (no fast path, no classifier); a grant still approves; Git Bash is unchanged.
+        #[tokio::test]
+        async fn u35_g11_powershell_and_cmd_ask_for_every_command_without_a_grant() {
+            use fuigo_config::shell::WindowsShellFamily as F;
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    for shell in [F::Pwsh, F::PowerShell, F::Cmd] {
+                        let _shell = TestRunnerShell::set(Some(shell));
+                        let tmp = tempfile::tempdir().unwrap();
+                        let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                        let mut seeded = PermissionState::default();
+                        seeded.allowed_bash_commands.insert("cat".to_owned());
+                        persist_state(&cwd, &seeded, None).await;
+                        let mgr = answering_manager(&cwd);
+                        for cmd in ["ls -la", "echo 'x & echo owned>marker & rem x'", "true"] {
+                            let asked = resolve(&mgr, cmd).await;
+                            assert!(prompted(&asked), "{shell:?} {cmd}: {:?}", asked.event);
+                        }
+                        let granted = resolve(&mgr, "cat README.md").await;
+                        assert_eq!(granted.decision, Decision::Allow);
+                        assert!(!prompted(&granted), "{shell:?}: a grant still approves: {:?}", granted.event);
+                        mgr.set_auto_mode(true);
+                        let (clf, seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                        mgr.set_classifier(Some(clf));
+                        for cmd in ["ls -la", "true", "cargo build"] {
+                            let asked = resolve(&mgr, cmd).await;
+                            assert!(prompted(&asked), "{shell:?} Auto {cmd}: {:?}", asked.event);
+                        }
+                        assert!(seen.lock().unwrap().is_empty(), "{shell:?}: the classifier is not asked");
+                    }
+                    let _shell = TestRunnerShell::set(Some(F::GitBash));
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let mgr = answering_manager(&cwd);
+                    let listed = resolve(&mgr, "ls -la").await;
+                    assert!(!prompted(&listed) && listed.decision == Decision::Allow, "Git Bash: {:?}", listed.event);
+                })
+                .await;
+        }
+
+        /// u35 g11 (Grok r10 Medium): an Auto mode classifier allow of a git command that runs the repository's own
+        /// hooks asks the user; the classifier is told about the hooks. Without hooks the allow stands.
+        #[tokio::test]
+        async fn u35_g11_classifier_allow_asks_when_repository_hooks_run() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let cmd = "git commit --allow-empty -m audit";
+                    for hooked in [true, false] {
+                        let tmp = tempfile::tempdir().unwrap();
+                        git2::Repository::init(tmp.path()).unwrap();
+                        if hooked {
+                            let hook = tmp.path().join(".git/hooks/pre-commit");
+                            std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+                            std::fs::write(&hook, "#!/bin/sh\n").unwrap();
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+                            }
+                        }
+                        let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                        let mgr = answering_manager(&cwd);
+                        mgr.set_auto_mode(true);
+                        let (clf, seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                        mgr.set_classifier(Some(clf));
+                        let call = resolve(&mgr, cmd).await;
+                        assert_eq!(call.decision, Decision::Allow);
+                        let seen = seen.lock().unwrap();
+                        assert_eq!(seen.len(), 1, "hooked={hooked}: must reach the classifier");
+                        assert_eq!(
+                            seen[0].security_findings.contains(ClassifierSecurityFinding::RepositoryHook),
+                            hooked
+                        );
+                        // u35 t1 (design d2 D3): in a trusted folder the repository's hooks no longer stop the model's
+                        // allow; the classifier is still told about them.
+                        assert!(!prompted(&call), "hooked={hooked}: {:?}", call.event);
+                    }
+                })
+                .await;
+        }
+
+        /// u35 g11 (Astra r10 High): a bash tool that runs its command in another directory (OpenCode bash
+        /// `workdir`) is judged there: a nested repository whose config runs a program makes `git status` ask though
+        /// the request's directory is clean.
+        #[tokio::test]
+        async fn u35_g11_tool_workdir_gets_every_repository_check() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let nested = tmp.path().join("nested-repo");
+                    std::fs::create_dir_all(&nested).unwrap();
+                    let repo = git2::Repository::init(&nested).unwrap();
+                    repo.config().unwrap().set_str("core.fsmonitor", "./payload").unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let mgr = answering_manager(&cwd);
+                    let request = |exec_cwd: Option<std::path::PathBuf>| PermissionRequest {
+                        exec_cwd,
+                        ..PermissionRequest::new(AccessKind::Bash("git status".to_owned()), tool_call())
+                    };
+                    let here = mgr.request(request(None)).await;
+                    assert!(!prompted(&here), "the request's directory is clean: {:?}", here.event);
+                    for workdir in [std::path::PathBuf::from("nested-repo"), nested.clone()] {
+                        let there = mgr.request(request(Some(workdir.clone()))).await;
+                        assert!(prompted(&there), "{workdir:?}: {:?}", there.event);
+                    }
+                })
+                .await;
+        }
+
+        /// u35 g12 (Astra r11 High): a no-grant model allow asks when the repository's git configuration runs a
+        /// program: a nested OpenCode `workdir` repository with `core.fsmonitor`, with a fixed-Allow classifier. The
+        /// same `git status` in the clean session directory and an opaque script with no repository finding still
+        /// follow the model.
+        #[tokio::test]
+        async fn u35_g12_fixed_allow_classifier_asks_for_a_nested_workdir_fsmonitor() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let nested = tmp.path().join("nested-repo");
+                    std::fs::create_dir_all(&nested).unwrap();
+                    let repo = git2::Repository::init(&nested).unwrap();
+                    repo.config().unwrap().set_str("core.fsmonitor", "./payload").unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let mgr = answering_manager(&cwd);
+                    mgr.set_auto_mode(true);
+                    let (clf, seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                    mgr.set_classifier(Some(clf));
+                    let request = |exec_cwd: Option<std::path::PathBuf>| PermissionRequest {
+                        exec_cwd,
+                        ..PermissionRequest::new(AccessKind::Bash("git status".to_owned()), tool_call())
+                    };
+                    let there = mgr.request(request(Some(std::path::PathBuf::from("nested-repo")))).await;
+                    // u35 t1 (design d2 D3): in a trusted folder the folder's own configuration no longer stops the model's allow (outside one every such command asks: T1).
+                    assert!(!prompted(&there) && there.decision == Decision::Allow, "the nested repository's fsmonitor runs: {:?}", there.event);
+                    assert_eq!(seen.lock().unwrap().len(), 1, "the model was asked and allowed");
+                    let here = mgr.request(request(None)).await;
+                    assert!(!prompted(&here) && here.decision == Decision::Allow, "clean: {:?}", here.event);
+                    let opaque = resolve(&mgr, "bash -c \"$X\"").await;
+                    assert!(!prompted(&opaque) && opaque.decision == Decision::Allow, "{:?}", opaque.event);
+                })
+                .await;
+        }
+
+        /// u35 g12 (Astra r11 High): a safe-verb hook git finds by another letter case (`Post-Index-Change`) runs on
+        /// `git status`; a fixed-Allow classifier's allow asks. A whole-command grant still approves without asking.
+        #[tokio::test]
+        async fn u35_g12_fixed_allow_classifier_asks_for_a_case_variant_safe_verb_hook() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    git2::Repository::init(tmp.path()).unwrap();
+                    let hook = tmp.path().join(".git/hooks/Post-Index-Change");
+                    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+                    std::fs::write(&hook, "#!/bin/sh\n").unwrap();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+                    }
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let mut seeded = PermissionState::default();
+                    seeded.allowed_bash_commands.insert("git log -1".to_owned());
+                    persist_state(&cwd, &seeded, None).await;
+                    let mgr = answering_manager(&cwd);
+                    mgr.set_auto_mode(true);
+                    let (clf, seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                    mgr.set_classifier(Some(clf));
+                    let status = resolve(&mgr, "git status").await;
+                    // u35 t1 (design d2 D3): in a trusted folder the folder's own configuration no longer stops the model's allow (outside one every such command asks: T1).
+                    assert!(!prompted(&status) && status.decision == Decision::Allow, "{:?}", status.event);
+                    assert_eq!(seen.lock().unwrap().len(), 1, "the model was asked and allowed");
+                    let granted = resolve(&mgr, "git log -1").await;
+                    assert!(!prompted(&granted) && granted.decision == Decision::Allow, "{:?}", granted.event);
+                })
+                .await;
+        }
+
+        /// u35 g12 (Astra r11 High): in Auto mode Fuigo's grep tool asks, as in Ask mode, when the environment picks
+        /// the program it runs from the project (`RG_BIN_PATH`); with the user's own program it runs.
+        #[tokio::test]
+        async fn u35_g12_auto_mode_grep_tool_asks_when_the_environment_picks_its_program() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    git2::Repository::init(tmp.path()).unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let mgr = answering_manager(&cwd);
+                    mgr.set_auto_mode(true);
+                    let (clf, seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                    mgr.set_classifier(Some(clf));
+                    let grep = || PermissionRequest::new(AccessKind::Grep { path: None, glob: None }, tool_call());
+                    // u35 g13 (Fable r12 Low): a shell command the inherited environment steers (an in-project `PATH`
+                    // entry) asks after the model's allow, instead of being refused later by the runner.
+                    {
+                        let _env = crate::permission::exec_risk::TestInheritedEnv::set(&[("PATH", "bin:/usr/bin")]);
+                        let before = seen.lock().unwrap().len();
+                        let build = resolve(&mgr, "cargo build").await;
+                        assert!(prompted(&build), "{:?}", build.event);
+                        assert_eq!(seen.lock().unwrap().len(), before + 1, "the model was asked and allowed");
+                    }
+                    {
+                        let _env = crate::permission::exec_risk::TestInheritedEnv::set(&[("RG_BIN_PATH", "bin/rg")]);
+                        let steered = mgr.request(grep()).await;
+                        assert!(prompted(&steered), "{:?}", steered.event);
+                    }
+                    let _env = crate::permission::exec_risk::TestInheritedEnv::set(&[("RG_BIN_PATH", "/usr/bin/rg")]);
+                    let own = mgr.request(grep()).await;
+                    assert!(!prompted(&own) && own.decision == Decision::Allow, "{:?}", own.event);
+                })
+                .await;
+        }
+
+        /// u35 g13 (Astra r12 High): git behind a wrapper that changes directory (`env -C nested git status`) runs in a
+        /// repository the ambient scan never read; with a fixed-Allow classifier and a nested `core.fsmonitor`, the
+        /// model's allow asks. The same wrapper without git still follows the model.
+        #[tokio::test]
+        async fn u35_g13_fixed_allow_classifier_asks_for_git_behind_a_directory_changing_wrapper() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let nested = tmp.path().join("nested");
+                    std::fs::create_dir_all(&nested).unwrap();
+                    let repo = git2::Repository::init(&nested).unwrap();
+                    repo.config().unwrap().set_str("core.fsmonitor", "./payload").unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let mgr = answering_manager(&cwd);
+                    mgr.set_auto_mode(true);
+                    let (clf, seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                    mgr.set_classifier(Some(clf));
+                    for cmd in ["env -C nested git status", "env --chdir=nested git status"] {
+                        let before = seen.lock().unwrap().len();
+                        let out = resolve(&mgr, cmd).await;
+                        // u35 t1 (design d2 D3): in a trusted folder the folder's own configuration no longer stops the model's allow (outside one every such command asks: T1).
+                        assert!(!prompted(&out) && out.decision == Decision::Allow, "{cmd}: the nested fsmonitor runs: {:?}", out.event);
+                        assert_eq!(seen.lock().unwrap().len(), before + 1, "{cmd}: the model was asked and allowed");
+                    }
+                    let plain = resolve(&mgr, "env -C nested ls").await;
+                    assert!(!prompted(&plain) && plain.decision == Decision::Allow, "{:?}", plain.event);
+                })
+                .await;
+        }
+
+        /// u35 g13 (Grok r12 High): a routine tool that loads a project configuration file able to run a program
+        /// asks after a fixed-Allow classifier's (or the heuristic's) allow: npm/yarn inspection under `.npmrc`
+        /// `onload-script`, `.yarnrc.yml` `yarnPath` or `.yarnrc` `yarn-path`; `cargo fmt` under a `.cargo/config.toml`
+        /// alias for `fmt`; `bazel version`/`info` under a `.bazelrc` startup option or `try-import`. The same commands
+        /// in a project without those files, and `cargo build` beside a `fmt` alias, follow the model; a grant still
+        /// approves.
+        #[tokio::test]
+        async fn u35_g13_fixed_allow_classifier_asks_for_project_tool_configuration() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let cases: &[(&str, &str, &[&str])] = &[
+                        (".npmrc", "onload-script=./pwn.js\n", &["npm ls", "npm outdated", "npm view x", "npm why x"]),
+                        (".yarnrc.yml", "yarnPath: ./pwn.cjs\n", &["yarn ls"]),
+                        (".yarnrc", "yarn-path \"./pwn.js\"\n", &["yarn ls"]),
+                        (".cargo/config.toml", "[alias]\nfmt = \"run --bin pwn\"\n", &["cargo fmt"]),
+                        (".bazelrc", "startup --host_jvm_args=-javaagent:tools/pwn.jar\n", &["bazel version", "bazel info"]),
+                        (".bazelrc", "try-import %workspace%/user.bazelrc\n", &["bazel version"]),
+                    ];
+                    for (file, body, cmds) in cases {
+                        let tmp = tempfile::tempdir().unwrap();
+                        let path = tmp.path().join(file);
+                        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                        std::fs::write(&path, body).unwrap();
+                        let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                        let mgr = answering_manager(&cwd);
+                        mgr.set_auto_mode(true);
+                        let (clf, _seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                        mgr.set_classifier(Some(clf));
+                        for cmd in *cmds {
+                            let out = resolve(&mgr, cmd).await;
+                            // u35 t1 (design d2 D3): in a trusted folder the folder's own configuration no longer stops the model's allow (outside one every such command asks: T1).
+                            assert!(!prompted(&out) && out.decision == Decision::Allow, "{file}: {cmd}: {:?}", out.event);
+                        }
+                        if *file == ".cargo/config.toml" {
+                            let build = resolve(&mgr, "cargo build").await;
+                            assert!(!prompted(&build) && build.decision == Decision::Allow, "{:?}", build.event);
+                        }
+                    }
+                    let clean = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(clean.path().to_path_buf()).unwrap();
+                    let mgr = answering_manager(&cwd);
+                    mgr.set_auto_mode(true);
+                    let (clf, _seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                    mgr.set_classifier(Some(clf));
+                    for cmd in ["npm ls", "yarn ls", "cargo fmt", "bazel version"] {
+                        let out = resolve(&mgr, cmd).await;
+                        assert!(!prompted(&out) && out.decision == Decision::Allow, "{cmd}: {:?}", out.event);
+                    }
+                    let granted_dir = tempfile::tempdir().unwrap();
+                    std::fs::write(granted_dir.path().join(".npmrc"), "onload-script=./pwn.js\n").unwrap();
+                    let cwd = AbsPathBuf::new(granted_dir.path().to_path_buf()).unwrap();
+                    let mut seeded = PermissionState::default();
+                    seeded.allowed_bash_commands.insert("npm ls".to_owned());
+                    persist_state(&cwd, &seeded, None).await;
+                    let mgr = answering_manager(&cwd);
+                    mgr.set_auto_mode(true);
+                    let (clf, _seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                    mgr.set_classifier(Some(clf));
+                    let granted = resolve(&mgr, "npm ls").await;
+                    assert!(!prompted(&granted) && granted.decision == Decision::Allow, "{:?}", granted.event);
+                })
+                .await;
+        }
+
+        /// u35 g13 (Astra r12 High): `grep --config` makes Fuigo's ugrep load the repository's `.ugrep`, whose
+        /// `filter=` runs a program; with a fixed-Allow classifier the model's allow asks. So does `cargo --config`
+        /// with a file. A grep with no configuration still follows the model.
+        #[tokio::test]
+        async fn u35_g13_fixed_allow_classifier_asks_for_a_repository_ugrep_config() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    std::fs::write(tmp.path().join(".ugrep"), "filter=txt:./payload\n").unwrap();
+                    std::fs::write(tmp.path().join("fixture.txt"), "needle\n").unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let mgr = answering_manager(&cwd);
+                    mgr.set_auto_mode(true);
+                    let (clf, seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                    mgr.set_classifier(Some(clf));
+                    for cmd in ["grep --config needle fixture.txt", "cargo --config evil.toml build"] {
+                        let before = seen.lock().unwrap().len();
+                        let out = resolve(&mgr, cmd).await;
+                        // u35 t1 (design d2 D3): in a trusted folder the folder's own configuration no longer stops the model's allow (outside one every such command asks: T1).
+                        assert!(!prompted(&out) && out.decision == Decision::Allow, "{cmd}: the configuration runs a program: {:?}", out.event);
+                        assert_eq!(seen.lock().unwrap().len(), before + 1, "{cmd}: the model was asked and allowed");
+                    }
+                    let plain = resolve(&mgr, "grep --filter=txt:cat needle fixture.txt").await;
+                    assert!(!prompted(&plain) && plain.decision == Decision::Allow, "{:?}", plain.event);
+                })
+                .await;
+        }
+
+        /// u35 g14 (Fable r13 H1, Astra r13 H3, Grok r13 High): git behind a launcher the ambient scan does not model
+        /// (`time`, `/usr/bin/time -p`, `caffeinate`, `taskset`) runs in a repository nobody scanned, and `gh` runs git;
+        /// with a fixed-Allow classifier and a repository `core.fsmonitor`, the model's (or the heuristic's) allow
+        /// asks. In a repository whose configuration runs nothing, `gh` follows the model.
+        #[tokio::test]
+        async fn u35_g14_fixed_allow_classifier_asks_for_git_behind_any_wrapper_and_gh() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let repo = git2::Repository::init(tmp.path()).unwrap();
+                    repo.config().unwrap().set_str("core.fsmonitor", "./payload").unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let mgr = answering_manager(&cwd);
+                    mgr.set_auto_mode(true);
+                    let (clf, _seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                    mgr.set_classifier(Some(clf));
+                    for cmd in [
+                        "time git status",
+                        "/usr/bin/time -p git status",
+                        "caffeinate git status",
+                        "taskset -c 0 git status",
+                        "gh status",
+                        "gh pr diff 1",
+                        "gh pr checkout 1",
+                        "taskset -c 0 gh status",
+                        "out=$(gh status); echo \"$out\"",
+                    ] {
+                        let out = resolve(&mgr, cmd).await;
+                        // u35 t1 (design d2 D3): in a trusted folder the folder's own configuration no longer stops the model's allow (outside one every such command asks: T1).
+                        assert!(!prompted(&out) && out.decision == Decision::Allow, "{cmd}: the repository fsmonitor runs: {:?}", out.event);
+                    }
+                    let clean = tempfile::tempdir().unwrap();
+                    git2::Repository::init(clean.path()).unwrap();
+                    let cwd = AbsPathBuf::new(clean.path().to_path_buf()).unwrap();
+                    let mgr = answering_manager(&cwd);
+                    mgr.set_auto_mode(true);
+                    let (clf, _seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                    mgr.set_classifier(Some(clf));
+                    for cmd in ["gh status", "gh pr view 1", "out=$(gh pr view 1); echo \"$out\""] {
+                        let out = resolve(&mgr, cmd).await;
+                        assert!(!prompted(&out) && out.decision == Decision::Allow, "{cmd}: {:?}", out.event);
+                    }
+                })
+                .await;
+        }
+
+        /// u35 g14 (Astra r13 H2, Grok r13 H1/H2, Fable r13 Medium and Low): the project configuration scan reads the
+        /// folder the tool runs in: after `cd`, `cargo -C`/`--directory`, `npm --prefix`, `pnpm --dir`, `yarn --cwd`,
+        /// inside `sh -c`, and fails closed on `env -C` and on a tool behind a launcher it does not model (`taskset`).
+        /// A routine build (`yarn build` beside `yarnPath`, `cargo build` beside an alias, `bazel build` beside a
+        /// `try-import`) follows the model (owner decision 2), as does `npm ls` where no configuration is.
+        #[tokio::test]
+        async fn u35_g14_fixed_allow_classifier_asks_for_configuration_where_the_tool_runs() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let sub = tmp.path().join("sub");
+                    std::fs::create_dir_all(sub.join(".cargo")).unwrap();
+                    std::fs::write(sub.join(".npmrc"), "onload-script=./pwn.js\n").unwrap();
+                    std::fs::write(sub.join(".yarnrc.yml"), "yarnPath: ./pwn.cjs\n").unwrap();
+                    std::fs::write(sub.join(".cargo/config.toml"), "['alias']\nfmt = \"run --bin pwn\"\n").unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let mgr = answering_manager(&cwd);
+                    mgr.set_auto_mode(true);
+                    let (clf, _seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                    mgr.set_classifier(Some(clf));
+                    for cmd in [
+                        "cd sub && npm ls",
+                        "cd sub && cd . && yarn info x",
+                        "npm --prefix sub ls",
+                        "pnpm --dir sub ls",
+                        "yarn --cwd sub ls",
+                        "cargo -C sub fmt",
+                        "cargo --directory=sub fmt",
+                        "cargo --directory sub fmt",
+                        "cd sub && cargo fmt",
+                        "env -C sub npm ls",
+                        "sh -c 'cd sub && npm ls'",
+                        "taskset -c 0 npm ls",
+                    ] {
+                        let out = resolve(&mgr, cmd).await;
+                        // u35 t1 (design d2 D3): in a trusted folder the folder's own configuration no longer stops the model's allow (outside one every such command asks: T1).
+                        assert!(!prompted(&out) && out.decision == Decision::Allow, "{cmd}: the configuration runs a program: {:?}", out.event);
+                    }
+                    for cmd in ["npm ls", "cargo fmt", "cd sub && yarn build", "cd sub && cargo build"] {
+                        let out = resolve(&mgr, cmd).await;
+                        assert!(!prompted(&out) && out.decision == Decision::Allow, "{cmd}: {:?}", out.event);
+                    }
+                    let bazel = tempfile::tempdir().unwrap();
+                    std::fs::write(bazel.path().join(".bazelrc"), "try-import %workspace%/user.bazelrc\n").unwrap();
+                    let cwd = AbsPathBuf::new(bazel.path().to_path_buf()).unwrap();
+                    let mgr = answering_manager(&cwd);
+                    mgr.set_auto_mode(true);
+                    let (clf, _seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                    mgr.set_classifier(Some(clf));
+                    let build = resolve(&mgr, "bazel build //...").await;
+                    assert!(!prompted(&build) && build.decision == Decision::Allow, "{:?}", build.event);
+                    let version = resolve(&mgr, "bazel version").await;
+                    // u35 t1 (design d2 D3): in a trusted folder the folder's own configuration no longer stops the model's allow (outside one every such command asks: T1).
+                    assert!(!prompted(&version) && version.decision == Decision::Allow, "{:?}", version.event);
+                })
+                .await;
+        }
+
+        /// u35 g14 (Fable r13 H2, Astra r13 H1/H4, Grok r13 H3): `cargo metadata` under a `[build] rustc` naming a
+        /// project file, an alias table in a literal-key header (`['alias']`), and a command-line option selecting a
+        /// configuration file (`kubectl --kubeconfig`, `docker --config`, `npm --userconfig` and its abbreviation) ask
+        /// after a fixed-Allow classifier's allow; `cargo metadata` under `rustc-wrapper = "sccache"` (a program on
+        /// `PATH`) and `kubectl get pods` follow the model.
+        #[tokio::test]
+        async fn u35_g14_fixed_allow_classifier_asks_for_cargo_build_settings_and_config_options() {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let cases: &[(&str, &[&str], &[&str])] = &[
+                        ("[build]\nrustc = \"../pwn\"\n", &["cargo metadata", "cargo tree", "cargo fetch"], &["cargo build"]),
+                        ("build.rustc-wrapper = \"./w\"\n", &["cargo metadata"], &["cargo check"]),
+                        ("[build]\nrustc-wrapper = \"sccache\"\n", &[], &["cargo metadata", "cargo fmt"]),
+                        ("['alias']\nfmt = \"run --bin pwn\"\n", &["cargo fmt"], &["cargo metadata"]),
+                    ];
+                    for (body, asks, follows) in cases {
+                        let tmp = tempfile::tempdir().unwrap();
+                        std::fs::create_dir_all(tmp.path().join(".cargo")).unwrap();
+                        std::fs::write(tmp.path().join(".cargo/config.toml"), body).unwrap();
+                        let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                        let mgr = answering_manager(&cwd);
+                        mgr.set_auto_mode(true);
+                        let (clf, _seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                        mgr.set_classifier(Some(clf));
+                        for cmd in *asks {
+                            let out = resolve(&mgr, cmd).await;
+                            // u35 t1 (design d2 D3): in a trusted folder the folder's own configuration no longer stops the model's allow (outside one every such command asks: T1).
+                            assert!(!prompted(&out) && out.decision == Decision::Allow, "{body}: {cmd}: {:?}", out.event);
+                        }
+                        for cmd in *follows {
+                            let out = resolve(&mgr, cmd).await;
+                            assert!(!prompted(&out) && out.decision == Decision::Allow, "{body}: {cmd}: {:?}", out.event);
+                        }
+                    }
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let mgr = answering_manager(&cwd);
+                    mgr.set_auto_mode(true);
+                    let (clf, seen) = capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
+                    mgr.set_classifier(Some(clf));
+                    for cmd in [
+                        "kubectl --kubeconfig=./evil.yaml get pods",
+                        "kubectl get pods --kubeconfig ./evil.yaml",
+                        "helm --kubeconfig ./evil.yaml list",
+                        "docker --config ./d ps",
+                        "npm --userconfig ./x ls",
+                        "npm --userc=./x ls",
+                        "pnpm --globalconfig=./x ls",
+                    ] {
+                        let before = seen.lock().unwrap().len();
+                        let out = resolve(&mgr, cmd).await;
+                        // u35 t1 (design d2 D3): in a trusted folder the folder's own configuration no longer stops the model's allow (outside one every such command asks: T1).
+                        assert!(!prompted(&out) && out.decision == Decision::Allow, "{cmd}: {:?}", out.event);
+                        assert_eq!(seen.lock().unwrap().len(), before + 1, "{cmd}: the model was asked and allowed");
+                    }
+                    let plain = resolve(&mgr, "kubectl get pods").await;
+                    assert!(!prompted(&plain) && plain.decision == Decision::Allow, "{:?}", plain.event);
+                })
+                .await;
+        }
     }
 }

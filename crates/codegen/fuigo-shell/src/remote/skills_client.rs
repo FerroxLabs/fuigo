@@ -270,6 +270,7 @@ fn product_skill_info(
         disable_model_invocation: false,
         enabled: true,
         body,
+        content_root: None,
     }
 }
 

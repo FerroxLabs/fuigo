@@ -7,8 +7,9 @@
 //! - `project`: a repo hook file, `.fuigo/hooks/probe.json`;
 //! - `projplug`: a PROJECT-scope plugin's inline manifest hooks, `.fuigo/plugins/projplug`;
 //! - `userplug`: a USER-scope plugin's `hooks/hooks.json`, `$FUIGO_HOME/plugins/userplug`;
-//! - `cfgplug`: a plugin the REPO's own `.fuigo/config.toml` names in `[plugins].paths` (config-path
-//!   scope, auto-trusted because it sits under `$HOME`), so only the folder gate keeps it out.
+//! - `cfgplug`: a plugin the REPO's own `.fuigo/config.toml` names in `[plugins].paths`. Since 1.0.35 such a path
+//!   loads as a project plugin held to the repository (it sits inside the repo, outside `.fuigo/plugins`), enabled
+//!   only by the user's own `[plugins].enabled`, so only the folder gate keeps it out.
 //!
 //! Three phases, each a parent turn that spawns a foreground child; child and parent each `read_file` a probe file
 //! whose name marks the call in the hook envelope:
@@ -25,7 +26,8 @@
 //! - **C, after `/hooks-untrust`:** none of `project`, `projplug`, `cfgplug` fires again, in parent
 //!   or child. The plugins are the stale-snapshot case: the session's stored plugin registry does not
 //!   follow a trust change, so the hook reload must rediscover the plugins on the current verdict
-//!   (`cfgplug` is not `Project`-scoped, so no scope filter alone catches it).
+//!   (`cfgplug` is named by the repo's own config, not found under `.fuigo/plugins`, so the rediscovery must also
+//!   re-read project config on the current verdict).
 //! - **D:** a sibling session opened while trusted untrusts the already-revoked folder: the verdict
 //!   does not change, but its own registry must still drop the repo's hooks.
 //! - **E:** the typed `/hooks-trust` / `/hooks-untrust` slash commands reconcile hooks like the modal.
@@ -378,8 +380,7 @@ fn plugin_hooks_follow_folder_trust_in_sessions_and_their_subagents() {
             json!({"hooks": logger_hooks(&log_path(&logs, "userplug"))}).to_string(),
         )
         .expect("user plugin hooks.json");
-        let home = PathBuf::from(std::env::var("HOME").expect("HOME"));
-        let cfgplug = home.join("cfgplug");
+        let cfgplug = cwd.join("cfgplug");
         std::fs::create_dir_all(cfgplug.join("hooks")).expect("config-path plugin dir");
         std::fs::write(cfgplug.join("plugin.json"), r#"{"name":"cfgplug"}"#).expect("manifest");
         std::fs::write(

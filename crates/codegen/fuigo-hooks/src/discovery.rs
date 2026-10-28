@@ -196,7 +196,21 @@ pub fn collect_specs_from_sources(
     }
 
     for source in project_sources {
-        let (mut specs, errors) = load_from_source(source, false);
+        // A project source (`<dir>/.claude/settings.json`, `<dir>/.fuigo/hooks`, `<dir>/.cursor/hooks.json`) is read
+        // only from inside `<dir>`: a hooks file or dir linked elsewhere on the machine is not loaded as project hooks.
+        // `<dir>` is pinned (resolved once) here, when the load starts; a `<dir>` that cannot be resolved has nothing
+        // to load.
+        let owner = match project_source_owner(source).map(fuigo_dirs::contained::PinnedRoot::pin) {
+            Some(Ok(root)) => Some(root),
+            Some(Err(_)) => continue,
+            None => None,
+        };
+        let (mut specs, errors) = load_from_source_scoped(
+            source,
+            false,
+            fuigo_config::user_fuigo_home().as_deref(),
+            owner.as_ref(),
+        );
         for spec in &mut specs {
             spec.name = format!("{}{}", crate::config::PROJECT_HOOK_PREFIX, spec.name);
         }
@@ -282,25 +296,48 @@ fn load_from_source(source: &HookSource<'_>, may_name_saved_key: bool) -> (Vec<H
     load_from_source_in(source, may_name_saved_key, fuigo_config::user_fuigo_home().as_deref())
 }
 
+/// The folder a project hook source belongs to: `<dir>` of `<dir>/<config dir>/<file or dir>`.
+fn project_source_owner<'a>(source: &HookSource<'a>) -> Option<&'a Path> {
+    let path = match source {
+        HookSource::SettingsFile(path) | HookSource::Directory(path) => *path,
+    };
+    path.parent()?.parent()
+}
+
 /// [`load_from_source`] with the user's fuigo home given.
 pub(crate) fn load_from_source_in(
     source: &HookSource<'_>,
     may_name_saved_key: bool,
     user_home: Option<&Path>,
 ) -> (Vec<HookSpec>, Vec<HookError>) {
+    load_from_source_scoped(source, may_name_saved_key, user_home, None)
+}
+
+/// [`load_from_source_in`] held to `contain` when set (project sources): every hook file read must lie inside it,
+/// checked on the opened file; a hooks directory linking outside it is not listed.
+pub(crate) fn load_from_source_scoped(
+    source: &HookSource<'_>,
+    may_name_saved_key: bool,
+    user_home: Option<&Path>,
+    contain: Option<&fuigo_dirs::contained::PinnedRoot>,
+) -> (Vec<HookSpec>, Vec<HookError>) {
     // P147: trust is decided per hook FILE by its real path, never by the source it was listed under: a global
     // `~/.claude/settings.json`, a `hooks-paths` target outside `$FUIGO_HOME/hooks`, a symlink in `$FUIGO_HOME/hooks`
     // that points outside it, and anything resolving into `worktrees/` or `plugins/` are all refused.
     let may_name = |file: &Path| may_name_saved_key && fuigo_config::key_naming::hook_file_may_name_saved_key_in(file, user_home);
     match source {
-        HookSource::SettingsFile(path) => load_hooks_from_settings_file(path, may_name(path)),
-        HookSource::Directory(dir) => load_hooks_from_directory(dir, &may_name),
+        HookSource::SettingsFile(path) => load_hooks_from_settings_file(path, may_name(path), contain),
+        HookSource::Directory(dir) => load_hooks_from_directory(dir, &may_name, contain),
     }
 }
 
 /// A missing file or absent `hooks` key returns empty results, not an error.
-fn load_hooks_from_settings_file(path: &Path, may_name_saved_key: bool) -> (Vec<HookSpec>, Vec<HookError>) {
-    let content = match std::fs::read_to_string(path) {
+fn load_hooks_from_settings_file(
+    path: &Path,
+    may_name_saved_key: bool,
+    contain: Option<&fuigo_dirs::contained::PinnedRoot>,
+) -> (Vec<HookSpec>, Vec<HookError>) {
+    let content = match fuigo_dirs::contained::read_scoped(path, contain) {
         Ok(c) => c,
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -323,9 +360,24 @@ fn load_hooks_from_settings_file(path: &Path, may_name_saved_key: bool) -> (Vec<
     (specs, errors)
 }
 
-fn load_hooks_from_directory(dir: &Path, may_name_saved_key: &dyn Fn(&Path) -> bool) -> (Vec<HookSpec>, Vec<HookError>) {
+fn load_hooks_from_directory(
+    dir: &Path,
+    may_name_saved_key: &dyn Fn(&Path) -> bool,
+    contain: Option<&fuigo_dirs::contained::PinnedRoot>,
+) -> (Vec<HookSpec>, Vec<HookError>) {
     let mut specs = Vec::new();
     let mut errors = Vec::new();
+    if let Some(root) = contain
+        && dir.exists()
+        && !fuigo_dirs::contained::is_contained(dir, root)
+    {
+        tracing::warn!(
+            path = %dir.display(),
+            root = %root.path().display(),
+            "project hooks directory links outside its folder; skipping"
+        );
+        return (specs, errors);
+    }
 
     // Best-effort listing: a bad dirent is recorded and skipped so sibling hooks still load
     // (Sandbox fail-closed listing lives in fuigo_config.)
@@ -367,7 +419,7 @@ fn load_hooks_from_directory(dir: &Path, may_name_saved_key: &dyn Fn(&Path) -> b
     json_files.sort();
 
     for path in json_files {
-        let content = match std::fs::read_to_string(&path) {
+        let content = match fuigo_dirs::contained::read_scoped(&path, contain) {
             Ok(c) => c,
             Err(e) => {
                 errors.push(HookError::ReadFile {
@@ -1086,5 +1138,49 @@ mod tests {
         assert!(!broken.is_match("run_terminal_command"));
         assert!(!broken.is_match("Bash"));
         assert!(!broken.is_match("read_file"));
+    }
+
+    /// m4: project hook sources (`<dir>/.claude/settings.json`, `<dir>/.fuigo/hooks/*.json`, the dir itself) linking
+    /// outside `<dir>` are not loaded; an in-folder link and a global source's link still are.
+    #[cfg(unix)]
+    #[test]
+    fn m4_project_hook_sources_linked_outside_their_folder_are_not_loaded() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_path_buf();
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        write_json(&outside, "settings.json", &simple_hook_with_id("SessionStart", "outside-settings"));
+        write_json(&outside, "hooks.json", &simple_hook_with_id("SessionStart", "outside-file"));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        symlink(outside.join("settings.json"), repo.join(".claude").join("settings.json")).unwrap();
+        let hooks = repo.join(".fuigo").join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        symlink(outside.join("hooks.json"), hooks.join("leak.json")).unwrap();
+        write_json(&repo, "own.json", &simple_hook_with_id("SessionStart", "own-linked"));
+        symlink(repo.join("own.json"), hooks.join("own.json")).unwrap();
+        let sub = repo.join("sub");
+        std::fs::create_dir_all(sub.join(".fuigo")).unwrap();
+        symlink(&outside, sub.join(".fuigo").join("hooks")).unwrap();
+
+        let settings = repo.join(".claude").join("settings.json");
+        let sub_hooks = sub.join(".fuigo").join("hooks");
+        let (specs, _) = collect_specs_from_sources(
+            &[],
+            &[
+                HookSource::SettingsFile(&settings),
+                HookSource::Directory(&hooks),
+                HookSource::Directory(&sub_hooks),
+            ],
+        );
+        // Hook names carry the file stem (commands are redacted in Debug): only `own.json` may load.
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names.len(), 1, "outside hooks loaded: {names:?}");
+        assert!(names[0].starts_with("project/own:"), "in-folder linked hook missing: {names:?}");
+
+        // A global (user) source follows links.
+        let (global, _) = collect_specs_from_sources(&[HookSource::SettingsFile(&settings)], &[]);
+        assert!(!global.is_empty(), "a global source's link must still be followed");
     }
 }

@@ -890,6 +890,8 @@ fn resolve_agent_definition_cli_agent_profile_wins_when_model_agent_type_is_defa
 #[test]
 #[serial_test::serial]
 fn resolve_agent_definition_agent_profile_with_model_override() {
+    // Project agent files load only through the installed trust hook (debug builds: inert-allow).
+    crate::agent::folder_trust::install_project_agent_trust();
     let prev = std::env::var("FUIGO_AGENT").ok();
     unsafe {
         std::env::remove_var("FUIGO_AGENT");
@@ -1194,6 +1196,7 @@ fn make_test_handle(
     yolo: bool,
     client_id: Option<&str>,
 ) -> crate::session::SessionHandle {
+    crate::agent::folder_trust::install_project_agent_trust();
     let (cmd_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     let (hunk_event_tx, _hunk_event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1257,6 +1260,9 @@ fn make_test_handle(
         non_interactive: false,
         plan_mode: std::sync::Arc::new(parking_lot::Mutex::new(
             crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from("/tmp")),
+        )),
+        current_prompt_mode: std::sync::Arc::new(parking_lot::Mutex::new(
+            crate::session::plan_mode::PromptMode::Agent,
         )),
         force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permission_handle: fuigo_workspace::permission::PermissionHandle::allow_all(),
@@ -3140,6 +3146,7 @@ mod p13_peer_acp_tests;
 mod session_rename_tests;
 mod session_resume_close_tests;
 mod p30_leader_tests;
+mod u35_modes_tests;
 mod p30_direct_lock_tests;
 mod subagent_spawn_context_tests;
 /// With no load in flight and no session the wait returns immediately (the caller then surfaces "unknown session id" exactly as before).
@@ -6912,7 +6919,8 @@ async fn answer_folder_trust_request(
     assert_eq!(args.request.method.as_ref(), "fuigo/folder_trust/request");
     let params: serde_json::Value = serde_json::from_str(args.request.params.get()).unwrap();
     let resp: acp::ExtResponse = acp::ExtResponse::new(std::sync::Arc::from(
-        serde_json::value::to_raw_value(&serde_json::json!({ "outcome": outcome })).unwrap(),
+        // u35 t1: a grant names the v2 scope (settings and commands).
+        serde_json::value::to_raw_value(&serde_json::json!({ "outcome": outcome, "scope": "configAndCommands" })).unwrap(),
     ));
     let _ = args.response_tx.send(Ok(resp));
     params
@@ -7050,13 +7058,11 @@ fn interactive_trust_prompt_dormant_when_feature_off() {
     let home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let _sim = EnvGuard::set(fuigo_version::TEST_VERSION_ENV, "0.0-sim");
-    let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
+    // u35 t1 (design d2 §2.4): only the user's own switch turns folder trust off; the remote one is ignored.
+    let _flag = EnvGuard::set("FUIGO_FOLDER_TRUST", "0");
     let repo = repo_with_project_mcp_server();
     let repo_path = repo.path().to_path_buf();
-    let remote = crate::util::config::RemoteSettings {
-        folder_trust_enabled: Some(false),
-        ..Default::default()
-    };
+    let remote = crate::util::config::RemoteSettings::default();
     run_local_for_bridge_test(|| async {
         let (agent, mut gw_rx) = build_agent_with_gateway_rx();
         agent.interactive_trust_client.set(true);

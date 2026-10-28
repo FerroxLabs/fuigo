@@ -1,6 +1,3 @@
-use std::env;
-use std::ffi::OsString;
-use std::path::PathBuf;
 use std::process::Output;
 use std::process::Stdio;
 use std::time::Duration;
@@ -28,14 +25,16 @@ const POST_EXIT_BUDGET: Duration = Duration::from_secs(2);
 /// Grace between SIGTERM and SIGKILL when tearing down a timed-out process group, so a signal-aware child can exit cleanly before the force kill.
 const TERM_GRACE: Duration = Duration::from_millis(500);
 
-/// Resolve the `git` binary: `GIT_BIN_PATH` (Bazel's hermetic-git data dep; runfiles-relative, so resolved against the cwd) or bare `git` on `PATH`.
-pub(crate) fn git_bin() -> OsString {
-    let Some(raw) = env::var_os("GIT_BIN_PATH") else {
-        return OsString::from("git");
+/// Resolve the `git` binary for test fixtures: `GIT_BIN_PATH` (Bazel's hermetic-git data dep; runfiles-relative, so resolved against the cwd) or bare `git` on `PATH`.
+/// Production code starts git only through the judged builders in `fuigo_tty_utils::repo_exec`.
+#[cfg(test)]
+pub(crate) fn git_bin() -> std::ffi::OsString {
+    let Some(raw) = std::env::var_os("GIT_BIN_PATH") else {
+        return std::ffi::OsString::from("git");
     };
-    let path = PathBuf::from(&raw);
+    let path = std::path::PathBuf::from(&raw);
     if path.is_relative() {
-        match env::current_dir() {
+        match std::env::current_dir() {
             Ok(cwd) => cwd.join(&path).into_os_string(),
             Err(_) => raw,
         }

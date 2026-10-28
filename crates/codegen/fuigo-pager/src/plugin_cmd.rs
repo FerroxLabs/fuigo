@@ -774,12 +774,9 @@ fn cmd_tag(path: &str, push: bool, force: bool, dry_run: bool) -> Result<()> {
     );
 
     if !force {
-        let mut status_cmd = std::process::Command::new("git");
-        fuigo_tty_utils::remove_fuigo_owned_secrets(&mut status_cmd);
-        let out = status_cmd
-            .args(["status", "--porcelain"])
-            .current_dir(&root)
-            .output()?;
+        // `fuigo plugin tag` is a command the user typed: git runs as typed (not judged).
+        let mut status_cmd = fuigo_tty_utils::git_command_user_invoked(&root);
+        let out = status_cmd.args(["status", "--porcelain"]).output()?;
         if !out.stdout.is_empty() {
             bail!("Working tree is dirty. Commit changes first, or use --force.");
         }
@@ -793,13 +790,12 @@ fn cmd_tag(path: &str, push: bool, force: bool, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut cmd = std::process::Command::new("git");
-    fuigo_tty_utils::remove_fuigo_owned_secrets(&mut cmd);
+    let mut cmd = fuigo_tty_utils::git_command_locking_user_invoked(&root);
     cmd.args(["tag", &tag]);
     if force {
         cmd.arg("--force");
     }
-    let out = cmd.current_dir(&root).output()?;
+    let out = cmd.output()?;
     if !out.status.success() {
         bail!(
             "Failed to create tag: {}",
@@ -809,13 +805,12 @@ fn cmd_tag(path: &str, push: bool, force: bool, dry_run: bool) -> Result<()> {
     fuigo_tty_utils::cli_println!("Created tag: {}", fuigo_tty_utils::untrusted(&tag));
 
     if push {
-        let mut push_cmd = std::process::Command::new("git");
-        fuigo_tty_utils::remove_fuigo_owned_secrets(&mut push_cmd);
+        let mut push_cmd = fuigo_tty_utils::git_command_locking_user_invoked(&root);
         push_cmd.args(["push", "origin", &tag]);
         if force {
             push_cmd.arg("--force");
         }
-        let out = push_cmd.current_dir(&root).output()?;
+        let out = push_cmd.output()?;
         if !out.status.success() {
             bail!(
                 "Failed to push tag: {}",
@@ -1225,11 +1220,15 @@ fn marketplace_update_with_cache_root(
             name_matched = true;
         }
         if let SourceKind::Git { url, branch } = &source.kind {
-            match fuigo_plugin_marketplace::git::force_sync_source_cache(
+            // `fuigo plugin marketplace update` is a command the user typed: the fetch is not judged.
+            match fuigo_plugin_marketplace::git::sync_source_cache_user_invoked(
                 url,
                 branch.as_deref(),
                 cache_root,
-            ) {
+                fuigo_plugin_marketplace::git::SyncMode::Force,
+            )
+            .map(|lease| lease.path.clone())
+            {
                 Ok(_) => {
                     fuigo_tty_utils::cli_println!(
                         "  {}: synced",
@@ -1449,7 +1448,7 @@ mod tests {
     }
 
     fn current_head(repo: &Path) -> String {
-        let output = fuigo_plugin_marketplace::git::git_command()
+        let output = fuigo_tty_utils::git_command()
             .current_dir(repo)
             .args(["rev-parse", "HEAD"])
             .output()

@@ -956,6 +956,7 @@ async fn post_tool_use_dispatch_merges_file_then_client_contributions() {
                 concatenated_json_count: 0,
                 dispatch_target_name: None,
                 is_read_only: false,
+                approved_without_grant: true,
                 rewriting_hook: None,
                 coercion_note: None,
                 additional_context: Vec::new(),

@@ -3,7 +3,6 @@
 use crate::agent::config::FeedbackUserConfig;
 use crate::util::subprocess::CommandLog;
 use crate::util::subprocess::RunOptions;
-use crate::util::subprocess::git_bin;
 use crate::util::subprocess::run_detached_with_timeout;
 use crate::util::subprocess::shell_c;
 use std::env;
@@ -125,8 +124,8 @@ async fn resolve_os_user() -> Option<String> {
 }
 
 async fn git_global_email() -> Option<String> {
-    let mut cmd = Command::new(git_bin());
-    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
+    // Reads the user's own global settings from outside every repository (not judged: it never touches a folder).
+    let mut cmd = Command::from(fuigo_tty_utils::git_command_global());
     // `--global` only: a repo-local `.git/config` in a cloned repo could otherwise supply an attacker-controlled email
     cmd.args(["config", "--global", "user.email"]);
     let output = run_detached_with_timeout(

@@ -220,15 +220,14 @@ pub(crate) async fn refresh_codebase_graph_after_head_change(
     repo_root: &Path,
     events_tx: &tokio::sync::broadcast::Sender<fuigo_workspace_types::WorkspaceEvent>,
 ) {
-    let mut diff_cmd = tokio::process::Command::new("git");
-    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut diff_cmd);
-    diff_cmd
-        .args(["diff", "--name-status", "ORIG_HEAD", "HEAD"])
-        .current_dir(repo_root)
-        .stdin(std::process::Stdio::null());
-    fuigo_tools::util::detach_command(&mut diff_cmd);
-    diff_cmd.envs(fuigo_tools::util::pager_env());
-    let diff_output = diff_cmd.output().await;
+    let diff_output = match fuigo_tty_utils::git_command_in(repo_root) {
+        Ok(mut diff_cmd) => {
+            diff_cmd.args(["diff", "--name-status", "ORIG_HEAD", "HEAD"]);
+            tokio::process::Command::from(diff_cmd).output().await
+        }
+        // Untrusted folder: no git runs; treat as a failed diff (the arm below handles it).
+        Err(e) => Err(e.into()),
+    };
 
     // `None` means the update failed entirely (channel closed); skip the event so subscribers are not misled
     let files_updated: Option<u64>;

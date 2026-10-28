@@ -41,7 +41,7 @@ fn synthetic_rules_for_default_mode(
 
     if effects.bypass_permissions {
         if let Some(reason) = policy_block {
-            warn!("defaultMode=bypassPermissions ignored: disabled by managed policy");
+            warn!(reason, "defaultMode=bypassPermissions ignored: always-approve is locked off");
             bypass_blocked = true;
             skipped.push(SkippedPermission {
                 rule: "defaultMode=bypassPermissions".to_string(),
@@ -252,10 +252,14 @@ fn load_config_toml_permissions(cwd: &Path, project_trusted: bool) -> Vec<Source
     // An untrusted clone must not contribute allow/deny/ask rules via `.fuigo/config.toml` (same gate as project `.claude/settings.json`)
     if project_trusted {
         for path in crate::project_config::find_project_configs(cwd) {
-            match fuigo_config::load_config_file(&path) {
-                Ok(value) => rules.extend(extract_toml_permissions(&value, || {
-                    RequirementSource::Config { path: path.clone() }
-                })),
+            match fuigo_config::load_project_config_file(&path) {
+                Ok(value) => {
+                    // u35 t1 (design d2 §2.3): folder trust is decided by the user's own config only.
+                    if value.get("folder_trust").is_some() {
+                        warn!(path = %path.display(), "[folder_trust] in a project config is ignored; set it in your own ~/.fuigo/config.toml");
+                    }
+                    rules.extend(extract_toml_permissions(&value, || RequirementSource::Config { path: path.clone() }))
+                }
                 Err(e) => {
                     warn!(path = %path.display(), error = %e, "Failed to load project config.toml")
                 }
@@ -300,6 +304,36 @@ pub async fn resolve_permission_config_with_fallback(
         .map(|r| r.config)
 }
 
+/// u35 t1 (design d2 §3.4): what a session's permission policy is built from besides the folder's own layer: the
+/// session folder, the CLI's `--allow`/`--deny` rules and the client's permission-mode hint. Passed to the
+/// permission manager beside the config built from it, so the manager can build the policy with and without the
+/// project tier and rebuild it when folder trust changes.
+#[derive(Debug, Clone)]
+pub struct SessionPolicyInputs {
+    pub cwd: std::path::PathBuf,
+    pub cli_rules: Vec<crate::permission::types::PermissionRule>,
+    pub mode_hint: Option<String>,
+    pub yolo_pin: Option<&'static str>,
+}
+
+/// The session permission config: the layered resolution for `inputs.cwd` (its project tier only when
+/// `project_trusted`), the CLI rules first, then the mode hint.
+pub async fn resolve_session_policy(inputs: &SessionPolicyInputs, project_trusted: bool) -> Option<PermissionConfig> {
+    let mut config = resolve_permission_config_with_fallback(&inputs.cwd, project_trusted).await;
+    if !inputs.cli_rules.is_empty() {
+        match &mut config {
+            Some(config) => {
+                let mut merged = inputs.cli_rules.clone();
+                merged.append(&mut config.rules);
+                config.rules = merged;
+            }
+            None => config = Some(PermissionConfig::new(inputs.cli_rules.clone())),
+        }
+    }
+    apply_permission_mode_hint(&mut config, inputs.mode_hint.as_deref(), inputs.yolo_pin);
+    config
+}
+
 /// Wire value a client sets in `startupHints.permissionMode` to pre-declare an allow answer for permission prompts.
 /// Meant for headless sessions where no client is attached on agent-initiated turns.
 ///
@@ -331,7 +365,7 @@ pub fn apply_permission_mode_hint(
     if let Some(reason) = policy_block {
         warn!(
             reason,
-            "startupHints.permissionMode=alwaysAllow ignored: always-approve disabled by managed policy"
+            "startupHints.permissionMode=alwaysAllow ignored: always-approve is locked off"
         );
         return false;
     }
@@ -434,7 +468,8 @@ fn drop_untrusted_catchall_allows(
             if is_catchall_allow(&sourced.value) && !is_admin_source(&sourced.source) {
                 warn!(
                     source = %sourced.source,
-                    "catch-all allow rule ignored: always-approve disabled by managed policy"
+                    reason,
+                    "catch-all allow rule ignored: always-approve is locked off"
                 );
                 skipped.push(SkippedPermission {
                     rule: format!(
@@ -1147,13 +1182,18 @@ pub struct YoloPolicyLock {
 }
 
 /// Hard-lock predicate (client gates, permission manager, vendor bypass gate).
-/// Returns `Some(reason)` iff a requirements layer sets `[ui] disable_bypass_permissions_mode = true` (or legacy `[ui] yolo = false`).
+/// Returns `Some(reason)` iff a requirements layer sets `[ui] disable_bypass_permissions_mode = true` (or legacy `[ui] yolo = false`),
+/// or the user's own `$FUIGO_HOME/config.toml` sets `[ui] disable_bypass_permissions_mode = true` (requirements win the label).
+/// The manager and the pager pin the lock at session/launch start, so one added mid-session applies from the next
+/// session start (the hub reads it per call, so there it applies at once); removing it is the user's own choice and
+/// likewise takes effect next session. The agent cannot remove it: `$FUIGO_HOME/config.toml` is a protected edit target
+/// and every unprompted write route is exactly what the lock pins off. A repo cannot set or clear it (user file only).
 /// Vendor `managed-settings.json` `disableBypassPermissionsMode` is deliberately not consulted.
 /// fuigo must not inherit a host-wide always-approve lockdown from that file.
 /// fuigo still honors that file's permission rules and MCP / marketplace allowlists.
 /// The user's own `--yolo` / `[ui] permission_mode` / runtime toggle drive always-approve.
-/// To disable it in fuigo, use a root-owned `requirements.toml`.
-/// Fails open on user-writable layers.
+/// To disable it in fuigo, use a root-owned `requirements.toml`, or for yourself `[ui] disable_bypass_permissions_mode = true`
+/// in your own `config.toml`.
 pub fn yolo_disabled_by_policy() -> Option<&'static str> {
     yolo_policy_lock().map(|lock| lock.reason)
 }
@@ -1166,7 +1206,7 @@ pub fn yolo_policy_lock() -> Option<YoloPolicyLock> {
         .iter()
         .map(|l| (PathBuf::from(l.source.label().as_ref()), &l.value))
         .collect();
-    resolve_yolo_policy_block(labeled.iter().map(|(p, v)| (p.as_path(), *v)))
+    resolve_yolo_policy_block(labeled.iter().map(|(p, v)| (p.as_path(), *v))).or_else(user_config_lock)
 }
 
 /// Read `[ui] <key>` as a bool; a non-bool value warns (naming key and layer) rather than silently failing to lock.
@@ -1184,6 +1224,53 @@ fn requirements_lock_bool(ui: Option<&toml::Value>, key: &str, path: &Path) -> O
             None
         }
     }
+}
+
+/// Reason for the user's own lock in `$FUIGO_HOME/config.toml`.
+pub const YOLO_PIN_REASON_USER_CONFIG: &str =
+    "always-approve disabled by your config.toml ([ui] disable_bypass_permissions_mode = true)";
+
+/// The user half of [`yolo_policy_lock`]: `[ui] disable_bypass_permissions_mode = true` in the user's own
+/// `$FUIGO_HOME/config.toml` (never a project layer, `FUIGO_CONFIG*`, overlay, remote or managed config).
+/// An unreadable or unparseable file warns once per process per path and does not lock.
+pub fn user_config_lock() -> Option<YoloPolicyLock> {
+    let (path, read) = fuigo_config::user_config_raw()?;
+    match read {
+        Ok(value) => resolve_yolo_policy_block_with_user(std::iter::empty(), Some((&path, &value))),
+        Err(e) => {
+            static WARNED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+                std::sync::LazyLock::new(Default::default);
+            let first = WARNED
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(path.clone());
+            if first {
+                warn!(
+                    path = %path.display(),
+                    "config.toml could not be read ({e}); [ui] disable_bypass_permissions_mode is not applied from it"
+                );
+            }
+            None
+        }
+    }
+}
+
+/// Pure form of [`yolo_policy_lock`] over pre-loaded requirements layers plus the user's own config.toml.
+/// Requirements win (the admin label is reported); otherwise the user's `[ui] disable_bypass_permissions_mode = true`
+/// locks under the user label. A user `[ui] yolo = false` is not a lock, and `false` clears nothing.
+fn resolve_yolo_policy_block_with_user<'a>(
+    requirement_layers: impl Iterator<Item = (&'a Path, &'a toml::Value)>,
+    user: Option<(&Path, &toml::Value)>,
+) -> Option<YoloPolicyLock> {
+    if let Some(lock) = resolve_yolo_policy_block(requirement_layers) {
+        return Some(lock);
+    }
+    let (path, value) = user?;
+    (requirements_lock_bool(value.get("ui"), "disable_bypass_permissions_mode", path) == Some(true))
+        .then(|| YoloPolicyLock {
+            source_label: path.display().to_string(),
+            reason: YOLO_PIN_REASON_USER_CONFIG,
+        })
 }
 
 /// Pure form of [`yolo_policy_lock`] over pre-loaded layers; `path` labels the lock's provenance and non-bool warnings.

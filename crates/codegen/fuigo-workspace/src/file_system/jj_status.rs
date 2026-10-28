@@ -1,6 +1,5 @@
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::file_system::FsError;
 
@@ -59,15 +58,11 @@ pub async fn jj_status(working_directory: impl Into<PathBuf>) -> Result<String, 
 /// Run a jj command and return trimmed stdout, or `None` on failure.
 /// A cancelled gather (a dropped, unconsumed prefetch) kills jj's whole process group, so its children can't run past the drop either.
 async fn run_jj(cwd: &Path, args: &[&str]) -> Option<String> {
-    let mut cmd = Command::new("jj");
-    fuigo_tty_utils::remove_fuigo_owned_secrets(&mut cmd);
+    let mut cmd = fuigo_tty_utils::jj_command_in(cwd).ok()?;
     cmd.arg("--ignore-working-copy")
         .args(args)
-        .current_dir(cwd)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .stdin(std::process::Stdio::null());
-    fuigo_tty_utils::detach_std_command(&mut cmd);
+        .stderr(std::process::Stdio::null());
     let output = super::process::output_killing_group_on_drop(cmd)
         .await
         .ok()?;

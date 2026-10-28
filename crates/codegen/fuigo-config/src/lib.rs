@@ -75,9 +75,10 @@ pub use loader::{
     TRUSTED_HOOK_PROJECTS_FILENAME, TRUSTED_PLUGINS_FILENAME, USER_CONFIG_FILENAME,
     apply_version_overrides_with_registered, deep_merge_toml, merge_requirements_toml, policy_semver, expand_env_vars_in_string,
     expand_env_vars_in_toml, hook_config_layers, hook_config_layers_at, load_config_file,
-    load_config_file_with_key_naming,
+    load_config_file_with_key_naming, load_project_config_file,
     load_from_disk, load_managed_config, load_system_managed_config, load_toml_file,
     managed_config_layers, managed_config_layers_at, parse_user_config_layer, toml_error_detail,
+    user_config_raw,
 };
 pub use macos_managed::MDM_REQUIREMENTS_SOURCE;
 pub use managed_cache::{

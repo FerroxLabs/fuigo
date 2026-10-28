@@ -25,7 +25,9 @@ pub use config_values::{
     ImportRuleAction, ImportTool, ImportableItem, PathKind, format_rule_string, redacted_env_value,
 };
 pub use error::MigrationError;
-pub use hooks_cla::{HooksMerge, extract_hooks_from_settings_file, merge_hooks};
+pub use hooks_cla::{
+    HooksMerge, extract_hooks_from_settings_file, extract_hooks_from_settings_file_in, merge_hooks,
+};
 pub use rewrite::{ConfigPatch, marker_config_text, merge_items_into_config};
 pub use scope::find_project_root;
 pub use source_cla::scan_importable_settings;

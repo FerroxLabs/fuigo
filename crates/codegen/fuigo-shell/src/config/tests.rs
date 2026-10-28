@@ -3251,10 +3251,10 @@ fn project_config_never_sources_feedback_user() {
     fuigo_workspace::folder_trust::grant_folder_trust(cwd);
     assert!(
             resolve_effective_plugins_config(cwd)
-                .paths
+                .project_paths
                 .iter()
-                .any(|p| p == "./p"),
-            "trusted project [plugins].paths must merge (proves the project config is read)"
+                .any(|(p, _)| p.ends_with("p")),
+            "trusted project [plugins].paths must load as project paths (proves the project config is read)"
         );
     let cfg = crate::agent::config::Config::new_from_toml_cfg(
             &load_effective_config().unwrap(),
@@ -3843,7 +3843,7 @@ fn resolve_effective_plugins_config_gates_project_paths_on_folder_trust() {
     let proj_disabled = "proj-bad".to_string();
     let untrusted = resolve_effective_plugins_config(cwd);
     assert!(
-            !untrusted.paths.contains(&proj_path),
+            !untrusted.paths.contains(&proj_path) && untrusted.project_paths.is_empty(),
             "untrusted folder must NOT merge the project [plugins].paths"
         );
     assert!(
@@ -3852,22 +3852,22 @@ fn resolve_effective_plugins_config_gates_project_paths_on_folder_trust() {
         );
     fuigo_workspace::folder_trust::grant_folder_trust(cwd);
     let trusted = resolve_effective_plugins_config(cwd);
+    // m5 (Astra r4 High): merged as PROJECT paths (provenance kept, resolved against the folder owning the config),
+    // never into the user's own `paths`.
     assert!(
-            trusted.paths.contains(&proj_path),
-            "trusted folder must merge the project [plugins].paths"
+            !trusted.paths.contains(&proj_path)
+                && trusted
+                    .project_paths
+                    .iter()
+                    .any(|(dir, _)| dir.ends_with("proj-plugin")),
+            "trusted folder must merge the project [plugins].paths as project paths: {trusted:?}"
         );
     assert!(
             trusted.disabled.contains(&proj_disabled),
             "project [plugins].disabled must merge when trusted too"
         );
-    let trusted_minus_project: Vec<String> = trusted
-        .paths
-        .iter()
-        .filter(|p| *p != &proj_path)
-        .cloned()
-        .collect();
     assert_eq!(
-            trusted_minus_project, untrusted.paths,
+            trusted.paths, untrusted.paths,
             "the trust gate must toggle ONLY the project path; user/global paths unaffected"
         );
 }
@@ -3949,6 +3949,58 @@ fn discover_plugins_excludes_untrusted_configpath_plugin_end_to_end() {
             "trusted folder must DISCOVER the merged ConfigPath plugin"
         );
 }
+/// m5 (Astra r4 High): a trusted repository's `[plugins].paths` naming a plugin OUTSIDE the repository (here under
+/// the user's home, where a user `[plugins].paths` entry would be auto-trusted and auto-enabled) is not loaded; one
+/// inside the repository is discovered as a PROJECT plugin: not auto-enabled.
+#[test]
+#[serial_test::serial]
+fn m5_project_plugin_paths_are_contained_and_not_auto_enabled() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    use fuigo_agent::plugins::{PluginScope, TrustStore, discover_plugins};
+    use fuigo_test_support::EnvGuard;
+    let home = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::set("FUIGO_HOME", home.path().join(".fuigo"));
+    let _home = EnvGuard::set("HOME", home.path());
+    let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
+    let _sim = simulate_release_build();
+    let outside = home.path().join("my-plugins").join("homeplug");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("plugin.json"), r#"{"name":"homeplug"}"#).unwrap();
+    let repo = home.path().join("work").join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git2::Repository::init(&repo).unwrap();
+    let inside = repo.join("vendor").join("repoplug");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::write(inside.join("plugin.json"), r#"{"name":"repoplug"}"#).unwrap();
+    std::fs::create_dir_all(repo.join(".fuigo")).unwrap();
+    std::fs::write(
+        repo.join(".fuigo").join("config.toml"),
+        format!("[plugins]\npaths = ['{}', './vendor/repoplug']\n", outside.display()),
+    )
+    .unwrap();
+    fuigo_workspace::folder_trust::grant_folder_trust(&repo);
+    crate::agent::folder_trust::resolve_and_record(&repo, None, false);
+    let verdict = crate::agent::folder_trust::project_scope_allowed(&repo);
+    assert!(verdict, "a store-granted repo must resolve trusted");
+
+    let mut dc = resolve_effective_plugins_config(&repo).to_discovery_config_with(None);
+    let trust_store = TrustStore::load_from(home.path().join("plugin-trust"));
+    let found = discover_plugins(Some(&repo), &dc, &trust_store, verdict);
+    assert!(
+        !found.iter().any(|p| p.manifest.name == "homeplug"),
+        "a repository [plugins].paths entry outside the repository was loaded"
+    );
+    let repoplug = found
+        .iter()
+        .find(|p| p.manifest.name == "repoplug")
+        .expect("repository [plugins].paths entry inside the repository is discovered");
+    assert_eq!(repoplug.scope, PluginScope::Project);
+    dc.populate_plugin_lists(&found);
+    assert!(!dc.enabled.iter().any(|e| e == "repoplug"), "project plugin auto-enabled");
+}
+
 /// Kill-switch ordering regression: `resolve_effective_plugins_config` reads the folder-trust gate internally.
 /// Its call sites (commands/list, plugin fan-out, reload) therefore resolve with the REAL RemoteSettings first.
 /// A cold key under an org kill-switch must end up allowed.
@@ -3964,7 +4016,8 @@ fn kill_switched_cold_cwd_stays_allowed_through_plugins_config_read() {
     use fuigo_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
-    let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
+    // u35 t1 (design d2 §2.4): only the user's own switch turns folder trust off; the remote one is ignored.
+    let _flag = EnvGuard::set("FUIGO_FOLDER_TRUST", "0");
     let _sim = simulate_release_build();
     let repo = tempfile::tempdir().unwrap();
     git2::Repository::init(repo.path()).unwrap();
@@ -3973,18 +4026,15 @@ fn kill_switched_cold_cwd_stays_allowed_through_plugins_config_read() {
     std::fs::write(fuigo.join("config.toml"), "[plugins]\npaths = [\"./proj-plugin\"]\n")
         .unwrap();
     let cwd = repo.path();
-    let remote = crate::util::config::RemoteSettings {
-        folder_trust_enabled: Some(false),
-        ..Default::default()
-    };
+    let remote = crate::util::config::RemoteSettings::default();
     assert!(
             crate::agent::folder_trust::resolve_and_record(cwd, Some(&remote), false),
             "kill-switch must resolve the cold key trusted"
         );
     let cfg = resolve_effective_plugins_config(cwd);
     assert!(
-            cfg.paths.contains(&"./proj-plugin".to_string()),
-            "kill-switched folder counts trusted, so the project path must merge"
+            cfg.project_paths.iter().any(|(p, _)| p.ends_with("proj-plugin")),
+            "kill-switched folder counts trusted, so the project path must load"
         );
     assert!(
             crate::agent::folder_trust::project_scope_allowed(cwd),
@@ -4287,4 +4337,34 @@ fn wrap_prints_the_sandbox_warning_on_windows_only() {
     );
     assert_eq!(wrap_sandbox_warning_line_for("workspace", false), None);
     assert_eq!(wrap_sandbox_warning_line_for("off", true), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn m5_project_roles_and_personas_linked_outside_the_project_are_not_loaded() {
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_roles = outside.path().join("roles");
+    std::fs::create_dir_all(&outside_roles).unwrap();
+    std::fs::write(outside_roles.join("evil.toml"), "description = \"outside role\"\n").unwrap();
+    std::fs::write(outside.path().join("p.toml"), "instructions = \"outside persona\"\n").unwrap();
+    std::fs::create_dir_all(project.path().join(".fuigo/personas")).unwrap();
+    // Whole roles folder linked out, and a single persona file linked out.
+    std::os::unix::fs::symlink(&outside_roles, project.path().join(".fuigo/roles")).unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("p.toml"),
+        project.path().join(".fuigo/personas/p.toml"),
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join(".fuigo/personas/ok.toml"),
+        "instructions = \"inside persona\"\n",
+    )
+    .unwrap();
+    let mut cfg = SubagentsConfig::default();
+    cfg.discover_roles(project.path());
+    cfg.discover_personas(project.path());
+    assert!(!cfg.roles.contains_key("evil"), "roles folder linked outside must be skipped");
+    assert!(!cfg.personas.contains_key("p"), "persona file linked outside must be skipped");
+    assert!(cfg.personas.contains_key("ok"), "in-project persona loads");
 }

@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use super::checkout::git_command;
+use super::checkout::git_command_judged;
 
 mod build_output;
 mod conversions;
@@ -330,9 +330,10 @@ fn open_surviving_repo(
     }
 }
 
-pub(super) fn probe_command(worktree: &Path) -> Command {
-    let mut command = git_command();
-    command.current_dir(worktree);
+/// The read-only probe git in `worktree`, judged (u35 t1): in a folder the user has not trusted nothing starts, and
+/// every caller reads the refusal as a failed check (the worktree is kept).
+pub(super) fn probe_command(worktree: &Path) -> Result<Command, fuigo_tty_utils::RepoUntrusted> {
+    let mut command = git_command_judged(worktree)?;
     command.args([
         "--literal-pathspecs",
         "--no-replace-objects",
@@ -343,7 +344,7 @@ pub(super) fn probe_command(worktree: &Path) -> Command {
     ]);
     command.env("GIT_GRAFT_FILE", NO_SUCH_PATH);
     super::probe::forget_inherited_git_environment(&mut command);
-    command
+    Ok(command)
 }
 
 #[cfg(test)]

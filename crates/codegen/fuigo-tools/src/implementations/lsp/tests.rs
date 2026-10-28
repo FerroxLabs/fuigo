@@ -1462,14 +1462,18 @@ async fn a_server_that_starts_answering_is_waited_on_again() {
     let (_dir, script_path) = write_silent_server();
     let workspace = tempfile::tempdir().unwrap();
     let mut mgr = single_server_manager(&script_path, &workspace).await;
-    // Short patience, generous hold: this is about whether we block, not about
-    // letting go of files.
+    // Generous hold, and a patience that is only ever crossed by moving the
+    // pending-edit clock (never by real time): this is about whether we block,
+    // not about letting go of files, and a loaded host must not be able to
+    // stretch the gap between an edit and its drain past the patience.
+    let patience = std::time::Duration::from_secs(30);
     mgr.pending_policy = super::pending::PendingPolicy {
-        verdict_ttl: std::time::Duration::from_secs(30),
-        server_patience: std::time::Duration::from_millis(50),
+        verdict_ttl: std::time::Duration::from_secs(3600),
+        server_patience: patience,
     };
     let mgr = tokio::sync::Mutex::new(mgr);
-    let brief = std::time::Duration::from_millis(20);
+    // Only ceilings: every drain here returns as soon as it has what it wants.
+    let ceiling = std::time::Duration::from_secs(120);
 
     let file = workspace.path().join("slow.ts");
     std::fs::write(&file, "const y = 1;\n").unwrap();
@@ -1478,15 +1482,11 @@ async fn a_server_that_starts_answering_is_waited_on_again() {
         .notify_file_changed(&file, "const y = 1;\n");
 
     // Quiet for long enough that the server stops being worth blocking on.
-    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    mgr.lock().await.clock_advance += patience + std::time::Duration::from_secs(1);
     let started = std::time::Instant::now();
+    assert!(drain_lsp_diagnostics(&mgr, ceiling).await.is_none());
     assert!(
-        drain_lsp_diagnostics(&mgr, std::time::Duration::from_secs(5))
-            .await
-            .is_none()
-    );
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(1),
+        started.elapsed() < ceiling / 2,
         "a server that has said nothing should not cost a turn its whole budget"
     );
 
@@ -1506,7 +1506,7 @@ async fn a_server_that_starts_answering_is_waited_on_again() {
         ),
     );
 
-    let summary = drain_lsp_diagnostics(&mgr, brief)
+    let summary = drain_lsp_diagnostics(&mgr, ceiling)
         .await
         .expect("the answer it finally gave must be reported");
     assert!(summary.text.contains("server is back"), "{}", summary.text);
@@ -1521,6 +1521,9 @@ async fn a_server_that_starts_answering_is_waited_on_again() {
         .notify_file_changed(&next, "const y = 2;\n");
 
     let late = store.clone();
+    // The real client wakes the drain after every publish; installing straight
+    // into the store does not, so do the same here.
+    let wake = mgr.lock().await.diagnostics_ready.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         late.install(
@@ -1535,9 +1538,10 @@ async fn a_server_that_starts_answering_is_waited_on_again() {
                 None,
             ),
         );
+        wake.notify_one();
     });
 
-    let summary = drain_lsp_diagnostics(&mgr, std::time::Duration::from_secs(3))
+    let summary = drain_lsp_diagnostics(&mgr, ceiling)
         .await
         .expect("a server that has started answering must be waited on again");
     assert!(summary.text.contains("still awake"), "{}", summary.text);
@@ -1671,8 +1675,7 @@ async fn a_server_that_publishes_is_not_second_guessed_with_a_pull() {
         mgr.lock().await.notify_file_changed(&file, &text);
         // The push arrives on the mock's own schedule; a single fixed-deadline
         // drain flaked on a loaded host, so poll drains up to the suite deadline.
-        let summary =
-            drain_until_reported(&mgr, "the check that only the push channel runs").await;
+        let summary = drain_until_reported(&mgr, "the check that only the push channel runs").await;
         assert!(
             summary.contains("the check that only the push channel runs"),
             "round {round}: the pushed report is what the reader gets"

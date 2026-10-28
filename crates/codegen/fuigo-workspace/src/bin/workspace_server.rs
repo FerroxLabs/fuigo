@@ -263,6 +263,8 @@ where
 }
 
 fn main() -> anyhow::Result<()> {
+    // u35 t1: folder trust gates every git, jj and direnv this hub starts; installed before anything can spawn.
+    fuigo_workspace::folder_trust::install_process_judges();
     // P149 (S14/K16): every storage upload this server makes sends its text through the upload scrub.
     fuigo_file_utils::payload_filter::install(fuigo_workspace::workspace_upload_scrub);
     let mut args = match parse_args_from(std::env::args_os()) {

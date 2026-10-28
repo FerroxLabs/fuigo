@@ -120,6 +120,13 @@ pub struct SkillInfo {
     /// Populated for agent definition `skills:` preloading.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+
+    /// The folder every read of this skill's file must stay inside: the plugin folder for a plugin skill, the folder
+    /// a project config dir belongs to for a project skill. `None` for user scope (links are followed). Set by
+    /// discovery and honored at every later read ([`super::skill::read_skill_source`]), so a link swapped in after
+    /// discovery is still refused. Never crosses the wire: a remote peer cannot widen it.
+    #[serde(skip)]
+    pub content_root: Option<fuigo_dirs::contained::PinnedRoot>,
 }
 
 impl SkillInfo {
@@ -180,6 +187,7 @@ impl Default for SkillInfo {
             disable_model_invocation: false,
             enabled: true,
             body: None,
+            content_root: None,
         }
     }
 }

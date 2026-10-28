@@ -169,6 +169,7 @@ use prompt_build::*;
 #[path = "acp_session_impl/session_mode.rs"]
 mod session_mode;
 use session_mode::*;
+pub(crate) use session_mode::advertised_mode_id;
 #[path = "acp_session_impl/child_tool_projection.rs"]
 mod child_tool_projection;
 #[path = "acp_session_impl/length_salvage.rs"]
@@ -691,6 +692,11 @@ pub(crate) struct PreparedToolCall {
     dispatch_target_name: Option<String>,
     /// Read-only per `ToolKind`; decides whether the call takes the per-file lock.
     is_read_only: bool,
+    /// u35 g9: the permission check approved some part of the call without a grant (the read-only lists or the Auto
+    /// mode fast path), so the shell runner judges the environment it runs under
+    /// ([`fuigo_tools::sandbox_launch::ApprovedWithoutGrant`]). `false` when a grant, an answer or an override
+    /// approved all of it.
+    approved_without_grant: bool,
     rewriting_hook: Option<String>,
     /// Reminder describing an MCP argument coercion applied to this call, appended to its result or failure message.
     coercion_note: Option<String>,
@@ -1891,6 +1897,9 @@ mod plan_mode_edit_gate_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/plan_mode_midturn_tests.rs"]
 mod plan_mode_midturn_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/u35_session_mode_tests.rs"]
+mod u35_session_mode_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/pre_tool_use_decision_tests.rs"]
 mod pre_tool_use_decision_tests;

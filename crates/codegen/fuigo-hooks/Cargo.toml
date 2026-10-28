@@ -21,6 +21,7 @@ toml = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 fuigo-config = { workspace = true }
+fuigo-dirs = { workspace = true }
 # P118: a key late-bound into a hook child is recorded for the sent-credential scrub.
 fuigo-secrets = { workspace = true }
 # Child-network restriction on hook command spawns; enforce is feature-unified

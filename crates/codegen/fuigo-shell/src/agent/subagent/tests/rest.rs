@@ -3228,6 +3228,7 @@ fn make_test_skill(
         has_user_specified_description: false,
         paths: None,
         body: None,
+        content_root: None,
     }
 }
 #[test]

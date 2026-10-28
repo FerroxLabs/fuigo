@@ -4,13 +4,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::git::checkout::git_command;
+use crate::git::checkout::git_command_judged;
 
 /// Create a git worktree with `--no-checkout`. Blocking.
 pub(crate) fn worktree_add_no_checkout(source: &Path, dest: &str, git_ref: &str) -> Result<()> {
     let git_ref = crate::git::operand::validate_git_ref(git_ref).map_err(|e| anyhow::anyhow!(e))?;
-    let output = git_command()
-        .current_dir(source)
+    let output = git_command_judged(source)?
         .args([
             "worktree",
             "add",
@@ -59,10 +58,9 @@ fn remove_stale_worktree_registrations(
         return 0;
     }
 
-    let common_dir = match git_command()
-        .current_dir(source_repo)
-        .args(["rev-parse", "--git-common-dir"])
-        .output()
+    let common_dir = match git_command_judged(source_repo)
+        .map_err(std::io::Error::from)
+        .and_then(|mut cmd| cmd.args(["rev-parse", "--git-common-dir"]).output())
     {
         Ok(o) if o.status.success() => {
             let path = PathBuf::from(String::from_utf8_lossy(&o.stdout).trim());

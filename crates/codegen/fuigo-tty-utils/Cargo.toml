@@ -8,6 +8,7 @@ description = "Lightweight process-spawning utilities for TTY safety — detach 
 [dependencies]
 anstream = "0.6"
 clap = { workspace = true }
+dunce = { workspace = true }
 fuigo-secrets = { workspace = true }
 tokio = { workspace = true, features = ["process", "rt", "time"] }
 tracing = { workspace = true }
@@ -21,6 +22,7 @@ windows = { workspace = true }
 
 [dev-dependencies]
 fuigo-secrets = { workspace = true, features = ["test-support"] }
+regex = { workspace = true }
 
 [features]
 # Test-only introspection for crates that link this one and need to pin their
@@ -30,6 +32,10 @@ fuigo-secrets = { workspace = true, features = ["test-support"] }
 # a dev-dependency only; never in a shipped build, so neither accessor is part
 # of the supported surface.
 testing = []
+# Test builds only (enabled as a dev-dependency): with no folder-trust judge installed, the judged repository-tool
+# builders (`git_command_in`, ...) allow instead of refusing, and the dirless `git_command()` family exists for test
+# fixtures. Never in a shipped build.
+unjudged-repo-exec = []
 
 [lints]
 workspace = true

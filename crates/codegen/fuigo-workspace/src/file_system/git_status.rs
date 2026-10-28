@@ -68,13 +68,14 @@ pub async fn git_status_short_pinned(
     .map_err(|e| FsError::Other(format!("git config pin task failed: {e}")))?
     .ok_or_else(|| FsError::Other("unreadable git config".to_string()))?;
 
-    let mut cmd = fuigo_tty_utils::git_command();
+    // A folder the user has not trusted gets no git from Fuigo: no status prefix.
+    let mut cmd = fuigo_tty_utils::git_command_in(&working_directory)
+        .map_err(|e| FsError::Other(e.to_string()))?;
     for pin in &filter_pins {
         cmd.args(["-c", pin.as_str()]);
     }
     cmd.args(["-c", fsmonitor.git_config_arg()]);
     cmd.args(["status", "--short", "--branch", "--untracked-files=normal"])
-        .current_dir(&working_directory)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     // GIT_OPTIONAL_LOCKS=0: a session-triggered status must not fight the user's git on index.lock.
@@ -228,13 +229,12 @@ fn git_status_impl(working_directory: &Path) -> Result<String, FsError> {
 fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
     // Caller is already on a blocking pool (`git_status_impl`); do not nest spawn_blocking.
     let filter_pins = crate::git_content_filters::content_filter_config_pins(cwd)?;
-    let mut cmd = fuigo_tty_utils::git_command();
+    let mut cmd = fuigo_tty_utils::git_command_in(cwd).ok()?;
     for pin in &filter_pins {
         cmd.args(["-c", pin.as_str()]);
     }
     let output = cmd
         .args(args)
-        .current_dir(cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()

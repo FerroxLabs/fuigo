@@ -18,7 +18,9 @@ fn probe_output(worktree: &Path, command: Command, what: &str) -> Result<Vec<u8>
 /// lose the real content. Compares the stored id against `hash-object
 /// --no-filters` of the file (see `find_converted_path_in`).
 pub(super) fn find_converted_path(worktree: &Path, snapshot: &str) -> Option<KeepReason> {
-    let mut command = probe_command(worktree);
+    let Ok(mut command) = probe_command(worktree) else {
+        return Some(KeepReason::CheckFailed);
+    };
     command.args(["status", "--porcelain", "-z", "--untracked-files=all"]);
     let changed = match probe_output(worktree, command, "status") {
         Ok(changed) => changed,
@@ -77,14 +79,18 @@ fn find_converted_path_in(
     snapshot: &str,
     paths: &[PathBuf],
 ) -> Option<KeepReason> {
-    let mut stored = probe_command(worktree);
+    let Ok(mut stored) = probe_command(worktree) else {
+        return Some(KeepReason::CheckFailed);
+    };
     stored.args(["ls-tree", "-z", snapshot, "--"]);
     stored.args(paths);
     let stored = match probe_output(worktree, stored, "ls-tree") {
         Ok(stored) => stored,
         Err(reason) => return Some(reason),
     };
-    let mut raw = probe_command(worktree);
+    let Ok(mut raw) = probe_command(worktree) else {
+        return Some(KeepReason::CheckFailed);
+    };
     raw.args(["hash-object", "--no-filters", "--"]);
     raw.args(paths);
     let raw = match probe_output(worktree, raw, "hash-object") {

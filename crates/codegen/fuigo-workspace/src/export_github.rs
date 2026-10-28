@@ -149,7 +149,10 @@ fn resolve_repo_mapping(
     requested: Option<&str>,
 ) -> Result<String, ExportGithubFailure> {
     let mapping_path = dir.join(GITHUB_REPO_MAPPING_FILE);
-    let stored = std::fs::read_to_string(&mapping_path)
+    // The mapping picks the push target, so it is read contained to the project dir: a mapping linked outside
+    // the project reads as absent.
+    let stored = fuigo_dirs::contained::PinnedRoot::pin(dir)
+        .and_then(|root| fuigo_dirs::contained::read_contained(&mapping_path, &root))
         .ok()
         .and_then(|s| s.lines().next().map(|l| l.trim().to_owned()))
         .filter(|s| !s.is_empty());
@@ -166,13 +169,38 @@ fn resolve_repo_mapping(
     };
     validate_repo_full_name(&repo)?;
 
-    std::fs::write(&mapping_path, format!("{repo}\n")).map_err(|e| {
+    write_mapping_no_follow(&mapping_path, &format!("{repo}\n")).map_err(|e| {
         ExportGithubFailure::new(
             ExportGithubError::GitFailed,
             format!("writing {GITHUB_REPO_MAPPING_FILE}: {e}"),
         )
     })?;
     Ok(repo)
+}
+
+/// Write the mapping without following a link at the leaf: the open itself refuses it (no check-then-write window).
+fn write_mapping_no_follow(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: open the link itself instead of its target; refused below
+        opts.custom_flags(0x0020_0000);
+    }
+    let file = opts.open(path)?;
+    #[cfg(windows)]
+    if file.metadata()?.file_type().is_symlink() || std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err(std::io::Error::other("link"));
+    }
+    file.set_len(0)?;
+    (&file).write_all(content.as_bytes())
 }
 
 async fn ensure_repo(dir: &Path, branch: Option<&str>) -> Result<(), ExportGithubFailure> {
@@ -319,9 +347,10 @@ fn classify_push_failure(failure: ExportGithubFailure) -> ExportGithubFailure {
 }
 
 async fn git(dir: &Path, args: &[&str]) -> Result<String, ExportGithubFailure> {
-    let mut cmd = fuigo_tty_utils::git_command();
-    cmd.current_dir(dir)
-        .env("GIT_TERMINAL_PROMPT", "0")
+    let mut cmd = fuigo_tty_utils::git_command_in(dir).map_err(|e| {
+        ExportGithubFailure::new(ExportGithubError::GitFailed, e.to_string())
+    })?;
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_AUTHOR_NAME", AUTHOR_NAME)
         .env("GIT_AUTHOR_EMAIL", AUTHOR_EMAIL)
         .env("GIT_COMMITTER_NAME", AUTHOR_NAME)
@@ -401,6 +430,35 @@ mod tests {
             .unwrap();
         assert!(out.status.success());
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn m6_mapping_write_never_follows_a_link() {
+        let dir = tmp_dir("m6-nofollow");
+        let target = dir.join("target");
+        std::fs::write(&target, "keep\n").unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(write_mapping_no_follow(&link, "o/r\n").is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep\n");
+        let plain = dir.join("plain");
+        write_mapping_no_follow(&plain, "o/r\n").unwrap();
+        write_mapping_no_follow(&plain, "o/s\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&plain).unwrap(), "o/s\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn m5_mapping_linked_outside_the_project_is_not_used_or_written() {
+        let project = tmp_dir("m5-project");
+        let outside = tmp_dir("m5-outside");
+        std::fs::write(outside.join("mapping"), "attacker/repo\n").unwrap();
+        std::os::unix::fs::symlink(outside.join("mapping"), mapping_file_path(&project)).unwrap();
+        let err = resolve_repo_mapping(&project, None).unwrap_err();
+        assert!(matches!(err.kind, ExportGithubError::RepoNotSpecified), "outside mapping must not name the push target");
+        assert!(resolve_repo_mapping(&project, Some("user/app")).is_err(), "never write through the link");
+        assert_eq!(std::fs::read_to_string(outside.join("mapping")).unwrap(), "attacker/repo\n");
     }
 
     #[tokio::test]

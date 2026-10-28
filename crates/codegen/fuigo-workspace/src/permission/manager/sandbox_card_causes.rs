@@ -51,9 +51,12 @@ pub(super) fn bash_ask_causes(
             }
             Finding::EnvInjection => AskCause::Kept("environment injection"),
             Finding::DangerousCommand => AskCause::Kept("a destructive or high-impact command"),
-            Finding::SpecialExecSurface => {
-                AskCause::Kept("a special executable or disclosure surface")
+            Finding::SpecialExecSurface => AskCause::Kept("a special executable or disclosure surface"),
+            // u35 g7/g8: the inherited variable (`PATH`, `LD_PRELOAD`, ...) that decided.
+            Finding::InheritedEnvironment => {
+                AskCause::Kept(evaluation.env_steering.unwrap_or("the inherited environment"))
             }
+            Finding::RepositoryHook => AskCause::Kept("the repository's own git hooks"),
         });
     }
     // With an allow rule the segments are the rule's business; without one each segment that is not
@@ -64,7 +67,10 @@ pub(super) fn bash_ask_causes(
             SegmentEvaluation::Unparseable => push(AskCause::UnparseableShell),
             SegmentEvaluation::NeedsPrompts { segments } => {
                 for segment in segments {
-                    push(if is_network_client(segment) {
+                    // u35 r3: a read-only command asked about only because the script is not plain text.
+                    push(if evaluation.gated_segments.contains(segment) {
+                        AskCause::UnparseableShell
+                    } else if is_network_client(segment) {
                         AskCause::NetworkEgress
                     } else {
                         AskCause::Kept("a command outside the safe list")
@@ -101,4 +107,31 @@ fn writes_stay_in_scope(
             |base, path| resolve_model_path(base, None, path),
             |path| cover.contains_write(path),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// The causes the default prompt names for `cmd` with no grant and no allow rule, under a standing cover.
+    fn causes(cmd: &str) -> Vec<AskCause> {
+        let evaluation = super::super::evaluate_bash(cmd, &super::super::PermissionState::default(), true);
+        let cover = SandboxCover::for_test(false, vec![PathBuf::from("/ws")]);
+        bash_ask_causes(&evaluation, false, &BranchSwitchPlan::NotApplicable, Path::new("/ws"), &cover)
+    }
+
+    /// g4 (Fable r3 M2): a read-only command asked about only because it is not plain text is named as unparseable
+    /// shell; the same form of a program outside the safe list, or a form with a finding of its own, keeps its cause.
+    #[test]
+    fn gate_only_asks_are_named_unparseable_shell() {
+        for cmd in ["ls ~/x", "ls src/*.rs", "ls 2>&1", "cd src && git status", "command ls -la"] {
+            assert_eq!(causes(cmd), vec![AskCause::UnparseableShell], "{cmd:?}");
+        }
+        assert_eq!(causes("foo ~/x"), vec![AskCause::Kept("a command outside the safe list")]);
+        assert_eq!(
+            causes("cat *.md"),
+            vec![AskCause::UnresolvedArgument, AskCause::Kept("a command outside the safe list")]
+        );
+    }
 }

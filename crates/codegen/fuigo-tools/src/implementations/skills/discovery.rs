@@ -68,13 +68,116 @@ fn is_vendor_default_skill(path: &str, name: &str) -> bool {
         || (in_claude && CLAUDE_DEFAULT_SKILLS.contains(&name))
 }
 
+/// How a skill/command walk treats symbolic links.
+///
+/// - [`SkillWalk::follow_links`]: user authority (`~/.fuigo`, `~/.claude`, `[skills].paths`, injected dirs). A link is
+///   followed wherever it points; the user put it there.
+/// - [`SkillWalk::contained`]: plugin and project scope. Every directory and file the walk would read must
+///   canonicalize inside the canonical root (the plugin folder, or the folder the project config dir belongs to).
+///   Anything that resolves outside is skipped with a debug log and counted in [`SkillWalk::skipped`], so a plugin or
+///   repo cannot link an arbitrary local file into the model's context.
+///
+/// Both modes keep a visited set of canonical directories, so a symlink loop is walked once (and the depth cap
+/// [`MAX_SKILL_WALK_DEPTH`] still bounds the walk).
+#[derive(Debug, Default)]
+pub struct SkillWalk {
+    root: Option<fuigo_dirs::contained::PinnedRoot>,
+    visited: HashSet<PathBuf>,
+    /// Canonical SKILL.md files already returned by the current walk: a self-link (`skills/a/self -> skills/a`)
+    /// reaches the same file under a second path, which must not become a second skill.
+    files: HashSet<PathBuf>,
+    skipped: usize,
+}
+
+impl SkillWalk {
+    /// Follow links anywhere (user scope).
+    pub fn follow_links() -> Self {
+        Self::default()
+    }
+
+    /// Keep every path the walk reads inside `root`, pinned here (resolved once; a root that cannot be resolved is
+    /// used as given, which fails closed for any resolved path that is not under it).
+    pub fn contained(root: &Path) -> Self {
+        Self::contained_pinned(
+            fuigo_dirs::contained::PinnedRoot::pin(root)
+                .unwrap_or_else(|_| fuigo_dirs::contained::PinnedRoot::from_canonical(root)),
+        )
+    }
+
+    /// Keep every path the walk reads inside an already pinned root.
+    pub fn contained_pinned(root: fuigo_dirs::contained::PinnedRoot) -> Self {
+        Self {
+            root: Some(root),
+            ..Self::default()
+        }
+    }
+
+    /// Entries skipped because they resolve outside the root.
+    pub fn skipped(&self) -> usize {
+        self.skipped
+    }
+
+    /// The canonical root a contained walk keeps to (`None` when following links). Discovery records it on each
+    /// skill ([`SkillInfo::content_root`]) so every later read of the file is held to the same folder.
+    pub fn root(&self) -> Option<&fuigo_dirs::contained::PinnedRoot> {
+        self.root.as_ref()
+    }
+
+    /// Start a new walk (keeps the root and the skip count).
+    fn reset(&mut self) {
+        self.visited.clear();
+        self.files.clear();
+    }
+
+    /// First time this SKILL.md (by canonical path) is found in the current walk.
+    fn first_file(&mut self, file: &Path) -> bool {
+        let canonical = dunce::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+        self.files.insert(canonical)
+    }
+
+    /// Whether the walk may read `path`. Always true when following links. Contained: true only when the path
+    /// canonicalizes under the root; an outside path is logged and counted, a path that cannot be resolved (vanished,
+    /// dangling link) is skipped quietly as there is nothing to load.
+    pub fn admit(&mut self, path: &Path) -> bool {
+        let Some(root) = &self.root else {
+            return true;
+        };
+        match dunce::canonicalize(path) {
+            Ok(canonical) if canonical.starts_with(root.path()) => true,
+            Ok(canonical) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    target = %canonical.display(),
+                    root = %root.path().display(),
+                    "skill/command path links outside its plugin or project folder; skipping"
+                );
+                self.skipped += 1;
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// First visit of this directory (by canonical path) in the current walk.
+    fn first_visit(&mut self, dir: &Path) -> bool {
+        let canonical = dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        self.visited.insert(canonical)
+    }
+}
+
 /// Find SKILL.md files inside `skills/` subdirectories, recursively.
 pub fn find_skill_paths(dir: &Path) -> Vec<PathBuf> {
+    find_skill_paths_in(dir, &mut SkillWalk::follow_links())
+}
+
+/// [`find_skill_paths`] under the given walk policy.
+pub fn find_skill_paths_in(dir: &Path, walk: &mut SkillWalk) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for subdir in SKILL_SUBDIRS {
         let skills_dir = dir.join(subdir);
-        if skills_dir.is_dir() {
-            walk_for_skill_md(&skills_dir, &mut paths, 0);
+        if skills_dir.is_dir() && walk.admit(&skills_dir) {
+            walk.reset();
+            walk_for_skill_md_in(&skills_dir, &mut paths, 0, walk);
         }
     }
     paths
@@ -85,16 +188,29 @@ pub fn find_command_paths(dir: &Path) -> Vec<PathBuf> {
     scan_md_files(&dir.join(COMMAND_SUBDIR))
 }
 
+/// [`find_command_paths`] under the given walk policy.
+pub fn find_command_paths_in(dir: &Path, walk: &mut SkillWalk) -> Vec<PathBuf> {
+    scan_md_files_in(&dir.join(COMMAND_SUBDIR), walk)
+}
+
 /// Scan a directory for `.md` files (flat, no recursion).
 pub fn scan_md_files(dir: &Path) -> Vec<PathBuf> {
-    if !dir.is_dir() {
+    scan_md_files_in(dir, &mut SkillWalk::follow_links())
+}
+
+/// [`scan_md_files`] under the given walk policy: the directory and each file must be admitted.
+pub fn scan_md_files_in(dir: &Path, walk: &mut SkillWalk) -> Vec<PathBuf> {
+    if !dir.is_dir() || !walk.admit(dir) {
         return vec![];
     }
     let mut paths = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
+            if path.is_file()
+                && path.extension().and_then(|e| e.to_str()) == Some("md")
+                && walk.admit(&path)
+            {
                 paths.push(path);
             }
         }
@@ -113,12 +229,21 @@ pub fn scan_md_files(dir: &Path) -> Vec<PathBuf> {
 /// plugin skill loader, the plugin count/name reporters, and config-path
 /// collection so they can never drift apart.
 pub fn find_skill_md_paths(dir: &Path) -> Vec<PathBuf> {
+    find_skill_md_paths_in(dir, &mut SkillWalk::follow_links())
+}
+
+/// [`find_skill_md_paths`] under the given walk policy (plugin skill dirs use [`SkillWalk::contained`]).
+pub fn find_skill_md_paths_in(dir: &Path, walk: &mut SkillWalk) -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    if !dir.is_dir() || !walk.admit(dir) {
+        return paths;
+    }
+    walk.reset();
     let self_skill_md = dir.join("SKILL.md");
-    if self_skill_md.is_file() {
+    if self_skill_md.is_file() && walk.admit(&self_skill_md) && walk.first_file(&self_skill_md) {
         paths.push(self_skill_md);
     }
-    walk_for_skill_md(dir, &mut paths, 0);
+    walk_for_skill_md_in(dir, &mut paths, 0, walk);
     paths
 }
 
@@ -128,7 +253,13 @@ pub fn find_skill_md_paths(dir: &Path) -> Vec<PathBuf> {
 /// filesystem-dependent, and name-collision handling downstream is
 /// first-seen-wins, so an unsorted walk picks a nondeterministic winner.
 pub fn walk_for_skill_md(dir: &Path, paths: &mut Vec<PathBuf>, depth: usize) {
-    if depth > MAX_SKILL_WALK_DEPTH {
+    walk_for_skill_md_in(dir, paths, depth, &mut SkillWalk::follow_links());
+}
+
+/// [`walk_for_skill_md`] under the given walk policy. Each canonical directory is walked once (symlink loops), every
+/// subdirectory and SKILL.md must be admitted by `walk`.
+pub fn walk_for_skill_md_in(dir: &Path, paths: &mut Vec<PathBuf>, depth: usize, walk: &mut SkillWalk) {
+    if depth > MAX_SKILL_WALK_DEPTH || !walk.first_visit(dir) {
         return;
     }
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -139,11 +270,17 @@ pub fn walk_for_skill_md(dir: &Path, paths: &mut Vec<PathBuf>, depth: usize) {
             .collect();
         dirs.sort();
         for path in dirs {
+            if !walk.admit(&path) {
+                continue;
+            }
             let skill_md_path = path.join("SKILL.md");
-            if skill_md_path.is_file() {
+            if skill_md_path.is_file()
+                && walk.admit(&skill_md_path)
+                && walk.first_file(&skill_md_path)
+            {
                 paths.push(skill_md_path);
             }
-            walk_for_skill_md(&path, paths, depth + 1);
+            walk_for_skill_md_in(&path, paths, depth + 1, walk);
         }
     }
 }
@@ -573,7 +710,16 @@ pub fn parse_skill_frontmatter(
 }
 
 pub fn read_frontmatter_only(path: &Path) -> std::io::Result<(String, usize)> {
-    let file = std::fs::File::open(path)?;
+    read_frontmatter_only_in(path, None)
+}
+
+/// [`read_frontmatter_only`] held to `root` when set: the file actually opened must lie inside it
+/// ([`fuigo_dirs::contained::open_contained`]).
+pub fn read_frontmatter_only_in(
+    path: &Path,
+    root: Option<&fuigo_dirs::contained::PinnedRoot>,
+) -> std::io::Result<(String, usize)> {
+    let file = fuigo_dirs::contained::open_scoped(path, root)?;
     let mut reader = BufReader::new(file);
     let mut frontmatter = String::new();
     let mut total_bytes = 0usize;
@@ -673,12 +819,25 @@ fn extract_lead_block(body: &str, include_headings: bool) -> Option<String> {
 /// host-driven scans), so the vendor-default denylist is applied here to cover
 /// every path. See [`is_vendor_default_skill`].
 pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillInfo> {
+    parse_skill_files_in(
+        skill_files
+            .into_iter()
+            .map(|(path, scope)| (path, scope, None))
+            .collect(),
+    )
+}
+
+/// [`parse_skill_files`] where each file carries the folder its reads must stay inside (`None`: user scope, links
+/// followed). The root is used for the reads here and recorded as [`SkillInfo::content_root`] for every later read.
+pub fn parse_skill_files_in(
+    skill_files: Vec<(PathBuf, SkillScope, Option<fuigo_dirs::contained::PinnedRoot>)>,
+) -> Vec<SkillInfo> {
     let mut skills: Vec<SkillInfo> = skill_files
         .into_iter()
-        .filter_map(|(path, scope)| {
+        .filter_map(|(path, scope, content_root)| {
             let path_str = path.to_string_lossy().to_string();
 
-            let (content, _) = match read_frontmatter_only(&path) {
+            let (content, _) = match read_frontmatter_only_in(&path, content_root.as_ref()) {
                 Ok(result) => result,
                 Err(err) => {
                     tracing::warn!(%err, "failed to read skill");
@@ -766,7 +925,7 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
             }
 
             if parsed.description.is_empty() {
-                if let Ok(full) = std::fs::read_to_string(&path) {
+                if let Ok(full) = fuigo_dirs::contained::read_scoped(&path, content_root.as_ref()) {
                     let body = extract_skill_body(&full);
                     let peek = if body.len() > MAX_BODY_PEEK_BYTES {
                         let end = crate::util::floor_char_boundary(&body, MAX_BODY_PEEK_BYTES);
@@ -812,6 +971,7 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
                 paths: parsed.paths,
                 enabled: true,
                 body: None,
+                content_root,
             })
         })
         .collect();
@@ -863,7 +1023,7 @@ pub fn discover_skills_for_paths(
         config_dir_names.push(".claude");
     }
 
-    let mut skill_files: Vec<(PathBuf, SkillScope)> = Vec::new();
+    let mut skill_files: Vec<(PathBuf, SkillScope, Option<fuigo_dirs::contained::PinnedRoot>)> = Vec::new();
     let mut seen_canonical_paths = HashSet::new();
 
     let cwd_canonical = dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
@@ -901,14 +1061,16 @@ pub fn discover_skills_for_paths(
 
             for config_dir_name in &config_dir_names {
                 let config_dir = dir.join(config_dir_name);
+                // Project scope: everything read stays inside the folder this config dir belongs to.
+                let mut walk = SkillWalk::contained(&dir);
                 // Skills before commands: skills win name collisions.
-                for path in find_skill_paths(&config_dir)
+                for path in find_skill_paths_in(&config_dir, &mut walk)
                     .into_iter()
-                    .chain(find_command_paths(&config_dir))
+                    .chain(find_command_paths_in(&config_dir, &mut walk))
                 {
                     let canonical = dunce::canonicalize(&path).unwrap_or_else(|_| path.clone());
                     if seen_canonical_paths.insert(canonical) {
-                        skill_files.push((path, SkillScope::Local));
+                        skill_files.push((path, SkillScope::Local, walk.root().cloned()));
                     }
                 }
             }
@@ -917,7 +1079,7 @@ pub fn discover_skills_for_paths(
         }
     }
 
-    let mut skills = parse_skill_files(skill_files);
+    let mut skills = parse_skill_files_in(skill_files);
 
     skills.sort_by(|a, b| {
         let depth_a = Path::new(&a.path).components().count();
@@ -1610,5 +1772,180 @@ model: test-model
                 "zeta/SKILL.md"
             ]
         );
+    }
+
+    // ── m3: symlink containment and loops ────────────────────────────
+
+    /// A symlink loop inside a skills dir is walked once: every SKILL.md is reported a single time.
+    #[cfg(unix)]
+    #[test]
+    fn m3_skill_walk_symlink_loop_reports_each_skill_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills = tmp.path().join("skills");
+        let a = skills.join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::write(a.join("SKILL.md"), "---\nname: a\n---\n").unwrap();
+        // skills/a/loop -> skills (a cycle)
+        std::os::unix::fs::symlink(&skills, a.join("loop")).unwrap();
+
+        let paths = find_skill_md_paths(&skills);
+        assert_eq!(paths.len(), 1, "loop walked more than once: {paths:?}");
+    }
+
+    /// Project scope (dynamic discovery): a `.fuigo/skills/<x>` dir or SKILL.md linked outside the project folder is
+    /// not loaded; a regular project skill beside it is.
+    #[cfg(unix)]
+    #[test]
+    fn m3_dynamic_project_skill_linked_outside_is_skipped() {
+        use crate::types::compat::CompatConfig;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let repo = base.join("repo");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(outside.join("secretdir")).unwrap();
+        std::fs::write(outside.join("secret.md"), "---\nname: secret-file\n---\nTOP SECRET").unwrap();
+        std::fs::write(
+            outside.join("secretdir").join("SKILL.md"),
+            "---\nname: secret-dir\n---\nTOP SECRET",
+        )
+        .unwrap();
+
+        let sub = repo.join("sub");
+        let skills = sub.join(".fuigo").join("skills");
+        std::fs::create_dir_all(skills.join("ok")).unwrap();
+        std::fs::write(skills.join("ok").join("SKILL.md"), "---\nname: ok\n---\n").unwrap();
+        std::os::unix::fs::symlink(outside.join("secretdir"), skills.join("linkdir")).unwrap();
+        std::fs::create_dir_all(skills.join("linkfile")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.md"), skills.join("linkfile").join("SKILL.md")).unwrap();
+        let commands = sub.join(".fuigo").join("commands");
+        std::fs::create_dir_all(&commands).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.md"), commands.join("leak.md")).unwrap();
+
+        let file = sub.join("file.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+        let mut checked = HashSet::new();
+        let found = discover_skills_for_paths(
+            &[file.as_path()],
+            &repo,
+            Some(repo.as_path()),
+            &mut checked,
+            CompatConfig::default(),
+        );
+        let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"ok"), "regular project skill missing: {names:?}");
+        assert_eq!(names.len(), 1, "a linked-out skill or command loaded: {names:?}");
+    }
+
+    /// Contained walk: links that leave the root are skipped and counted; a link that stays inside still loads;
+    /// following links (user scope) loads everything.
+    #[cfg(unix)]
+    #[test]
+    fn m3_contained_walk_skips_and_counts_links_outside_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let root = base.join("plugin");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(outside.join("far")).unwrap();
+        std::fs::write(outside.join("far").join("SKILL.md"), "---\nname: far\n---\n").unwrap();
+        std::fs::write(outside.join("x.md"), "---\nname: x\n---\n").unwrap();
+
+        let skills = root.join("skills");
+        std::fs::create_dir_all(skills.join("own")).unwrap();
+        std::fs::write(skills.join("own").join("SKILL.md"), "---\nname: own\n---\n").unwrap();
+        std::fs::create_dir_all(root.join("shared").join("inside")).unwrap();
+        std::fs::write(root.join("shared").join("inside").join("SKILL.md"), "---\nname: inside\n---\n").unwrap();
+        std::os::unix::fs::symlink(root.join("shared").join("inside"), skills.join("inside")).unwrap();
+        std::os::unix::fs::symlink(outside.join("far"), skills.join("far")).unwrap();
+        std::fs::create_dir_all(skills.join("filelink")).unwrap();
+        std::os::unix::fs::symlink(outside.join("x.md"), skills.join("filelink").join("SKILL.md")).unwrap();
+        let commands = root.join("commands");
+        std::fs::create_dir_all(&commands).unwrap();
+        std::fs::write(commands.join("own.md"), "x").unwrap();
+        std::os::unix::fs::symlink(outside.join("x.md"), commands.join("leak.md")).unwrap();
+
+        let mut walk = SkillWalk::contained(&root);
+        let skill_paths = find_skill_md_paths_in(&skills, &mut walk);
+        let cmd_paths = scan_md_files_in(&commands, &mut walk);
+        let rel = |p: &PathBuf| p.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+        assert_eq!(
+            skill_paths.iter().map(rel).collect::<Vec<_>>(),
+            ["skills/inside/SKILL.md", "skills/own/SKILL.md"]
+        );
+        assert_eq!(cmd_paths.iter().map(rel).collect::<Vec<_>>(), ["commands/own.md"]);
+        assert_eq!(walk.skipped(), 3, "far dir, linked SKILL.md, linked command");
+
+        // A whole skills dir linked out of the root is one skipped entry and loads nothing.
+        let root2 = base.join("plugin2");
+        std::fs::create_dir_all(&root2).unwrap();
+        std::os::unix::fs::symlink(&outside, root2.join("skills")).unwrap();
+        let mut walk2 = SkillWalk::contained(&root2);
+        assert!(find_skill_md_paths_in(&root2.join("skills"), &mut walk2).is_empty());
+        assert!(find_skill_paths_in(&root2, &mut walk2).is_empty());
+        assert_eq!(walk2.skipped(), 2);
+
+        // User scope keeps following links.
+        let mut follow = SkillWalk::follow_links();
+        assert_eq!(find_skill_md_paths_in(&skills, &mut follow).len(), 4);
+        assert_eq!(follow.skipped(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn m4_self_link_skill_dir_reports_the_skill_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills = dunce::canonicalize(tmp.path()).unwrap().join("skills");
+        std::fs::create_dir_all(skills.join("a")).unwrap();
+        std::fs::write(skills.join("a").join("SKILL.md"), "---\nname: a\n---\n").unwrap();
+        std::os::unix::fs::symlink(skills.join("a"), skills.join("a").join("self")).unwrap();
+        let found = find_skill_md_paths(&skills);
+        assert_eq!(found.len(), 1, "a self-linked skill dir was reported twice: {found:?}");
+        let found = find_skill_paths(skills.parent().unwrap());
+        assert_eq!(found.len(), 1, "a self-linked skill dir was reported twice: {found:?}");
+    }
+
+    /// A project skill admitted by discovery is swapped for a link to an outside file afterwards: the invocation read is
+    /// refused (the folder is checked on the opened file), and an in-folder link swapped in still reads.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn m4_dynamic_project_skill_swapped_after_discovery_is_refused_at_read() {
+        use crate::implementations::skills::skill::load_skill_content;
+        use crate::types::compat::CompatConfig;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let repo = base.join("repo");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.md"), "---\nname: ok\n---\nTOP SECRET").unwrap();
+        let sub = repo.join("sub");
+        let skill_dir = sub.join(".fuigo").join("skills").join("ok");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: ok\n---\nown body").unwrap();
+        std::fs::write(sub.join("other.md"), "---\nname: ok\n---\ninside body").unwrap();
+        let file = sub.join("file.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+
+        let mut checked = HashSet::new();
+        let found = discover_skills_for_paths(
+            &[file.as_path()],
+            &repo,
+            Some(repo.as_path()),
+            &mut checked,
+            CompatConfig::default(),
+        );
+        let skill = found.iter().find(|s| s.name == "ok").expect("project skill discovered").clone();
+        assert_eq!(load_skill_content(&skill).await.unwrap(), "own body");
+
+        std::fs::remove_file(skill_dir.join("SKILL.md")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.md"), skill_dir.join("SKILL.md")).unwrap();
+        match load_skill_content(&skill).await {
+            Ok(body) => assert!(!body.contains("TOP SECRET"), "outside file read after the swap: {body}"),
+            Err(e) => assert!(e.contains("Failed to read"), "{e}"),
+        }
+
+        std::fs::remove_file(skill_dir.join("SKILL.md")).unwrap();
+        std::os::unix::fs::symlink(sub.join("other.md"), skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(load_skill_content(&skill).await.unwrap(), "inside body");
     }
 }

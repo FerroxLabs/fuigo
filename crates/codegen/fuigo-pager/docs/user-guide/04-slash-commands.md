@@ -224,7 +224,7 @@ Save a note to memory immediately, without waiting for an automatic summary.
 
 Open the extensions modal on the Hooks tab, where you can view loaded hooks, add or remove custom ones, and toggle them individually. The modal does not grant project trust — see [10-hooks.md](10-hooks.md) for the trust model.
 
-The shell also advertises individual `/hooks-list`, `/hooks-trust`, `/hooks-add`, `/hooks-remove`, and `/hooks-untrust` commands; in the pager these are folded into the `/hooks` modal.
+The shell also advertises individual `/hooks-list`, `/hooks-trust` (alias `/trust`), `/hooks-add`, `/hooks-remove`, and `/hooks-untrust` (alias `/untrust`) commands; in the pager these are folded into the `/hooks` modal. `/trust` and `/untrust` trust or stop trusting the whole folder: its settings and its shell commands (see [Folder trust](22-permissions-and-safety.md#folder-trust)).
 
 ### `/plugins`
 

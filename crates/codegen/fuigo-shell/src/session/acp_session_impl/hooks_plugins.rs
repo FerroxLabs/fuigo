@@ -37,8 +37,9 @@ impl SessionActor {
                 continue;
             }
             if let Some(ref hooks_path) = plugin.hooks_path {
-                let (specs, warnings) = fuigo_agent::plugins::hooks_adapter::parse_plugin_hooks(
+                let (specs, warnings) = fuigo_agent::plugins::hooks_adapter::parse_plugin_hooks_contained(
                     hooks_path,
+                    &plugin.pinned_root(),
                     &plugin.name,
                     &plugin.root_str(),
                     &plugin.data_dir_str(),
@@ -235,40 +236,42 @@ impl SessionActor {
 
     // ── Shared hook/plugin operation functions ────────────────────────
 
-    /// Trust the current project via the unified folder-trust store.
-    /// Same as `--trust`: also allows repo-local MCP/LSP for this folder.
-    /// `Ok((root, None))` when saved (or auto-trusted); `Ok((root, Some(note)))` when the write was denied and the grant
-    /// holds for this session only (the note says so); `Err` when nothing was recorded (e.g. an unreadable store).
+    /// `/trust` (`/hooks-trust`): trust the current folder (its settings and its shell commands), exactly as
+    /// `fuigo --trust` and the trust question's "yes" do. Works for any folder, git or not (u35 t1: the trust key).
+    /// `Ok((key, None))` when saved (or auto-trusted); `Err` when nothing was saved (the folder stays untrusted).
     pub(super) fn do_hooks_trust_project(
         cwd: &str,
     ) -> Result<(std::path::PathBuf, Option<String>), String> {
-        let root =
-            fuigo_workspace::session::git::find_git_root_from_path(std::path::Path::new(cwd))
-                .map_err(|_| {
-                    "Not in a git repository. Project hooks require a git worktree root."
-                        .to_string()
-                })?;
-        // Never claim a save that did not happen: a session-only grant carries its note, a refusal is an error.
+        let cwd = std::path::Path::new(cwd);
+        let key = fuigo_workspace::trust::workspace_key(cwd);
         use fuigo_workspace::folder_trust::GrantResolution;
-        let outcome = fuigo_workspace::folder_trust::grant_folder_trust(&root);
+        let outcome = fuigo_workspace::folder_trust::grant_folder_trust(cwd);
         match outcome.resolution() {
-            GrantResolution::Trusted => Ok((root, None)),
-            GrantResolution::SessionLocal => Ok((root, Some(outcome.to_string()))),
+            GrantResolution::Trusted => Ok((key, None)),
             GrantResolution::Unrecorded => Err(outcome.to_string()),
         }
     }
 
-    /// Untrust the current project in the unified folder-trust store.
-    /// Returns (git_root, was_trusted).
+    /// `/untrust` (`/hooks-untrust`): decline the current folder (any folder, git or not). Returns (key, was_trusted,
+    /// note): the note says when the "no" could not be saved (it holds in this process only).
     pub(super) fn do_hooks_untrust_project(
         cwd: &str,
-    ) -> Result<(std::path::PathBuf, bool), String> {
-        let root =
-            fuigo_workspace::session::git::find_git_root_from_path(std::path::Path::new(cwd))
-                .map_err(|_| "Not in a git repository.".to_string())?;
-        // revoke_folder_trust persists set_untrusted and downgrades the decision cache so the untrust applies at the next reload, not just restart
-        let was_trusted = crate::agent::folder_trust::revoke_folder_trust(&root);
-        Ok((root, was_trusted))
+    ) -> Result<(std::path::PathBuf, bool, Option<String>), String> {
+        use fuigo_workspace::folder_trust::RevokeOutcome;
+        match crate::agent::folder_trust::revoke_folder_trust(std::path::Path::new(cwd)) {
+            RevokeOutcome::Revoked { key, was_trusted, saved } => {
+                let note = saved.err().map(|e| {
+                    format!(
+                        "This folder is untrusted for this session, but the change couldn't be saved ({e}); \
+                         run /untrust again once your Fuigo home is writable."
+                    )
+                });
+                Ok((key, was_trusted, note))
+            }
+            RevokeOutcome::NotApplicable => Err(
+                "This folder is never trusted (home and root folders, or folder trust is off in this build).".to_string(),
+            ),
+        }
     }
 
     /// Re-resolve the repo `[mcp] max_output_bytes` cap for this session's cwd and update the toolset's `TruncationCfg` resource to match.
@@ -388,24 +391,25 @@ impl SessionActor {
                     requires_reload: false,
                     requires_restart: false,
                 },
-                Ok((root, false)) => {
+                Ok((root, false, note)) => {
                     // Another session may have revoked the folder already; this session's registry still has to follow the verdict
                     let _ = self.reload_hooks_impl().await;
                     ActionOutcome {
                         status: OutcomeStatus::NotFound,
-                        message: format!("Not currently trusted: {}", root.display()),
+                        message: format!("Not currently trusted: {}{}", root.display(), note.map(|n| format!("\n{n}")).unwrap_or_default()),
                         requires_reload: false,
                         requires_restart: false,
                     }
                 }
-                Ok((root, true)) => {
+                Ok((root, true, note)) => {
                     let reload_msg = self.reload_hooks_impl().await;
                     // Revoking trust must drop a previously seeded repo MCP output cap right away, not at the next config reload
                     // The resolver is trust-gated, so this call clears it
                     self.reseed_mcp_output_cap().await;
+                    let note = note.map(|n| format!("{n}\n")).unwrap_or_default();
                     ActionOutcome {
                         status: OutcomeStatus::Success,
-                        message: format!("Untrusted: {}.\n{reload_msg}", root.display()),
+                        message: format!("Untrusted: {}.\n{note}{reload_msg}", root.display()),
                         requires_reload: false,
                         requires_restart: false,
                     }
@@ -1479,6 +1483,7 @@ mod p07_plugin_hook_tests {
         let cfg = DiscoveryConfig {
             enabled: vec!["projgate".to_string(), "cligate".to_string()],
             config_paths: vec![cfg_plugin.clone()],
+            project_config_paths: Vec::new(),
             ..Default::default()
         };
         let handle = SharedPluginRegistryHandle::new(None, vec![]);
@@ -1543,6 +1548,7 @@ mod p07_plugin_hook_tests {
         let cfg = DiscoveryConfig {
             enabled: vec!["cligate".to_string()],
             config_paths: vec![cfg_plugin.clone()],
+            project_config_paths: Vec::new(),
             ..Default::default()
         };
         let handle = SharedPluginRegistryHandle::new(None, vec![]);
@@ -1592,6 +1598,7 @@ mod p07_plugin_hook_tests {
         let cfg = DiscoveryConfig {
             enabled: vec!["cligate".to_string()],
             config_paths: vec![cfg_plugin.clone()],
+            project_config_paths: Vec::new(),
             ..Default::default()
         };
         let handle = SharedPluginRegistryHandle::new(None, vec![]);

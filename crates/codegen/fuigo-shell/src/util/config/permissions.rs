@@ -826,4 +826,39 @@ mod tests {
             PermissionMode::Ask,
         );
     }
+
+    /// u35 B, RED at base: the launch gate honours the user's own `[ui] disable_bypass_permissions_mode = true`.
+    #[test]
+    #[serial_test::serial]
+    fn launch_gate_honours_the_user_config_lock() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let home = fuigo_test_support::FuigoHome::new();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[ui]\ndisable_bypass_permissions_mode = true\n",
+        )
+        .unwrap();
+        if fuigo_config::requirements_layers().iter().any(|l| {
+            l.value
+                .get("ui")
+                .and_then(|ui| ui.get("disable_bypass_permissions_mode"))
+                .and_then(toml::Value::as_bool)
+                == Some(true)
+        }) {
+            eprintln!("skipping: a requirements layer on this host already locks always-approve");
+            return;
+        }
+        let launch = effective_yolo_for_launch(true, None, None);
+        assert!(!launch.yolo, "--yolo is neutralised by the user's own lock");
+        assert!(launch.blocked_warning.is_some());
+        assert!(
+            launch
+                .policy_block
+                .is_some_and(|reason| reason.contains("your config.toml")),
+            "{:?}",
+            launch.policy_block
+        );
+    }
 }

@@ -4067,3 +4067,160 @@ fn user_allow_edit_rule_is_default_not_accept_edits() {
         resolve_claude_settings_inner(tmp.path(), true, None, UserDefaultModeLoad::Apply).unwrap();
     assert_eq!(cfg.base_mode(), M::AcceptEdits);
 }
+
+// u35 B: the user's own `[ui] disable_bypass_permissions_mode = true` in `$FUIGO_HOME/config.toml`
+
+#[test]
+fn yolo_policy_block_with_user_table() {
+    let req = Path::new("/etc/fuigo/requirements.toml");
+    let user = Path::new("/home/u/.fuigo/config.toml");
+    let locked = layer("[ui]\ndisable_bypass_permissions_mode = true\n");
+    let unlocked = layer("[ui]\ndisable_bypass_permissions_mode = false\n");
+    let stringly = layer("[ui]\ndisable_bypass_permissions_mode = \"true\"\n");
+    let yolo_off = layer("[ui]\nyolo = false\n");
+    let user_lock = Some(YoloPolicyLock {
+        source_label: user.display().to_string(),
+        reason: YOLO_PIN_REASON_USER_CONFIG,
+    });
+    // User true, no requirements: the user's own label.
+    assert_eq!(
+        resolve_yolo_policy_block_with_user(std::iter::empty(), Some((user, &locked))),
+        user_lock
+    );
+    // Requirements true + user true: the admin label wins.
+    assert_eq!(
+        resolve_yolo_policy_block_with_user([(req, &locked)].into_iter(), Some((user, &locked))),
+        Some(YoloPolicyLock {
+            source_label: req.display().to_string(),
+            reason: YOLO_PIN_REASON_REQUIREMENTS,
+        })
+    );
+    // Requirements false + user true: the user lock still applies (false clears nothing).
+    assert_eq!(
+        resolve_yolo_policy_block_with_user([(req, &unlocked)].into_iter(), Some((user, &locked))),
+        user_lock
+    );
+    // User false, user non-bool, user `[ui] yolo = false`: no lock.
+    for value in [&unlocked, &stringly, &yolo_off] {
+        assert_eq!(
+            resolve_yolo_policy_block_with_user(std::iter::empty(), Some((user, value))),
+            None
+        );
+    }
+    // No user layer: identical to the requirements-only resolver.
+    for value in [&locked, &unlocked, &stringly, &yolo_off] {
+        assert_eq!(
+            resolve_yolo_policy_block_with_user([(req, value)].into_iter(), None),
+            resolve_yolo_policy_block([(req, value)].into_iter())
+        );
+    }
+}
+
+/// `FUIGO_HOME` (and the config-path variables) pinned for one test, under the crate env lock.
+fn user_lock_env(config: Option<&str>) -> (crate::LockedTestEnv, tempfile::TempDir) {
+    let home = tempfile::tempdir().unwrap();
+    if let Some(config) = config {
+        std::fs::write(home.path().join("config.toml"), config).unwrap();
+    }
+    let env = crate::LockedTestEnv::lock().set("FUIGO_HOME", home.path());
+    (env, home)
+}
+
+/// RED at base: the user's own config.toml is the source of the lock, read host-free.
+#[test]
+fn user_config_lock_reads_own_config_toml() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let (_env, home) = user_lock_env(Some("[ui]\ndisable_bypass_permissions_mode = true\n"));
+    let lock = user_config_lock().expect("the user's own key locks");
+    assert_eq!(lock.reason, YOLO_PIN_REASON_USER_CONFIG);
+    assert_eq!(
+        lock.source_label,
+        home.path().join("config.toml").display().to_string()
+    );
+}
+
+/// Only `$FUIGO_HOME/config.toml` counts: the key anywhere else, or a blank/missing file, does not lock.
+#[test]
+fn user_config_lock_ignores_every_other_source() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let elsewhere = tempfile::tempdir().unwrap();
+    let keyed = elsewhere.path().join("keyed.toml");
+    std::fs::write(&keyed, "[ui]\ndisable_bypass_permissions_mode = true\n").unwrap();
+    let project = elsewhere.path().join(".fuigo");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("config.toml"), "[ui]\ndisable_bypass_permissions_mode = true\n").unwrap();
+
+    // Missing file.
+    {
+        let (_env, home) = user_lock_env(None);
+        std::fs::write(
+            home.path().join("managed_config.toml"),
+            "[ui]\ndisable_bypass_permissions_mode = true\n",
+        )
+        .unwrap();
+        let _cfg = crate::TestEnvGuard::set("FUIGO_CONFIG", &keyed);
+        let _cfg_path = crate::TestEnvGuard::set("FUIGO_CONFIG_PATH", &keyed);
+        assert_eq!(user_config_lock(), None, "only the user's own config.toml locks");
+    }
+    // Blank file.
+    {
+        let (_env, _home) = user_lock_env(Some("  \n"));
+        assert_eq!(user_config_lock(), None);
+    }
+    // The key set false, or only the legacy `yolo = false`.
+    for config in [
+        "[ui]\ndisable_bypass_permissions_mode = false\n",
+        "[ui]\nyolo = false\n",
+    ] {
+        let (_env, _home) = user_lock_env(Some(config));
+        assert_eq!(user_config_lock(), None, "{config}");
+    }
+}
+
+/// An unparseable user config.toml does not lock and warns once per process for that path.
+#[test]
+fn user_config_lock_warns_once_on_garbage() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    #[derive(Clone, Default)]
+    struct CapturingWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+    let (_env, home) = user_lock_env(Some("[ui\nthis is = = not toml"));
+    let writer = CapturingWriter::default();
+    let buf = writer.0.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(writer)
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .finish();
+    let (first, second) = tracing::subscriber::with_default(subscriber, || {
+        (user_config_lock(), user_config_lock())
+    });
+    assert_eq!((first, second), (None, None));
+    let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    let path = home.path().join("config.toml").display().to_string();
+    assert_eq!(
+        out.lines().filter(|l| l.contains("WARN") && l.contains(&path)).count(),
+        1,
+        "exactly one warning naming the file: {out}"
+    );
+}

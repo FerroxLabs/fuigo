@@ -25,7 +25,7 @@ pub(super) enum MinimalAuthHint {
     /// The last sign-in attempt failed; show the error.
     Failed(String),
     /// Authenticated, but the cwd has untrusted repo-local config: ask before creating a session.
-    /// Input (y/Enter trust, n/Esc quit) is handled by the welcome interceptor in `AppView::handle_input`; this is render-only.
+    /// Input (y/Enter trust, n/Esc continue untrusted, q quit) is handled by the welcome interceptor in `AppView::handle_input`; this is render-only.
     /// `error`: why the last "yes" recorded nothing (P167), shown under the question until it is answered.
     TrustFolder { workspace: PathBuf, error: Option<String> },
     /// Authenticated and trusted; the session is being created (brief transient).
@@ -58,7 +58,7 @@ pub(super) fn minimal_auth_hint(
             code: None,
         },
         AuthState::Done if has_access && !is_zdr_blocked => {
-            if let TrustState::Pending { workspace } = trust {
+            if let TrustState::Pending { workspace, .. } = trust {
                 MinimalAuthHint::TrustFolder {
                     workspace: workspace.clone(),
                     error: trust_error.map(str::to_owned),
@@ -94,7 +94,7 @@ pub(super) fn auth_hint_rows(hint: &MinimalAuthHint, width: u16) -> u16 {
             let path_rows = wrapped_char_rows(&path, width, Shown::Placeholder);
             // + blank + wrapped error, when the last "yes" recorded nothing
             let error_rows = error.as_deref().map_or(0, |e| 1 + wrapped_char_rows(e, width, Shown::Placeholder));
-            1 + path_rows + error_rows + 1 + 2 + 1 + 2 + 1 + 1
+            1 + path_rows + error_rows + 1 + 2 + 1 + 3 + 1 + 1
         }
         MinimalAuthHint::Starting => 1,
     }
@@ -298,10 +298,7 @@ pub(super) fn render_auth(buf: &mut Buffer, area: Rect, theme: &Theme, hint: &Mi
                 area,
                 y,
                 bottom,
-                Line::from(Span::styled(
-                    "Do you trust the contents of this directory?",
-                    bold,
-                )),
+                Line::from(Span::styled("Do you trust the files in this folder?", bold)),
             );
             y = render_url(
                 buf,
@@ -332,7 +329,7 @@ pub(super) fn render_auth(buf: &mut Buffer, area: Rect, theme: &Theme, hint: &Mi
                 y,
                 bottom,
                 Line::from(Span::styled(
-                    "Fuigo may run or modify contents in this directory,",
+                    "Trusting it loads its settings and runs shell commands here without asking.",
                     gray,
                 )),
             );
@@ -341,7 +338,7 @@ pub(super) fn render_auth(buf: &mut Buffer, area: Rect, theme: &Theme, hint: &Mi
                 area,
                 y,
                 bottom,
-                Line::from(Span::styled("posing security risks.", gray)),
+                Line::from(Span::styled("No: settings not loaded, every command asks.", gray)),
             );
             y = put_line(buf, area, y, bottom, Line::default());
             y = put_line(
@@ -351,7 +348,7 @@ pub(super) fn render_auth(buf: &mut Buffer, area: Rect, theme: &Theme, hint: &Mi
                 bottom,
                 Line::from(vec![
                     Span::styled("y", bold),
-                    Span::styled("  Yes, proceed", gray),
+                    Span::styled("  Yes, trust this folder", gray),
                 ]),
             );
             y = put_line(
@@ -361,8 +358,15 @@ pub(super) fn render_auth(buf: &mut Buffer, area: Rect, theme: &Theme, hint: &Mi
                 bottom,
                 Line::from(vec![
                     Span::styled("n", bold),
-                    Span::styled("  No, quit", gray),
+                    Span::styled("  No, continue without trusting it", gray),
                 ]),
+            );
+            y = put_line(
+                buf,
+                area,
+                y,
+                bottom,
+                Line::from(vec![Span::styled("q", bold), Span::styled("  Quit", gray)]),
             );
             y = put_line(buf, area, y, bottom, Line::default());
             let _ = put_line(
@@ -371,7 +375,7 @@ pub(super) fn render_auth(buf: &mut Buffer, area: Rect, theme: &Theme, hint: &Mi
                 y,
                 bottom,
                 Line::from(Span::styled(
-                    "Enter or y to trust \u{00b7} n or Esc to quit",
+                    "Enter or y to trust \u{00b7} n or Esc to continue \u{00b7} q to quit",
                     gray,
                 )),
             );
@@ -497,6 +501,7 @@ mod tests {
     fn auth_hint_maps_pending_trust_after_auth() {
         let trust = TrustState::Pending {
             workspace: PathBuf::from("/tmp/untrusted-repo"),
+            upgrade: false,
         };
         match minimal_auth_hint(&AuthState::Done, &trust, true, false, None) {
             MinimalAuthHint::TrustFolder { workspace, error } => {
@@ -557,17 +562,18 @@ mod tests {
         render_auth(&mut buf, area, &theme, &hint);
         let text = buffer_text(&buf, area);
         assert!(
-            text.contains("Do you trust the contents of this directory?"),
+            text.contains("Do you trust the files in this folder?"),
             "question: {text:?}"
         );
         assert!(
             text.contains("/home/agent/project"),
             "workspace path: {text:?}"
         );
-        assert!(text.contains("Yes, proceed"), "yes option: {text:?}");
-        assert!(text.contains("No, quit"), "no option: {text:?}");
+        assert!(text.contains("Yes, trust this folder"), "yes option: {text:?}");
+        assert!(text.contains("No, continue without trusting it"), "no option: {text:?}");
+        assert!(text.contains("Quit"), "quit option: {text:?}");
         assert!(text.contains("Enter or y to trust"), "hint line: {text:?}");
-        assert!(text.contains("posing security risks"), "warning: {text:?}");
+        assert!(text.contains("runs shell commands here"), "what trust means: {text:?}");
     }
 
     /// P167: when the last "yes" recorded nothing, the minimal trust question shows why (it paints no welcome toast).
@@ -577,6 +583,7 @@ mod tests {
         let theme = Theme::current();
         let trust = TrustState::Pending {
             workspace: PathBuf::from("/home/agent/project"),
+            upgrade: false,
         };
         let reason = "Couldn't save folder trust: the trust store could not be read.";
         let hint = minimal_auth_hint(&AuthState::Done, &trust, true, false, Some(reason));
@@ -585,7 +592,7 @@ mod tests {
         render_auth(&mut buf, area, &theme, &hint);
         let text = buffer_text(&buf, area);
         assert!(text.contains("trust store could not be read"), "error: {text:?}");
-        assert!(text.contains("Yes, proceed"), "the question stays answerable: {text:?}");
+        assert!(text.contains("Yes, trust this folder"), "the question stays answerable: {text:?}");
         let without = MinimalAuthHint::TrustFolder {
             workspace: PathBuf::from("/home/agent/project"),
             error: None,

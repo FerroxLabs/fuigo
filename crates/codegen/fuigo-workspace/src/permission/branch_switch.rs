@@ -390,7 +390,7 @@ enum Discovery {
 
 fn discover(cwd: &Path) -> Discovery {
     let args = ["rev-parse", "--is-bare-repository", "--show-toplevel", "--glob=refs/replace/*"];
-    let Some(done) = run_command(hardened_git_command(cwd, &args), None, 1024 * 1024) else {
+    let Some(done) = hardened_git_command(cwd, &args).and_then(|c| run_command(c, None, 1024 * 1024)) else {
         return Discovery::Unknown;
     };
     let Some(Ok(text)) = done.out.map(String::from_utf8) else {
@@ -432,7 +432,7 @@ fn resolve_revs(cwd: &Path, revs: &[&str], no_replace: bool) -> Vec<Resolved> {
         if no_replace {
             args.insert(0, "--no-replace-objects");
         }
-        let Some(done) = run_command(hardened_git_command(cwd, &args), Some(input), 1024 * 1024) else {
+        let Some(done) = hardened_git_command(cwd, &args).and_then(|c| run_command(c, Some(input), 1024 * 1024)) else {
             return Vec::new();
         };
         let Some(Ok(text)) = done.out.map(String::from_utf8) else {
@@ -535,7 +535,7 @@ fn list_ls_files(cwd: &Path, args: &[&str]) -> TreeListing {
 /// config visible (reading config executes nothing). True at any level, or any failure: `None`/`Some(true)`.
 pub(crate) fn submodule_recursion_with_home(cwd: &Path, home: Option<&std::ffi::OsStr>) -> Option<bool> {
     let args = ["config", "--type=bool", "--get-regexp", r"^(submodule\.recurse|checkout\.recursesubmodules)$"];
-    let mut command = hardened_git_command(cwd, &args);
+    let mut command = hardened_git_command(cwd, &args)?;
     command.env_remove("GIT_CONFIG_NOSYSTEM").env_remove("GIT_CONFIG_GLOBAL");
     if let Some(home) = home {
         command.env("HOME", home);
@@ -664,8 +664,12 @@ const DENIED_PROTOCOLS: [&str; 6] = ["file", "git", "ssh", "http", "https", "ext
 /// `protocol.<name>.allow=never` on the command line, which outranks repository config, and an empty
 /// `GIT_ALLOW_PROTOCOL`), so the fetch child dies before any transport starts and the object stays missing. Either
 /// way a missing object fails the child, which is undetermined.
-pub(crate) fn hardened_git_command(cwd: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new("git");
+///
+/// `None` when `cwd` is not a trusted folder (u35 t1): no child starts, and every caller reads that as undetermined.
+pub(crate) fn hardened_git_command(cwd: &Path, args: &[&str]) -> Option<Command> {
+    // The judged builder sets the directory (and `GIT_BIN_PATH` handling); the hardened environment below replaces
+    // everything else it set.
+    let mut command = fuigo_tty_utils::git_command_in(cwd).ok()?;
     command
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -691,8 +695,8 @@ pub(crate) fn hardened_git_command(cwd: &Path, args: &[&str]) -> Command {
     for protocol in DENIED_PROTOCOLS {
         command.arg("-c").arg(format!("protocol.{protocol}.allow=never"));
     }
-    command.args(args).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-    command
+    command.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    Some(command)
 }
 
 /// A finished child: exit code (None: signal) and stdout (None: over the cap or unreadable).
@@ -752,7 +756,7 @@ fn run_command(mut command: Command, stdin: Option<Vec<u8>>, cap: usize) -> Opti
 
 /// Run [`hardened_git_command`] with stdout capped at `cap` bytes and wall-clock bounded by [`GIT_CHILD_TIMEOUT`].
 fn run_git_outcome(cwd: &Path, args: &[&str], cap: usize) -> GitRun {
-    match run_command(hardened_git_command(cwd, args), None, cap) {
+    match hardened_git_command(cwd, args).and_then(|c| run_command(c, None, cap)) {
         Some(Finished { code: Some(0), out: Some(data) }) => GitRun::Output(data),
         Some(Finished { code: Some(code), .. }) if code != 0 => GitRun::Exit(code),
         _ => GitRun::Bound,

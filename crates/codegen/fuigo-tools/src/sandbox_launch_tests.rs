@@ -301,10 +301,12 @@ fn a_replaying_shell_hands_the_hook_what_it_exports() {
     )
     .unwrap();
     assert_eq!(vec![vec![pyuser]], *hook.restored.lock().unwrap());
+    // u35 g8: a tool call's exports are also read to judge its environment once a judge is
+    // installed (another test may have installed one), so the unread case is a shell-init spawn
     let unread = || -> Vec<(OsString, OsString)> { panic!("no hook, nothing to read") };
     assert_eq!(
         None,
-        prepare_restoring(None, &mut cmd, unread, &CallId::tool("tc-11")).unwrap()
+        prepare_restoring(None, &mut cmd, unread, &CallId::shell_init("tc-11")).unwrap()
     );
     let wrapping = WrappingHook {
         seen: Mutex::new(Vec::new()),
@@ -387,4 +389,191 @@ fn captured_parts_rebuild_the_wrapped_command_on_a_fresh_command() {
     let mut again = parts.new_command();
     parts.apply(&mut again);
     assert_eq!(argv(&rebuilt), argv(&again));
+}
+
+/// u35-winenv: on Windows the environment the sandbox reads has ONE entry per variable: an edit of
+/// `Path` replaces an inherited `PATH` (no stale copy beside it), a removal drops every spelling,
+/// and a restored entry replaces too. Unix keeps the spellings as distinct variables.
+#[test]
+fn child_env_for_windows_has_one_entry_per_variable() {
+    use crate::util::shell_env_policy::EnvPlatform;
+    let os = |s: &str| OsString::from(s);
+    let inherited = vec![
+        (os("PATH"), os("C:\\stale")),
+        (os("Path"), os("C:\\stale2")),
+        (os("PYTHONUSERBASE"), os("C:\\old-base")),
+        (os("Drop_Me"), os("x")),
+    ];
+    let edits = vec![
+        (os("Path"), Some(os("C:\\edited"))),
+        (os("DROP_ME"), None),
+    ];
+    let restored = vec![(os("PythonUserBase"), os("C:\\restored-base"))];
+    let env = super::child_env_for(inherited.clone(), edits.clone(), restored.clone(), EnvPlatform::Windows);
+    assert_eq!(
+        env,
+        vec![(os("PATH"), os("C:\\edited")), (os("PYTHONUSERBASE"), os("C:\\restored-base"))]
+    );
+    let env = super::child_env_for(inherited, edits, restored, EnvPlatform::Unix);
+    let names: Vec<&OsString> = env.iter().map(|(k, _)| k).collect();
+    assert_eq!(
+        names,
+        vec![&os("Drop_Me"), &os("PATH"), &os("PYTHONUSERBASE"), &os("Path"), &os("PythonUserBase")]
+    );
+}
+
+/// u35 g9: a judge for the runner tests: `U35_STEER_A` / `U35_STEER_B` steer, nothing else does.
+fn u35_test_judge(_command: &str, env: &[(String, String)], _dir: &Path) -> Option<String> {
+    env.iter()
+        .find(|(name, value)| matches!(name.as_str(), "U35_STEER_A" | "U35_STEER_B") && !value.is_empty())
+        .map(|(name, _)| name.clone())
+}
+
+fn u35_env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+    pairs.iter().map(|(k, v)| (OsString::from(k), OsString::from(v))).collect()
+}
+
+/// u35 g9 (Astra r8 High 2): a child `PATH` that is empty or missing makes the shell search its
+/// built-in default (bash's includes the current directory), so it steers like a dirty one.
+#[test]
+fn u35_g9_empty_or_missing_child_path_is_judged() {
+    let dir = Path::new("/");
+    let empty = u35_env(&[("PATH", ""), ("HOME", "/home/u")]);
+    assert_eq!(super::judge_child_env(&empty, "ls", dir, u35_test_judge).as_deref(), Some("PATH"));
+    let missing = u35_env(&[("HOME", "/home/u")]);
+    assert_eq!(super::judge_child_env(&missing, "ls", dir, u35_test_judge).as_deref(), Some("PATH"));
+    let clean = u35_env(&[("PATH", "/usr/bin:/bin"), ("HOME", "/home/u")]);
+    assert_eq!(super::judge_child_env(&clean, "ls", dir, u35_test_judge), None);
+}
+
+/// u35 g9 (Astra/Grok r8 High 1): nothing is remembered between calls. Every call approved without
+/// a grant is judged on its own environment, so a batch sibling under the same steering value is
+/// refused like the first call, however many times it comes.
+#[test]
+fn u35_g9_every_no_grant_call_is_judged_on_its_own_environment() {
+    let dir = Path::new("/");
+    let steering = u35_env(&[("PATH", "/usr/bin"), ("U35_STEER_A", "1")]);
+    for sibling in 0..3 {
+        assert_eq!(
+            super::judge_child_env(&steering, "ls", dir, u35_test_judge).as_deref(),
+            Some("U35_STEER_A"),
+            "call {sibling}"
+        );
+    }
+    let other = u35_env(&[("PATH", "/usr/bin"), ("U35_STEER_B", "2")]);
+    assert_eq!(super::judge_child_env(&other, "ls", dir, u35_test_judge).as_deref(), Some("U35_STEER_B"));
+    // A call approved by a grant, an answer or an override is never refused by the check.
+    let cmd = tokio::process::Command::new("true");
+    assert!(super::check_child_env(&cmd, &steering, "ls", false, None).is_ok());
+    // A call that carries no flag is judged.
+    assert!(super::ApprovedWithoutGrant::of(None));
+    assert!(!super::ApprovedWithoutGrant::of(Some(&super::ApprovedWithoutGrant(false))));
+}
+
+/// u35 g8 (release gate, `an_acp_error_in_the_body_still_answers_the_exit_plan_tail`): the
+/// runner refused a plain tool call because Fuigo's own `GH_PAGER=cat` looked like the user's
+/// steering variable. Fuigo's constants are never judged; another value of the same name is.
+#[test]
+fn u35_fuigo_own_pager_env_is_not_the_users() {
+    for (name, value) in crate::util::pager_env() {
+        assert!(super::is_fuigo_own_env(&name, &value), "{name}={value}");
+    }
+    assert!(!super::is_fuigo_own_env("GH_PAGER", "sh ./pager"));
+    assert!(!super::is_fuigo_own_env("GIT_ASKPASS", ""));
+    let steer_any = |_: &str, env: &[(String, String)], _: &Path| {
+        env.iter().find(|(name, _)| name != "PATH").map(|(name, _)| name.clone())
+    };
+    let mut env: Vec<(OsString, OsString)> =
+        crate::util::pager_env().into_iter().map(|(k, v)| (OsString::from(k), OsString::from(v))).collect();
+    env.push((OsString::from("PATH"), OsString::from("/usr/bin")));
+    assert_eq!(super::judge_child_env(&env, "git log -1", Path::new("/"), steer_any), None);
+    env.push((OsString::from("GH_PAGER"), OsString::from("sh ./pager")));
+    assert_eq!(super::judge_child_env(&env, "gh pr list", Path::new("/"), steer_any).as_deref(), Some("GH_PAGER"));
+}
+
+/// u35 g10 (Fable r9 Low): the refusal names only remedies that exist when it happens. Nothing
+/// prompts here, and a remembered "always allow" is written only by a prompt answer.
+#[test]
+fn u35_g10_refusal_names_only_reachable_remedies() {
+    let text = super::ChildEnvSteers { name: "GIT_ASKPASS".to_owned() }.to_string();
+    assert!(
+        text.contains("--allow 'Bash(") && text.contains("allow all commands") && text.contains("always-approve"),
+        "{text}"
+    );
+    assert!(!text.contains("\"always allow\" for the command"), "{text}");
+}
+
+/// u35 g11 (owner decision; Astra r10 High 2): the shell runner refuses a call approved without a
+/// grant when its shell is PowerShell or cmd.exe, which read commands differently from the bash
+/// syntax the permission check judged; Git Bash and Unix shells are judged as before.
+#[test]
+fn u35_g11_runner_refuses_no_grant_calls_under_powershell_and_cmd() {
+    use fuigo_config::shell::WindowsShellFamily as F;
+    for shell in [F::Pwsh, F::PowerShell, F::Cmd] {
+        let text = super::check_runner_shell(Some(shell)).expect_err("refused").to_string();
+        assert!(text.contains(shell.name()) && text.contains("FUIGO_SHELL=bash"), "{text}");
+        assert!(text.contains("--allow 'Bash(") && text.contains("allow all commands"), "{text}");
+    }
+    assert!(super::check_runner_shell(Some(F::GitBash)).is_ok());
+    assert!(super::check_runner_shell(None).is_ok());
+}
+
+/// u35 g11 (Fable/Grok r10 Low): with no environment rule installed, a call approved without a
+/// grant is refused outside this crate's tests.
+#[test]
+fn u35_g11_no_installed_judge_refuses_a_no_grant_call() {
+    let text = super::missing_env_judge(true).expect_err("refused").to_string();
+    assert!(text.contains("approval"), "{text}");
+    assert!(super::missing_env_judge(false).is_ok());
+}
+
+/// u35 g12 (Fable r11 Low): the runner half of the Windows shell decision, through the real hop:
+/// `check_child_env` asks the runner's shell family (set per thread here, so every host runs it)
+/// and refuses a call approved without a grant under PowerShell or cmd.exe; a call a grant, an
+/// answer or an override approved runs; Git Bash and Unix shells reach the environment check.
+#[test]
+fn u35_g12_check_child_env_refuses_no_grant_calls_under_powershell_and_cmd() {
+    use fuigo_config::shell::WindowsShellFamily as F;
+    let cmd = tokio::process::Command::new("/bin/echo");
+    for shell in [F::Pwsh, F::PowerShell, F::Cmd] {
+        let _shell = super::TestRunnerShell::set(Some(shell));
+        let text = super::check_child_env(&cmd, &[], "ls -la", true, None).expect_err("refused").to_string();
+        assert!(text.contains(shell.name()) && text.contains("FUIGO_SHELL=bash"), "{text}");
+        assert!(super::check_child_env(&cmd, &[], "ls -la", false, None).is_ok(), "{shell:?}: a grant runs");
+    }
+    // u35 g13 (Fable r12 Low): with this crate's judge installed, Git Bash and Unix shells reach the
+    // environment check and the call runs.
+    super::install_env_judge(super::u35_test_child_judge);
+    for shell in [Some(F::GitBash), None] {
+        let _shell = super::TestRunnerShell::set(shell);
+        super::check_child_env(&cmd, &[], "ls -la", true, None)
+            .unwrap_or_else(|e| panic!("{shell:?}: reaches the environment check and runs: {e}"));
+    }
+}
+
+/// u35 t1 T3: the shell runner refuses a command approved without a grant that runs in, or was judged in, a folder
+/// that is not trusted; a grant runs it; with no rule installed the call is refused (strict, as outside tests).
+#[test]
+fn u35_t1_runner_refuses_an_ungranted_command_outside_a_trusted_folder() {
+    super::install_trust_judge(super::u35_test_trust_judge);
+    let trusted = tempfile::tempdir().unwrap();
+    let mut cmd = tokio::process::Command::new("/bin/sh");
+    cmd.current_dir(trusted.path());
+    let text = super::check_child_env(&cmd, &[], "ls u35-t1-untrusted", true, None).expect_err("refused").to_string();
+    assert!(text.contains("not trusted"), "{text}");
+    assert!(super::check_child_env(&cmd, &[], "ls u35-t1-untrusted", false, None).is_ok(), "a grant runs");
+    assert!(super::check_child_env(&cmd, &[], "ls", true, None).is_ok(), "a trusted folder runs");
+    let judged = std::path::Path::new("/w/u35-t1-untrusted");
+    assert!(
+        super::check_child_env(&cmd, &[], "ls", true, Some(judged)).is_err(),
+        "the directory the permission check judged it in counts too"
+    );
+    let untrusted_dir = trusted.path().join("u35-t1-untrusted");
+    std::fs::create_dir_all(&untrusted_dir).unwrap();
+    let mut there = tokio::process::Command::new("/bin/sh");
+    there.current_dir(&untrusted_dir);
+    assert!(super::check_child_env(&there, &[], "ls", true, None).is_err(), "where it runs counts");
+    let no_rule = super::check_runner_trust_with(None, "ls", trusted.path(), None, true).expect_err("strict");
+    assert!(no_rule.to_string().contains("no rule to check the folder"), "{no_rule}");
+    assert!(super::check_runner_trust_with(None, "ls", trusted.path(), None, false).is_ok());
 }

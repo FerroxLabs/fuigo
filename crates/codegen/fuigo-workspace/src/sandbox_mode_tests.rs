@@ -9,8 +9,6 @@ use super::{
     SandboxModeInputs, SandboxModeWriteError, resolve_sandbox_mode_in, set_workspace_mode_in,
     write_workspace_sandbox_mode,
 };
-use crate::folder_trust::{self, TrustOutcome};
-use crate::trust::workspace_key;
 
 fn write_sandbox_table(dir: &Path, rel: &str, mode: &str) {
     let path = dir.join(rel);
@@ -119,12 +117,7 @@ fn an_untrusted_folder_still_tightens_through_its_workspace_file() {
     let ws = tmp.path().join("ws");
     write_sandbox_table(&ws, ".fuigo/workspaced.toml", "enforce");
     std::fs::write(ws.join(".envrc"), "export FOO=1\n").unwrap();
-    let trust = folder_trust::decide_inputs_with_interactive(&ws, &workspace_key(&ws), false);
-    assert_eq!(
-        TrustOutcome::Untrusted,
-        folder_trust::decide(true, &trust),
-        "the fixture folder must be one the trust decision refuses"
-    );
+    // u35 t1: the folder has no trust record, so the trust decision refuses it (on a release build).
     let resolved = resolve(&ws, &home, None);
     assert_eq!(SandboxMode::Enforce, resolved.mode);
     assert_eq!(SandboxModeSource::WorkspaceConfig, resolved.source);

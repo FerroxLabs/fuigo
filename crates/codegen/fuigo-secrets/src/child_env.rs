@@ -126,6 +126,11 @@ const NEVER_CREDENTIAL_NAMES: &[&str] = &[
 /// configured (no trimming: `env_key = " K "` reads the variable `" K "`, and `"   "` is a
 /// valid variable name on Unix, so those are the ones to deny); matching is case-insensitive
 /// like the rest of the policy.
+///
+/// Whether a name IS a never-credential name is decided by the host's real name rules
+/// ([`is_never_credential_name`]), never by the wider credential fold: on Unix `\u{17f}HELL` is a
+/// different variable from `SHELL`, so it is registered (and removed from children) while `SHELL`
+/// itself survives ([`is_configured_credential`] never matches a never-credential name).
 pub fn register_credential_env_names<I, S>(names: I)
 where
     I: IntoIterator<Item = S>,
@@ -137,9 +142,7 @@ where
             let name = name.as_ref();
             let usable = !name.is_empty()
                 && !name.contains(['=', '\0'])
-                && !NEVER_CREDENTIAL_NAMES
-                    .iter()
-                    .any(|never| never.eq_ignore_ascii_case(name));
+                && !is_never_credential_name(name);
             usable.then(|| name.to_ascii_uppercase())
         })
         // P113 r3 (Astra r3 #1): a built-in provider name a config names (an MCP `bearer_token_env_var =
@@ -192,7 +195,104 @@ pub fn credential_denylist_fence() -> std::sync::RwLockReadGuard<'static, ()> {
 }
 
 fn is_known_credential(name: &str) -> bool {
-    known_credential_names().any(|known| known.eq_ignore_ascii_case(name))
+    known_credential_names().any(|known| credential_names_match(known, name))
+}
+
+/// Whether `name` is one of [`NEVER_CREDENTIAL_NAMES`] under the HOST's own name rules: ASCII
+/// case-insensitive on Unix (what the registry, stored ASCII-upper-cased, always used there) and
+/// Windows' ordinal ignore-case equality ([`windows_env_names_equal`]) on Windows. Deliberately
+/// NOT [`credential_names_match`]: the wide fold may only ever add a removal, so it must never make a
+/// distinct variable count as a never-credential name and escape registration.
+fn is_never_credential_name(name: &str) -> bool {
+    is_never_credential_name_on(name, cfg!(windows))
+}
+
+fn is_never_credential_name_on(name: &str, windows: bool) -> bool {
+    NEVER_CREDENTIAL_NAMES.iter().any(|never| {
+        if windows {
+            windows_env_names_equal(never, name)
+        } else {
+            never.eq_ignore_ascii_case(name)
+        }
+    })
+}
+
+/// Whether the configured registry holds `name` in any spelling [`credential_names_match`] equates.
+/// A never-credential name ([`is_never_credential_name`]) is never one: a registered `\u{17f}HELL`
+/// folds to `SHELL` under the wide match, and that fold must strip `\u{17f}HELL`, not `SHELL`.
+fn is_configured_credential(name: &str) -> bool {
+    if is_never_credential_name(name) {
+        return false;
+    }
+    CONFIGURED_CREDENTIAL_NAMES
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|configured| credential_names_match(configured, name))
+}
+
+/// `c`'s simple (one-to-one) uppercase mapping as Windows applies it: per UTF-16 code unit, so a
+/// character outside the Basic Multilingual Plane (a surrogate pair) is never mapped, and a
+/// character whose uppercase is several characters (`ß` -> `SS`) or lies outside the BMP is left
+/// as it is.
+fn windows_upcase(c: char) -> char {
+    if u32::from(c) > 0xFFFF {
+        return c;
+    }
+    let mut upper = c.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(u), None) if u32::from(u) <= 0xFFFF => u,
+        _ => c,
+    }
+}
+
+/// `c` lowered (one-to-one only), then [`windows_upcase`]d: equates the characters whose case pair
+/// is not symmetric (the Kelvin sign `\u{212A}` and `K`), which [`windows_upcase`] alone keeps apart.
+fn fold_lower_then_upcase(c: char) -> char {
+    let mut lower = c.to_lowercase();
+    match (lower.next(), lower.next()) {
+        (Some(l), None) => windows_upcase(l),
+        _ => windows_upcase(c),
+    }
+}
+
+/// Whether Windows treats `a` and `b` as the SAME environment variable. Windows compares variable
+/// names with an ordinal ignore-case comparison (`CompareStringOrdinal(.., TRUE)`, which Rust's
+/// `std` also uses for `Command`'s environment keys): each UTF-16 unit is mapped through the
+/// system's uppercase table and the results compared. The model here is Unicode uppercase per
+/// UTF-16 unit, kept only where it is one-to-one ([`windows_upcase`]). For ASCII and Latin-1 names
+/// it equates exactly what Windows does; outside them it may differ either way (a character whose
+/// full uppercase is several characters but whose simple uppercase is one, such as `\u{1f80}`, is
+/// left unmapped here while Windows maps it). Credential matching does not rely on it alone
+/// ([`credential_names_match`] adds a wider fold).
+pub fn windows_env_names_equal(a: &str, b: &str) -> bool {
+    if a.is_ascii() && b.is_ascii() {
+        return a.eq_ignore_ascii_case(b);
+    }
+    a.chars().map(windows_upcase).eq(b.chars().map(windows_upcase))
+}
+
+/// `name` mapped through [`windows_upcase`]: equal keys are exactly the names
+/// [`windows_env_names_equal`] equates.
+pub fn windows_env_name_key(name: &str) -> String {
+    name.chars().map(windows_upcase).collect()
+}
+
+/// `name` mapped through [`fold_lower_then_upcase`] (the wider fold [`credential_names_match`] adds).
+pub fn wide_env_name_key(name: &str) -> String {
+    name.chars().map(fold_lower_then_upcase).collect()
+}
+
+/// Whether `a` and `b` must be treated as the same CREDENTIAL name on every platform. Deliberately
+/// wider than any one platform's rule, so a credential fails toward removal: ASCII case-insensitive
+/// (as before), Windows' equality ([`windows_env_names_equal`]), and the lower-then-upper fold
+/// ([`wide_env_name_key`]) for the case pairs Windows' table might map differently. On Unix this can
+/// strip a distinct variable whose name differs from a credential only by case, never keep one.
+pub fn credential_names_match(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+        || windows_env_names_equal(a, b)
+        || (!(a.is_ascii() && b.is_ascii())
+            && a.chars().map(fold_lower_then_upcase).eq(b.chars().map(fold_lower_then_upcase)))
 }
 
 /// Every built-in credential name: the provider keys, then Fuigo's own.
@@ -208,11 +308,7 @@ fn known_credential_names() -> impl Iterator<Item = &'static str> {
 /// variables ([`provider_key_env_vars`]), Fuigo's own ([`FUIGO_INTERNAL_CREDENTIAL_ENV_VARS`]) and
 /// every name a loaded config registered.
 pub fn is_provider_credential(name: &str) -> bool {
-    is_known_credential(name)
-        || CONFIGURED_CREDENTIAL_NAMES
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&name.to_ascii_uppercase())
+    is_known_credential(name) || is_configured_credential(name)
 }
 
 /// Every credential variable name currently denied to children (known, then registered).
@@ -237,11 +333,8 @@ pub fn is_fuigo_secret(name: &str) -> bool {
     provider_key_env_vars::FLUXROUTER
         .iter()
         .chain(FUIGO_INTERNAL_CREDENTIAL_ENV_VARS)
-        .any(|known| known.eq_ignore_ascii_case(name))
-        || CONFIGURED_CREDENTIAL_NAMES
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&name.to_ascii_uppercase())
+        .any(|known| credential_names_match(known, name))
+        || is_configured_credential(name)
 }
 
 /// The variables of this process's environment, spelled as they are, that hold one of Fuigo's own secrets
@@ -274,7 +367,7 @@ pub fn is_fuigo_owned_secret(name: &str) -> bool {
     provider_key_env_vars::FLUXROUTER
         .iter()
         .chain(FUIGO_INTERNAL_CREDENTIAL_ENV_VARS)
-        .any(|known| known.eq_ignore_ascii_case(name))
+        .any(|known| credential_names_match(known, name))
 }
 
 /// Every name a loaded config registered as a credential (upper-cased), built-in names excluded: the user-side class
@@ -301,5 +394,91 @@ pub fn inherited_fuigo_owned_secret_names() -> Vec<std::ffi::OsString> {
 pub fn remove_fuigo_owned_secrets(cmd: &mut std::process::Command) {
     for name in inherited_fuigo_owned_secret_names() {
         cmd.env_remove(name);
+    }
+}
+
+#[cfg(test)]
+mod u35_winenv_tests {
+    use super::*;
+
+    /// Windows equates names by uppercasing each UTF-16 unit, so a non-ASCII spelling is the same
+    /// variable as its uppercase; ASCII-only folding (the old rule) kept them apart.
+    #[test]
+    fn windows_env_names_equal_folds_unicode_case() {
+        assert!(windows_env_names_equal("Path", "PATH"));
+        assert!(windows_env_names_equal("\u{f6}auth", "\u{d6}AUTH"), "\u{f6} uppercases to \u{d6}");
+        assert!(windows_env_names_equal("caf\u{e9}_key", "CAF\u{c9}_KEY"));
+        assert!(!windows_env_names_equal("PATH", "PATHS"));
+        assert!(!windows_env_names_equal("STRASSE", "stra\u{df}e"), "\u{df} has no one-to-one uppercase");
+        assert_eq!(windows_env_name_key("\u{f6}auth"), "\u{d6}AUTH");
+        // A character outside the BMP is a surrogate pair to Windows and is never case-mapped.
+        assert!(!windows_env_names_equal("\u{10428}", "\u{10400}"));
+    }
+
+    /// A credential fails toward removal: every spelling any platform could treat as the same name,
+    /// including a dotless i (`\u{131}` uppercases to `I`) and the Kelvin sign (`\u{212A}`, whose
+    /// lowercase is `k`).
+    #[test]
+    fn provider_credentials_match_unicode_spellings() {
+        assert!(is_provider_credential("openai_api_key"));
+        assert!(is_provider_credential("OPENA\u{131}_API_KEY"), "dotless i aliases I");
+        assert!(is_provider_credential("GROQ_API_\u{212A}EY"), "Kelvin sign aliases K");
+        assert!(is_fuigo_secret("FUIGO_AP\u{131}_KEY"));
+        assert!(is_fuigo_owned_secret("flux_ap\u{131}_key"));
+        assert!(!is_provider_credential("OPENAI_API_KEYS"));
+        assert!(!is_provider_credential("PATH"));
+    }
+
+    /// A registered non-ASCII credential is denied in every spelling, not only its upper-ASCII form
+    /// (the registry stored `to_ascii_uppercase`, so `\u{d6}AUTH` matched `\u{f6}AUTH` only by luck of
+    /// spelling).
+    #[test]
+    fn registered_credentials_match_unicode_spellings() {
+        register_credential_env_names(["\u{d6}AUTH_U35"]);
+        assert!(is_provider_credential("\u{d6}AUTH_U35"));
+        assert!(is_provider_credential("\u{f6}auth_u35"));
+        assert!(is_fuigo_secret("\u{f6}Auth_U35"));
+        assert!(!is_provider_credential("OAUTH_U35"), "\u{f6} is not o");
+    }
+
+    /// A configured name that folds to a never-credential name (`\u{17f}` uppercases to `S`) can never
+    /// strip `SHELL` or `USERNAME` from a child, on any platform.
+    #[test]
+    fn never_credential_names_ignore_unicode_spellings() {
+        register_credential_env_names(["\u{17f}HELL", "U\u{17f}ERNAME"]);
+        assert!(!is_provider_credential("SHELL"));
+        assert!(!is_provider_credential("USERNAME"));
+        assert!(!is_provider_credential("shell"));
+    }
+
+    /// u35-winenv r2 (Astra r2 High): on Unix a credential whose name differs from a never-credential
+    /// name only by a Unicode case alias (`\u{17f}HELL`, `SHELL`) is a DIFFERENT variable. Registering
+    /// it must deny it to children; the wide fold must not make it count as `SHELL` and be dropped
+    /// (b62b45bfa dropped it, so the secret reached every child). `SHELL` itself still survives. On
+    /// Windows the two are one variable, so the registration is ignored there, as `SHELL` is.
+    #[test]
+    fn unix_credential_folding_to_a_core_name_is_still_denied() {
+        register_credential_env_names(["\u{17f}HELL"]);
+        if cfg!(windows) {
+            assert!(!is_provider_credential("\u{17f}HELL"));
+        } else {
+            assert!(is_provider_credential("\u{17f}HELL"), "the credential must be removed from children");
+            assert!(is_fuigo_secret("\u{17f}HELL"));
+            assert!(
+                credential_env_names().iter().any(|name| name == "\u{17f}HELL"),
+                "listed as denied"
+            );
+        }
+        assert!(!is_provider_credential("SHELL"), "SHELL itself is never a credential");
+        assert!(!is_fuigo_secret("SHELL"));
+    }
+
+    /// Whether a name is a never-credential name is the host's own name rule, never the wide fold.
+    #[test]
+    fn never_credential_rule_is_the_hosts_name_rule() {
+        assert!(is_never_credential_name_on("\u{17f}HELL", true), "Windows: one variable with SHELL");
+        assert!(!is_never_credential_name_on("\u{17f}HELL", false), "Unix: a distinct variable");
+        assert!(is_never_credential_name_on("Shell", false), "Unix registry rule stays ASCII-insensitive");
+        assert!(is_never_credential_name_on("Path", true));
     }
 }

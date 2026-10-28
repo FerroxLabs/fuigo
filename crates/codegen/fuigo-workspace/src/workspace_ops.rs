@@ -311,7 +311,7 @@ impl WorkspaceOp for ReposListReq {
         let mut manifest = RepoManifest::new(Vec::new());
         for d in repos_manifest_search_dirs(&start) {
             let path = d.join(rel);
-            match tokio::fs::read(&path).await {
+            match read_repos_manifest_contained(&d, &path).await {
                 Ok(bytes) => {
                     manifest = RepoManifest::from_json_bytes(&bytes).map_err(|e| {
                         WorkspaceError::HubError(format!(
@@ -356,9 +356,33 @@ pub(crate) async fn materialized_git_roots(
     let manifest = load_repos_manifest(&root).await?;
     Ok(manifest.materialized_mounts(&root))
 }
+/// Read a workspace `.fuigo/repos.json` contained to the directory it was found under (pinned for this read).
+/// A manifest linked outside that directory reads as absent (`NotFound`) with a debug log, so a repository cannot
+/// point the workspace at a manifest it does not contain.
+async fn read_repos_manifest_contained(
+    dir: &std::path::Path,
+    path: &std::path::Path,
+) -> std::io::Result<Vec<u8>> {
+    let dir = dir.to_path_buf();
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let root = fuigo_dirs::contained::PinnedRoot::pin(&dir)?;
+        match fuigo_dirs::contained::read_contained_bytes(&path, &root) {
+            Err(e) if e.kind() == fuigo_dirs::contained::OUTSIDE_ROOT
+                && !fuigo_dirs::contained::is_contained(&path, &root) =>
+            {
+                tracing::debug!(path = %path.display(), "repos manifest links outside its folder; ignored");
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))
+            }
+            other => other,
+        }
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
 async fn load_repos_manifest(root: &std::path::Path) -> WorkspaceResult<RepoManifest> {
     let path = root.join(fuigo_workspace_types::rpc::repos::REPOS_MANIFEST_RELATIVE_PATH);
-    match tokio::fs::read(&path).await {
+    match read_repos_manifest_contained(root, &path).await {
         Ok(bytes) => RepoManifest::from_json_bytes(&bytes)
             .map_err(|e| WorkspaceError::HubError(e.to_string())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(RepoManifest::new(Vec::new())),
@@ -1690,12 +1714,17 @@ impl WorkspaceOps {
     /// - **Local**: dispatches through the workspace session's [`FinalizedToolset`](fuigo_tools::registry::types::FinalizedToolset) (in-process).
     ///   Requires `session_id` to look up the session.
     /// - **Proxy**: routes through the server `ToolHarness` (remote).
+    ///
+    /// `approved_without_grant` is how this session's permission check approved the call
+    /// ([`fuigo_tools::sandbox_launch::ApprovedWithoutGrant`], u35 g9); it rides on a local call. A proxied call is
+    /// judged again by the server's own permission check (`enforce_hub_policy`), which sets the flag there.
     pub async fn call_tool(
         &self,
         name: &str,
         args: Value,
         call_id: &str,
         session_id: Option<&str>,
+        approved_without_grant: bool,
     ) -> Result<ToolRunResult, fuigo_tool_runtime::ToolError> {
         match self {
             Self::Local { handle } => {
@@ -1714,7 +1743,7 @@ impl WorkspaceOps {
                         ),
                     )
                 })?;
-                session.toolset().call(name, args, call_id, None).await
+                session.toolset().call_approved(name, args, call_id, approved_without_grant).await
             }
             Self::Proxy { client } => {
                 if !client.is_connected() {
@@ -1903,6 +1932,21 @@ mod tests {
         let ops = WorkspaceOps::for_test_in(&agent_cwd);
         let listed = ops.repos_list().await.expect("walk up to sandbox ws");
         assert_eq!(one.repos, listed.repos);
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn m5_repos_manifest_linked_outside_the_workspace_reads_as_absent() {
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("repos.json"), "not json at all").unwrap();
+        let rel = fuigo_workspace_types::rpc::repos::REPOS_MANIFEST_RELATIVE_PATH;
+        let manifest = ws.path().join(rel);
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("repos.json"), &manifest).unwrap();
+        let loaded = load_repos_manifest(ws.path())
+            .await
+            .expect("outside-linked manifest is ignored, not parsed");
+        assert!(loaded.repos.is_empty());
     }
     #[test]
     fn repos_manifest_search_dirs_stops_at_sandbox_workspace_root() {

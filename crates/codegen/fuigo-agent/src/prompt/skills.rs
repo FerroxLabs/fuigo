@@ -13,8 +13,9 @@ pub use fuigo_tools::implementations::skills::types::{SkillInfo, SkillScope};
 pub use fuigo_tools::types::compat::CompatConfig;
 
 use fuigo_tools::implementations::skills::discovery::{
-    COMMAND_SUBDIR, MAX_SKILL_WALK_DEPTH, SKILL_SUBDIRS, find_command_paths, find_skill_md_paths,
-    find_skill_paths, is_valid_skill_name, normalize_skill_name, parse_skill_files, scan_md_files,
+    COMMAND_SUBDIR, MAX_SKILL_WALK_DEPTH, SKILL_SUBDIRS, SkillWalk, find_command_paths_in,
+    find_skill_md_paths, find_skill_md_paths_in, find_skill_paths, find_skill_paths_in,
+    is_valid_skill_name, normalize_skill_name, parse_skill_files_in, scan_md_files_in,
     walk_for_skill_md,
 };
 
@@ -639,10 +640,26 @@ fn collect_skill_config_dirs_from_sources(
     let config_dir_names = compat.skill_config_dirs();
 
     // Priority 1, 2 & 2.5: the cwd-to-git-root chain (cwd first), then the optional workspace user dir
+    // A chain config dir that itself links out of its folder loads nothing (its walk is contained to that folder), so
+    // it is left out here instead of claiming the canonical slot of what it points at: a project `.fuigo` linked to
+    // `~/.fuigo` must not stop the real user dir being walked (with user authority) below.
     if let Some(project_sources) = project_sources {
         for dir in project_sources.skill_dirs() {
+            let in_chain = project_sources.chain.dirs.iter().any(|d| d == dir);
             for name in &config_dir_names {
-                try_add(dir.join(name));
+                let config_dir = dir.join(name);
+                if in_chain
+                    && config_dir.is_dir()
+                    && !fuigo_dirs::contained::PinnedRoot::pin(dir)
+                        .is_ok_and(|root| fuigo_dirs::contained::is_contained(&config_dir, &root))
+                {
+                    tracing::debug!(
+                        path = %config_dir.display(),
+                        "project config dir links outside its folder; not scanned for skills"
+                    );
+                    continue;
+                }
+                try_add(config_dir);
             }
         }
     }
@@ -703,7 +720,41 @@ fn scope_for_config_dir(dir: &Path, cwd: Option<&Path>, git_root: Option<&Path>)
     SkillScope::User
 }
 
-/// Collect paths into `out`, deduplicating by canonical path.
+/// The walk policy for one skill config dir.
+///
+/// A project config dir (`.fuigo`/`.agents`/`.claude`/`.cursor` directly under a dir of the cwd-to-git-root chain) is
+/// contained to that dir: a skill dir, SKILL.md or command file linking outside the project folder is skipped, so a
+/// repo cannot pull an arbitrary local file into the prompt. User dirs (`~/.fuigo`, `~/.claude`, the workspace-user dir,
+/// `[skills].paths`) follow links: the user put them there.
+fn skill_walk_for_config_dir(
+    config_dir: &Path,
+    project_sources: Option<&crate::repo::StartupProjectSources>,
+    global_dir: &Path,
+) -> SkillWalk {
+    if is_user_config_dir(config_dir, global_dir) {
+        return SkillWalk::follow_links();
+    }
+    let project_root = config_dir.parent().filter(|parent| {
+        project_sources.is_some_and(|sources| sources.chain.dirs.iter().any(|d| d == parent))
+    });
+    match project_root {
+        Some(root) => SkillWalk::contained(root),
+        None => SkillWalk::follow_links(),
+    }
+}
+
+/// A user config dir (`$FUIGO_HOME`, or a dot dir directly in the home directory), also when the session runs in
+/// `$HOME` and that dir is therefore on the project chain too: user scope follows links.
+fn is_user_config_dir(config_dir: &Path, global_dir: &Path) -> bool {
+    let canonical = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let dir = canonical(config_dir);
+    dir == canonical(global_dir)
+        || fuigo_dirs::home_dir()
+            .is_some_and(|home| config_dir.parent().is_some_and(|parent| canonical(parent) == canonical(&home)))
+}
+
+/// Collect paths into `out`, deduplicating by canonical path. `root` is the folder their reads must stay inside
+/// (`None`: user scope), recorded on each skill for every later read.
 ///
 /// Skill/command discovery does **not** consult `.gitignore`.
 /// Auto-discovery only visits known config roots (`.fuigo`, `.agents`, `.claude`, `.cursor`), which teams often gitignore but still expect to load.
@@ -712,13 +763,14 @@ fn scope_for_config_dir(dir: &Path, cwd: Option<&Path>, git_root: Option<&Path>)
 fn collect_discovered_paths(
     paths: impl IntoIterator<Item = PathBuf>,
     scope: SkillScope,
+    root: Option<&fuigo_dirs::contained::PinnedRoot>,
     seen: &mut HashSet<PathBuf>,
-    out: &mut Vec<(PathBuf, SkillScope)>,
+    out: &mut Vec<(PathBuf, SkillScope, Option<fuigo_dirs::contained::PinnedRoot>)>,
 ) {
     for path in paths {
         let canonical = dunce::canonicalize(&path).unwrap_or_else(|_| path.clone());
         if seen.insert(canonical) {
-            out.push((path, scope));
+            out.push((path, scope, root.cloned()));
         }
     }
 }
@@ -757,22 +809,27 @@ fn list_skills_with_options_blocking(
     let config_dirs =
         collect_skill_config_dirs_from_sources(project_sources.as_ref(), global_dir, &[], compat);
 
-    let mut skill_files: Vec<(PathBuf, SkillScope)> = Vec::new();
+    let mut skill_files: Vec<(PathBuf, SkillScope, Option<fuigo_dirs::contained::PinnedRoot>)> = Vec::new();
     let mut seen_canonical_paths = HashSet::new();
 
     for config_dir in &config_dirs {
         let scope = scope_for_config_dir(config_dir, cwd.as_deref(), git_root);
+        let mut walk = skill_walk_for_config_dir(config_dir, project_sources.as_ref(), global_dir);
 
         // Skills before commands: skills win name collisions.
+        let skills = find_skill_paths_in(config_dir, &mut walk);
+        let root = walk.root().cloned();
         collect_discovered_paths(
-            find_skill_paths(config_dir),
+            skills,
             scope,
+            root.as_ref(),
             &mut seen_canonical_paths,
             &mut skill_files,
         );
         collect_discovered_paths(
-            find_command_paths(config_dir),
+            find_command_paths_in(config_dir, &mut walk),
             scope,
+            root.as_ref(),
             &mut seen_canonical_paths,
             &mut skill_files,
         );
@@ -782,11 +839,12 @@ fn list_skills_with_options_blocking(
     collect_discovered_paths(
         find_skill_paths(&bundled_dir),
         SkillScope::Bundled,
+        None,
         &mut seen_canonical_paths,
         &mut skill_files,
     );
 
-    parse_skill_files(skill_files)
+    parse_skill_files_in(skill_files)
 }
 
 /// Expand a `~`-prefixed path string to an absolute `PathBuf`.
@@ -805,7 +863,7 @@ fn expand_tilde(raw: &str) -> PathBuf {
 /// `~` is expanded.
 /// Scope is `Repo` if the resolved path falls inside `git_root`, otherwise `User`.
 fn collect_config_skills(config_paths: &[String], git_root: Option<&Path>) -> Vec<SkillInfo> {
-    let mut skill_files: Vec<(PathBuf, SkillScope)> = Vec::new();
+    let mut skill_files: Vec<(PathBuf, SkillScope, Option<fuigo_dirs::contained::PinnedRoot>)> = Vec::new();
     let mut seen = HashSet::new();
 
     for raw in config_paths {
@@ -819,12 +877,13 @@ fn collect_config_skills(config_paths: &[String], git_root: Option<&Path>) -> Ve
             collect_discovered_paths(
                 std::iter::once(expanded),
                 scope,
+                None,
                 &mut seen,
                 &mut skill_files,
             );
         } else if expanded.is_dir() {
             let dir_paths = find_skill_md_paths(&expanded);
-            collect_discovered_paths(dir_paths, scope, &mut seen, &mut skill_files);
+            collect_discovered_paths(dir_paths, scope, None, &mut seen, &mut skill_files);
         } else {
             tracing::warn!(
                 path = %expanded.display(),
@@ -833,7 +892,7 @@ fn collect_config_skills(config_paths: &[String], git_root: Option<&Path>) -> Ve
         }
     }
 
-    let mut skills = parse_skill_files(skill_files);
+    let mut skills = parse_skill_files_in(skill_files);
     // Provenance metadata only (scope still drives precedence): lets inspect and UIs tell `[skills].paths` entries from plain user/repo skills
     for skill in &mut skills {
         skill.config_source = Some(
@@ -846,7 +905,7 @@ fn collect_config_skills(config_paths: &[String], git_root: Option<&Path>) -> Ve
 }
 
 fn collect_injected_skills(dirs: &[String], scope: SkillScope) -> Vec<SkillInfo> {
-    let mut skill_files: Vec<(PathBuf, SkillScope)> = Vec::new();
+    let mut skill_files: Vec<(PathBuf, SkillScope, Option<fuigo_dirs::contained::PinnedRoot>)> = Vec::new();
     let mut seen = HashSet::new();
 
     for raw in dirs {
@@ -856,10 +915,10 @@ fn collect_injected_skills(dirs: &[String], scope: SkillScope) -> Vec<SkillInfo>
         }
         let mut dir_paths = Vec::new();
         walk_for_skill_md(&expanded, &mut dir_paths, 0);
-        collect_discovered_paths(dir_paths, scope, &mut seen, &mut skill_files);
+        collect_discovered_paths(dir_paths, scope, None, &mut seen, &mut skill_files);
     }
 
-    parse_skill_files(skill_files)
+    parse_skill_files_in(skill_files)
 }
 
 /// Deduplicate skills while preserving first-seen priority order.
@@ -1005,11 +1064,18 @@ fn stamp_plugin_fields(skills: &mut [SkillInfo], plugin: &crate::plugins::Loaded
     }
 }
 
+/// Skills and commands of the session's active plugins: enabled AND trusted, the same set as callable plugin agents,
+/// hooks and MCP. An untrusted project plugin (an untrusted folder, including one that wins an enabled name by scope
+/// precedence) contributes no skill text, as untrusted project skills do not.
 fn collect_plugin_skills(registry: &crate::plugins::PluginRegistry) -> Vec<SkillInfo> {
     let mut skills = Vec::new();
 
-    for plugin in registry.enabled_plugins() {
-        let mut paths: Vec<(PathBuf, SkillScope)> = Vec::new();
+    for plugin in registry.active_plugins() {
+        let mut paths: Vec<(PathBuf, SkillScope, Option<fuigo_dirs::contained::PinnedRoot>)> = Vec::new();
+        // Contained to the plugin folder: a dir or file linking outside it is skipped (counted in `skipped_links`), and
+        // every read of an admitted file (here and at invocation) is held to the folder too.
+        let mut walk = SkillWalk::contained_pinned(plugin.pinned_root());
+        let root = Some(plugin.pinned_root());
 
         // Skills: shared discovery primitive (see `find_skill_md_paths`).
         for skill_dir in &plugin.skill_dirs {
@@ -1017,22 +1083,22 @@ fn collect_plugin_skills(registry: &crate::plugins::PluginRegistry) -> Vec<Skill
                 continue;
             }
             paths.extend(
-                find_skill_md_paths(skill_dir)
+                find_skill_md_paths_in(skill_dir, &mut walk)
                     .into_iter()
-                    .map(|p| (p, SkillScope::Repo)),
+                    .map(|p| (p, SkillScope::Repo, root.clone())),
             );
         }
 
         // Commands (.md files in command directories)
         for cmd_dir in &plugin.command_dirs {
             paths.extend(
-                scan_md_files(cmd_dir)
+                scan_md_files_in(cmd_dir, &mut walk)
                     .into_iter()
-                    .map(|p| (p, SkillScope::Repo)),
+                    .map(|p| (p, SkillScope::Repo, root.clone())),
             );
         }
 
-        let mut parsed = parse_skill_files(paths);
+        let mut parsed = parse_skill_files_in(paths);
         stamp_plugin_fields(&mut parsed, plugin);
         skills.extend(parsed);
     }
@@ -1161,7 +1227,7 @@ mod tests {
     use std::fs;
     use fuigo_tools::implementations::skills::discovery::{
         MAX_BODY_PEEK_BYTES, SkillParseError, extract_first_paragraph, is_valid_skill_name,
-        normalize_skill_name, parse_skill_frontmatter,
+        normalize_skill_name, parse_skill_files, parse_skill_frontmatter,
     };
 
     fn write_skill_md(dir: &Path, name: &str) {
@@ -2000,6 +2066,7 @@ mod tests {
             paths: None,
             enabled: true,
             body: None,
+            content_root: None,
         }
     }
 
@@ -2041,6 +2108,7 @@ mod tests {
             inline_mcp_servers: None,
             inline_lsp_servers: None,
             conflict: None,
+            skipped_links: Default::default(),
         };
 
         let mut skills = vec![make_skill(
@@ -2069,6 +2137,16 @@ mod tests {
         root: &Path,
         skill_dirs: Vec<PathBuf>,
     ) -> crate::plugins::PluginRegistry {
+        make_registry_with_skill_dirs_scoped(name, root, skill_dirs, PluginScope::User, true)
+    }
+
+    fn make_registry_with_skill_dirs_scoped(
+        name: &str,
+        root: &Path,
+        skill_dirs: Vec<PathBuf>,
+        scope: PluginScope,
+        trusted: bool,
+    ) -> crate::plugins::PluginRegistry {
         use crate::plugins::discovery::{DiscoveredPlugin, PluginId};
         use crate::plugins::manifest::PluginManifest;
 
@@ -2089,12 +2167,12 @@ mod tests {
                 mcp_servers: None,
                 lsp_servers: None,
             },
-            id: PluginId::new(PluginScope::User, root, name),
+            id: PluginId::new(scope, root, name),
             root: root.to_path_buf(),
             canonical_root: root.to_path_buf(),
-            scope: PluginScope::User,
+            scope,
             origin: crate::plugins::PluginOrigin::UserFuigo,
-            trusted: true,
+            trusted,
             skill_dirs,
             command_dirs: vec![],
             agent_dirs: vec![],
@@ -2130,6 +2208,22 @@ mod tests {
                 .iter()
                 .all(|s| s.plugin_name.as_deref() == Some("listed"))
         );
+    }
+
+    /// u35 r2 (Grok M): an enabled but untrusted project plugin contributes no skills (descriptions or bodies); once
+    /// trusted it does.
+    #[test]
+    fn collect_plugin_skills_skips_untrusted_plugins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let one = tmp.path().join("skills").join("one");
+        write_skill_md(&one, "one");
+        let untrusted =
+            make_registry_with_skill_dirs_scoped("proj", tmp.path(), vec![one.clone()], PluginScope::Project, false);
+        assert_eq!(untrusted.enabled_plugins().len(), 1, "enabled, so only trust keeps it out");
+        assert!(collect_plugin_skills(&untrusted).is_empty(), "untrusted plugin skills must not load");
+        let trusted =
+            make_registry_with_skill_dirs_scoped("proj", tmp.path(), vec![one], PluginScope::Project, true);
+        assert_eq!(collect_plugin_skills(&trusted).len(), 1);
     }
 
     #[test]
@@ -2881,6 +2975,7 @@ mod tests {
             inline_mcp_servers: None,
             inline_lsp_servers: None,
             conflict: None,
+            skipped_links: Default::default(),
         }
     }
 
@@ -3677,5 +3772,406 @@ mod discovery_budget_tests {
             has(&after, "second-skill"),
             "the rescan must pick the new skill up"
         );
+    }
+}
+
+/// m3: plugin and project skills/commands stay inside their own folder (symlinks out are skipped).
+#[cfg(all(test, unix))]
+mod m3_containment_tests {
+    use super::*;
+    use crate::plugins::discovery::{DiscoveredPlugin, PluginId, PluginScope};
+    use crate::plugins::manifest::PluginManifest;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    fn write_skill(dir: &Path, name: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: skill {name}\n---\nbody\n"),
+        )
+        .unwrap();
+    }
+
+    /// A registry holding one trusted user plugin at `root`, its dirs resolved by the manifest defaults
+    /// (`skills/`, `commands/`, `agents/`) exactly as discovery resolves them.
+    fn registry_from_dir(root: &Path) -> crate::plugins::PluginRegistry {
+        let manifest: PluginManifest = serde_json::from_str(r#"{"name": "m3p"}"#).unwrap();
+        let canonical = dunce::canonicalize(root).unwrap();
+        let dp = DiscoveredPlugin {
+            skill_dirs: manifest.skill_dirs(root),
+            command_dirs: manifest.command_dirs(root),
+            agent_dirs: manifest.agent_dirs(root),
+            manifest,
+            id: PluginId::new(PluginScope::User, &canonical, "m3p"),
+            root: root.to_path_buf(),
+            canonical_root: canonical,
+            scope: PluginScope::User,
+            origin: crate::plugins::PluginOrigin::UserFuigo,
+            trusted: true,
+            hooks_path: None,
+            mcp_config_path: None,
+            lsp_config_path: None,
+            conflict: None,
+        };
+        crate::plugins::PluginRegistry::from_discovered(vec![dp], &[], &["m3p".to_string()])
+    }
+
+    /// `outside/` holds a skill dir and a markdown file the plugin or project links to.
+    fn outside_tree(base: &Path) -> PathBuf {
+        let outside = base.join("outside");
+        write_skill(&outside.join("far"), "far-secret");
+        fs::write(
+            outside.join("secret.md"),
+            "---\nname: file-secret\ndescription: d\n---\nTOP SECRET\n",
+        )
+        .unwrap();
+        outside
+    }
+
+    /// The plugin layout: own skill, a skill linked to another folder INSIDE the plugin, a skill dir and a SKILL.md
+    /// linked outside, an own command and a command linked outside.
+    fn plugin_tree(base: &Path, outside: &Path) -> PathBuf {
+        let root = base.join("plugin");
+        let skills = root.join("skills");
+        write_skill(&skills.join("own"), "own");
+        write_skill(&root.join("shared").join("inside"), "inside");
+        symlink(root.join("shared").join("inside"), skills.join("inside")).unwrap();
+        symlink(outside.join("far"), skills.join("far")).unwrap();
+        fs::create_dir_all(skills.join("linkfile")).unwrap();
+        symlink(outside.join("secret.md"), skills.join("linkfile").join("SKILL.md")).unwrap();
+        let commands = root.join("commands");
+        fs::create_dir_all(&commands).unwrap();
+        fs::write(commands.join("cmd-own.md"), "---\nname: cmd-own\ndescription: d\n---\nx\n").unwrap();
+        symlink(outside.join("secret.md"), commands.join("leak.md")).unwrap();
+        let agents = root.join("agents");
+        fs::create_dir_all(&agents).unwrap();
+        symlink(outside.join("secret.md"), agents.join("leak.md")).unwrap();
+        root
+    }
+
+    fn sorted_names(skills: &[SkillInfo]) -> Vec<String> {
+        let mut names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn m3_plugin_default_skills_dir_linked_outside_loads_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let outside = outside_tree(&base);
+        let root = base.join("plugin");
+        fs::create_dir_all(&root).unwrap();
+        symlink(&outside, root.join("skills")).unwrap();
+        let skills = collect_plugin_skills(&registry_from_dir(&root));
+        assert!(skills.is_empty(), "linked-out skills/ loaded: {:?}", sorted_names(&skills));
+    }
+
+    #[test]
+    fn m3_plugin_skill_md_and_command_linked_outside_skipped_inside_link_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let outside = outside_tree(&base);
+        let root = plugin_tree(&base, &outside);
+        let skills = collect_plugin_skills(&registry_from_dir(&root));
+        assert_eq!(sorted_names(&skills), ["cmd-own", "inside", "own"]);
+        assert!(
+            skills.iter().all(|s| s.body.as_deref().is_none_or(|b| !b.contains("TOP SECRET"))),
+            "outside content reached a skill"
+        );
+    }
+
+    #[tokio::test]
+    async fn m3_project_skill_and_command_linked_outside_project_are_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let outside = outside_tree(&base);
+        let repo = base.join("repo");
+        let skills = repo.join(".fuigo").join("skills");
+        write_skill(&skills.join("proj-ok"), "proj-ok");
+        symlink(outside.join("far"), skills.join("linkdir")).unwrap();
+        fs::create_dir_all(skills.join("linkfile")).unwrap();
+        symlink(outside.join("secret.md"), skills.join("linkfile").join("SKILL.md")).unwrap();
+        let commands = repo.join(".fuigo").join("commands");
+        fs::create_dir_all(&commands).unwrap();
+        symlink(outside.join("secret.md"), commands.join("leak.md")).unwrap();
+        let global = base.join("fuigo-home");
+        fs::create_dir_all(&global).unwrap();
+
+        let found = list_skills_with_options(
+            Some(repo.to_str().unwrap()),
+            None,
+            &global,
+            CompatConfig::default(),
+        )
+        .await;
+        let names = sorted_names(&found);
+        assert!(names.iter().any(|n| n == "proj-ok"), "own project skill missing: {names:?}");
+        for leaked in ["far-secret", "file-secret", "linkdir", "linkfile", "leak"] {
+            assert!(!names.iter().any(|n| n == leaked), "{leaked} loaded: {names:?}");
+        }
+    }
+
+    #[test]
+    fn m3_plugin_skipped_links_are_counted_per_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let outside = outside_tree(&base);
+        let root = plugin_tree(&base, &outside);
+        let registry = registry_from_dir(&root);
+        let plugin = registry.get("m3p").unwrap();
+        assert_eq!(
+            plugin.skipped_links,
+            crate::plugins::registry::SkippedLinks { skills: 2, commands: 1, agents: 1 }
+        );
+        assert_eq!(plugin.skill_count, 3, "own + inside + cmd-own");
+        assert_eq!(plugin.agent_count, 0);
+
+        // A whole default skills/ dir linked out counts as one skipped skills entry.
+        let root2 = base.join("plugin2");
+        fs::create_dir_all(&root2).unwrap();
+        symlink(&outside, root2.join("skills")).unwrap();
+        let registry2 = registry_from_dir(&root2);
+        let plugin2 = registry2.get("m3p").unwrap();
+        assert_eq!(plugin2.skipped_links.skills, 1);
+        assert_eq!(plugin2.skill_count, 0);
+    }
+}
+
+/// m4: plugin and project skill reads are held to their folder at READ time (a link swapped in after discovery is
+/// refused), in-folder links still read, user-scope links are still followed.
+#[cfg(all(test, unix))]
+mod m4_read_time_tests {
+    use super::*;
+    use crate::plugins::discovery::{DiscoveredPlugin, PluginId, PluginScope};
+    use crate::plugins::manifest::PluginManifest;
+    use fuigo_tools::implementations::skills::skill::{load_skill_content, load_skill_with_body};
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    fn write_skill(dir: &Path, name: &str, body: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("SKILL.md"), format!("---\nname: {name}\ndescription: skill {name}\n---\n{body}\n")).unwrap();
+    }
+
+    fn registry_from_dir(root: &Path) -> crate::plugins::PluginRegistry {
+        let manifest: PluginManifest = serde_json::from_str(r#"{"name": "m4p"}"#).unwrap();
+        let canonical = dunce::canonicalize(root).unwrap();
+        let dp = DiscoveredPlugin {
+            skill_dirs: manifest.skill_dirs(root),
+            command_dirs: manifest.command_dirs(root),
+            agent_dirs: manifest.agent_dirs(root),
+            manifest,
+            id: PluginId::new(PluginScope::User, &canonical, "m4p"),
+            root: root.to_path_buf(),
+            canonical_root: canonical,
+            scope: PluginScope::User,
+            origin: crate::plugins::PluginOrigin::UserFuigo,
+            trusted: true,
+            hooks_path: None,
+            mcp_config_path: None,
+            lsp_config_path: None,
+            conflict: None,
+        };
+        crate::plugins::PluginRegistry::from_discovered(vec![dp], &[], &["m4p".to_string()])
+    }
+
+    fn swap_for_link(file: &Path, target: &Path) {
+        fs::remove_file(file).unwrap();
+        symlink(target, file).unwrap();
+    }
+
+    fn no_secret(read: Result<String, String>) {
+        if let Ok(body) = read {
+            assert!(!body.contains("TOP SECRET"), "outside file read after the swap: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn m4_plugin_skill_swapped_after_discovery_is_refused_at_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        fs::create_dir_all(base.join("outside")).unwrap();
+        let secret = base.join("outside").join("secret.md");
+        fs::write(&secret, "---\nname: own\n---\nTOP SECRET\n").unwrap();
+        let root = base.join("plugin");
+        write_skill(&root.join("skills").join("own"), "own", "own body");
+        write_skill(&root.join("shared"), "own", "inside body");
+
+        let skills = collect_plugin_skills(&registry_from_dir(&root));
+        let skill = skills.iter().find(|s| s.name == "own").expect("plugin skill").clone();
+        assert!(load_skill_content(&skill).await.unwrap().contains("own body"));
+
+        let skill_md = root.join("skills").join("own").join("SKILL.md");
+        swap_for_link(&skill_md, &secret);
+        no_secret(load_skill_content(&skill).await);
+        no_secret(load_skill_with_body(&skill).await.map(|s| s.body.unwrap_or_default()));
+
+        // An in-plugin link swapped in still reads.
+        swap_for_link(&skill_md, &root.join("shared").join("SKILL.md"));
+        assert!(load_skill_content(&skill).await.unwrap().contains("inside body"));
+    }
+
+    /// Astra r4 High: the WHOLE plugin folder is replaced with a link to an outside tree after discovery. The read is
+    /// held to the folder resolved at discovery (pinned), not to wherever the plugin path points now.
+    #[tokio::test]
+    async fn m5_plugin_root_replaced_by_link_after_discovery_is_refused_at_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        write_skill(&base.join("outside").join("skills").join("own"), "own", "TOP SECRET");
+        let root = base.join("plugin");
+        write_skill(&root.join("skills").join("own"), "own", "own body");
+
+        let skills = collect_plugin_skills(&registry_from_dir(&root));
+        let skill = skills.iter().find(|s| s.name == "own").expect("plugin skill").clone();
+        assert!(load_skill_content(&skill).await.unwrap().contains("own body"));
+
+        fs::rename(&root, base.join("plugin.old")).unwrap();
+        symlink(base.join("outside"), &root).unwrap();
+        no_secret(load_skill_content(&skill).await);
+        no_secret(load_skill_with_body(&skill).await.map(|s| s.body.unwrap_or_default()));
+    }
+
+    /// The same for a project skill: the project folder itself is replaced with a link after discovery.
+    #[tokio::test]
+    async fn m5_project_root_replaced_by_link_after_discovery_is_refused_at_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        write_skill(&base.join("outside").join(".fuigo").join("skills").join("proj"), "proj", "TOP SECRET");
+        let repo = base.join("repo");
+        write_skill(&repo.join(".fuigo").join("skills").join("proj"), "proj", "own body");
+        let global = base.join("fuigo-home");
+        fs::create_dir_all(&global).unwrap();
+
+        let found =
+            list_skills_with_options(Some(repo.to_str().unwrap()), None, &global, CompatConfig::default()).await;
+        let skill = found.iter().find(|s| s.name == "proj").expect("project skill").clone();
+        assert!(load_skill_content(&skill).await.unwrap().contains("own body"));
+
+        fs::rename(&repo, base.join("repo.old")).unwrap();
+        symlink(base.join("outside"), &repo).unwrap();
+        no_secret(load_skill_content(&skill).await);
+        no_secret(load_skill_with_body(&skill).await.map(|s| s.body.unwrap_or_default()));
+    }
+
+    #[tokio::test]
+    async fn m4_project_skill_swapped_after_discovery_is_refused_at_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        fs::create_dir_all(base.join("outside")).unwrap();
+        let secret = base.join("outside").join("secret.md");
+        fs::write(&secret, "---\nname: proj\n---\nTOP SECRET\n").unwrap();
+        let repo = base.join("repo");
+        let skill_dir = repo.join(".fuigo").join("skills").join("proj");
+        write_skill(&skill_dir, "proj", "own body");
+        let global = base.join("fuigo-home");
+        fs::create_dir_all(&global).unwrap();
+
+        let found =
+            list_skills_with_options(Some(repo.to_str().unwrap()), None, &global, CompatConfig::default()).await;
+        let skill = found.iter().find(|s| s.name == "proj").expect("project skill").clone();
+        swap_for_link(&skill_dir.join("SKILL.md"), &secret);
+        no_secret(load_skill_content(&skill).await);
+        // Agent `skills:` preloading reads through the same path.
+        no_secret(load_skill_with_body(&skill).await.map(|s| s.body.unwrap_or_default()));
+    }
+
+    #[tokio::test]
+    async fn m4_user_skill_link_is_still_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        write_skill(&base.join("elsewhere").join("mine"), "mine", "user body");
+        let global = base.join("fuigo-home");
+        fs::create_dir_all(global.join("skills")).unwrap();
+        symlink(base.join("elsewhere").join("mine"), global.join("skills").join("mine")).unwrap();
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        let found =
+            list_skills_with_options(Some(repo.to_str().unwrap()), None, &global, CompatConfig::default()).await;
+        let skill = found.iter().find(|s| s.name == "mine").expect("linked user skill listed");
+        assert!(load_skill_content(skill).await.unwrap().contains("user body"));
+    }
+
+    /// Fable m3 Low 2: a session in the folder that holds the user config dir (cwd = the parent of `$FUIGO_HOME`, e.g.
+    /// `$HOME`) still follows the user's own links.
+    #[tokio::test]
+    async fn m4_user_config_dir_follows_links_when_cwd_is_its_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        write_skill(&base.join("elsewhere").join("mine"), "mine", "user body");
+        let home = base.join("home");
+        let global = home.join(".fuigo");
+        fs::create_dir_all(global.join("skills")).unwrap();
+        symlink(base.join("elsewhere").join("mine"), global.join("skills").join("mine")).unwrap();
+
+        let found =
+            list_skills_with_options(Some(home.to_str().unwrap()), None, &global, CompatConfig::default()).await;
+        assert!(
+            found.iter().any(|s| s.name == "mine"),
+            "user skill linked out of $FUIGO_HOME was skipped when cwd is its parent"
+        );
+    }
+
+    /// Grok m3 Low: a project `.fuigo` that links to the user config dir must not take the user dir's slot, so the user
+    /// dir is still walked (with user authority).
+    #[tokio::test]
+    async fn m4_project_config_dir_linked_to_user_dir_does_not_hide_user_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let global = base.join("fuigo-home");
+        write_skill(&global.join("skills").join("usr"), "usr", "user body");
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        symlink(&global, repo.join(".fuigo")).unwrap();
+
+        let found =
+            list_skills_with_options(Some(repo.to_str().unwrap()), None, &global, CompatConfig::default()).await;
+        let skill = found.iter().find(|s| s.name == "usr").expect("user skill hidden by the linked project .fuigo");
+        assert_eq!(skill.scope, SkillScope::User);
+    }
+
+    /// Fable m3 Low 3: the compat-gated `.claude/skills` follows the same containment as `.fuigo/skills`.
+    #[tokio::test]
+    async fn m4_claude_project_skill_linked_outside_is_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        write_skill(&base.join("outside").join("far"), "far-secret", "TOP SECRET");
+        let repo = base.join("repo");
+        let skills = repo.join(".claude").join("skills");
+        write_skill(&skills.join("own"), "claude-own", "own");
+        symlink(base.join("outside").join("far"), skills.join("far")).unwrap();
+        let global = base.join("fuigo-home");
+        fs::create_dir_all(&global).unwrap();
+        let found =
+            list_skills_with_options(Some(repo.to_str().unwrap()), None, &global, CompatConfig::default()).await;
+        assert!(found.iter().any(|s| s.name == "claude-own"), "own .claude skill missing");
+        assert!(!found.iter().any(|s| s.name == "far-secret"), ".claude skill linked outside loaded");
+    }
+
+    /// Fable m3 Low 3: a plugin whose root is itself a link (`~/.fuigo/plugins/p -> /elsewhere/p`) is contained to the
+    /// link's target: in-folder links load, links out of the target are skipped.
+    #[tokio::test]
+    async fn m4_linked_plugin_root_contains_to_its_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        write_skill(&base.join("outside").join("far"), "far-secret", "TOP SECRET");
+        let real = base.join("elsewhere").join("p");
+        write_skill(&real.join("skills").join("own"), "own", "own body");
+        write_skill(&real.join("shared").join("inside"), "inside", "inside body");
+        symlink(real.join("shared").join("inside"), real.join("skills").join("inside")).unwrap();
+        symlink(base.join("outside").join("far"), real.join("skills").join("far")).unwrap();
+        fs::create_dir_all(base.join("plugins")).unwrap();
+        let root = base.join("plugins").join("p");
+        symlink(&real, &root).unwrap();
+
+        let skills = collect_plugin_skills(&registry_from_dir(&root));
+        let mut names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["inside", "own"]);
+        for skill in &skills {
+            assert!(!load_skill_content(skill).await.unwrap().contains("TOP SECRET"));
+        }
     }
 }

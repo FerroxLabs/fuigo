@@ -56,6 +56,8 @@ fn make_request(command: &str, timeout_secs: u64) -> TerminalRunRequest {
     ));
 
     TerminalRunRequest {
+        request_cwd: None,
+        approved_without_grant: false,
         command: command.to_string(),
         working_directory: PathBuf::from("/tmp"),
         env: HashMap::new(),

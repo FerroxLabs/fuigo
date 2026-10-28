@@ -91,6 +91,28 @@ impl SkillDiscoveryReminder {
         }
         false
     }
+
+    /// The folder a project SKILL.md (`<dir>/<config dir>/skills/.../SKILL.md`) belongs to: `<dir>`. Its reads are
+    /// held there, as startup and walk discovery hold them. `None` when `<dir>` is the home directory: `~/.fuigo` and
+    /// friends are user scope and follow links, even when the session runs in `$HOME`.
+    ///
+    /// The `skills` folder is the one directly inside a config dir (`.fuigo`, `.agents`, `.claude`, ...), not merely
+    /// the nearest `skills` ancestor: a nested `<dir>/.fuigo/skills/<g>/skills/<x>/SKILL.md` belongs to `<dir>`, as
+    /// at startup. The folder is pinned here, when the skill is registered.
+    pub(crate) fn project_root_of_skill(path: &Path) -> Option<fuigo_dirs::contained::PinnedRoot> {
+        let skills = path.ancestors().skip(1).find(|a| {
+            a.file_name().is_some_and(|n| n == "skills")
+                && a.parent()
+                    .and_then(|p| p.file_name())
+                    .is_some_and(|n| SKILL_CONFIG_DIRS.iter().any(|d| *d == n))
+        })?;
+        let owner = skills.parent()?.parent()?;
+        let pinned = fuigo_dirs::contained::PinnedRoot::pin(owner)
+            .unwrap_or_else(|_| fuigo_dirs::contained::PinnedRoot::from_canonical(owner));
+        let is_home = fuigo_dirs::home_dir()
+            .is_some_and(|home| dunce::canonicalize(&home).unwrap_or(home) == pinned.path());
+        (!is_home).then_some(pinned)
+    }
 }
 
 #[async_trait::async_trait]
@@ -146,7 +168,14 @@ impl Reminder for SkillDiscoveryReminder {
                     _ => SkillScope::User,
                 }
             };
-            let skills = discovery::parse_skill_files(vec![(target_path.to_path_buf(), scope)]);
+            // Project scope: held to the folder the config dir belongs to, like startup discovery, so a project skill
+            // linked out of the project (and skipped at startup) does not register here either.
+            let content_root = match scope {
+                SkillScope::Local | SkillScope::Repo => Self::project_root_of_skill(target_path),
+                _ => None,
+            };
+            let skills =
+                discovery::parse_skill_files_in(vec![(target_path.to_path_buf(), scope, content_root)]);
             if !skills.is_empty() {
                 let mut res = resources.lock().await;
                 if let Some(tracker) = res.get_mut::<SkillManager>() {
@@ -223,6 +252,19 @@ impl Reminder for SkillDiscoveryReminder {
 mod tests {
     use super::*;
     use crate::types::output::ApplyPatchFileResult;
+
+    /// Fable r4 Low: a nested `<dir>/.fuigo/skills/<g>/skills/<x>/SKILL.md` belongs to `<dir>` (the folder owning the
+    /// config dir), as at startup, not to the nearest `skills` ancestor.
+    #[test]
+    fn m5_nested_project_skill_belongs_to_the_config_dir_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("proj");
+        let skill = dir.join(".fuigo/skills/group/skills/x");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+        let root = SkillDiscoveryReminder::project_root_of_skill(&skill.join("SKILL.md")).unwrap();
+        assert_eq!(root.path(), dunce::canonicalize(&dir).unwrap());
+    }
 
     fn edited(path: &str, move_to: Option<&str>) -> ApplyPatchFileResult {
         ApplyPatchFileResult {

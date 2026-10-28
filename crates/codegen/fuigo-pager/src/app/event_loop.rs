@@ -381,38 +381,43 @@ fn reconnect_restore_outcome(
     (all_restored, active_restored)
 }
 
-/// Compute the folder-trust verdict for the session cwd and seed [`AppView::trust_state`].
-/// Pager-side mirror of the agent's resolve.
-/// Reads the local store, scans for repo-local code-exec config, and runs the pure [`decide`](fuigo_workspace::folder_trust::decide) precedence.
+/// Compute the folder-trust decision for the session cwd and seed [`AppView::trust_state`] (u35 t1: the one decision,
+/// [`fuigo_workspace::folder_trust::decide`], covering the folder's settings and its shell commands).
 ///
-/// `TrustOutcome::Prompt` (interactive and untrusted, with repo configs present) becomes `TrustState::Pending` (show the question).
-/// Everything else becomes `TrustState::Done`.
-/// The feature-off fast path (kill-switch / opt-out / local build) short-circuits before any I/O.
+/// `Prompt` (an undecided or pre-1.0.35 folder, with a TTY stdin to answer on) becomes `TrustState::Pending` showing the
+/// trust key; everything else becomes `TrustState::Done`. The pager prompts with its own rendered question and keyboard
+/// (it redirects native stderr at startup), so interactivity here is stdin alone.
 fn seed_trust_state(app: &mut AppView, remote: Option<&fuigo_shell::util::config::RemoteSettings>) {
-    use fuigo_workspace::folder_trust::{
-        TrustOutcome, decide, decide_inputs_with_interactive, feature_enabled,
-    };
-    use fuigo_workspace::trust::workspace_key;
+    use fuigo_workspace::folder_trust::{PromptReason, TrustDecision, decide};
     use std::io::IsTerminal;
-
-    let feature = feature_enabled(remote);
-    if !feature {
-        app.trust_state = TrustState::Done;
-        return;
-    }
-
+    let _ = remote;
     // The launch cwd is the process cwd, which is `app.cwd` (set at construction), matching the `--trust` grant's `std::env::current_dir()`
     let cwd = app.cwd.clone();
-    let key = workspace_key(&cwd);
-    // Reuse the canonical gather (store trust and repo-config scan) but pass the pager's stdin-only interactivity
-    // The TUI prompts via the rendered question and crossterm keyboard, NOT stderr
-    // The pager redirects native stderr at startup, so the engine's `stdin && stderr` would be false here and the question would never show
-    // A TTY stdin means the user can answer; otherwise fail closed (no prompt)
-    let inputs = decide_inputs_with_interactive(&cwd, &key, std::io::stdin().is_terminal());
-    app.trust_state = match decide(feature, &inputs) {
-        TrustOutcome::Prompt => TrustState::Pending { workspace: key },
-        TrustOutcome::Trusted | TrustOutcome::Untrusted => TrustState::Done,
-    };
+    match decide(&cwd, std::io::stdin().is_terminal()) {
+        TrustDecision::Prompt(reason) => match fuigo_workspace::trust::trust_key(&cwd) {
+            Ok(key) => {
+                app.trust_state = TrustState::Pending {
+                    workspace: key,
+                    upgrade: reason == PromptReason::Upgrade,
+                };
+            }
+            Err(_) => app.trust_state = TrustState::Done,
+        },
+        TrustDecision::Untrusted(reason) => {
+            app.trust_state = TrustState::Done;
+            // u35 t1 (design d2 §5.1): no question at home or root, one dim line instead.
+            if reason.unrecordable() {
+                app.show_toast("Home or root folder: settings not loaded, every command asks.");
+            }
+        }
+        TrustDecision::Trusted => {
+            app.trust_state = TrustState::Done;
+            // u35 t1 (D2): the user switched folder trust off; say so once.
+            if fuigo_workspace::folder_trust::folder_trust_disabled() {
+                app.show_toast(fuigo_workspace::folder_trust::DISABLED_WARNING);
+            }
+        }
+    }
 }
 
 /// Must run before the first render, or the startup-intent block opens a session behind the gate and the first frame shows the normal welcome.

@@ -75,6 +75,13 @@ impl MvpAgentHandle {
     pub(crate) fn set_gateway_for_tests(&mut self, gateway: super::GatewaySender) {
         self.state_mut_while_unshared().gateway = gateway;
     }
+
+    /// Replaces the plugin registry (tests that need a specific plugin set, e.g. an untrusted plugin).
+    #[cfg(test)]
+    pub(crate) fn set_plugin_registry_for_tests(&mut self, registry: fuigo_agent::plugins::PluginRegistry) {
+        self.state_mut_while_unshared().plugin_registry_handle =
+            fuigo_agent::plugins::SharedPluginRegistryHandle::new(Some(registry), Vec::new());
+    }
 }
 
 impl Deref for MvpAgentHandle {

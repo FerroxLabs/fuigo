@@ -2427,3 +2427,30 @@ async fn presence_note_is_inert_while_dark() {
         "dark default: the note must not withhold idle"
     );
 }
+/// u35 t2 (Grok 3, design d2 §4.3): the hub's project discovery follows this host's folder trust: in an untrusted
+/// folder the project config is not returned and project instruction files are not read; in a trusted one both are.
+#[tokio::test]
+async fn t2_hub_project_discovery_follows_folder_trust() {
+    let handle = make_handle();
+    let root = handle.root_cwd().expect("root cwd");
+    std::fs::create_dir_all(root.join(".fuigo")).unwrap();
+    std::fs::write(root.join(".fuigo/config.toml"), "[t2]\nmarker = 1\n").unwrap();
+    std::fs::write(root.join("AGENTS.md"), "t2 project instructions\n").unwrap();
+    let handler = WorkspaceRpcHandler::new(handle);
+    let agents_path = root.join("AGENTS.md").display().to_string();
+    let names_project_file = |files: &Value| {
+        let text = files.to_string();
+        text.contains("t2 project instructions") || text.contains(&agents_path)
+    };
+    {
+        let _untrusted = crate::folder_trust::TestFolderTrust::untrusted();
+        let config = handler.dispatch("workspace.load_project_config", Value::Null, None).await.unwrap();
+        assert!(config.is_null(), "untrusted: no project config, got {config}");
+        let files = handler.dispatch("workspace.discover_agents_md", Value::Null, None).await.unwrap();
+        assert!(!names_project_file(&files), "untrusted: no project AGENTS.md, got {files}");
+    }
+    let config = handler.dispatch("workspace.load_project_config", Value::Null, None).await.unwrap();
+    assert!(!config.is_null(), "trusted: the project config is returned");
+    let files = handler.dispatch("workspace.discover_agents_md", Value::Null, None).await.unwrap();
+    assert!(names_project_file(&files), "trusted: the project AGENTS.md is read, got {files}");
+}

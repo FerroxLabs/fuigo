@@ -210,9 +210,18 @@ pub(crate) enum ResolvedAgent {
     Name(String),
 }
 
+/// `--agent <arg>`: a definition file only when the argument reads as a path (a separator, or a `.md` name) and is a
+/// file; a plain agent name is always a name, so a repo file called `explore` or `codex` never becomes the profile.
 pub(crate) fn resolve_agent_arg(agent: &str) -> ResolvedAgent {
+    resolve_agent_arg_with(agent, |p| p.is_file())
+}
+
+fn resolve_agent_arg_with(agent: &str, is_file: impl Fn(&std::path::Path) -> bool) -> ResolvedAgent {
     let path = std::path::Path::new(agent);
-    if path.exists() && path.is_file() {
+    // A separator or a `.md` suffix, nothing else: a qualified plugin name (`plug:reviewer`) is not a valid bare
+    // name but is still a name, so a repo file literally called `plug:reviewer` never becomes the profile.
+    let reads_as_path = agent.contains(['/', '\\']) || agent.ends_with(".md");
+    if reads_as_path && is_file(path) {
         ResolvedAgent::FilePath(dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
     } else {
         ResolvedAgent::Name(agent.to_string())
@@ -310,6 +319,34 @@ mod bom_tests {
         assert!(matches!(
             HeadlessPrompt::from_file(&json).unwrap(),
             HeadlessPrompt::Blocks(_)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod u35_agent_arg_tests {
+    use super::*;
+
+    /// u35 r1 (Grok M): a file in the working directory named like an agent is not a profile file.
+    #[test]
+    fn plain_agent_names_never_resolve_to_a_file() {
+        // Every path "exists" as a file: only the argument's shape decides.
+        let every_path_is_a_file = |_: &std::path::Path| true;
+        for name in ["explore", "codex", "fuigo-build", "custom", "plug:reviewer"] {
+            assert!(
+                matches!(resolve_agent_arg_with(name, every_path_is_a_file), ResolvedAgent::Name(n) if n == name),
+                "{name} must stay a name"
+            );
+        }
+        for path in ["mine.md", "./explore", "agents/codex", "/abs/fuigo-build"] {
+            assert!(
+                matches!(resolve_agent_arg_with(path, every_path_is_a_file), ResolvedAgent::FilePath(_)),
+                "{path} reads as a file"
+            );
+        }
+        assert!(matches!(
+            resolve_agent_arg_with("./missing.md", |_| false),
+            ResolvedAgent::Name(_)
         ));
     }
 }

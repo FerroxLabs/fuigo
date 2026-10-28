@@ -3,14 +3,17 @@ license = "Apache-2.0"
 edition.workspace = true
 name = "fuigo-dirs"
 version = "0.1.0"
-description = "Home-directory resolution generally: USERPROFILE-first home_dir, plus fuigo-home ($FUIGO_HOME or <home>/.fuigo)"
+description = "Home-directory resolution generally: USERPROFILE-first home_dir, plus fuigo-home ($FUIGO_HOME or <home>/.fuigo); contained reads of repository- and plugin-scoped files"
 
 [dependencies]
 dunce = { workspace = true }
 tracing = { workspace = true }
 
-[target.'cfg(unix)'.dev-dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

@@ -29,6 +29,17 @@ pub enum ClassifierSecurityFinding {
     DangerousCommand,
     /// Special executable/disclosure surface (`rg --pre`, Git drivers/pagers, kubectl config/auth overrides, process-environment dump).
     SpecialExecSurface,
+    /// u35 g8: the inherited environment can change which program runs or what it loads (`PATH` not clean, a
+    /// steering variable set). Not a grant floor: it switches off only approval without a grant (the read-only lists,
+    /// the Auto mode fast path and heuristic pre-pass; an Auto mode classifier allow is approval without a grant too,
+    /// which the shell runner checks against the call's own environment, and u35 g12 (Astra r11 High) asks the user
+    /// instead); every grant the user gave still applies.
+    InheritedEnvironment,
+    /// u35 g10 (Astra r9 High): a git command that is not a read-only query runs in a repository with hooks of its own
+    /// (`pre-commit`, `post-checkout`, ...). Like `InheritedEnvironment` not a grant floor: it switches off only approval
+    /// without a grant (the Auto mode fast path, heuristic pre-pass and, u35 g11 (Grok r10 Medium), a classifier allow,
+    /// which asks the user instead); every grant the user gave still applies.
+    RepositoryHook,
 }
 
 impl ClassifierSecurityFinding {
@@ -45,6 +56,8 @@ impl ClassifierSecurityFinding {
         Self::FileWrite,
         Self::DangerousCommand,
         Self::SpecialExecSurface,
+        Self::InheritedEnvironment,
+        Self::RepositoryHook,
     ];
 
     /// Stable wire token rendered into the classifier system message.
@@ -61,6 +74,8 @@ impl ClassifierSecurityFinding {
             Self::FileWrite => "file_write",
             Self::DangerousCommand => "dangerous_command",
             Self::SpecialExecSurface => "special_exec_surface",
+            Self::InheritedEnvironment => "inherited_environment",
+            Self::RepositoryHook => "repository_hook",
         }
     }
 
@@ -84,13 +99,16 @@ impl ClassifierSecurityFinding {
             Self::SpecialExecSurface => {
                 "options or tools that can write arbitrary output, execute code, override config/identity, or disclose the process environment"
             }
+            Self::InheritedEnvironment => {
+                "the environment the command inherits can change which program runs or what it loads"
+            }
+            Self::RepositoryHook => "the repository has git hooks of its own, which this git command can run",
         }
     }
 
-    /// Whether this finding constrains a *broad* grant (session `allow_bash_execute` blanket, prefix/glob grant, sandbox auto-allow).
-    /// These are effects a broad grant cannot vouch for, so their presence must reach the classifier rather than auto-allow.
-    /// `DangerousCommand` is excluded here because the blanket grant path already refuses dangerous segments.
-    /// `UnparseableShell` and `FailClosedPolicy` are handled by their own decision arms.
+    /// Whether this finding floors every broad authority, a configured catch-all allow rule included: effects a broad
+    /// grant cannot vouch for, so their presence must reach the classifier or a prompt rather than auto-allow.
+    /// `FailClosedPolicy` is handled by its own decision arm.
     const fn is_grant_floor(self) -> bool {
         matches!(
             self,
@@ -101,6 +119,19 @@ impl ClassifierSecurityFinding {
                 | Self::ExecOrAmbientGit
                 | Self::SpecialExecSurface
         )
+    }
+
+    /// Whether this finding floors a session grant: a prefix/glob grant, the session blanket (`allow_bash_execute`),
+    /// sandbox auto-allow and the auto-mode fast path. On top of [`Self::is_grant_floor`], a destructive command and a
+    /// command the classifier cannot fully model (an argument only the shell resolves, structure it cannot decompose)
+    /// are not covered by a grant given for other commands. A configured catch-all allow rule keeps the narrower
+    /// [`Self::is_grant_floor`] set: it is a documented explicit override.
+    const fn is_session_grant_floor(self) -> bool {
+        self.is_grant_floor()
+            || matches!(
+                self,
+                Self::DangerousCommand | Self::UnresolvedArgument | Self::UnparseableShell
+            )
     }
 }
 
@@ -134,6 +165,27 @@ impl BashSecurityAssessment {
             .iter()
             .copied()
             .any(ClassifierSecurityFinding::is_grant_floor)
+    }
+
+    /// Whether any finding floors a session grant, sandbox auto-allow or the auto fast path (see
+    /// [`ClassifierSecurityFinding::is_session_grant_floor`]).
+    pub(crate) fn constrains_session_grant(&self) -> bool {
+        self.0
+            .iter()
+            .copied()
+            .any(ClassifierSecurityFinding::is_session_grant_floor)
+    }
+
+    /// u35 g8: whether `InheritedEnvironment` is the only finding (it is not a grant floor). u35 g10: so may
+    /// `RepositoryHook` be; neither stops a grant.
+    pub(crate) fn is_inherited_environment_only(&self) -> bool {
+        !self.0.is_empty()
+            && self.0.iter().all(|finding| {
+                matches!(
+                    finding,
+                    ClassifierSecurityFinding::InheritedEnvironment | ClassifierSecurityFinding::RepositoryHook
+                )
+            })
     }
 
     /// Whether `FileWrite` is the only finding, the one floor a narrow allow rule naming a write-capable command can vouch for.

@@ -174,6 +174,8 @@ pub async fn run_command_hook(
     #[cfg(unix)]
     let env_root = Cow::Borrowed(ctx.workspace_root);
 
+    // Whether the child's PATH is set, for the spawn-failure log (recorded by the configurator).
+    let mut path_set = false;
     let mut child = match fuigo_tools::util::ProcessScope::spawn_placed(ctx.process_scope.as_ref(), || tokio::process::Command::new(&program), |cmd, _hook| {
         // P189: spawn_placed has already registered the placement as the first pre_exec
         // (apply_shell_environment_policy, detach_command and restrict_child_network all register one).
@@ -195,10 +197,14 @@ pub async fn run_command_hook(
             .env("FUIGO_WORKSPACE_ROOT", env_root.as_ref())
             .env("CLAUDE_PROJECT_DIR", env_root.as_ref())
             .kill_on_drop(true);
+        path_set = fuigo_tools::util::spawn::child_path_is_set(cmd.as_std());
         Ok::<(), std::convert::Infallible>(())
     })
     .map_err(|e| match e {
-        fuigo_tools::util::SpawnPlacedError::Spawn(e) => e,
+        fuigo_tools::util::SpawnPlacedError::Spawn(e) => {
+            fuigo_tools::util::spawn::ShellSpawnFailure::new("hooks", program.as_os_str(), &e, path_set).log();
+            e
+        }
         fuigo_tools::util::SpawnPlacedError::Build(never) => match never {},
         fuigo_tools::util::SpawnPlacedError::Stopping => std::io::Error::other("session is stopping; command not started"),
     }) {
@@ -488,11 +494,11 @@ fn rewrite_hook_command_for_windows_shell<'a>(
 ) -> Cow<'a, str> {
     use fuigo_config::shell::{WindowsShell, detect_windows_shell};
     match detect_windows_shell() {
-        WindowsShell::Pwsh | WindowsShell::PowerShell => {
+        WindowsShell::Pwsh(_) | WindowsShell::PowerShell(_) => {
             rewrite_posix_env_refs_for_powershell(command, extra_env)
         }
         WindowsShell::GitBash(_) => Cow::Borrowed(command),
-        WindowsShell::Cmd => {
+        WindowsShell::Cmd(_) => {
             if command.contains('$') {
                 tracing::warn!(
                     "hook command uses $VAR but the Windows shell is cmd, which expands %VAR%"
@@ -592,7 +598,7 @@ pub(crate) fn plan_command(
         let command_str = rewrite_hook_command_for_windows_shell(command_str, child_env);
         if matches!(
             fuigo_config::shell::detect_windows_shell(),
-            fuigo_config::shell::WindowsShell::Pwsh | fuigo_config::shell::WindowsShell::PowerShell
+            fuigo_config::shell::WindowsShell::Pwsh(_) | fuigo_config::shell::WindowsShell::PowerShell(_)
         ) {
             warn_if_reads_powershell_input(spec, command_str.as_ref());
         }
@@ -2962,6 +2968,54 @@ mod tests {
                 "parameter-expansion form `{case}` should not be flagged, got {v:?}"
             );
         }
+    }
+
+    /// u35-winenv r2 (Fable/Grok Low): a hook whose program fails to start is logged at THIS site
+    /// with the program, the OS error and the PATH flag, and no environment value. The program
+    /// exists (a missing one is refused before the spawn as a CONFIG failure); the working
+    /// directory does not, so the OS spawn itself fails.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_hook_spawn_is_logged_at_the_hooks_site() {
+        let capture = fuigo_tools::util::spawn::capture::CaptureEvents::default();
+        let _guard = tracing::subscriber::set_default(capture.clone());
+        let program = std::path::PathBuf::from("/bin/sh");
+        let mut extra_env = std::collections::HashMap::new();
+        extra_env.insert("U35_CANARY".to_string(), "u35-canary-env-value".to_string());
+        let spec = HookSpec {
+            name: "test-u35-missing".into(),
+            event: crate::event::HookEventName::Stop,
+            handler_type: crate::config::HandlerType::Command,
+            configured_matcher: None,
+            matcher: None,
+            enabled: true,
+            command: Some(program.clone()),
+            command_raw: Some("/bin/sh".to_string()),
+            args: Some(vec!["-c".to_string(), "true".to_string()]),
+            shell: None,
+            url: None,
+            url_raw: None,
+            timeout_ms: 5000,
+            source_dir: std::env::temp_dir(),
+            extra_env,
+            layer: crate::config::HookProvenance::File,
+        };
+        let ctx = RunContext {
+            workspace_root: "/nonexistent-u35-winenv-r2/workspace",
+            ..make_ctx()
+        };
+        let (result, _, _) = run_command_hook(&spec, &make_envelope(), &ctx, GateKind::Observe).await;
+        assert!(matches!(result, HookRunnerResult::Failed(_)), "{result:?}");
+        let logged = capture.text();
+        let line = logged
+            .lines()
+            .find(|line| line.contains("site=\"hooks\""))
+            .unwrap_or_else(|| panic!("no spawn-failure event: {logged}"));
+        assert!(line.starts_with("WARN:"), "{line}");
+        assert!(line.contains("program=/bin/sh"), "{line}");
+        assert!(line.contains("os_error=Some("), "{line}");
+        assert!(line.contains("path_set="), "{line}");
+        assert!(!logged.contains("u35-canary"), "an environment value was logged: {logged}");
     }
 
     #[tokio::test]

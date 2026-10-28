@@ -305,6 +305,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-telemetry/tests/manual_auth_emit.rs", 5),
     ("crates/codegen/fuigo-test-support/src/mock_server.rs", 3),
     ("crates/codegen/fuigo-test-support/src/sandbox.rs", 1),
+    ("crates/codegen/fuigo-tools/src/computer/local/restore_guard.rs", 1), // u35: the `hostname` shell command in the guard's list of safe-listed program names; not a body
     ("crates/codegen/fuigo-tools/src/mcp_elicitation/schema.rs", 1),
     ("crates/codegen/fuigo-tools/src/mcp_elicitation/schema_tests.rs", 5),
     ("crates/codegen/fuigo-tools/src/mcp_elicitation/types.rs", 4),
@@ -323,6 +324,8 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-workspace/src/hub_auth/proactive_tests.rs", 2),
     ("crates/codegen/fuigo-workspace/src/permission/auto_mode/mod.rs", 1), // P77: the `hostname` shell command in an allowlist; not a body
     ("crates/codegen/fuigo-workspace/src/permission/manager/mod.rs", 3), // P77: the `hostname` shell command in allowlists and a test; not a body
+    ("crates/codegen/fuigo-workspace/src/permission/manager/u35_classify_tests.rs", 1), // u35: the `hostname` shell command in a read-only regression table; not a body
+    ("crates/codegen/fuigo-workspace/src/permission/safe_forms.rs", 1), // u35: the `hostname` shell command, matched to judge its options; not a body
     ("crates/codegen/fuigo-workspace/src/publish.rs", 1),
     ("crates/codegen/fuigo-workspace/src/sandbox/grants.rs", 3), // U32-P3: `self.engage()` is `WorkspaceSandbox::engage`, which builds the folder's sandbox grant store; it is not a Mixpanel profile write. No body site
     ("crates/codegen/fuigo-workspace/src/sandbox/mod.rs", 1), // U32-P3: the `engage()` call in `engage_unless_off`; same method, no body site

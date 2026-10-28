@@ -2238,6 +2238,19 @@ async fn run_single_turn_inner(
             &fuigo_workspace::folder_trust::grant_folder_trust(&cwd),
         );
     }
+    // u35 t1 (design d2 §5.4): a headless run cannot answer the folder-trust question; say once what that means.
+    match fuigo_workspace::folder_trust::decide(&cwd, false) {
+        fuigo_workspace::folder_trust::TrustDecision::Untrusted(reason) => {
+            fuigo_tty_utils::cli_eprintln!(
+                "fuigo: {}",
+                fuigo_tty_utils::untrusted(fuigo_workspace::folder_trust::untrusted_session_notice(&reason))
+            );
+        }
+        _ if fuigo_workspace::folder_trust::folder_trust_disabled() => {
+            fuigo_tty_utils::cli_eprintln!("fuigo: {}", fuigo_workspace::folder_trust::DISABLED_WARNING);
+        }
+        _ => {}
+    }
 
     let cancel = CancellationToken::new();
     let memory_config = agent_config.memory_config.clone();

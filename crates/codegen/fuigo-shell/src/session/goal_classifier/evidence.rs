@@ -40,17 +40,18 @@ use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 
+#[cfg(test)]
 use crate::util::subprocess::git_bin;
 
 /// Max wall-clock for git commands during evidence capture.
 const DIFF_COMMAND_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-/// Build a `tokio::process::Command` for `git` with `kill_on_drop(true)` so a `tokio::time::timeout` firing reaps the child instead of orphaning it.
-fn git_command(cwd: &Path) -> Command {
-    let mut cmd = Command::new(git_bin());
-    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
-    cmd.current_dir(cwd).kill_on_drop(true);
-    cmd
+/// Build a `tokio::process::Command` for `git` in `cwd` with `kill_on_drop(true)` so a `tokio::time::timeout` firing reaps the child instead of orphaning it.
+/// Judged on `cwd` (u35 t1): in a folder the user has not trusted, no git starts and every capture reads as unavailable.
+fn evidence_git(cwd: &Path) -> io::Result<Command> {
+    let mut cmd = Command::from(fuigo_tty_utils::git_command_in(cwd)?);
+    cmd.kill_on_drop(true);
+    Ok(cmd)
 }
 
 /// It is the synthetic parent for the initial-commit case (`git diff --root HEAD` does NOT include the initial commit's additions).
@@ -344,7 +345,9 @@ async fn finish_git_capture(raw: String, workspace_root: &Path) -> CapturedChang
 /// The output is NUL-separated so non-ASCII / special filenames arrive verbatim instead of octal-escaped-and-quoted.
 /// Best-effort: any failure returns an empty list (the diff itself is still usable).
 async fn git_untracked_files(workspace_root: &Path) -> Vec<String> {
-    let mut cmd = git_command(workspace_root);
+    let Ok(mut cmd) = evidence_git(workspace_root) else {
+        return Vec::new();
+    };
     cmd.arg("ls-files")
         .arg("--others")
         .arg("--exclude-standard")
@@ -401,7 +404,9 @@ pub(crate) async fn capture_plan_changes(
             current_path,
         ),
     };
-    let mut cmd = git_command(cmd_cwd);
+    let Ok(mut cmd) = evidence_git(cmd_cwd) else {
+        return None;
+    };
     cmd.arg("diff")
         .arg("--no-index")
         .arg("--no-prefix")
@@ -443,7 +448,8 @@ async fn run_git_diff_against_baseline(
     baseline: &str,
     workspace_root: &Path,
 ) -> Result<String, ChangesCaptureError> {
-    let mut cmd = git_command(workspace_root);
+    let mut cmd = evidence_git(workspace_root)
+        .map_err(|e| ChangesCaptureError::DiffCommandFailed(e.to_string()))?;
     cmd.arg("diff").arg(baseline);
     let output = match tokio::time::timeout(DIFF_COMMAND_TIMEOUT, cmd.output()).await {
         Ok(Ok(output)) => output,
@@ -484,7 +490,8 @@ async fn lazy_git_baseline_diff(
     // If `oldest` has a parent, diff `parent..HEAD`
     // Otherwise the oldest IS the initial commit; diff against the empty-tree SHA as a synthetic parent
     // `git diff --root HEAD` does not include the initial commit's additions
-    let mut cmd = git_command(workspace_root);
+    let mut cmd = evidence_git(workspace_root)
+        .map_err(|e| ChangesCaptureError::DiffCommandFailed(e.to_string()))?;
     if git_has_parent(workspace_root, &oldest).await {
         cmd.arg("diff").arg(format!("{oldest}^..{head}"));
     } else {
@@ -534,7 +541,7 @@ async fn derive_empty_tree_sha(workspace_root: &Path) -> &'static str {
 /// Returns `None` on any failure so the caller falls back to the SHA-1 constant.
 async fn run_hash_object_tree(workspace_root: &Path) -> Option<String> {
     use std::process::Stdio;
-    let mut cmd = git_command(workspace_root);
+    let mut cmd = evidence_git(workspace_root).ok()?;
     cmd.arg("hash-object")
         .arg("-t")
         .arg("tree")
@@ -571,7 +578,7 @@ async fn run_hash_object_tree(workspace_root: &Path) -> Option<String> {
 /// Returns `None` for any failure (workspace is not a git repo, git unavailable, timeout).
 /// Mirrors `goal_classifier::capture_git_baseline` but with a shorter budget so the lazy retry adds at most ~1s to the runner's wall clock.
 async fn git_rev_parse_head(workspace_root: &Path) -> Option<String> {
-    let mut cmd = git_command(workspace_root);
+    let mut cmd = evidence_git(workspace_root).ok()?;
     cmd.arg("rev-parse").arg("HEAD");
     let output = match tokio::time::timeout(Duration::from_secs(1), cmd.output()).await {
         Ok(Ok(o)) => o,
@@ -598,7 +605,7 @@ async fn git_rev_parse_head(workspace_root: &Path) -> Option<String> {
 
 /// `git log --since=<ts> --reverse --format=%H`; the first line if any.
 async fn git_oldest_commit_since(workspace_root: &Path, since_unix: i64) -> Option<String> {
-    let mut cmd = git_command(workspace_root);
+    let mut cmd = evidence_git(workspace_root).ok()?;
     cmd.arg("log")
         .arg(format!("--since={since_unix}"))
         .arg("--reverse")
@@ -630,7 +637,9 @@ async fn git_oldest_commit_since(workspace_root: &Path, since_unix: i64) -> Opti
 }
 
 async fn git_has_parent(workspace_root: &Path, commit: &str) -> bool {
-    let mut cmd = git_command(workspace_root);
+    let Ok(mut cmd) = evidence_git(workspace_root) else {
+        return false;
+    };
     cmd.arg("rev-parse").arg(format!("{commit}^"));
     match tokio::time::timeout(Duration::from_secs(1), cmd.output()).await {
         Ok(Ok(o)) => o.status.success(),

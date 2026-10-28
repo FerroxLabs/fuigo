@@ -64,6 +64,8 @@ fn request(command: &str) -> TerminalRunRequest {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));
     TerminalRunRequest {
+        request_cwd: None,
+        approved_without_grant: false,
         command: command.to_string(),
         working_directory: PathBuf::from("/tmp"),
         env: Default::default(),

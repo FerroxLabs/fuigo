@@ -1802,6 +1802,9 @@ impl SessionActor {
             )
             .in_scope(|| {});
         }
+        // u35 g9: how the permission check approved the call, carried to the shell runner with it. A call the check
+        // did not judge (a plan-file edit) carries `true`, the value the runner checks under.
+        let mut approved_without_grant = true;
         if !plan_file_auto_approve {
             let (perm_title, perm_kind, perm_raw_input) = tool_call_display
                 .as_ref()
@@ -1897,10 +1900,16 @@ impl SessionActor {
                         // P174: every file a multi-file read reads, judged as a Read each.
                         read_targets: fuigo_workspace::permission::read_targets_for(&tool_input),
                         peer_note: None,
+                        // u35 g11 (Astra r10 High): the directory the bash tool really runs the command in.
+                        exec_cwd: fuigo_workspace::permission::bash_exec_cwd_for(
+                            &tool_input,
+                            std::path::Path::new(self.session_info.cwd.as_str()),
+                        ),
                         ..PermissionRequest::new(access_kind.clone(), tool_call_update)
                     })
                     .await
             };
+            approved_without_grant = resolution.approved_without_grant();
             let manager_event = resolution.event;
             let decision = resolution.decision;
             // Flush the hit and store this denial now (not at the batch end), so a crash inside a batch keeps it.
@@ -2161,6 +2170,7 @@ impl SessionActor {
             concatenated_json_count,
             dispatch_target_name,
             is_read_only,
+            approved_without_grant,
             rewriting_hook,
             additional_context: hook_additional_context,
             judged_read_paths: match &tool_input {

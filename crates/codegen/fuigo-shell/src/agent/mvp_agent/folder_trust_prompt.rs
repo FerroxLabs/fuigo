@@ -2,9 +2,13 @@
 //! It asks the client to decide trust for an untrusted workspace that has repo configs.
 //! On a grant it reloads the now-trusted project servers without a restart.
 //!
-//! Dormant in production: it fires only when the connected client advertised `fuigo/folderTrust.interactive`.
-//! The folder-trust feature flag must also be on, and the verdict must be [`fuigo_workspace::folder_trust::TrustOutcome::Prompt`].
-//! No client advertises the capability until the desktop UI ships, so this is inert by default even with the feature flag on.
+//! Dormant in production: it fires only when the connected client advertised the v2 capability
+//! (`fuigo/folderTrust` with `"v2": true`; u35 t1), and the folder's decision is
+//! [`fuigo_workspace::folder_trust::TrustDecision::Prompt`]. The v2 question covers the folder's settings AND its shell
+//! commands (`scope: "configAndCommands"`), and the reply must say the same scope. A v1-only or capability-less client is
+//! never asked and can never grant: its sessions still honour existing durable trust, a `[folder_trust]
+//! trusted_folders` entry and `--trust` (the one decision), and an untrusted folder asks per command through
+//! `session/request_permission`. No client advertises the capability until the desktop UI ships.
 //! The TUI and headless clients never advertise it (they gate trust themselves, client-side), so they are never double-prompted.
 //! The module is a child of `mvp_agent` and glob-imports it (`use super::*`).
 //!
@@ -33,11 +37,16 @@ pub(crate) struct FolderTrustRequest {
     pub cwd: String,
     /// Display path of the canonical workspace key (the trust grant's scope).
     pub workspace: String,
-    /// The detected repo-local config kinds (e.g. `mcp`, `hooks`, `lsp`), shown by the prompt UI as the reasons the folder is gated.
-    /// Display-only: the trust gate does not read it, though both derive from the same scan.
-    /// `lsp` may appear: it is a real reason to prompt, but project LSP applies on the next session open rather than hot-reloading on grant.
+    /// The detected repo-local config kinds (e.g. `mcp`, `hooks`, `lsp`), shown by the prompt UI. Display-only.
     pub config_kinds: Vec<String>,
+    /// u35 t1: what trusting grants: always `"configAndCommands"` (the folder's settings and its shell commands).
+    pub scope: String,
+    /// u35 t1: `"new"` (never decided) or `"upgrade"` (trusted before 1.0.35 for its settings only; asked once more).
+    pub reason: String,
 }
+
+/// The only scope a v2 trust question asks about, and the only one a reply may grant.
+pub(crate) const FOLDER_TRUST_SCOPE: &str = "configAndCommands";
 
 /// Outcome of the trust prompt, sent by the GUI client to the agent.
 /// Fail-closed: any value other than `"trust"`, including unknown strings via `#[serde(other)]`, decodes to [`FolderTrustOutcome::Reject`].
@@ -50,22 +59,41 @@ pub(crate) enum FolderTrustOutcome {
     Reject,
 }
 
-/// ACP `fuigo/folder_trust/request` response, sent by the GUI client to the agent.
+/// ACP `fuigo/folder_trust/request` response, sent by the GUI client to the agent. u35 t1: a grant must be exactly
+/// `{"outcome": "trust", "scope": "configAndCommands"}`; an unknown field, another scope or a missing scope is a reject.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct FolderTrustResponse {
     pub outcome: FolderTrustOutcome,
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+impl FolderTrustResponse {
+    /// Whether this reply grants trust (settings and commands).
+    pub(crate) fn grants(&self) -> bool {
+        self.outcome == FolderTrustOutcome::Trust && self.scope.as_deref() == Some(FOLDER_TRUST_SCOPE)
+    }
+}
+
+/// Decode a client's reply: anything that is not exactly a v2 grant is a reject (fail closed).
+pub(crate) fn decode_trust_reply(raw: &str) -> FolderTrustOutcome {
+    match serde_json::from_str::<FolderTrustResponse>(raw) {
+        Ok(reply) if reply.grants() => FolderTrustOutcome::Trust,
+        _ => FolderTrustOutcome::Reject,
+    }
 }
 
 impl MvpAgent {
-    /// Parse the `fuigo/folderTrust.interactive` capability from an initialize request.
-    /// Returns `false` if absent or not `true`.
+    /// Parse the folder-trust v2 capability (`_meta["fuigo/folderTrust"]["v2"] == true`) from an initialize request.
+    /// Returns `false` if absent or not `true`; a v1-only client (`interactive` alone) is never asked (u35 t1).
     /// Mirrors [`Self::parse_code_nav_capability`].
     pub(crate) fn parse_interactive_trust_capability(init: &acp::InitializeRequest) -> bool {
         init.client_capabilities
             .meta
             .as_ref()
             .and_then(|m| m.get("fuigo/folderTrust"))
-            .and_then(|v| v.get("interactive"))
+            .and_then(|v| v.get("v2"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
     }
@@ -86,9 +114,10 @@ impl MvpAgent {
         if !self.interactive_trust_client.get() {
             return;
         }
-        if !folder_trust::prompt_warranted(cwd, remote) {
+        let Some(reason) = folder_trust::prompt_reason(cwd) else {
             return;
-        }
+        };
+        let _ = remote;
         let key = fuigo_workspace::trust::workspace_key(cwd);
         // Dedup: skip if this workspace was already prompted or decided (a reconnect) or has a prompt in flight (a concurrent sibling session)
         // `insert` returns false when already present
@@ -128,7 +157,6 @@ impl MvpAgent {
         let sessions_announcing = self.sessions_announcing.clone();
         let plugin_handle = self.plugin_registry_handle.clone();
         let compat = self.cfg.borrow().compat_resolved;
-        let remote = remote.cloned();
         let cwd = cwd.to_path_buf();
         let workspace = key.display().to_string();
         let config_kinds = folder_trust::detected_config_kinds(&cwd);
@@ -145,6 +173,12 @@ impl MvpAgent {
                 cwd: cwd.to_string_lossy().into_owned(),
                 workspace,
                 config_kinds,
+                scope: FOLDER_TRUST_SCOPE.to_owned(),
+                reason: match reason {
+                    fuigo_workspace::folder_trust::PromptReason::New => "new",
+                    fuigo_workspace::folder_trust::PromptReason::Upgrade => "upgrade",
+                }
+                .to_owned(),
             };
             // Non-panicking: a struct of `String` and `Vec<String>` fields can't fail to serialize, but avoid `expect` in prod
             // On the impossible error, bail and release the dedup key rather than aborting the task thread
@@ -168,14 +202,7 @@ impl MvpAgent {
                 // A decodable response carries the user's decision
                 // An undecodable success payload is a client or protocol error, not a decision
                 // Stay gated (fail-closed) but release the dedup key so a later session can re-prompt, same as transport and timeout below
-                Ok(Ok(raw)) => match serde_json::from_str::<FolderTrustResponse>(raw.0.get()) {
-                    Ok(r) => r.outcome,
-                    Err(e) => {
-                        tracing::debug!(error = %e, "folder trust: undecodable trust response; staying gated, releasing dedup key");
-                        prompted.borrow_mut().remove(&key);
-                        return;
-                    }
-                },
+                Ok(Ok(raw)) => decode_trust_reply(raw.0.get()),
                 Ok(Err(e)) => {
                     // A disconnect or transport error is not a decision: release the key so a later session can re-prompt
                     tracing::debug!(error = %crate::sampling::error::acp_error_text(&e), "folder trust: client trust request failed");
@@ -221,7 +248,6 @@ impl MvpAgent {
             if !settle_gui_grant(&outcome, &cwd, &notify, &prompted, &key) {
                 return;
             }
-            folder_trust::resolve_and_record(&cwd, remote.as_ref(), false);
 
             // A snapshot: the reload awaits, and a session starting meanwhile updates the set.
             let announcing = sessions_announcing.borrow().clone();
@@ -273,17 +299,7 @@ fn settle_gui_grant(
     }
     match outcome.resolution() {
         fuigo_workspace::folder_trust::GrantResolution::Trusted => true,
-        // The write was denied (e.g. under a sandbox): this agent process holds the grant, so the reload applies for
-        // this session; the notice above said it was not saved.
-        fuigo_workspace::folder_trust::GrantResolution::SessionLocal => {
-            tracing::warn!(
-                cwd = %cwd.display(),
-                error = %outcome,
-                "folder trust: grant not saved; trusted for this session only"
-            );
-            true
-        }
-        // Nothing recorded (unreadable store, no home, moved folder): stay gated, and release the dedup key so a
+        // Nothing saved (a denied write, unreadable store, no home, moved folder): stay gated, and release the dedup key so a
         // later session can ask again once the cause is fixed.
         fuigo_workspace::folder_trust::GrantResolution::Unrecorded => {
             tracing::warn!(
@@ -503,10 +519,14 @@ mod tests {
         let mut meta = serde_json::Map::new();
         meta.insert(
             "fuigo/folderTrust".to_string(),
-            serde_json::json!({ "interactive": true }),
+            serde_json::json!({ "interactive": true, "v2": true }),
         );
         let init = init_with_meta(Some(serde_json::Value::Object(meta)));
         assert!(MvpAgent::parse_interactive_trust_capability(&init));
+        // T9: a v1-only client (it would grant settings alone) is never asked.
+        let mut v1 = serde_json::Map::new();
+        v1.insert("fuigo/folderTrust".to_string(), serde_json::json!({ "interactive": true }));
+        assert!(!MvpAgent::parse_interactive_trust_capability(&init_with_meta(Some(serde_json::Value::Object(v1)))));
     }
 
     #[test]
@@ -533,8 +553,12 @@ mod tests {
             cwd: "/repo".into(),
             workspace: "/repo".into(),
             config_kinds: vec!["mcp".into()],
+            scope: FOLDER_TRUST_SCOPE.into(),
+            reason: "upgrade".into(),
         };
         let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["scope"], "configAndCommands");
+        assert_eq!(json["reason"], "upgrade");
         assert!(json.get("configKinds").is_some());
         assert!(json.get("config_kinds").is_none());
         // Leader Tier-2 routing reads `params.sessionId`; it must be present and non-empty
@@ -545,13 +569,22 @@ mod tests {
 
     #[test]
     fn response_decodes_trust_reject_and_unknown_fail_closed() {
-        let trust: FolderTrustResponse = serde_json::from_str(r#"{"outcome":"trust"}"#).unwrap();
-        assert_eq!(trust.outcome, FolderTrustOutcome::Trust);
-        let reject: FolderTrustResponse = serde_json::from_str(r#"{"outcome":"reject"}"#).unwrap();
-        assert_eq!(reject.outcome, FolderTrustOutcome::Reject);
-        // Unknown outcome must fail closed to Reject (never silently "trust").
-        let unknown: FolderTrustResponse = serde_json::from_str(r#"{"outcome":"banana"}"#).unwrap();
-        assert_eq!(unknown.outcome, FolderTrustOutcome::Reject);
+        // T9 (u35 t1): only an exact v2 grant trusts; a v1 reply (no scope), another scope, an unknown field, an
+        // unknown outcome or garbage is a reject.
+        assert_eq!(
+            decode_trust_reply(r#"{"outcome":"trust","scope":"configAndCommands"}"#),
+            FolderTrustOutcome::Trust
+        );
+        for raw in [
+            r#"{"outcome":"trust"}"#,
+            r#"{"outcome":"trust","scope":"config"}"#,
+            r#"{"outcome":"trust","scope":"configAndCommands","forever":true}"#,
+            r#"{"outcome":"reject","scope":"configAndCommands"}"#,
+            r#"{"outcome":"banana"}"#,
+            "not json",
+        ] {
+            assert_eq!(decode_trust_reply(raw), FolderTrustOutcome::Reject, "{raw}");
+        }
     }
 
     fn p180_drain_notices(
@@ -578,18 +611,19 @@ mod tests {
         let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
         let sessions = [tx1, tx2];
 
-        // Session-only: both sessions are told, the grant goes ahead, the key stays.
-        let session_only = GrantOutcome::Granted {
+        // Not saved (u35 t1: no session-only grant): both sessions are told, the grant stops, the key is released.
+        let not_saved = GrantOutcome::Granted {
             key: key.clone(),
-            persist: PersistStatus::ProcessLocalOnly { error: std::io::Error::other("denied") },
+            persist: PersistStatus::NotSaved { error: std::io::Error::other("denied") },
         };
-        assert!(settle_gui_grant(&session_only, &cwd, &sessions, &prompted, &key));
+        assert!(!settle_gui_grant(&not_saved, &cwd, &sessions, &prompted, &key));
         for rx in [&mut rx1, &mut rx2] {
             let notices = p180_drain_notices(rx);
             assert_eq!(notices.len(), 1, "{notices:?}");
-            assert!(notices[0].contains("this session only"), "{notices:?}");
+            assert!(notices[0].contains("stays untrusted"), "{notices:?}");
         }
-        assert!(prompted.borrow().contains(&key));
+        assert!(!prompted.borrow().contains(&key));
+        prompted.borrow_mut().insert(key.clone());
 
         // Unrecorded: both sessions are told, the grant stops, the dedup key is released.
         let refused = GrantOutcome::Refused { reason: GrantRefuse::Unreadable };

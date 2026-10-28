@@ -2234,11 +2234,14 @@ fn memory_trace_wanted(memory_override: Option<bool>) -> bool {
     memory_override != Some(false)
 }
 fn main() {
+    // u35 t1: folder trust gates every git, jj and direnv Fuigo starts; installed before anything can spawn.
+    fuigo_workspace::folder_trust::install_process_judges();
     fuigo_version::set_full_version(env!("VERSION_WITH_COMMIT"));
     fuigo_telemetry::startup::mark_process_start();
     // Persist every trust-set write to the unified log from the first one, rather
     // than relying on a Config path having run. See `TrustRecordSink`.
     fuigo_shell::agent::config::install_trust_record_sink();
+    fuigo_shell::agent::folder_trust::install_project_agent_trust();
     if let Some(code) = fuigo_pager::app::mermaid_worker::maybe_run_render_subprocess() {
         std::process::exit(code);
     }

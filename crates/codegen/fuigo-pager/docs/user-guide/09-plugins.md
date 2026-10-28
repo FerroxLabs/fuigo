@@ -11,7 +11,7 @@ A marketplace is a catalog of plugins that someone has published and shared. Usi
 1. **Add the marketplace** so Fuigo can show what it offers. Nothing installs yet.
 2. **Install the plugins you want**, one at a time.
 
-Plugins stay off until you install and enable them, and a plugin's hooks and MCP servers stay inactive until you [trust](#trust-and-security) it.
+Plugins stay off until you install and enable them, and a plugin's hooks, MCP servers, skills and agents stay inactive until you [trust](#trust-and-security) it.
 
 ---
 
@@ -172,11 +172,15 @@ To hide the plugins and hooks interface entirely, set `disable_plugins = true` i
 
 Plugins run with your privileges, so treat them like any software you install: only add marketplaces and install plugins from sources you trust.
 
-Enabling a plugin loads its skills, commands, and agents. Trust is separate and controls whether a plugin's code runs: even when enabled, its hooks, MCP servers, and LSP servers stay inactive until you trust it. Fuigo trusts plugins in `~/.fuigo/plugins/` automatically; project plugins in `.fuigo/plugins/` require trust. Install with `--trust` to grant it:
+Enabling a plugin makes it available; trust decides what of it reaches the session. Until you trust it, even when enabled, its hooks, MCP servers, and LSP servers stay inactive, its skills and commands do not load, and its agents are listed in `/agents` but cannot be called (by the Task tool, a model's `agent_type`, or by name). Fuigo trusts plugins in `~/.fuigo/plugins/` automatically; project plugins in `.fuigo/plugins/` require trust. Install with `--trust` to grant it:
 
 ```bash
 fuigo plugin install <source> --trust
 ```
+
+A plugin reads only its own folder. Its `skills/`, `commands/` and `agents/` dirs (the defaults or the paths in its manifest), and every skill folder, `SKILL.md`, command or agent file inside them, must resolve inside the plugin folder; one that is a symlink to somewhere else on your machine is skipped and does not load. A link that stays inside the plugin folder still works. When the plugin row in `/plugins` is expanded it shows `N skipped: links outside the plugin folder`. The manifest and the hooks, MCP and LSP files (including the default `hooks/hooks.json`, `.mcp.json` and `.lsp.json`) are held to the plugin folder the same way, each file is checked again on the file actually opened when it is read, and a plugin folder found in a repository (`.fuigo/plugins/`, `.claude/plugins/`, a project marketplace, or a `[plugins].paths` entry in the repository's own `.fuigo/config.toml`) must itself resolve inside that repository. A plugin folder is resolved once, when it is discovered, and that resolved folder is the boundary for every later read: replacing the whole plugin folder (or the repository) with a symlink afterwards does not move the boundary, the reads are refused. Beyond those checks (which refuse a link that is already in place when a file is read), containment is not a defence against a program racing Fuigo's reads while it runs, such as swapping a folder for a link between the check and the read: that takes running something on your machine, which the folder trust gate governs (in an untrusted folder every shell command asks first).
+
+`[plugins].paths` entries keep track of where they came from. Entries in your own `~/.fuigo/config.toml` are yours: they load enabled, and those under your home folder are trusted automatically. Entries in a trusted repository's `.fuigo/config.toml` are the repository's: they load as project plugins, must resolve inside that repository (relative entries are resolved against the folder holding `.fuigo/`), are not enabled until you enable them, and are never trusted automatically because they happen to sit under your home folder.
 
 Trusted plugin `.mcp.json` servers attach to the session like other MCP config, and child agents inherit them. Plugin agents (`plugin-name:agent-name`) use the parent session's MCP servers by default, the same as user agents under `~/.fuigo/agents/`; restrict that with the `mcpInheritance` frontmatter (see [Subagents](16-subagents.md#mcp-inheritance)). For safety, plugin agent frontmatter cannot declare `mcpServers` or hooks, or set `permissionMode: bypassPermissions`.
 
@@ -416,7 +420,8 @@ Fuigo discovers plugins from these locations, in priority order. The `.claude/pl
 | `--plugin-dir` (the `fuigo agent … stdio` flag) | Process, that agent process only | Trusted automatically |
 | `.fuigo/plugins/` | Project, shared through version control | Requires trust |
 | `~/.fuigo/plugins/` | User, every project | Trusted automatically |
-| `[plugins].paths` (config) | Custom directories you add | Depends on location |
+| `[plugins].paths` in your own `~/.fuigo/config.toml` | Custom directories you add | Trusted automatically under your home folder, else requires trust |
+| `[plugins].paths` in a project `.fuigo/config.toml` | Project, from the repository | Requires trust (as `.fuigo/plugins/`) |
 
 The `_meta.pluginDirs` field on the `session/new` and `session/load` requests loads plugins for a single session; because the caller supplies the directory, those plugins are trusted automatically and do not persist after the session. `--plugin-dir` is the process-wide equivalent for a dedicated `fuigo agent … stdio` process, repeatable (`fuigo agent --no-leader --plugin-dir A --plugin-dir B stdio`), and ignored in leader mode, where the shared leader discovers its own plugins.
 

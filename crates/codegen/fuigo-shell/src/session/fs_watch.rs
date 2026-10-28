@@ -186,14 +186,14 @@ async fn refresh_codebase_graph_after_head_change(
     idx: &fuigo_codebase_graph::IndexManagerHandle,
     repo_root: &Path,
 ) {
-    let mut cmd = tokio::process::Command::new("git");
-    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
-    cmd.args(["diff", "--name-status", "ORIG_HEAD", "HEAD"])
-        .current_dir(repo_root)
-        .stdin(std::process::Stdio::null());
-    fuigo_tools::util::detach_command(&mut cmd);
-    cmd.envs(fuigo_tools::util::pager_env());
-    let diff_output = cmd.output().await;
+    let diff_output = match fuigo_tty_utils::git_command_in(repo_root) {
+        Ok(mut cmd) => {
+            cmd.args(["diff", "--name-status", "ORIG_HEAD", "HEAD"]);
+            tokio::process::Command::from(cmd).output().await
+        }
+        // Untrusted folder: the diff is skipped (treated as a failed diff).
+        Err(e) => Err(e.into()),
+    };
 
     match diff_output {
         Ok(output) if output.status.success() => {

@@ -281,7 +281,42 @@ fn log_session_started(
         ),
     );
 }
+/// The four mode ids `session/set_mode` accepts, as the `available` list a session response advertises.
+pub(super) fn advertised_available_modes() -> Vec<acp::SessionMode> {
+    use fuigo_tools::types::{BROWSER_USE_MODE_ID, SessionMode};
+    vec![
+        acp::SessionMode::new(SessionMode::Default.as_id(), "Default"),
+        acp::SessionMode::new(SessionMode::Plan.as_id(), "Plan"),
+        acp::SessionMode::new(SessionMode::Ask.as_id(), "Ask"),
+        acp::SessionMode::new(BROWSER_USE_MODE_ID, "Browser"),
+    ]
+}
 impl MvpAgent {
+    /// `modes` for a session response: the four supported ids plus the mode the session is in now.
+    ///
+    /// A resident session answers from its live plan tracker and prompt mode (shared Arcs on the handle, so a session
+    /// that is mid-turn is never waited on). With no resident session, the persisted plan state decides (prompt mode is
+    /// not persisted), else `default`.
+    pub(super) fn advertised_session_modes(
+        &self,
+        session_id: &acp::SessionId,
+        persisted_plan: Option<crate::session::plan_mode::PlanModeState>,
+    ) -> acp::SessionModeState {
+        use crate::session::acp_session::advertised_mode_id;
+        use crate::session::plan_mode::{PlanModeState, PromptMode};
+        let current = match self.resident_handle(session_id) {
+            Some(handle) => {
+                let plan = handle.plan_mode.lock().state();
+                let prompt = *handle.current_prompt_mode.lock();
+                advertised_mode_id(plan, prompt)
+            }
+            None => advertised_mode_id(
+                persisted_plan.unwrap_or(PlanModeState::Inactive),
+                PromptMode::Agent,
+            ),
+        };
+        acp::SessionModeState::new(current, advertised_available_modes())
+    }
     /// Read this client's capabilities, falling back to the agent's own state where the request says nothing.
     fn resolve_client_caps(
         &self,
@@ -883,7 +918,9 @@ impl MvpAgent {
             false,
         );
         let config_options = self.acp_config_options(Some(&session_id), &models);
+        let modes = self.advertised_session_modes(&session_id, None);
         Ok(acp::NewSessionResponse::new(session_id)
+            .modes(Some(modes))
             .models(Some(models))
             .config_options(Some(config_options))
             .meta(meta.as_object().cloned()))
@@ -1201,6 +1238,7 @@ impl MvpAgent {
         spawn_sampler_transport_prewarm(&persisted_base_url);
         let restored =
             RestoredSignals::read(persisted_signals.as_ref(), persisted_plan_mode.as_ref());
+        let persisted_plan_state = persisted_plan_mode.as_ref().map(|s| s.state);
         self.set_turn_number(&session_id, summary.next_trace_turn);
         tracing::info!(
             session_id = %session_id.0,
@@ -1246,16 +1284,12 @@ impl MvpAgent {
             }
         };
         let envrc = if !load_envrc {
-            Some(fuigo_workspace::envrc::spawn_envrc_load(
-                cwd.as_path().to_path_buf(),
-                false,
-            ))
+            Some(fuigo_workspace::envrc::envrc_load_disabled())
         } else if session_exists {
             None
         } else {
             Some(fuigo_workspace::envrc::spawn_envrc_load(
                 cwd.as_path().to_path_buf(),
-                folder_trust::project_scope_allowed(cwd.as_path()),
             ))
         };
         let recovery = if self.is_resident(&session_id) {
@@ -1474,7 +1508,9 @@ impl MvpAgent {
             .await;
         fuigo_telemetry::unified_log::info("session loaded", Some(session_id.0.as_ref()), None);
         let config_options = self.acp_config_options(Some(&session_id), &model_state);
+        let modes = self.advertised_session_modes(&session_id, persisted_plan_state);
         let response = acp::LoadSessionResponse::new()
+            .modes(Some(modes))
             .models(Some(model_state))
             .config_options(Some(config_options))
             .meta(response_meta.as_object().cloned());

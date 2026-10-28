@@ -443,7 +443,8 @@ fn marketplace_root_for_provenance(
     let source = &provenance.source_url_or_path;
     if let Some((url, branch)) = configured_marketplace_git_source(source) {
         let cache_root = git::default_cache_root();
-        let lease = git::sync_source_cache_with_mode(
+        // A plugin update the user asked for: the source fetch is not judged.
+        let lease = git::sync_source_cache_user_invoked(
             &url,
             branch.as_deref(),
             &cache_root,
@@ -461,7 +462,7 @@ fn marketplace_root_for_provenance(
     if source.contains("://") || source.contains("git@") {
         let cache_root = git::default_cache_root();
         let lease =
-            git::sync_source_cache_with_mode(source, None, &cache_root, git::SyncMode::Force)
+            git::sync_source_cache_user_invoked(source, None, &cache_root, git::SyncMode::Force)
                 .map_err(|e| InstallError::InstallFailed {
                     detail: format!("Git sync failed: {e}"),
                 })?;
@@ -946,7 +947,9 @@ fn resolve_source_root_for_install(
             }
         }
         SourceKind::Git { url, branch } => {
-            let lease = git::sync_source_cache_with_mode(
+            // u35 t2 (Astra 5): install resolution runs for an install the user typed, so the source fetch is
+            // user-invoked (design d2 §4.1), not a background sync of the cache.
+            let lease = git::sync_source_cache_user_invoked(
                 url,
                 branch.as_deref(),
                 cache_root,
@@ -2565,6 +2568,47 @@ mod tests {
             1,
             "already-installed short-circuit must not create a duplicate repo"
         );
+    }
+
+    /// u35 t2 (Astra 5, design d2 §4.1): an install the user typed clones a git marketplace into a fresh cache even
+    /// where the folder-trust judge refuses the cache directory; a background sync there is still refused.
+    #[test]
+    fn t2_user_invoked_install_resolution_clones_a_fresh_git_cache() {
+        let git_ok = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        let remote = tempfile::tempdir().unwrap();
+        write_marketplace_plugin(remote.path(), "demo", "1.0.0");
+        git_ok(remote.path(), &["init", "--initial-branch", "main"]);
+        git_ok(remote.path(), &["add", "-A"]);
+        git_ok(remote.path(), &["commit", "-m", "init"]);
+
+        fn refused_root() -> PathBuf {
+            std::env::temp_dir().join(format!("fuigo-t2-mkt-untrusted-{}", std::process::id()))
+        }
+        struct RestoreAllowAll;
+        impl Drop for RestoreAllowAll {
+            fn drop(&mut self) {
+                fuigo_tty_utils::install_repo_exec_judge(|_| true);
+            }
+        }
+        let cache_root = refused_root().join("cache");
+        fuigo_tty_utils::install_repo_exec_judge(|dir| !dir.starts_with(refused_root()));
+        let _restore = RestoreAllowAll;
+
+        let url = remote.path().to_str().unwrap();
+        let sources = vec![git_source("Remote", url)];
+        let name = resolve_marketplace_source_name_with(&sources, &cache_root, "demo", None)
+            .expect("an install the user typed syncs a fresh cache");
+        assert_eq!(name, "Remote");
+        assert!(git::sync_source_cache_with_mode(url, None, &refused_root().join("background"), git::SyncMode::Force).is_err());
+        let _ = std::fs::remove_dir_all(refused_root());
     }
 
     #[test]

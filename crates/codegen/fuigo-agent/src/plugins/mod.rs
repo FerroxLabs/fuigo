@@ -22,7 +22,7 @@ pub use discovery::{
     DiscoveredPlugin, PluginOrigin, PluginScope, PluginSourceRestriction, discover_plugins,
     project_plugin_dirs, project_plugin_dirs_in,
 };
-pub use hooks_adapter::parse_plugin_hooks;
+pub use hooks_adapter::parse_plugin_hooks_contained;
 pub use install_registry::InstallRegistry;
 pub use manifest::PluginManifest;
 pub use registry::{LoadedPlugin, PluginRegistry, SharedPluginRegistryHandle};

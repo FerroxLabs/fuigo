@@ -225,6 +225,7 @@ pub(crate) async fn create_test_actor_ex(
     SessionActor,
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
 ) {
+    crate::agent::folder_trust::install_project_agent_trust();
     create_test_actor_with_terminal(
         total_tokens,
         context_window,
@@ -282,6 +283,7 @@ pub(crate) async fn create_test_actor_with_terminal(
     SessionActor,
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
 ) {
+    crate::agent::folder_trust::install_project_agent_trust();
     let cwd = fuigo_paths::AbsPathBuf::new(crate::test_support::abs_tmp()).unwrap();
     let fs = Arc::new(fuigo_workspace::file_system::MockFs::new(cwd.to_path_buf()));
     let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();

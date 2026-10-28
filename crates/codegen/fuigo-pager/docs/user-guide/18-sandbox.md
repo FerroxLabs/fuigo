@@ -287,7 +287,7 @@ The mode is the first of, highest to lowest: the `FUIGO_SANDBOX_MODE` environmen
 
 When a shell command really runs inside the sandbox (`enforce` with an OS backend, a foreground command whose output Fuigo reads back), the sandbox already confines what the command can do, and anything it blocks is settled by a card. In that case, and only then, the sandbox card takes the place of exactly these prompts for that command:
 
-1. **Unparseable shell**: the script could not be broken into commands to check.
+1. **Unparseable shell**: the script could not be broken into commands to check, or a read-only command asks only because it is not plain text (`ls ~/x`, `ls 2>&1`, `cd src && git status`; see [Plain text first](22-permissions-and-safety.md#read-only-shell-commands)).
 2. **Unvetted environment**: the command sets an environment variable outside the known-safe set.
 3. **Unresolved argument**: argument values that depend on shell expansion (`"$LOG"`).
 4. **Network egress**: a plain network client (`curl`, `wget`) and nothing else wrong with the command, only while the folder's egress proxy is serving it; the proxy asks per host.

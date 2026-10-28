@@ -252,6 +252,9 @@ fn wedged_child_handle() -> (
                 crate::session::plan_mode::PlanModeTracker::new(PathBuf::from("/tmp")),
             ),
         ),
+        current_prompt_mode: std::sync::Arc::new(parking_lot::Mutex::new(
+            crate::session::plan_mode::PromptMode::Agent,
+        )),
         force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permission_handle: fuigo_workspace::permission::PermissionHandle::allow_all(),
         attribution_callback: None,

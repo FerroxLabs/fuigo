@@ -20,12 +20,76 @@ pub(super) fn git_words_are_routine(words: &[String]) -> bool {
     };
     let args = &words[2..];
     match verb {
-        "add" | "commit" | "pull" | "fetch" => true,
+        "add" | "fetch" => true,
+        "commit" => !commit_reads_message_file(args),
+        "pull" => !pull_uses_custom_strategy(args),
         "worktree" => args.first().map(String::as_str) == Some("list"),
         "checkout" | "switch" => is_routine_branch_switch(args),
         "stash" => is_routine_stash(args),
         _ => false,
     }
+}
+
+/// u35 g3: `commit -F FILE`/`--file`, `-t FILE`/`--template` read the message from a file the command does not show
+/// (it lands in the commit); `-` (stdin) is visible. Long options may be abbreviated (`--fil`, `--te`).
+fn commit_reads_message_file(args: &[String]) -> bool {
+    use crate::permission::exec_risk::is_accepted_long_option_prefix;
+    let mut i = 0;
+    while let Some(word) = args.get(i) {
+        i += 1;
+        if word == "--" {
+            break;
+        }
+        if word.starts_with("--") {
+            let (name, value) = word.split_once('=').map_or((word.as_str(), None), |(n, v)| (n, Some(v)));
+            if (is_accepted_long_option_prefix(name, "--file", 5) || is_accepted_long_option_prefix(name, "--template", 4))
+                && value.or(args.get(i).map(String::as_str)) != Some("-")
+            {
+                return true;
+            }
+            continue;
+        }
+        let Some(cluster) = word.strip_prefix('-') else {
+            continue;
+        };
+        for (at, letter) in cluster.char_indices() {
+            let rest = &cluster[at + letter.len_utf8()..];
+            match letter {
+                'F' | 't' => {
+                    let value = if rest.is_empty() { args.get(i).map(String::as_str) } else { Some(rest) };
+                    if value != Some("-") {
+                        return true;
+                    }
+                    break;
+                }
+                'm' | 'c' | 'C' | 'S' => break,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+/// u35 g3: `pull -s NAME`/`--strategy` other than a built-in strategy runs `git-merge-NAME` from PATH.
+fn pull_uses_custom_strategy(args: &[String]) -> bool {
+    const BUILTIN: &[&str] = &["ort", "recursive", "resolve", "octopus", "ours", "subtree"];
+    let mut i = 0;
+    while let Some(word) = args.get(i) {
+        i += 1;
+        let value = if let Some(value) = word.strip_prefix("--strategy=") {
+            Some(value)
+        } else if word == "--strategy" || word == "-s" {
+            args.get(i).map(String::as_str)
+        } else if let Some(value) = word.strip_prefix("-s") {
+            Some(value)
+        } else {
+            continue;
+        };
+        if !value.is_some_and(|v| BUILTIN.contains(&v)) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Exact spellings only, so clusters (`-qf`) and abbreviations (`--fo`) fail closed.

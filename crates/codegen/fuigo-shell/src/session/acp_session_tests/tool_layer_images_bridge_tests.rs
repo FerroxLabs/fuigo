@@ -188,6 +188,7 @@ fn prepared_post_tool_use_call(id: &str, tool_name: &str) -> PreparedToolCall {
         concatenated_json_count: 0,
         dispatch_target_name: None,
         is_read_only: false,
+        approved_without_grant: true,
         rewriting_hook: None,
         coercion_note: None,
         additional_context: Vec::new(),
