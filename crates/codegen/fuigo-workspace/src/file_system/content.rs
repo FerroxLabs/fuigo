@@ -45,6 +45,12 @@ fn build_ripgrep_command(root: &Path, params: &ContentSearchParams) -> anyhow::R
     // P113 r3: the policy environment (no Fuigo secret, provider key or configured credential), like the search tools.
     fuigo_tools::util::spawn::detach_search_command(&mut cmd);
 
+    // u35 t1 (Astra d2 H2): in a folder that is not trusted, ripgrep reads no configuration file: `RIPGREP_CONFIG_PATH`
+    // can name the repository's own `.ripgreprc`, whose `--pre=./payload` would run a program from the folder.
+    if !crate::folder_trust::dir_trust(root).is_trusted() {
+        cmd.env_remove("RIPGREP_CONFIG_PATH");
+        cmd.arg("--no-config");
+    }
     cmd.arg("--json");
     cmd.arg("--line-number");
 

@@ -747,7 +747,7 @@ async fn run_remove(name: &str, requested_scope: Option<McpScope>) -> Result<()>
         fuigo_shell::config::find_project_configs(&cwd)
             .into_iter()
             .rev()
-            .find(|path| mcp_server_defined_at(path, name))
+            .find(|path| fuigo_shell::util::config::project_mcp_server_defined_at(path, name))
     };
 
     let user_defined = mcp_server_defined_at(&user_config_path(), name);

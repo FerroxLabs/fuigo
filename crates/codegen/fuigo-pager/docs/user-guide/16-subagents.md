@@ -63,7 +63,7 @@ The `spawn_subagent` tool accepts a `subagent_type` parameter that selects the c
 | `explore`         | Research agent. Searches, reads, greps, and runs shell commands, but does not edit files. Use it for codebase investigation. |
 | `plan`            | Planning agent. Explores the codebase and produces a structured implementation plan; does not edit files. |
 
-Project- or user-defined agents can add new types or shadow these built-ins by name.
+Project- or user-defined agents can add new types, but never replace a built-in agent: a file whose name or frontmatter `name` is a built-in agent name (these three, or a top-level profile such as `codex` or `fuigo-build`) is ignored. Project agents (`.fuigo/agents/`, `.claude/agents/`) load only in a folder you trust, and plugin agents are callable only from a plugin you trust (an untrusted plugin's agents still list in `/agents`). An agent name must be a single plain name; a path, `..`, a separator or a drive prefix is refused.
 
 ---
 

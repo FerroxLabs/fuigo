@@ -136,7 +136,7 @@ pub fn load_sandbox_config(workspace: &Path) -> SandboxConfig {
 
     // Project config: <workspace>/.fuigo/sandbox.toml (additive only)
     let project_path = workspace.join(".fuigo").join(SANDBOX_CONFIG_FILENAME);
-    if let Some(project) = load_config_file(&project_path) {
+    if let Some(project) = load_config_file_in(&project_path, Some(workspace)) {
         merge_project_profiles(&mut config, project);
     }
 
@@ -145,8 +145,9 @@ pub fn load_sandbox_config(workspace: &Path) -> SandboxConfig {
 
 pub fn sandbox_profile_conflicts(workspace: &Path) -> Vec<String> {
     let global = load_config_file(&fuigo_home().join(SANDBOX_CONFIG_FILENAME)).unwrap_or_default();
-    let project = load_config_file(&workspace.join(".fuigo").join(SANDBOX_CONFIG_FILENAME))
-        .unwrap_or_default();
+    let project =
+        load_config_file_in(&workspace.join(".fuigo").join(SANDBOX_CONFIG_FILENAME), Some(workspace))
+            .unwrap_or_default();
     mismatched_profile_names(&global, &project)
 }
 
@@ -175,7 +176,15 @@ fn merge_project_profiles(config: &mut SandboxConfig, project: SandboxConfig) {
 }
 
 fn load_config_file(path: &Path) -> Option<SandboxConfig> {
-    let content = std::fs::read_to_string(path).ok()?;
+    load_config_file_in(path, None)
+}
+
+/// [`load_config_file`] held to `root` when set: the project's `.fuigo/sandbox.toml` is read only from inside the
+/// workspace, so a link to a sandbox file elsewhere is not loaded as this project's profiles.
+/// The workspace is pinned when this load starts ([`fuigo_dirs::contained::PinnedRoot`]).
+fn load_config_file_in(path: &Path, root: Option<&Path>) -> Option<SandboxConfig> {
+    let root = fuigo_dirs::contained::PinnedRoot::pin_opt(root).ok()?;
+    let content = fuigo_dirs::contained::read_scoped(path, root.as_ref()).ok()?;
     if content.trim().is_empty() {
         return Some(SandboxConfig::default());
     }
@@ -960,6 +969,27 @@ mod tests {
         };
 
         assert_eq!(mismatched_profile_names(&global, &project), vec!["dev"]);
+    }
+
+    /// Fable r4 Medium: the project `sandbox.toml` linked outside the workspace is not loaded; linked inside it is.
+    #[cfg(unix)]
+    #[test]
+    fn m5_project_sandbox_toml_linked_outside_workspace_is_not_loaded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(ws.join(".fuigo")).unwrap();
+        std::fs::write(tmp.path().join("outside.toml"), "[profiles.evil]\nextends = \"workspace\"\n").unwrap();
+        let project = ws.join(".fuigo").join(SANDBOX_CONFIG_FILENAME);
+        std::os::unix::fs::symlink(tmp.path().join("outside.toml"), &project).unwrap();
+        assert!(load_config_file_in(&project, Some(&ws)).is_none());
+        // User scope (no root) follows the link.
+        assert!(load_config_file(&project).is_some());
+
+        std::fs::write(ws.join("inside.toml"), "[profiles.ok]\nextends = \"workspace\"\n").unwrap();
+        std::fs::remove_file(&project).unwrap();
+        std::os::unix::fs::symlink(ws.join("inside.toml"), &project).unwrap();
+        let loaded = load_config_file_in(&project, Some(&ws)).unwrap();
+        assert!(loaded.profiles.contains_key("ok"));
     }
 
     #[test]

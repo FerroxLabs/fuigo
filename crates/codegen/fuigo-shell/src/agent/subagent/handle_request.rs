@@ -1005,7 +1005,11 @@ pub(crate) async fn run_shell_child(
         effective_sampling_config.attribution_callback.clone();
     // A parent with memory off (`--no-memory`, `memory.enabled = false`: `ctx.memory_config` is `None`) must not
     // hand a child persistent agent memory either: no memory write tools, no MEMORY.md injection, no storage.
-    let agent_memory_scope = definition.memory.filter(|_| ctx.memory_config.is_some());
+    // Project/local memory folders linked outside the project are refused as a store (no tools, no injection).
+    let agent_memory_scope = definition
+        .memory
+        .filter(|_| ctx.memory_config.is_some())
+        .filter(|scope| scope.memory_dir_contained(&definition.name, &ctx.parent_cwd));
     let agent_name_for_memory = definition.name.clone();
     let is_plugin_agent = definition.plugin_name.is_some();
     let yolo_policy_block = fuigo_workspace::permission::resolution::yolo_disabled_by_policy();
@@ -1024,7 +1028,7 @@ pub(crate) async fn run_shell_child(
         } else {
             tracing::warn!(
                 agent = %definition.name,
-                "ignoring subagent permissionMode=bypassPermissions: always-approve disabled by managed policy"
+                "ignoring subagent permissionMode=bypassPermissions: always-approve is locked off"
             );
         }
     }
@@ -1039,12 +1043,9 @@ pub(crate) async fn run_shell_child(
                 definition.tool_config.tools.push(tc);
             }
         }
-        let resolved_mem = scope.resolve_dir(&agent_name_for_memory, &ctx.parent_cwd);
-        let memory_dir = &resolved_mem.path;
-        let memory_md = memory_dir.join("MEMORY.md");
-        if memory_md.is_file()
-            && let Ok(content) = std::fs::read_to_string(&memory_md)
-        {
+        // Project/local memory is read only from inside the project folder (contained read); user memory follows links.
+        if let Some((memory_dir, content)) = scope.read_memory_md(&agent_name_for_memory, &ctx.parent_cwd) {
+            let memory_dir = &memory_dir;
             const MAX_LINES: usize = 200;
             const MAX_BYTES: usize = 25 * 1024;
             let truncated: String = content

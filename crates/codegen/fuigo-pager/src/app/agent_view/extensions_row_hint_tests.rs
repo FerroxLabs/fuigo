@@ -72,6 +72,7 @@ fn plugin_info(name: &str, enabled: bool) -> fuigo_hooks_plugins_types::PluginIn
         marketplace_source: None,
         origin: None,
         conflict: None,
+        skipped_links: 0,
     }
 }
 

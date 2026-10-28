@@ -45,6 +45,11 @@ pub struct SubagentRole {
     /// Set to the parent dir of the source `.toml` file during discovery.
     #[serde(skip)]
     pub source_dir: Option<PathBuf>,
+    /// Project folder this role was discovered in (`<cwd>/.fuigo/roles`), pinned at discovery.
+    /// When set, `prompt_file` is read contained to it, so a link out of the project is refused.
+    /// `None` for user, bundled and inline roles.
+    #[serde(skip)]
+    pub contain_root: Option<fuigo_dirs::contained::PinnedRoot>,
 }
 
 /// A named persona/SOUL definition controlling tone, style, and behavior.
@@ -89,6 +94,11 @@ pub struct SubagentPersona {
     /// Populated during discovery; `None` for inline config personas.
     #[serde(skip)]
     pub source_path: Option<String>,
+    /// Project folder this persona was discovered in (`<cwd>/.fuigo/personas`), pinned at discovery.
+    /// When set, `instructions_file` is read contained to it, so a link out of the project is refused.
+    /// `None` for user, bundled and inline personas.
+    #[serde(skip)]
+    pub contain_root: Option<fuigo_dirs::contained::PinnedRoot>,
 }
 
 /// A declared input or output for a persona.

@@ -12,6 +12,8 @@ pub mod channel;
 pub mod config;
 pub mod discovery;
 pub mod envrc;
+#[cfg(test)]
+mod repo_exec_gate_tests;
 pub mod error;
 pub mod export_github;
 pub mod file_system;

@@ -17,12 +17,29 @@ pub struct PlainCommand {
     words: Vec<String>,
     span_start: usize,
     span_end: usize,
+    /// Some word's value depends on shell expansion (an option-capable glob, an over-cap brace expansion, ...); it is
+    /// kept as spelled (a glob as its pattern).
+    unresolved: bool,
+    /// u35 r2: [`Self::words`] with every word the normaliser could not pin (an expansion, a glob of any kind, an
+    /// over-cap brace group) replaced by [`crate::permission::exec_surface::UNRESOLVED_WORD`], for the floor checks.
+    floor_words: Vec<String>,
 }
 
 impl PlainCommand {
     /// The command name and args, env assignments stripped.
     pub fn words(&self) -> &[String] {
         &self.words
+    }
+
+    /// Whether some word could not be normalised to exact literal words ([`crate::permission::shell_words`]); such a
+    /// word stays in [`Self::words`] as spelled, so a match on it proves nothing about what runs.
+    pub fn has_unresolved_word(&self) -> bool {
+        self.unresolved
+    }
+
+    /// u35 r2: the words the floor checks run on: an unpinned word is the unresolved marker, never its spelling.
+    pub(crate) fn floor_words(&self) -> &[String] {
+        &self.floor_words
     }
 
     /// Whether this command's highlighted span covers the entire script (ignoring surrounding whitespace).
@@ -462,17 +479,15 @@ pub(crate) fn env_split_string_script(words: &[String]) -> Option<String> {
 pub(crate) fn strip_wrapper_command(cmd: &[String]) -> Option<&[String]> {
     // Basename so a path-qualified wrapper (e.g. `/usr/bin/env`) is still stripped.
     let head = cmd.first()?.rsplit(['/', '\\']).next()?;
-    let mut i = 1usize;
+    let mut i: usize;
     match head {
         // `timeout [OPTIONS] DURATION COMMAND [ARGS]`
         "timeout" => {
-            while i < cmd.len() && cmd[i].starts_with('-') {
-                if matches!(cmd[i].as_str(), "-k" | "-s" | "--kill-after" | "--signal") {
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
+            i = wrapper_options_end(
+                cmd,
+                &["-v", "--verbose", "--preserve-status", "--foreground"],
+                &["-k", "-s", "--kill-after", "--signal"],
+            )?;
             // mandatory DURATION token
             if i >= cmd.len() {
                 return None;
@@ -481,40 +496,31 @@ pub(crate) fn strip_wrapper_command(cmd: &[String]) -> Option<&[String]> {
         }
         // `nice [OPTIONS] [COMMAND]`
         "nice" => {
-            while i < cmd.len() && cmd[i].starts_with('-') {
-                if matches!(cmd[i].as_str(), "-n" | "--adjustment") {
-                    i += 2;
-                } else {
-                    i += 1;
-                }
+            if cmd.get(1).is_some_and(|w| w.len() > 1 && w[1..].bytes().all(|b| b.is_ascii_digit())) {
+                // Historical `nice -5 COMMAND`.
+                i = 2;
+            } else {
+                i = wrapper_options_end(cmd, &[], &["-n", "--adjustment"])?;
             }
         }
         // `ionice [OPTIONS] [COMMAND]`
         "ionice" => {
-            while i < cmd.len() && cmd[i].starts_with('-') {
-                if matches!(
-                    cmd[i].as_str(),
-                    "-c" | "-n"
-                        | "-p"
-                        | "-P"
-                        | "-u"
-                        | "--class"
-                        | "--classdata"
-                        | "--pid"
-                        | "--pgid"
-                        | "--uid"
-                ) {
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
+            i = wrapper_options_end(
+                cmd,
+                &["-t", "--ignore"],
+                &["-c", "-n", "-p", "-P", "-u", "--class", "--classdata", "--pid", "--pgid", "--uid"],
+            )?;
         }
         // `chrt [OPTIONS] PRIORITY COMMAND [ARGS]`
         "chrt" => {
-            while i < cmd.len() && cmd[i].starts_with('-') {
-                i += 1;
-            }
+            i = wrapper_options_end(
+                cmd,
+                &[
+                    "-a", "-b", "-d", "-e", "-f", "-i", "-o", "-r", "-R", "-v", "--all-tasks", "--batch", "--deadline",
+                    "--fifo", "--idle", "--other", "--rr", "--reset-on-fork", "--verbose",
+                ],
+                &["-T", "-P", "-D", "--sched-runtime", "--sched-period", "--sched-deadline"],
+            )?;
             // mandatory PRIORITY token
             if i >= cmd.len() {
                 return None;
@@ -523,13 +529,7 @@ pub(crate) fn strip_wrapper_command(cmd: &[String]) -> Option<&[String]> {
         }
         // `stdbuf OPTIONS COMMAND [ARGS]`
         "stdbuf" => {
-            while i < cmd.len() && cmd[i].starts_with('-') {
-                if matches!(cmd[i].as_str(), "-i" | "-o" | "-e") {
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
+            i = wrapper_options_end(cmd, &[], &["-i", "-o", "-e", "--input", "--output", "--error"])?;
         }
         // `env [OPTIONS]/[NAME=VALUE] (interspersed) [COMMAND] [ARGS]`
         "env" => {
@@ -547,6 +547,39 @@ pub(crate) fn strip_wrapper_command(cmd: &[String]) -> Option<&[String]> {
         return None;
     }
     Some(inner)
+}
+
+/// u35 r3 (Astra r2 H4): the index after a wrapper's options, recognising only the exact spellings given: a flag in
+/// `flags`, or an option in `valued` with its value attached (`-k5`, `--signal=TERM`) or as the next word. `--` ends
+/// the options. Any other option (an abbreviation such as `--sig`, or one not modelled) is `None`, so the wrapper is
+/// not peeled and the normaliser fails closed instead of reading the option's value as the program.
+fn wrapper_options_end(cmd: &[String], flags: &[&str], valued: &[&str]) -> Option<usize> {
+    let mut i = 1usize;
+    while let Some(word) = cmd.get(i) {
+        if word == "--" {
+            return Some(i + 1);
+        }
+        if !word.starts_with('-') || word == "-" {
+            break;
+        }
+        if flags.contains(&word.as_str()) {
+            i += 1;
+        } else if valued.contains(&word.as_str()) {
+            cmd.get(i + 1)?;
+            i += 2;
+        } else if valued.iter().any(|option| {
+            if option.starts_with("--") {
+                word.strip_prefix(*option).is_some_and(|rest| rest.starts_with('='))
+            } else {
+                word.len() > option.len() && word.starts_with(*option)
+            }
+        }) {
+            i += 1;
+        } else {
+            return None;
+        }
+    }
+    Some(i)
 }
 
 /// True if `words`' head is a command [`strip_wrapper_command`] would peel, i.e. its basename is in the canonical wrapper set.
@@ -606,6 +639,60 @@ pub(crate) fn unwrap_wrappers_checked(words: &[String]) -> CheckedWrapperPeel<'_
         env_options_uncertain,
         exhausted: is_wrapper_command(current) && strip_wrapper_command(current).is_some(),
     }
+}
+
+/// u35: whether every program the wrapper chain runs (each canonical wrapper, each `command`/`builtin`/`exec` prefix and
+/// the inner command) is named by a plain lowercase word that PATH resolves. A path-qualified name (`./env`,
+/// `/tmp/x/timeout`, `bin/tool`) is whatever file sits there, a case variant (`LS`, `Cat`) is a different program on a
+/// case-sensitive file system, and a name with whitespace or other non-name characters (`'ls -la'`) is one argv word
+/// that only looks like a command plus operands, so none may inherit an approval given to the plain name (u35 r1: a word
+/// that differs from its normalised spelling gets none). Only positive approvals (read-only lists, auto-mode routine)
+/// consult this; it never makes a command more trusted.
+pub(crate) fn program_identity_is_plain(words: &[String]) -> bool {
+    let mut current = words;
+    for _ in 0..=MAX_NORMALIZE_ROUNDS {
+        let Some(head) = current.first() else {
+            return true;
+        };
+        if !program_word_is_plain(head) {
+            return false;
+        }
+        if let Some(inner) = strip_wrapper_command(current) {
+            current = inner;
+            continue;
+        }
+        match strip_transparent_prefix(current) {
+            TransparentStrip::NotPrefix => return true,
+            TransparentStrip::Peeled(inner) => current = inner,
+            TransparentStrip::Ambiguous => return false,
+        }
+    }
+    false
+}
+
+/// u35 r1: a program word equal to its normalised spelling (basename, lowercase, no `.exe`) and made only of name
+/// characters, so it is one PATH lookup of exactly that name.
+pub(crate) fn program_word_is_plain(word: &str) -> bool {
+    !word.is_empty()
+        && !word.starts_with(['-', '.'])
+        && !word.ends_with(".exe")
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'+' | b'-'))
+}
+
+/// u35 r1: whether argv starts with the space-separated words of `pattern`, compared word by word (argv boundaries),
+/// so one argv word containing a space never matches two pattern words.
+pub(crate) fn argv_starts_with_words(words: &[String], pattern: &str, ignore_case: bool) -> bool {
+    pattern.split(' ').enumerate().all(|(i, part)| {
+        words.get(i).is_some_and(|word| {
+            if ignore_case {
+                word.eq_ignore_ascii_case(part)
+            } else {
+                word == part
+            }
+        })
+    })
 }
 
 /// Repeatedly strip wrapper commands (e.g. `timeout 30 nice -n 10 rm -rf /`), bounded to avoid pathological loops.
@@ -705,6 +792,15 @@ pub(crate) fn normalize_command_words(words: &[String]) -> NormalizedCommandPeel
     if !ambiguous && !has_split_string && !env_options_uncertain {
         // Remaining peelable head after the budget is unmodeled, so fail closed
         let still_wrapper = is_wrapper_command(current) && strip_wrapper_command(current).is_some();
+        // u35 r3 (Astra r2 H4): a wrapper with arguments whose options are not modelled cannot be peeled, so the program
+        // it runs is unknown (bare `env` and its options are judged by the env scan and the exec-surface check).
+        let unpeelable_wrapper = is_wrapper_command(current)
+            && current.len() > 1
+            && strip_wrapper_command(current).is_none()
+            && current.first().and_then(|w| w.rsplit(['/', '\\']).next()) != Some("env");
+        if unpeelable_wrapper {
+            ambiguous = true;
+        }
         let still_transparent = !matches!(
             strip_transparent_prefix(current),
             TransparentStrip::NotPrefix
@@ -728,6 +824,16 @@ enum TransparentStrip<'a> {
     NotPrefix,
     Peeled(&'a [String]),
     Ambiguous,
+}
+
+/// u35 r3 (Astra r2 Critical): one peel layer for scans that must visit every wrapper in a chain: a canonical wrapper
+/// ([`strip_wrapper_command`]) or a transparent prefix (`command`, `builtin`, `exec`, `nohup`, `time`, ...). `None`
+/// when the head is neither or cannot be peeled.
+pub(crate) fn peel_one_wrapper_layer(cmd: &[String]) -> Option<&[String]> {
+    strip_wrapper_command(cmd).or(match strip_transparent_prefix(cmd) {
+        TransparentStrip::Peeled(inner) if !inner.is_empty() => Some(inner),
+        _ => None,
+    })
 }
 
 fn strip_transparent_prefix(cmd: &[String]) -> TransparentStrip<'_> {
@@ -933,96 +1039,201 @@ pub fn all_commands_from_script(script: &str) -> Option<Vec<PlainCommand>> {
     try_parse_word_only_commands_sequence(&tree, script)
 }
 
+/// Option grammar of a read-only tool whose plain path operands may be anchored globs ([`glob_role_requires_approval`]).
+struct PathOperandTool {
+    /// Short options whose value is the rest of the cluster or the next word.
+    short_value: &'static str,
+    /// Long options (exact spelling) whose value is the next word unless glued with `=`.
+    long_value: &'static [&'static str],
+    /// The first operand is a pattern or format, not a path, unless an option supplied it.
+    pattern_first: bool,
+    /// Options that supply the pattern, so the first operand is a path.
+    pattern_options: &'static str,
+}
+
+fn path_operand_tool(program: &str) -> Option<PathOperandTool> {
+    const fn tool(short_value: &'static str, long_value: &'static [&'static str]) -> PathOperandTool {
+        PathOperandTool {
+            short_value,
+            long_value,
+            pattern_first: false,
+            pattern_options: "",
+        }
+    }
+    Some(match program {
+        "ls" => tool("ITw", &["--ignore", "--hide", "--format", "--sort", "--time-style", "--block-size", "--width", "--tabsize", "--time", "--indicator-style", "--quoting-style"]),
+        "cat" | "tac" | "echo" | "wc" | "realpath" | "readlink" | "md5sum" | "sha1sum" | "sha224sum" | "sha256sum"
+        | "sha384sum" | "sha512sum" | "b2sum" | "cksum" | "less" | "more" => tool("", &["--files0-from"]),
+        "stat" => tool("c", &["--format", "--printf"]),
+        "du" => tool("dBtX", &["--max-depth", "--block-size", "--exclude", "--exclude-from", "--files0-from", "--threshold", "--time-style"]),
+        "diff" => tool("CUIxXFLS", &["--label", "--ignore-matching-lines", "--exclude", "--exclude-from", "--starting-file", "--show-function-line", "--from-file", "--to-file", "--horizon-lines"]),
+        "cmp" => tool("in", &["--ignore-initial", "--bytes"]),
+        "head" | "tail" => tool("ncs", &["--lines", "--bytes", "--sleep-interval", "--pid", "--max-unchanged-stats"]),
+        "tree" => tool("LPIo", &["--filelimit", "--charset", "--sort", "--timefmt", "--ignore-case"]),
+        "sort" => tool("kStTyo", &["--key", "--field-separator", "--buffer-size", "--temporary-directory", "--output", "--files0-from", "--random-source", "--parallel", "--batch-size", "--sort", "--compress-program"]),
+        "uniq" => tool("fsw", &["--skip-fields", "--skip-chars", "--check-chars", "--group", "--all-repeated"]),
+        "cut" => tool("bcdf", &["--bytes", "--characters", "--delimiter", "--fields", "--output-delimiter"]),
+        // u35: a plain `grep` runs Fuigo's ugrep shadow (`exec_surface/search_shadows.rs`), so its own value options.
+        "grep" => PathOperandTool {
+            short_value: "ABCDdefgJKMmNOt",
+            long_value: &["--after-context", "--before-context", "--binary-files", "--context", "--depth", "--devices", "--directories", "--exclude", "--exclude-dir", "--exclude-from", "--file", "--from", "--include", "--include-dir", "--include-from", "--label", "--regexp"],
+            pattern_first: true,
+            pattern_options: "ef",
+        },
+        "egrep" | "fgrep" => PathOperandTool {
+            short_value: "efmABCdD",
+            long_value: &["--regexp", "--file", "--max-count", "--after-context", "--before-context", "--context", "--include", "--exclude", "--exclude-dir", "--exclude-from", "--label", "--binary-files", "--devices", "--directories", "--group-separator"],
+            pattern_first: true,
+            pattern_options: "ef",
+        },
+        "rg" => PathOperandTool {
+            short_value: "efgtTmABCjMEr",
+            long_value: &["--regexp", "--file", "--glob", "--iglob", "--type", "--type-not", "--max-count", "--after-context", "--before-context", "--context", "--threads", "--max-columns", "--encoding", "--replace", "--pre", "--pre-glob", "--type-add", "--type-clear", "--max-depth", "--max-filesize", "--path-separator", "--sort", "--sortr", "--colors", "--color", "--context-separator", "--field-match-separator", "--field-context-separator", "--hostname-bin", "--hyperlink-format", "--engine", "--dfa-size-limit", "--regex-size-limit", "--ignore-file"],
+            pattern_first: true,
+            pattern_options: "ef",
+        },
+        "printf" => PathOperandTool {
+            pattern_first: true,
+            ..tool("v", &[])
+        },
+        _ => return None,
+    })
+}
+
+/// u35 r1 (anchored globs by role): an anchored glob (`src/*.rs`) cannot become an option, but it still expands to
+/// whatever files match, so it is modelled only where any file name is harmless: a plain path operand of a read-only
+/// tool. In a program, wrapper, subcommand, script, pattern or option-value position (`awk B* f`, `timeout 5* ls`,
+/// `git a* …`, `grep -e a* f`) it is unresolved and requires approval. Roles are judged on the argv after the one
+/// classifier normalisation; `globbed` is index-aligned with `words`.
+fn glob_role_requires_approval(words: &[String], globbed: &[bool]) -> bool {
+    if !globbed.iter().any(|glob| *glob) {
+        return false;
+    }
+    let norm = crate::permission::shell_access::normalize_for_classification(words);
+    let offset = words.len() - norm.words.len();
+    if norm.fail_closed || globbed[..offset].iter().any(|glob| *glob) {
+        return true;
+    }
+    let (inner, marks) = (norm.words, &globbed[offset..]);
+    if marks.first().copied().unwrap_or(true) {
+        return true;
+    }
+    let program = inner[0].rsplit(['/', '\\']).next().unwrap_or(&inner[0]).to_ascii_lowercase();
+    let Some(tool) = path_operand_tool(&program) else {
+        return true;
+    };
+    let mut pattern_pending = tool.pattern_first;
+    let mut options_done = false;
+    let mut i = 1;
+    while let Some(word) = inner.get(i) {
+        let glob = marks[i];
+        i += 1;
+        if !options_done && word == "--" {
+            options_done = true;
+            continue;
+        }
+        if !options_done && word.starts_with('-') && word != "-" {
+            if glob {
+                return true;
+            }
+            let value_next = if let Some(long) = word.strip_prefix("--") {
+                let name = long.split_once('=').map_or(long, |(name, _)| name);
+                if ["regexp", "file"].contains(&name) && tool.pattern_first {
+                    pattern_pending = false;
+                }
+                !long.contains('=') && tool.long_value.iter().any(|value| value.trim_start_matches('-') == name)
+            } else {
+                let cluster = &word[1..];
+                let mut next = false;
+                for (at, option) in cluster.char_indices() {
+                    if tool.pattern_options.contains(option) {
+                        pattern_pending = false;
+                    }
+                    if tool.short_value.contains(option) {
+                        next = cluster[at + option.len_utf8()..].is_empty();
+                        break;
+                    }
+                }
+                next
+            };
+            if value_next {
+                if marks.get(i).copied().unwrap_or(false) {
+                    return true;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if std::mem::take(&mut pattern_pending) && glob {
+            return true;
+        }
+    }
+    false
+}
+
 /// Parse a single `command` node into a list of "words", rejecting anything non-trivial (substitutions, complex strings, etc.).
-/// Also returns the byte span for the *highlighted* portion (command and args, not env).
+/// Each word is normalised the way bash would ([`crate::permission::shell_words`]): quotes removed, escapes folded,
+/// fragments joined, unquoted braces expanded. A word that cannot be pinned down stays as spelled and marks the command
+/// unresolved. Also returns the byte span for the *highlighted* portion (command and args, not env).
 fn parse_plain_command_from_node(cmd: Node, src: &str) -> Option<PlainCommand> {
+    use crate::permission::shell_words::{GlobMark, normalise_word_node_marking_globs};
     if cmd.kind() != "command" {
         return None;
     }
+    use crate::permission::exec_surface::UNRESOLVED_WORD;
     let mut words = Vec::new();
+    let mut floor_words = Vec::new();
+    let mut globbed = Vec::new();
+    let mut unresolved = false;
     let mut cursor = cmd.walk();
 
     let mut span_start: Option<usize> = None;
     let mut span_end: Option<usize> = None;
 
     for child in cmd.named_children(&mut cursor) {
-        match child.kind() {
+        let word_node = match child.kind() {
             // Env assignments in front of the command are skipped; the outer whitelist already vetted their contents
-            "variable_assignment" => {
-                // no-op, just skip for words & span
-            }
-            "command_name" => {
-                let word_node = child.named_child(0)?;
-                if word_node.kind() != "word" {
-                    return None;
-                }
-                let text = word_node.utf8_text(src.as_bytes()).ok()?.to_owned();
-
-                if span_start.is_none() {
-                    span_start = Some(word_node.start_byte());
-                }
-                span_end = Some(word_node.end_byte());
-
-                words.push(text);
-            }
-            "word" | "number" => {
-                let text = child.utf8_text(src.as_bytes()).ok()?.to_owned();
-
-                if span_start.is_none() {
-                    span_start = Some(child.start_byte());
-                }
-                span_end = Some(child.end_byte());
-
-                words.push(text);
-            }
-            "string"
-                // Allow only simple double-quoted strings with plain content.
-                if child.child_count() == 3
-                    && child.child(0)?.kind() == "\""
-                    && child.child(1)?.kind() == "string_content"
-                    && child.child(2)?.kind() == "\""
-                => {
-                    let content_node = child.child(1)?;
-                    let text = content_node.utf8_text(src.as_bytes()).ok()?.to_owned();
-
-                    if span_start.is_none() {
-                        // Highlight whole quoted string in the original script, so span uses the outer node
-                        span_start = Some(child.start_byte());
-                    }
-                    span_end = Some(child.end_byte());
-
-                    words.push(text);
-                }
-            "raw_string" => {
-                let raw_string = child.utf8_text(src.as_bytes()).ok()?;
-                let stripped = raw_string
-                    .strip_prefix('\'')
-                    .and_then(|s| s.strip_suffix('\''));
-                if let Some(s) = stripped {
-                    if span_start.is_none() {
-                        span_start = Some(child.start_byte());
-                    }
-                    span_end = Some(child.end_byte());
-
-                    words.push(s.to_owned());
-                } else {
-                    return None;
+            "variable_assignment" => continue,
+            "command_name" => child.named_child(0)?,
+            _ => child,
+        };
+        if !matches!(
+            word_node.kind(),
+            "word" | "number" | "string" | "raw_string" | "concatenation"
+        ) {
+            return None;
+        }
+        if span_start.is_none() {
+            span_start = Some(word_node.start_byte());
+        }
+        span_end = Some(word_node.end_byte());
+        let program_position = words.is_empty();
+        match normalise_word_node_marking_globs(word_node, src) {
+            Ok(list) => {
+                for word in list {
+                    // An anchored glob names a path (`src/*.rs`); a glob that can start with `-` can become an option,
+                    // and a glob in the program's place can be any program, so neither is modelled.
+                    unresolved |= word.glob == GlobMark::OptionCapable
+                        || (program_position && word.glob != GlobMark::Literal);
+                    globbed.push(word.glob != GlobMark::Literal);
+                    floor_words.push(if word.glob == GlobMark::Literal {
+                        word.text.clone()
+                    } else {
+                        UNRESOLVED_WORD.to_owned()
+                    });
+                    words.push(word.text);
                 }
             }
-            "concatenation" => {
-                // E.g. `{}` in `find -exec`
-                let text = child.utf8_text(src.as_bytes()).ok()?.to_owned();
-
-                if span_start.is_none() {
-                    span_start = Some(child.start_byte());
-                }
-                span_end = Some(child.end_byte());
-
-                words.push(text);
+            Err(_) => {
+                unresolved = true;
+                globbed.push(true);
+                floor_words.push(UNRESOLVED_WORD.to_owned());
+                words.push(word_node.utf8_text(src.as_bytes()).ok()?.to_owned());
             }
-            _ => return None,
         }
     }
+    // u35 r1: an anchored glob is a modelled word only as a plain path operand of a read-only tool.
+    unresolved |= glob_role_requires_approval(&words, &globbed);
 
     let span_start = span_start.unwrap_or_else(|| cmd.start_byte());
     let span_end = span_end.unwrap_or_else(|| cmd.end_byte());
@@ -1031,6 +1242,8 @@ fn parse_plain_command_from_node(cmd: Node, src: &str) -> Option<PlainCommand> {
         words,
         span_start,
         span_end,
+        unresolved,
+        floor_words,
     })
 }
 
@@ -1413,7 +1626,7 @@ mod tests {
                 highlighted_words: vec![
                     "python3".to_owned(),
                     "-c".to_owned(),
-                    "some text\\\" here ".to_owned()
+                    "some text\" here ".to_owned()
                 ],
                 suffix: vec![
                     "|".to_owned(),
@@ -1448,7 +1661,8 @@ mod tests {
                     "grep".to_owned(),
                     "-r".to_owned(),
                     "ToolKind".to_owned(),
-                    "~/.cargo/registry/src/".to_owned(),
+                    // u35 r1: an unquoted leading `~` is `$HOME`, as bash expands it.
+                    format!("{}/.cargo/registry/src/", std::env::var("HOME").unwrap()),
                 ],
                 suffix: vec![
                     "2>/dev/null".to_owned(),
@@ -1508,8 +1722,8 @@ mod tests {
                 highlighted_words: vec![
                     "python".to_owned(),
                     "-c".to_owned(),
-                    "\"\n        import os\n        os.environ.get(\"something\")\n        \""
-                        .to_owned()
+                    // Bash quote removal: the inner `"something"` closes and reopens the double-quoted string.
+                    "\n        import os\n        os.environ.get(something)\n        ".to_owned()
                 ],
                 suffix: vec![],
             })

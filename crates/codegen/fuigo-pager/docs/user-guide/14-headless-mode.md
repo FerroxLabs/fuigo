@@ -585,7 +585,7 @@ echo "No issues found"
 
 ## Folder Trust in Headless Runs
 
-Project instructions (`AGENTS.md`, `CLAUDE.md`, `.fuigo/rules/`), project skills and commands (`.fuigo/skills/`, `.fuigo/commands/`, and their `.agents` / `.claude` / `.cursor` equivalents), project hooks, plugins, permission rules, and repo-local MCP/LSP servers load only from a trusted folder. An interactive session asks once. A headless run cannot ask, so in an untrusted folder that ships any of these it starts without them.
+Project instructions (`AGENTS.md`, `CLAUDE.md`, `.fuigo/rules/`), project skills and commands (`.fuigo/skills/`, `.fuigo/commands/`, and their `.agents` / `.claude` / `.cursor` equivalents), project hooks, plugins, permission rules, `.envrc` and repo-local MCP/LSP servers load only from a trusted folder, and in a folder that is not trusted no shell command runs unless your grant or an `--allow` rule covers it. An interactive session asks once per folder (its repository). A headless run cannot ask, so in a folder that is not trusted it starts without those settings, says so once on stderr, and refuses each shell command no `--allow` rule covers with a message naming the fix. Folders trusted before 1.0.35 (settings only) count as not trusted in a headless run until trusted again.
 
 For CI jobs and benchmark harnesses running against a checkout you trust, pass `--trust`:
 
@@ -593,7 +593,14 @@ For CI jobs and benchmark harnesses running against a checkout you trust, pass `
 fuigo --trust -p "Run the test suite and fix failures"
 ```
 
-`--trust` records the current folder's workspace (its git root) in `~/.fuigo/trusted_folders.toml` before the session starts, so later runs in the same checkout are trusted as well. In a disposable container you can instead turn the gate off for the process with `FUIGO_FOLDER_TRUST=0`. Instructions and skills under `~/.fuigo/` always load. See [10-hooks.md](10-hooks.md) for the full trust model.
+`--trust` records the current folder (its git repository, or the folder itself) in `~/.fuigo/trusted_folders.toml` before the session starts, so later runs in the same checkout are trusted as well. A harness that runs in many checkouts (an embedding app, a bot) can list them in your own `~/.fuigo/config.toml` instead; a project's own config cannot:
+
+```toml
+[folder_trust]
+trusted_folders = ["/srv/checkouts/app"]
+```
+
+Your home folder and `/` can never be trusted; run from a project folder. In a disposable container you can instead turn the gate off for the process with `FUIGO_FOLDER_TRUST=0` (Fuigo warns at start). Instructions and skills under `~/.fuigo/` always load. See [10-hooks.md](10-hooks.md) for the full trust model.
 
 ## Always-approve for automation
 
@@ -946,7 +953,7 @@ These flags supplement the [Command-Line Options](#command-line-options) table a
 
 | Flag                          | Description                                       |
 | ----------------------------- | ------------------------------------------------- |
-| `--agent <NAME>`              | Agent name or definition file path                |
+| `--agent <NAME>`              | Agent name, or a definition file when the argument is a path (contains a separator or ends in `.md`)|
 | `--agents <JSON>`             | Inline subagent definitions as JSON               |
 | `--system-prompt-override`    | Override the agent's system prompt                |
 | `--no-plan`                   | Disable plan mode                                 |

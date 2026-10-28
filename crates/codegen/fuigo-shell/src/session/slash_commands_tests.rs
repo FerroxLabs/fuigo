@@ -154,6 +154,7 @@ fn make_skill(name: &str, user_invocable: bool) -> SkillInfo {
         paths: None,
         enabled: true,
         body: None,
+        content_root: None,
     }
 }
 
@@ -1054,6 +1055,7 @@ fn make_scoped_skill(name: &str, scope: SkillScope) -> SkillInfo {
         paths: None,
         enabled: true,
         body: None,
+        content_root: None,
     }
 }
 

@@ -207,6 +207,8 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
+        // Every agent mode passes through here: gate project agent files on folder trust before any discovery runs.
+        crate::agent::folder_trust::install_project_agent_trust();
         // Every agent mode (stdio/headless/leader and the in-process TUI
         // agent) passes through here, so diagnostic uploads always carry
         // the version stamp and the resource ceilings in effect.

@@ -306,7 +306,10 @@ async fn run_command(
                 c
             };
             configure(&mut shell);
-            shell.spawn().map_err(RunError::Spawn)?
+            shell.spawn().map_err(|error| {
+                fuigo_tools::util::spawn::ShellSpawnFailure::for_command("status_line", shell.as_std(), &error).log();
+                RunError::Spawn(error)
+            })?
         }
     };
     let group = match fuigo_tty_utils::global_process_scope().enroll(&child) {

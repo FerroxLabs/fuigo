@@ -327,6 +327,7 @@ mod p174_tests {
             concatenated_json_count: 0,
             dispatch_target_name: None,
             is_read_only: true,
+            approved_without_grant: true,
             rewriting_hook: None,
             coercion_note: None,
             additional_context: Vec::new(),

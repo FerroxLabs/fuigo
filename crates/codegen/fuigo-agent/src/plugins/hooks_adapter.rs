@@ -9,13 +9,34 @@ use fuigo_hooks::event::HookEventName;
 use super::manifest::substitute_env_vars;
 
 /// Read, pre-filter, and parse a plugin's hooks file, then inject the plugin env vars.
-pub fn parse_plugin_hooks(
+///
+/// The hooks file is read only from inside `contain_root` (the plugin folder pinned at discovery), checked on the
+/// opened file, so a hooks file swapped for an outside link after discovery is refused at the read. There is no
+/// uncontained entry point.
+pub fn parse_plugin_hooks_contained(
+    hooks_path: &Path,
+    contain_root: &fuigo_dirs::contained::PinnedRoot,
+    plugin_name: &str,
+    plugin_root: &str,
+    plugin_data: &str,
+) -> (Vec<HookSpec>, Vec<String>) {
+    parse_plugin_hooks_read(
+        fuigo_dirs::contained::read_contained(hooks_path, contain_root),
+        hooks_path,
+        plugin_name,
+        plugin_root,
+        plugin_data,
+    )
+}
+
+fn parse_plugin_hooks_read(
+    read: std::io::Result<String>,
     hooks_path: &Path,
     plugin_name: &str,
     plugin_root: &str,
     plugin_data: &str,
 ) -> (Vec<HookSpec>, Vec<String>) {
-    let content = match std::fs::read_to_string(hooks_path) {
+    let content = match read {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -267,7 +288,13 @@ mod tests {
         .unwrap();
 
         let (specs, warnings) =
-            parse_plugin_hooks(&hooks_file, "my-plugin", "/path/to/plugin", "/path/to/data");
+            parse_plugin_hooks_contained(
+                &hooks_file,
+                &fuigo_dirs::contained::PinnedRoot::pin(hooks_file.parent().unwrap()).unwrap(),
+                "my-plugin",
+                "/path/to/plugin",
+                "/path/to/data",
+            );
 
         // One spec from SessionStart; FutureEvent was filtered
         assert_eq!(specs.len(), 1);

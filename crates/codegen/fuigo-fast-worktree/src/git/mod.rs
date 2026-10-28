@@ -11,6 +11,8 @@ pub(crate) mod reclaimed;
 pub(crate) mod safety;
 pub(crate) mod status;
 pub(crate) mod worktree;
+#[cfg(test)]
+mod judged_tests;
 
 pub(crate) use checkout::checkout_ref;
 pub(crate) use checkout::{git_clean_fd, git_reset_hard_command};

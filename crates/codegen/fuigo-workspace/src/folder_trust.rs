@@ -1,113 +1,133 @@
-//! Folder-trust DECISION side ("do you trust this folder?").
+//! Folder trust: one decision per folder for its settings AND its shell commands (u35 t1, design d2).
 //!
-//! This is the client/workspace half of the folder-trust gate: it scans a
-//! workspace for trust-sensitive configs (code-exec configs and project
-//! instructions/skills), resolves the pure trust [`decide`] precedence, prompts (MVP stderr), and reads/writes the durable
-//! [`crate::trust::TrustStore`] (`~/.fuigo/trusted_folders.toml`). The
-//! consume/gating half (the `DECISIONS` cache, `resolve_and_record`,
-//! `project_scope_allowed`, the loader filters) lives in `fuigo-shell`.
+//! **Trusting a folder** means its project config (hooks, `.envrc`, project MCP/LSP servers, project permission
+//! rules, instructions, skills) loads and its shell commands carry the user's authority, as upstream and the peers do
+//! it. An **untrusted** folder loads no executable project config, every shell command there that no user grant covers
+//! asks (or is refused when nothing can ask), and Fuigo itself starts no `git`, `jj` or `direnv` there.
 //!
-//! ## Precedence (canonical; see [`decide`])
-//! 1. Feature flag OFF  → trusted (no gating).
-//! 2. Store (this workspace recorded trusted) → trusted.
-//!    An explicit `--trust` grant is persisted to the store up front (see [`grant_folder_trust`]), so it is honored here.
-//! 3. Key unrecordable (the user's own `$HOME`, the filesystem root, or a non-absolute path) → trusted.
-//!    The store refuses to persist such an over-broad root, so gating would re-prompt forever on a key that can never persist.
-//!    See [`crate::trust::is_unsafe_trust_root`].
-//! 4. No trust-sensitive configs present → trusted (nothing to gate).
-//! 5. Interactive TTY   → prompt the user (y/N).
-//! 6. Otherwise (headless) → untrusted.
+//! ## Precedence ([`decide`])
+//! 1. No trust key ([`crate::trust::trust_key`]: canonicalize failed, non-UTF-8, `$HOME`, `/`) → Untrusted.
+//! 2. The user's own `[folder_trust] enabled = false` (absolute user home or managed config) or
+//!    `FUIGO_FOLDER_TRUST=0` → Trusted, with a loud warning. A local/dev build (no release stamp) → Trusted (inert).
+//!    The remote kill switch is ignored.
+//! 3. A relative `FUIGO_HOME`, no home, or an unreadable store → Untrusted.
+//! 4. A "no" from this process ([`decline_folder_trust_key`], `/untrust`) → Untrusted, whatever the store says.
+//! 5. A stored "no" covering the key → Untrusted (it beats the config list, so `/untrust` always revokes).
+//! 6. `[folder_trust] trusted_folders` in the user's own config (or managed config) covering the key → Trusted.
+//! 7. A stored "yes" at the current consent ([`crate::trust::CONSENT_V`]) → Trusted.
+//! 8. A stored "yes" from before 1.0.35 (Legacy) → asked once more (`Prompt(Upgrade)`), else Untrusted; no record →
+//!    `Prompt(New)`, else Untrusted. While a question is pending the folder is Untrusted.
 //!
-//! How the consume side caches this verdict is a `fuigo-shell` concern, documented there.
-//! (For example, the rule-4 allow is provisional and re-checked rather than cached.)
+//! [`dir_trust`] caches the command-side verdict per canonical directory, validated by a fingerprint of the trust
+//! inputs (store, user and managed config, worktree registry, the switch, this process's declines); errors and
+//! pending questions are never cached.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use parking_lot::Mutex;
 
 use toml::Value as TomlValue;
-use fuigo_config_types::{BoolFlag, RemoteSettings};
+use fuigo_config_types::BoolFlag;
 
-use crate::trust::{TrustStore, workspace_key};
+pub use crate::trust::{CONSENT_V, Coverage, KeyError};
+use crate::trust::{TrustStore, trust_key};
 
-/// The pure trust outcome for a set of inputs.
+/// Why a folder is not trusted for commands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UntrustedReason {
+    /// The folder has no trust key (canonicalize failed, non-UTF-8, home or filesystem root).
+    Key(KeyError),
+    /// The user declined this folder (stored, or in this process).
+    Declined(PathBuf),
+    /// Trusted before 1.0.35 (settings only); asked once more before it covers commands.
+    Legacy(PathBuf),
+    /// Never decided.
+    Undecided(PathBuf),
+    /// The trust inputs could not be read (relative `FUIGO_HOME`, no home, unreadable store).
+    Inputs,
+}
+
+impl UntrustedReason {
+    /// The folder's trust key, when it has one.
+    pub fn key(&self) -> Option<&Path> {
+        match self {
+            Self::Declined(k) | Self::Legacy(k) | Self::Undecided(k) => Some(k),
+            Self::Key(_) | Self::Inputs => None,
+        }
+    }
+
+    /// Whether the folder is the user's home or the filesystem root (or otherwise can never be trusted).
+    pub fn unrecordable(&self) -> bool {
+        matches!(self, Self::Key(KeyError::Unrecordable))
+    }
+}
+
+/// u35 t1 (design d2 §5.4): what a session that cannot ask says when a shell command was not run because its folder
+/// is not trusted (headless, `dontAsk`).
+pub fn untrusted_command_refusal(reason: &UntrustedReason) -> String {
+    if reason.unrecordable() {
+        return "Not run: home and root folders can't be trusted; run Fuigo from a project folder, or pass an allow \
+                rule such as --allow 'Bash(cargo test *)'."
+            .to_owned();
+    }
+    let folder = reason.key().map_or_else(|| "this folder".to_owned(), |key| key.display().to_string());
+    format!(
+        "Not run: {folder} is not a trusted folder and this session can't ask. Run \"fuigo --trust\" there once, or \
+         add to ~/.fuigo/config.toml: [folder_trust] trusted_folders = [\"{folder}\"] (a project's own config can't \
+         set this). An allow rule such as --allow 'Bash(cargo test *)' also works."
+    )
+}
+
+/// u35 t1 (design d2 §5.4): what a session that cannot ask says once at start in a folder that is not trusted.
+pub fn untrusted_session_notice(reason: &UntrustedReason) -> String {
+    let refusal = untrusted_command_refusal(reason);
+    let rest = refusal.strip_prefix("Not run: ").unwrap_or(&refusal);
+    format!("shell commands without an allow rule will not run: {rest}")
+}
+
+/// Why the folder-trust question is asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrustOutcome {
-    /// Repo-local servers allowed.
+pub enum PromptReason {
+    /// Never decided.
+    New,
+    /// Trusted before 1.0.35 for its settings only: asked once more, because trust now also covers commands.
+    Upgrade,
+}
+
+/// The folder-trust decision for a folder ([`decide`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustDecision {
     Trusted,
-    /// Repo-local servers blocked.
-    Untrusted,
-    /// Interactive: ask the user.
-    Prompt,
+    Untrusted(UntrustedReason),
+    /// Interactive: ask the user. The folder is Untrusted until answered.
+    Prompt(PromptReason),
 }
 
-/// Inputs to the pure [`decide`] precedence function.
-#[derive(Debug, Clone, Copy)]
-pub struct DecideInputs {
-    pub store_trusted: bool,
-    pub repo_configs_present: bool,
-    pub is_interactive: bool,
-    /// False when the workspace key is an over-broad root the store refuses to record (home, filesystem root, non-absolute).
-    /// See [`crate::trust::is_unsafe_trust_root`].
-    pub key_recordable: bool,
+impl TrustDecision {
+    pub fn is_trusted(&self) -> bool {
+        matches!(self, Self::Trusted)
+    }
 }
 
-/// Pure trust-decision precedence. No I/O; unit-tested directly.
-/// See the module docs for the ordered precedence.
-pub fn decide(feature_enabled: bool, i: &DecideInputs) -> TrustOutcome {
-    if !feature_enabled {
-        return TrustOutcome::Trusted;
-    }
-    if i.store_trusted {
-        return TrustOutcome::Trusted;
-    }
-    // An over-broad root the store can't record (the user's own $HOME or fs-root, never a fetched repo) can't be durably gated
-    // Trust it instead of prompting on a key that can never persist (mirrors the feature-off default)
-    if !i.key_recordable {
-        return TrustOutcome::Trusted;
-    }
-    if !i.repo_configs_present {
-        return TrustOutcome::Trusted;
-    }
-    if i.is_interactive {
-        return TrustOutcome::Prompt;
-    }
-    TrustOutcome::Untrusted
+/// The command-side trust verdict for a directory or a command's directories.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandTrust {
+    Trusted,
+    Untrusted(UntrustedReason),
 }
 
-/// Gather the [`DecideInputs`] for `cwd` (store trust, repo configs, interactivity), keyed by `key`.
-/// The shell's `compute` and the launch-dir resolve both gather through here, so the store read and repo-config scan cannot drift across callers.
-pub fn decide_inputs(cwd: &Path, key: &Path) -> DecideInputs {
-    decide_inputs_with_interactive(cwd, key, is_interactive())
-}
-
-/// Like [`decide_inputs`] but with caller-supplied interactivity, so callers that determine it differently still share the same gather.
-/// The pager TUI passes `stdin().is_terminal()` ONLY.
-/// It redirects native stderr before resolving trust, so the default [`is_interactive`] (`stdin && stderr`) is false and the prompt never shows.
-pub fn decide_inputs_with_interactive(
-    cwd: &Path,
-    key: &Path,
-    is_interactive: bool,
-) -> DecideInputs {
-    DecideInputs {
-        store_trusted: is_trusted_this_process(key),
-        // Deliberate second discover: the caller's `key` came from `workspace_key`, its own git2 discover
-        // `repo_configs_present` runs `RepoDirChain::resolve`, which discovers the same repo again
-        // Collapsing the two would mean threading the resolved root into key derivation, rippling `workspace_key` repo-wide
-        repo_configs_present: repo_configs_present(cwd),
-        is_interactive,
-        // An over-broad key (home / fs-root / non-absolute) can never be recorded
-        // by the store, so decide() trusts it rather than prompt on a key that
-        // can't persist (Case 2: cwd IS $HOME, incl. the default `~/.fuigo`).
-        key_recordable: !crate::trust::is_unsafe_trust_root(key),
+impl CommandTrust {
+    pub fn is_trusted(&self) -> bool {
+        matches!(self, Self::Trusted)
     }
 }
 
 /// Whether the whole folder-trust system is inert (auto-trusts everything) for this binary: true on a local/dev build (no `FUIGO_VERSION` stamp).
-/// Every trust auto-grant site calls this; when true fuigo never prompts, never gates repo-local configs, and does no `trusted_folders.toml` I/O.
+/// Every trust auto-grant site calls this; when true fuigo never prompts, never gates, and does no `trusted_folders.toml` I/O.
 pub fn folder_trust_inert() -> bool {
     is_local_build()
 }
@@ -124,63 +144,449 @@ fn is_local_build() -> bool {
     option_env!("FUIGO_VERSION").is_none()
 }
 
-/// Resolve whether the folder-trust gate is enabled.
-///
-/// On a local/dev build (no `FUIGO_VERSION` release stamp) the feature is OFF regardless of env/config/remote: a self-built fuigo auto-trusts.
-/// Folder-trust applies only to shipped, release-stamped binaries.
-///
-/// On a release-stamped build, normal precedence (via `BoolFlag`):
-/// env `FUIGO_FOLDER_TRUST` > `[folder_trust] enabled` (user) > managed > remote `folder_trust_enabled` > default **true**.
-/// The remote kill-switch or a `[folder_trust] enabled = false` opt-out turns it back off.
-pub fn feature_enabled(remote: Option<&RemoteSettings>) -> bool {
-    feature_enabled_for_build(remote, is_local_build())
+/// The warning shown once when the user switched folder trust off (owner decision D2).
+pub const DISABLED_WARNING: &str =
+    "Folder trust is off: every folder's config and commands run with your authority";
+
+// ── Trust inputs (store, config list, switch), cached by fingerprint ─────────────────────────────
+
+/// One file's identity for the fingerprint: absent, or (length, mtime, inode-ish, permissions, status-change time).
+/// u35 t2 (Astra 3): the permissions and the status-change time are in it, so a `chmod` (a store made unreadable)
+/// invalidates every verdict cached before it, though the length, mtime and inode stay the same.
+type FileStamp = Option<(u64, Option<std::time::SystemTime>, u64, u32, (i64, i64))>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Fingerprint {
+    home: Option<PathBuf>,
+    files: Vec<FileStamp>,
+    switch: Option<std::ffi::OsString>,
+    test_version: bool,
+    declines: u64,
 }
 
-/// `feature_enabled` with the local-build flag fed in so both arms are unit-testable.
-fn feature_enabled_for_build(remote: Option<&RemoteSettings>, is_local_build: bool) -> bool {
-    // Local/dev builds never gate (auto-trust): folder-trust applies only to shipped, release-stamped binaries
-    // Even an explicit FUIGO_FOLDER_TRUST/config opt-in is ignored here so a self-built fuigo never prompts
-    if is_local_build {
+fn file_stamp(path: &Path) -> FileStamp {
+    let meta = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let ino = {
+        use std::os::unix::fs::MetadataExt;
+        meta.ino() ^ meta.dev().rotate_left(32)
+    };
+    #[cfg(not(unix))]
+    let ino = 0;
+    #[cfg(unix)]
+    let (mode, changed) = {
+        use std::os::unix::fs::MetadataExt;
+        (meta.mode(), (meta.ctime(), meta.ctime_nsec()))
+    };
+    #[cfg(not(unix))]
+    let (mode, changed) = (u32::from(meta.permissions().readonly()), (0, 0));
+    Some((meta.len(), meta.modified().ok(), ino, mode, changed))
+}
+
+/// The worktree registry file the read-write open would use under `home` (per host on network mounts), resolved once
+/// per home (it runs a statfs and a hostname lookup).
+fn worktree_db_path(home: &Path) -> PathBuf {
+    static CACHE: LazyLock<Mutex<HashMap<PathBuf, PathBuf>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+    if let Some(path) = CACHE.lock().get(home) {
+        return path.clone();
+    }
+    let path = fuigo_fast_worktree::WorktreeDb::resolve_db_path(home);
+    CACHE.lock().insert(home.to_path_buf(), path.clone());
+    path
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(suffix);
+    PathBuf::from(os)
+}
+
+/// u35 t1 (design d2 §2.3, Grok d2 H3, Astra d2 M5): the files whose content decides folder trust: the store, the user
+/// and managed config, and the worktree registry Fuigo actually opens (`WorktreeDb::resolve_db_path`, per-host on a
+/// network mount) with its `-wal`/`-shm`/`-journal` sidecars. Empty when no absolute user home resolves (then nothing
+/// is read from it either). The protected-edit floor compares these by physical path AND by file identity, so a
+/// symlink, a hard link or a renamed path cannot be used to write them.
+pub fn trust_input_paths() -> Vec<PathBuf> {
+    let Some(home) = fuigo_config::user_fuigo_home() else {
+        return Vec::new();
+    };
+    let db = worktree_db_path(&home);
+    let mut paths = vec![
+        home.join(crate::trust::TRUST_FILE_NAME),
+        home.join(fuigo_config::USER_CONFIG_FILENAME),
+        home.join(fuigo_config::MANAGED_CONFIG_FILENAME),
+        db.clone(),
+    ];
+    paths.extend(["-wal", "-shm", "-journal"].map(|s| with_suffix(&db, s)));
+    paths
+}
+
+/// Whether the physical `path` IS one of the [`trust_input_paths`]: the same resolved path, or the same file (device
+/// and inode on Unix, file index on Windows) reached through a hard link or another name.
+pub fn is_trust_input(path: &Path) -> bool {
+    let inputs = trust_input_paths();
+    if inputs.is_empty() {
         return false;
     }
-    fn from_toml(v: Option<&TomlValue>) -> Option<bool> {
-        v?.get("folder_trust")?.get("enabled")?.as_bool()
+    let target = same_file::Handle::from_path(path).ok();
+    inputs.iter().any(|input| {
+        let physical = dunce::canonicalize(input).unwrap_or_else(|_| input.clone());
+        physical == path
+            || target
+                .as_ref()
+                .is_some_and(|t| same_file::Handle::from_path(&physical).ok().as_ref() == Some(t))
+    })
+}
+
+fn fingerprint() -> Fingerprint {
+    let home = fuigo_config::user_fuigo_home();
+    // Every trust input, the registry's `-shm`/`-journal` sidecars included (empty when no absolute home resolves).
+    let files = trust_input_paths().iter().map(|p| file_stamp(p)).collect();
+    Fingerprint {
+        home,
+        files,
+        switch: std::env::var_os("FUIGO_FOLDER_TRUST"),
+        test_version: std::env::var_os(fuigo_version::TEST_VERSION_ENV).is_some(),
+        declines: DECLINE_GENERATION.load(Ordering::Acquire),
     }
-    let user = fuigo_config::load_from_disk().ok();
-    let managed = fuigo_config::load_managed_config().ok();
-    BoolFlag::env("FUIGO_FOLDER_TRUST")
-        .config(from_toml(user.as_ref()))
-        .managed(from_toml(managed.as_ref()))
-        .feature_flag(remote.and_then(|r| r.folder_trust_enabled))
+}
+
+/// The trust inputs read from the user's absolute home: the store, the switch, and the `trusted_folders` keys.
+#[derive(Debug)]
+struct TrustInputs {
+    /// `None`: no absolute user home (relative `FUIGO_HOME` or none): nothing is trusted.
+    store: Option<TrustStore>,
+    /// The user's own `[folder_trust] enabled = false` or `FUIGO_FOLDER_TRUST=0`.
+    disabled: bool,
+    /// `[folder_trust] trusted_folders`, each resolved to its trust key.
+    config_keys: Vec<PathBuf>,
+    /// u35 t2 (Astra 6): the user or managed config could not be read or parsed. The decision still uses what did
+    /// load (a store grant counts; a malformed config does not untrust every folder), but neither these inputs nor a
+    /// verdict derived from them is cached: the next use reads and decides again.
+    load_failed: bool,
+}
+
+fn folder_trust_table(value: Option<&TomlValue>) -> Option<&toml::map::Map<String, TomlValue>> {
+    value?.get("folder_trust")?.as_table()
+}
+
+fn load_inputs() -> TrustInputs {
+    let home = fuigo_config::user_fuigo_home();
+    // The user and managed config are read only from an absolute user home (`user_fuigo_home` is `None` otherwise).
+    let mut load_failed = false;
+    let mut loaded = |layer: &str, result: Result<TomlValue, _>| match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            load_failed = true;
+            tracing::warn!(layer, %error, "folder trust: could not read the config; its folder-trust settings are ignored until it loads");
+            None
+        }
+    };
+    let user = home.as_ref().and_then(|_| loaded("user", fuigo_config::load_from_disk()));
+    let managed = home.as_ref().and_then(|_| loaded("managed", fuigo_config::load_managed_config()));
+    let enabled_of = |v: Option<&TomlValue>| folder_trust_table(v)?.get("enabled")?.as_bool();
+    let enabled = BoolFlag::env("FUIGO_FOLDER_TRUST")
+        .config(enabled_of(user.as_ref()))
+        .managed(enabled_of(managed.as_ref()))
         .default(true)
         .resolve()
-        .value
+        .value;
+    let mut config_keys = Vec::new();
+    for layer in [managed.as_ref(), user.as_ref()] {
+        let Some(list) = folder_trust_table(layer).and_then(|t| t.get("trusted_folders")).and_then(TomlValue::as_array)
+        else {
+            continue;
+        };
+        for entry in list.iter().filter_map(TomlValue::as_str) {
+            let path = match entry.strip_prefix("~/") {
+                Some(rest) => match fuigo_dirs::home_dir() {
+                    Some(h) => h.join(rest),
+                    None => continue,
+                },
+                None => PathBuf::from(entry),
+            };
+            if !path.is_absolute() {
+                tracing::warn!(entry, "[folder_trust] trusted_folders: ignoring a relative path");
+                continue;
+            }
+            match trust_key(&path) {
+                Ok(key) => config_keys.push(key),
+                Err(KeyError::Unrecordable) => {
+                    tracing::warn!(entry, "[folder_trust] trusted_folders: home and root folders can't be trusted; ignored");
+                }
+                Err(KeyError::Canonicalize) => {
+                    tracing::debug!(entry, "[folder_trust] trusted_folders: folder not found; ignored");
+                }
+            }
+        }
+    }
+    let store = crate::trust::TrustStore::default_path().map(TrustStore::load_from);
+    TrustInputs { store, disabled: !enabled, config_keys, load_failed }
 }
 
-/// Process-local explicit grant/deny, separate from [`TrustStore`] durability.
-/// When the sandbox denies the store write, this process still honors the latest user decision.
-/// The consume side reads it via [`is_trusted_this_process`].
-static PROCESS_DECISIONS: LazyLock<Mutex<HashMap<PathBuf, bool>>> =
+/// The trust inputs last read, with the fingerprint they were read at.
+type CachedInputs = Option<(Fingerprint, Arc<TrustInputs>)>;
+
+static INPUTS: LazyLock<Mutex<CachedInputs>> = LazyLock::new(|| Mutex::new(None));
+
+fn inputs_for(fp: &Fingerprint) -> Arc<TrustInputs> {
+    if let Some((cached_fp, inputs)) = INPUTS.lock().as_ref()
+        && cached_fp == fp
+    {
+        return inputs.clone();
+    }
+    let inputs = Arc::new(load_inputs());
+    if !inputs.load_failed {
+        *INPUTS.lock() = Some((fp.clone(), inputs.clone()));
+    }
+    inputs
+}
+
+/// Whether the user switched folder trust off (their own config or `FUIGO_FOLDER_TRUST=0`); the TUI and headless
+/// startup show [`DISABLED_WARNING`] when it is.
+pub fn folder_trust_disabled() -> bool {
+    !folder_trust_inert() && inputs_for(&fingerprint()).disabled
+}
+
+fn warn_disabled_once() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| tracing::warn!("{DISABLED_WARNING}"));
+}
+
+// ── This process's declines ───────────────────────────────────────────────────────────────────────
+
+/// Keys the user declined in this process (`n`, `/untrust`). A decline beats the store and the config list for this
+/// process even when it could not be saved (Grok d2 M6). There is no process-local grant: a "yes" that could not be
+/// saved leaves the folder untrusted.
+static PROCESS_DECLINES: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+static DECLINE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn set_process_decline(key: &Path, declined: bool) {
+    let changed = if declined {
+        PROCESS_DECLINES.lock().insert(key.to_path_buf())
+    } else {
+        PROCESS_DECLINES.lock().remove(key)
+    };
+    if changed {
+        DECLINE_GENERATION.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// A trust change this process made (or saw): every cached verdict is re-derived on its next use.
+pub fn note_trust_changed() {
+    DECLINE_GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
+/// The current trust-input fingerprint generation, for callers that cache something derived from trust (the
+/// permission manager's compiled project policy): changes whenever any trust input or this process's declines change.
+pub fn trust_generation() -> u64 {
+    use std::hash::{Hash, Hasher};
+    let fp = fingerprint();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    fp.home.hash(&mut h);
+    fp.files.hash(&mut h);
+    fp.switch.hash(&mut h);
+    fp.test_version.hash(&mut h);
+    fp.declines.hash(&mut h);
+    h.finish()
+}
+
+// ── The decision ─────────────────────────────────────────────────────────────────────────────────
+
+/// The folder-trust decision for `cwd` (see the module docs for the precedence). `interactive`: whether the caller can
+/// ask the user now (the TUI question, an ACP v2 client); otherwise an undecided or Legacy folder is Untrusted.
+pub fn decide(cwd: &Path, interactive: bool) -> TrustDecision {
+    if folder_trust_inert() {
+        return TrustDecision::Trusted;
+    }
+    decide_in(cwd, interactive, &inputs_for(&fingerprint()))
+}
+
+/// [`decide`] over trust inputs already read.
+fn decide_in(cwd: &Path, interactive: bool, inputs: &TrustInputs) -> TrustDecision {
+    let Ok(physical) = dunce::canonicalize(cwd) else {
+        return TrustDecision::Untrusted(UntrustedReason::Key(KeyError::Canonicalize));
+    };
+    match trust_key(&physical) {
+        Ok(key) => decide_with(&physical, &key, interactive, inputs),
+        Err(e) => TrustDecision::Untrusted(UntrustedReason::Key(e)),
+    }
+}
+
+/// [`decide`] for an already-resolved trust key.
+pub fn decide_key(key: &Path, interactive: bool) -> TrustDecision {
+    if folder_trust_inert() {
+        return TrustDecision::Trusted;
+    }
+    let inputs = inputs_for(&fingerprint());
+    decide_with(key, key, interactive, &inputs)
+}
+
+/// The precedence for the physical folder `path` whose trust key is `key` (a record for a subfolder of the repository
+/// counts for that subfolder: the most specific "no" wins).
+fn decide_with(path: &Path, key: &Path, interactive: bool, inputs: &TrustInputs) -> TrustDecision {
+    let key_buf = || key.to_path_buf();
+    if inputs.disabled {
+        warn_disabled_once();
+        return TrustDecision::Trusted;
+    }
+    let Some(store) = inputs.store.as_ref().filter(|s| s.disk_readable()) else {
+        return TrustDecision::Untrusted(UntrustedReason::Inputs);
+    };
+    if PROCESS_DECLINES.lock().contains(key) {
+        return TrustDecision::Untrusted(UntrustedReason::Declined(key_buf()));
+    }
+    let coverage = store.coverage(path, key);
+    if coverage == Coverage::Declined {
+        return TrustDecision::Untrusted(UntrustedReason::Declined(key_buf()));
+    }
+    if inputs.config_keys.iter().any(|k| k == key) {
+        return TrustDecision::Trusted;
+    }
+    match coverage {
+        Coverage::Trusted { consent } if consent >= CONSENT_V => TrustDecision::Trusted,
+        Coverage::Trusted { .. } if interactive => TrustDecision::Prompt(PromptReason::Upgrade),
+        Coverage::Trusted { .. } => TrustDecision::Untrusted(UntrustedReason::Legacy(key_buf())),
+        Coverage::None | Coverage::Declined if interactive => TrustDecision::Prompt(PromptReason::New),
+        Coverage::None | Coverage::Declined => TrustDecision::Untrusted(UntrustedReason::Undecided(key_buf())),
+    }
+}
+
+/// Per canonical directory: the fingerprint it was derived under and the verdict.
+static DIR_CACHE: LazyLock<Mutex<HashMap<PathBuf, (Fingerprint, CommandTrust)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn record_process_decision(key: &Path, trusted: bool) {
-    PROCESS_DECISIONS.lock().insert(key.to_path_buf(), trusted);
+/// The command-side verdict for one directory: Trusted only when [`decide`] (not interactive) is Trusted. Spawns
+/// nothing. Cached per canonical directory under the trust-input fingerprint; key errors and undecided/Legacy folders
+/// (a question may be pending) are never cached.
+pub fn dir_trust(dir: &Path) -> CommandTrust {
+    #[cfg(test)]
+    if let Some(forced) = test_folder_trust(dir) {
+        return forced;
+    }
+    if folder_trust_inert() {
+        return CommandTrust::Trusted;
+    }
+    let Ok(canonical) = dunce::canonicalize(dir) else {
+        return CommandTrust::Untrusted(UntrustedReason::Key(KeyError::Canonicalize));
+    };
+    let fp = fingerprint();
+    if let Some((cached_fp, verdict)) = DIR_CACHE.lock().get(&canonical)
+        && *cached_fp == fp
+    {
+        return verdict.clone();
+    }
+    let inputs = inputs_for(&fp);
+    let verdict = match decide_in(&canonical, false, &inputs) {
+        TrustDecision::Trusted => CommandTrust::Trusted,
+        TrustDecision::Untrusted(reason) => CommandTrust::Untrusted(reason),
+        TrustDecision::Prompt(_) => CommandTrust::Untrusted(UntrustedReason::Undecided(canonical.clone())),
+    };
+    let cacheable = !inputs.load_failed
+        && matches!(
+            verdict,
+            CommandTrust::Trusted | CommandTrust::Untrusted(UntrustedReason::Declined(_) | UntrustedReason::Inputs)
+        );
+    if cacheable {
+        DIR_CACHE.lock().insert(canonical, (fp, verdict.clone()));
+    }
+    verdict
 }
 
-/// Latest process-local decision, else the durable store.
-pub fn is_trusted_this_process(key: &Path) -> bool {
-    if let Some(&trusted) = PROCESS_DECISIONS.lock().get(key) {
-        return trusted;
+/// Trusted iff every directory is ([`dir_trust`]); the first untrusted directory's reason otherwise.
+pub fn command_trust<'a>(dirs: impl IntoIterator<Item = &'a Path>) -> CommandTrust {
+    for dir in dirs {
+        if let CommandTrust::Untrusted(reason) = dir_trust(dir) {
+            return CommandTrust::Untrusted(reason);
+        }
     }
-    TrustStore::load().is_trusted(key)
+    CommandTrust::Trusted
 }
+
+/// Install this process's folder-trust judges: the repository-tool gate (`fuigo_tty_utils::repo_exec`) and the shell
+/// runner's backstop. Every binary entry calls it once at start, before anything can spawn.
+pub fn install_process_judges() {
+    fuigo_tty_utils::install_repo_exec_judge(|dir| dir_trust(dir).is_trusted());
+    crate::permission::install_runner_trust_judge();
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_FOLDER_TRUST: std::cell::RefCell<TestTrustMode> = const { std::cell::RefCell::new(TestTrustMode::Default) };
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+enum TestTrustMode {
+    /// Tests that do not choose: every folder Trusted (existing suites keep r14 behaviour).
+    Default,
+    Fixed(CommandTrust),
+    /// Trusted only under these folders (as given and canonical); every other folder Undecided.
+    Only(Vec<PathBuf>),
+    /// The real decision (store, config, keys).
+    Real,
+}
+
+#[cfg(test)]
+fn test_folder_trust(dir: &Path) -> Option<CommandTrust> {
+    TEST_FOLDER_TRUST.with(|m| match &*m.borrow() {
+        TestTrustMode::Default => Some(CommandTrust::Trusted),
+        TestTrustMode::Fixed(t) => Some(t.clone()),
+        TestTrustMode::Only(roots) => {
+            // u35 t2 (Astra 7): physical containment only, as the real decision (a symlink inside a trusted folder
+            // that points elsewhere is the folder it points to; a folder that does not resolve is not trusted).
+            let Ok(canonical) = dunce::canonicalize(dir) else {
+                return Some(CommandTrust::Untrusted(UntrustedReason::Key(KeyError::Canonicalize)));
+            };
+            Some(if roots.iter().any(|root| canonical.starts_with(root)) {
+                CommandTrust::Trusted
+            } else {
+                CommandTrust::Untrusted(UntrustedReason::Undecided(canonical))
+            })
+        }
+        TestTrustMode::Real => None,
+    })
+}
+
+/// Test-only: until dropped, [`dir_trust`] on this thread returns `trust` (or the real decision with
+/// [`TestFolderTrust::real`]). Without one, every folder is Trusted in this crate's tests.
+#[cfg(test)]
+pub(crate) struct TestFolderTrust(TestTrustMode);
+
+#[cfg(test)]
+impl TestFolderTrust {
+    pub(crate) fn set(trust: CommandTrust) -> Self {
+        Self(TEST_FOLDER_TRUST.with(|m| m.replace(TestTrustMode::Fixed(trust))))
+    }
+    pub(crate) fn untrusted() -> Self {
+        Self::set(CommandTrust::Untrusted(UntrustedReason::Undecided(PathBuf::from("/untrusted-test-folder"))))
+    }
+    /// Trusted only physically under `roots` (each by its canonical path).
+    pub(crate) fn only(roots: &[&Path]) -> Self {
+        let all = roots.iter().map(|root| dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())).collect();
+        Self(TEST_FOLDER_TRUST.with(|m| m.replace(TestTrustMode::Only(all))))
+    }
+    pub(crate) fn real() -> Self {
+        Self(TEST_FOLDER_TRUST.with(|m| m.replace(TestTrustMode::Real)))
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestFolderTrust {
+    fn drop(&mut self) {
+        let prev = std::mem::replace(&mut self.0, TestTrustMode::Default);
+        TEST_FOLDER_TRUST.with(|m| *m.borrow_mut() = prev);
+    }
+}
+
+// ── Grants, declines, revocation ────────────────────────────────────────────────────────────────
 
 /// Why a grant was refused before anything was recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrantRefuse {
     /// Local/dev build: folder-trust is inert (auto-trusts everything).
     InertBuild,
-    /// Home, filesystem root, or non-absolute key: never recorded, and auto-trusted by [`decide`].
+    /// Home, filesystem root, a non-UTF-8 or non-absolute path: never trusted.
     UnsafeRoot,
     /// No user home, or a relative store home (that would be a cwd-relative store).
     NoHome,
@@ -194,7 +600,10 @@ impl std::fmt::Display for GrantRefuse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InertBuild => write!(f, "folder trust is off in this build"),
-            Self::UnsafeRoot => write!(f, "folder trust is not recorded for this path"),
+            Self::UnsafeRoot => write!(
+                f,
+                "This folder can't be trusted (home and root folders never are). Run Fuigo from a project folder."
+            ),
             Self::NoHome => write!(
                 f,
                 "Couldn't save folder trust: no home directory for the trust store. \
@@ -222,19 +631,19 @@ impl std::error::Error for GrantRefuse {}
 pub enum PersistStatus {
     /// Written to `trusted_folders.toml`.
     Durable,
-    /// The store was read (or is missing) but the lock or write failed (e.g. `--sandbox` denies writes under the home).
-    /// Nothing was published; the grant holds for this process only.
-    ProcessLocalOnly { error: std::io::Error },
+    /// The store was read (or is missing) but the lock or write failed (e.g. `--sandbox` denies writes under the
+    /// home). Nothing was published, and the folder stays untrusted (there is no process-local grant).
+    NotSaved { error: std::io::Error },
 }
 
-/// Result of an explicit grant (`--trust`, the trust question, `/hooks trust`).
+/// Result of an explicit grant (`--trust`, the trust question, `/trust`).
 #[derive(Debug)]
 pub enum GrantOutcome {
     /// A record was inserted; see `persist` for whether it reached disk.
     Granted { key: PathBuf, persist: PersistStatus },
-    /// The exact key is already durably trusted; the store was not rewritten.
+    /// The exact key is already durably trusted (current consent); the store was not rewritten.
     AlreadyDurable { key: PathBuf },
-    /// Nothing was recorded, durable or process-local.
+    /// Nothing was recorded.
     Refused { reason: GrantRefuse },
 }
 
@@ -242,11 +651,11 @@ impl std::fmt::Display for GrantOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Granted {
-                persist: PersistStatus::ProcessLocalOnly { error },
+                persist: PersistStatus::NotSaved { error },
                 ..
             } => write!(
                 f,
-                "Couldn't save folder trust ({error}); the folder is trusted for this session only. \
+                "Couldn't save folder trust ({error}); the folder stays untrusted. \
                  Check that your Fuigo home ($FUIGO_HOME, default ~/.fuigo) is writable, \
                  then run `fuigo --trust` in this folder."
             ),
@@ -261,11 +670,9 @@ impl std::error::Error for GrantOutcome {}
 /// How a gate should treat a [`GrantOutcome`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrantResolution {
-    /// Durable, already durable, or auto-trusted (inert build / unrecordable root): the gate is answered.
+    /// Durable, already durable, or auto-trusted (inert build): the folder is trusted.
     Trusted,
-    /// Trusted in this process only; the next process will ask again.
-    SessionLocal,
-    /// Nothing recorded: the folder is not trusted.
+    /// Nothing durable was recorded: the folder is not trusted.
     Unrecorded,
 }
 
@@ -277,29 +684,27 @@ impl GrantOutcome {
                 persist: PersistStatus::Durable,
                 ..
             }
-            | Self::AlreadyDurable { .. } => GrantResolution::Trusted,
+            | Self::AlreadyDurable { .. }
+            | Self::Refused {
+                reason: GrantRefuse::InertBuild,
+            } => GrantResolution::Trusted,
             Self::Granted {
-                persist: PersistStatus::ProcessLocalOnly { .. },
+                persist: PersistStatus::NotSaved { .. },
                 ..
-            } => GrantResolution::SessionLocal,
-            Self::Refused { reason } => match reason {
-                GrantRefuse::InertBuild | GrantRefuse::UnsafeRoot => GrantResolution::Trusted,
-                GrantRefuse::NoHome | GrantRefuse::Unreadable | GrantRefuse::KeyMoved => {
-                    GrantResolution::Unrecorded
-                }
-            },
+            }
+            | Self::Refused { .. } => GrantResolution::Unrecorded,
         }
     }
 
-    /// True only when the grant answers the gate durably (or the folder is auto-trusted).
+    /// True only when the grant answers the gate durably (or the build is inert).
     #[must_use]
     pub fn dismisses_gate(&self) -> bool {
         matches!(self.resolution(), GrantResolution::Trusted)
     }
 }
 
-/// Report a `--trust` result on stderr. Durable and auto-trusted outcomes are silent; a session-only grant or a
-/// refusal prints its reason and next step, so `--trust` never fails silently.
+/// Report a `--trust` result on stderr. Durable and auto-trusted outcomes are silent; an unsaved grant or a refusal
+/// prints its reason and next step, so `--trust` never fails silently.
 pub fn report_cli_trust_grant(outcome: &GrantOutcome) {
     if outcome.dismisses_gate() {
         return;
@@ -308,22 +713,26 @@ pub fn report_cli_trust_grant(outcome: &GrantOutcome) {
     fuigo_tty_utils::cli_eprintln!("{}", fuigo_tty_utils::untrusted(outcome));
 }
 
-/// Persist an explicit `--trust` grant for `workspace_key(cwd)`.
-/// The key is pre-checked (canonical, not an over-broad root) and the store must read cleanly before anything is
-/// recorded; see [`GrantOutcome`]. A grant whose disk write fails is still honored in this process
-/// ([`PersistStatus::ProcessLocalOnly`]); a refused one records nothing.
+/// Persist an explicit `--trust` / `/trust` grant for `trust_key(cwd)` (settings and commands, [`CONSENT_V`]).
 pub fn grant_folder_trust(cwd: &Path) -> GrantOutcome {
-    // Local/dev builds never gate, so there is nothing to grant: `--trust` is a no-op and the store is left untouched (the whole feature is inert)
     if folder_trust_inert() {
         return GrantOutcome::Refused {
             reason: GrantRefuse::InertBuild,
         };
     }
-    grant_folder_trust_key(&workspace_key(cwd))
+    match trust_key(cwd) {
+        Ok(key) => grant_folder_trust_key(&key),
+        Err(KeyError::Unrecordable) => GrantOutcome::Refused {
+            reason: GrantRefuse::UnsafeRoot,
+        },
+        Err(KeyError::Canonicalize) => GrantOutcome::Refused {
+            reason: GrantRefuse::KeyMoved,
+        },
+    }
 }
 
-/// Grant exactly the key the user was shown (the trust question's workspace). Canonicalize-checks it; does not
-/// re-derive [`workspace_key`].
+/// Grant exactly the key the user was shown (the trust question's folder). Canonicalize-checks it; does not
+/// re-derive [`trust_key`].
 pub fn grant_folder_trust_key(key: &Path) -> GrantOutcome {
     checked_grant(TrustStore::default_path(), key)
 }
@@ -359,8 +768,8 @@ fn precheck_grant(key: &Path) -> Option<GrantOutcome> {
     }
     // An existing key must be its own canonical form (an alias or a moved folder is not the key that was shown).
     // A key that does not exist at all is granted as written only when it is absolute and lexically normal: that is
-    // the standalone `fuigo -w` worktree whose recorded source repo was deleted (its `workspace_key` is that recorded
-    // path, see [`crate::trust::workspace_key`]), and such a record can only cover that exact, normal prefix.
+    // the standalone `fuigo -w` worktree whose recorded source repo was deleted, and such a record can only cover
+    // that exact, normal prefix.
     let canonical = match dunce::canonicalize(key) {
         Ok(c) => c,
         Err(e)
@@ -383,7 +792,7 @@ fn precheck_grant(key: &Path) -> Option<GrantOutcome> {
             reason: GrantRefuse::KeyMoved,
         });
     }
-    if crate::trust::is_unsafe_trust_root(key) {
+    if crate::trust::is_unsafe_trust_root(key) || key.to_str().is_none() {
         return Some(GrantOutcome::Refused {
             reason: GrantRefuse::UnsafeRoot,
         });
@@ -403,14 +812,15 @@ fn apply_grant_to_store(store: &mut TrustStore, key: &Path) -> GrantOutcome {
             reason: GrantRefuse::NoHome,
         };
     }
-    // Already durable needs a clean read and an exact trusted record (a missing file is not already durable).
-    if store.has_decision(&key) && store.is_trusted(&key) {
-        record_process_decision(&key, true);
+    // Already durable needs a clean read and an exact record at the current consent (a Legacy record is rewritten).
+    if store.has_decision(&key) && store.coverage(&key, &key) == (Coverage::Trusted { consent: CONSENT_V }) {
+        set_process_decline(&key, false);
         return GrantOutcome::AlreadyDurable { key };
     }
-    match store.record_decision_strict(&key, true) {
+    match store.grant(&key) {
         Ok(crate::trust::Recorded::Durable) => {
-            record_process_decision(&key, true);
+            set_process_decline(&key, false);
+            note_trust_changed();
             GrantOutcome::Granted {
                 key,
                 persist: PersistStatus::Durable,
@@ -423,71 +833,71 @@ fn apply_grant_to_store(store: &mut TrustStore, key: &Path) -> GrantOutcome {
             reason: GrantRefuse::Unreadable,
         },
         Err(crate::trust::TrustPersistError::Publish(error)) => {
-            tracing::debug!(error = %error, "folder trust granted for this process only; durable write denied");
-            record_process_decision(&key, true);
+            tracing::warn!(error = %error, "folder trust: the grant could not be saved; the folder stays untrusted");
             GrantOutcome::Granted {
                 key,
-                persist: PersistStatus::ProcessLocalOnly { error },
+                persist: PersistStatus::NotSaved { error },
             }
         }
     }
 }
 
-/// Revoke trust for `cwd`'s workspace in the durable store and this process.
-///
-/// A never-trusted folder stays undecided: do not persist a decision the user did not make.
-/// Symmetric with [`grant_folder_trust`].
-pub fn revoke_folder_trust_store(cwd: &Path) -> bool {
-    // Local/dev builds never wrote the store, so there is nothing to revoke.
-    if folder_trust_inert() {
-        return false;
-    }
-    let key = workspace_key(cwd);
-    let mut store = TrustStore::load();
-    let was_trusted =
-        store.is_trusted(&key) || PROCESS_DECISIONS.lock().get(&key).copied() == Some(true);
-    if was_trusted {
-        if let Err(e) = store.set_untrusted(&key) {
-            tracing::warn!(
-                path = %key.display(),
-                error = %e,
-                "folder trust: failed to persist untrust decision"
-            );
-        }
-        record_process_decision(&key, false);
-    }
-    was_trusted
-}
-
-/// Persist an accepted interactive (stderr) prompt for `key`. Only a real grant records process-local trust: an
-/// unreadable store is not granted into. Returns the outcome so the caller can report it.
+/// Persist an accepted interactive (stderr) prompt for `key`. Returns the outcome so the caller can report it.
 pub fn persist_trust(store: &mut TrustStore, key: &Path) -> GrantOutcome {
     let outcome = apply_grant_to_store(store, key);
-    match &outcome {
-        GrantOutcome::Granted {
-            persist: PersistStatus::Durable,
-            ..
-        }
-        | GrantOutcome::AlreadyDurable { .. } => {}
-        GrantOutcome::Granted {
-            persist: PersistStatus::ProcessLocalOnly { error },
-            ..
-        } => {
-            tracing::warn!(
-                path = %key.display(),
-                error = %error,
-                "folder trust: failed to persist trust decision"
-            );
-        }
-        GrantOutcome::Refused { reason } => {
-            tracing::warn!(
-                path = %key.display(),
-                ?reason,
-                "folder trust: grant refused; process-local trust not recorded"
-            );
-        }
+    if let GrantOutcome::Refused { reason } = &outcome {
+        tracing::warn!(path = %key.display(), ?reason, "folder trust: grant refused");
     }
     outcome
+}
+
+/// The user said no for `key` (the question's `n`, `/untrust`): held in this process at once, then saved. Returns the
+/// save error when the "no" could not be saved (the caller tells the user: untrusted here, not saved).
+pub fn decline_folder_trust_key(key: &Path) -> Result<(), std::io::Error> {
+    set_process_decline(key, true);
+    if folder_trust_inert() {
+        return Ok(());
+    }
+    let mut store = TrustStore::load();
+    if !store.has_store_path() {
+        return Err(std::io::Error::other("no absolute Fuigo home for the trust store"));
+    }
+    let result = store.set_untrusted(key);
+    note_trust_changed();
+    result
+}
+
+/// The result of `/untrust` ([`revoke_folder_trust_store`]).
+#[derive(Debug)]
+pub enum RevokeOutcome {
+    /// The folder is untrusted now. `was_trusted`: it was trusted before; `saved`: the "no" reached the store.
+    Revoked { key: PathBuf, was_trusted: bool, saved: Result<(), std::io::Error> },
+    /// Nothing to revoke: an inert build, or a folder with no trust key (never trusted).
+    NotApplicable,
+}
+
+impl RevokeOutcome {
+    /// Whether the folder had been trusted.
+    pub fn was_trusted(&self) -> bool {
+        matches!(self, Self::Revoked { was_trusted: true, .. })
+    }
+}
+
+/// `/untrust`: decline `trust_key(cwd)` in the store and in this process, whatever covered it before (a stored grant,
+/// the config list). The next command asks and project settings stop applying.
+pub fn revoke_folder_trust_store(cwd: &Path) -> RevokeOutcome {
+    if folder_trust_inert() {
+        return RevokeOutcome::NotApplicable;
+    }
+    let Ok(key) = trust_key(cwd) else {
+        return RevokeOutcome::NotApplicable;
+    };
+    let was_trusted = decide_key(&key, false).is_trusted();
+    let saved = decline_folder_trust_key(&key);
+    if let Err(e) = &saved {
+        tracing::warn!(path = %key.display(), error = %e, "folder trust: failed to persist untrust decision");
+    }
+    RevokeOutcome::Revoked { key, was_trusted, saved }
 }
 
 #[cfg(test)]
@@ -583,7 +993,7 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
     // `[plugins].paths` loads as auto-trusted ConfigPath plugins; `[permission]` allow/deny/ask rules auto-approve or block tools
     // A clone whose ONLY repo-local config is either must still be gated (else it resolves Trusted and the loader runs ungated)
     for path in crate::project_config::find_project_configs_in(&chain.dirs) {
-        let Ok(root) = fuigo_config::load_config_file(&path) else {
+        let Ok(root) = fuigo_config::load_project_config_file(&path) else {
             continue;
         };
         let has_mcp_servers = root
@@ -730,23 +1140,30 @@ pub fn prompt_for_trust(key: &Path) -> bool {
 /// The prompt text. The folder path is the one untrusted thing in it (a cloned repo picks its own directory name).
 fn write_trust_prompt(err: &mut impl std::io::Write, key: &Path) {
     let _ = writeln!(err);
-    let _ = writeln!(
-        err,
-        "This folder contains repo-local config (MCP/LSP servers, hooks, permission rules) \
-         or project instructions/skills that Fuigo would otherwise apply automatically."
-    );
+    let _ = writeln!(err, "Do you trust the files in this folder?");
     // A hidden or control character in the name shows as one U+FFFD, so the line cannot be made to read like another prompt
     let folder = key.display().to_string();
-    let _ = writeln!(err, "  Folder: {}", fuigo_tty_utils::replace_unsafe_display(&folder, '\u{fffd}'));
-    let _ = write!(
-        err,
-        "Trust the authors of this folder and apply them? [y/N] "
-    );
+    let _ = writeln!(err, "  {}", fuigo_tty_utils::replace_unsafe_display(&folder, '\u{fffd}'));
+    let _ = writeln!(err, "{TRUST_QUESTION_BODY}");
+    let _ = write!(err, "Trust this folder? [y/N] ");
     let _ = err.flush();
 }
 
+/// The explanation under the folder-trust question (TUI, stderr and ACP share it).
+pub const TRUST_QUESTION_BODY: &str = "Trusting it lets Fuigo use this folder's own settings (MCP and LSP servers, hooks, \
+.envrc, permission rules, instructions, skills) and run shell commands here without asking each time. A folder's \
+files can make those run code, so trust only folders whose contents you would run yourself.";
+
+/// The one-time re-ask for a folder trusted before 1.0.35 (settings only).
+pub const TRUST_UPGRADE_BODY: &str = "Fuigo's folder trust now also covers shell commands. You trusted this folder's \
+settings before; trust now means its settings load AND commands run here without asking each time.";
+
+/// What "No" means, in every surface that asks.
+pub const TRUST_DECLINE_LABEL: &str =
+    "No: don't load its settings, and ask unless your approval or grant covers the command (reading, searching and editing still work)";
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// P181 (sweep): the trust prompt is a permission prompt written raw to stderr, and the folder path in it is chosen
@@ -761,71 +1178,8 @@ mod tests {
             !text.chars().any(|c| c != '\n' && (c.is_control() || fuigo_tty_utils::is_unsafe_display_char(c))),
             "{text:?}"
         );
-        assert!(text.contains("  Folder: /w/evil\u{fffd}]0;owned\u{fffd}\u{fffd}dir\u{fffd}Trust? [y/N] y\u{fffd}\n"), "{text:?}");
+        assert!(text.contains("\n  /w/evil\u{fffd}]0;owned\u{fffd}\u{fffd}dir\u{fffd}Trust? [y/N] y\u{fffd}\n"), "{text:?}");
         assert!(text.ends_with("[y/N] "), "{text:?}");
-    }
-
-    fn inputs() -> DecideInputs {
-        DecideInputs {
-            store_trusted: false,
-            repo_configs_present: true,
-            is_interactive: false,
-            // Default: a normal (recordable) key, so the Case-2 rule doesn't fire and every `..inputs()` spread exercises the other rules
-            key_recordable: true,
-        }
-    }
-
-    #[test]
-    fn feature_off_is_always_trusted() {
-        // Even with everything pointing to untrusted, feature off resolves trusted
-        assert_eq!(decide(false, &inputs()), TrustOutcome::Trusted);
-    }
-
-    #[test]
-    fn store_trusted_is_trusted() {
-        let i = DecideInputs {
-            store_trusted: true,
-            ..inputs()
-        };
-        assert_eq!(decide(true, &i), TrustOutcome::Trusted);
-    }
-
-    #[test]
-    fn no_repo_configs_is_trusted_without_prompt() {
-        let i = DecideInputs {
-            repo_configs_present: false,
-            is_interactive: true,
-            ..inputs()
-        };
-        // Nothing to gate resolves Trusted, never Prompt
-        assert_eq!(decide(true, &i), TrustOutcome::Trusted);
-    }
-
-    #[test]
-    fn interactive_with_configs_prompts() {
-        let i = DecideInputs {
-            is_interactive: true,
-            ..inputs()
-        };
-        assert_eq!(decide(true, &i), TrustOutcome::Prompt);
-    }
-
-    #[test]
-    fn headless_with_configs_is_untrusted() {
-        assert_eq!(decide(true, &inputs()), TrustOutcome::Untrusted);
-    }
-
-    #[test]
-    fn unrecordable_key_is_trusted_even_with_configs_and_interactive() {
-        // Case 2: cwd == $HOME (or fs-root / non-absolute)
-        // The store can't record such a key, so gating would re-prompt forever; decide() trusts it, ahead of the repo-configs and interactive rules
-        let i = DecideInputs {
-            store_trusted: false,
-            repo_configs_present: true,
-            is_interactive: true,
-            key_recordable: false,
-        };
-        assert_eq!(decide(true, &i), TrustOutcome::Trusted);
     }
 
     /// A `git init`'d temp dir, so repo discovery is bounded to it instead of any ancestor repo the system temp dir lives in.
@@ -1277,362 +1631,498 @@ mod tests {
     // The crate-shared env-var guard (one definition in `lib.rs`), aliased to the local `EnvVarGuard` name
     use crate::TestEnvGuard as EnvVarGuard;
 
-    /// Simulate a release-stamped build so store I/O runs (a local/dev build makes grant/revoke no-ops).
-    /// Hold the returned guard for the test body.
-    fn simulate_release_build() -> EnvVarGuard {
-        EnvVarGuard::set(fuigo_version::TEST_VERSION_ENV, Path::new("0.0.0-sim"))
+    /// An isolated release-like world: own process (env is process-global), the env lock, a fresh absolute
+    /// `FUIGO_HOME`, `FUIGO_TEST_VERSION` set (so the gate is live) and the switch unset.
+    struct World {
+        home: tempfile::TempDir,
+        _guards: Vec<EnvVarGuard>,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
-    #[test]
-    fn local_build_ignores_remote_rollout() {
+    fn world() -> Option<World> {
         if fuigo_test_support::env::rerun_in_own_process() {
-            return;
+            return None;
         }
-        // A local/dev build never gates (auto-trust): even a remote rollout enable is ignored
-        // The feature stays off and resolves Trusted with repo configs present and interactive
-        // (Env/config isolated to unset so the remote flag is unambiguously the only enable being dropped here.)
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("FUIGO_HOME", home.path());
-        let _flag = EnvVarGuard::unset("FUIGO_FOLDER_TRUST");
+        let guards = vec![
+            EnvVarGuard::set("FUIGO_HOME", home.path()),
+            EnvVarGuard::set(fuigo_version::TEST_VERSION_ENV, Path::new("0.0.0-sim")),
+            EnvVarGuard::unset("FUIGO_FOLDER_TRUST"),
+        ];
+        Some(World { home, _guards: guards, _lock: lock })
+    }
 
-        let remote = RemoteSettings {
-            folder_trust_enabled: Some(true),
-            ..Default::default()
+    impl World {
+        fn config(&self, toml: &str) {
+            std::fs::write(self.home.path().join(fuigo_config::USER_CONFIG_FILENAME), toml).unwrap();
+        }
+    }
+
+    fn key_of(dir: &Path) -> PathBuf {
+        trust_key(dir).expect("a recordable folder")
+    }
+
+    /// T6: an undecided folder (git or not) is asked when the caller can ask, and untrusted otherwise; there is no
+    /// "no project settings, so trusted" exemption any more.
+    #[test]
+    fn t6_undecided_folder_prompts_or_is_untrusted() {
+        let Some(_w) = world() else { return };
+        let plain = tempfile::tempdir().unwrap();
+        let repo = repo_tmp();
+        for dir in [plain.path(), repo.path()] {
+            assert_eq!(decide(dir, true), TrustDecision::Prompt(PromptReason::New), "{}", dir.display());
+            assert!(matches!(decide(dir, false), TrustDecision::Untrusted(UntrustedReason::Undecided(_))));
+        }
+    }
+
+    /// T12: a client that cannot ask (ACP without the v2 capability, headless) never grants, but a saved "yes"
+    /// still holds for it; an undecided folder stays untrusted and its notice names the setting that trusts it.
+    #[test]
+    fn t12_a_client_that_cannot_ask_honours_saved_trust_and_grants_nothing() {
+        let Some(_w) = world() else { return };
+        let repo = repo_tmp();
+        let TrustDecision::Untrusted(reason) = decide(repo.path(), false) else {
+            panic!("an undecided folder is untrusted for a client that cannot ask");
         };
-        let feature = feature_enabled_for_build(Some(&remote), true);
-        assert!(!feature);
-        let i = DecideInputs {
-            is_interactive: true,
-            ..inputs()
+        let notice = untrusted_session_notice(&reason);
+        assert!(notice.contains("trusted_folders"), "{notice}");
+        assert!(!decide(repo.path(), false).is_trusted(), "asking without an answer grants nothing");
+        assert!(grant_folder_trust(repo.path()).dismisses_gate());
+        assert_eq!(decide(repo.path(), false), TrustDecision::Trusted);
+    }
+
+    /// T9: at home and root the notice says the folder can't be trusted, not how to trust it.
+    #[test]
+    fn t9_home_and_root_notice_says_they_are_never_trusted() {
+        let Some(_w) = world() else { return };
+        let TrustDecision::Untrusted(reason) = decide(Path::new("/"), false) else {
+            panic!("root is untrusted");
         };
-        assert_eq!(decide(feature, &i), TrustOutcome::Trusted);
+        assert!(reason.unrecordable());
+        let notice = untrusted_session_notice(&reason);
+        assert!(!notice.contains("trusted_folders ="), "{notice}");
     }
 
+    /// T6: a grant trusts the folder (settings and commands) and its subfolders in the same repository.
     #[test]
-    fn release_build_keeps_gate_when_enabled() {
-        if fuigo_test_support::env::rerun_in_own_process() {
-            return;
-        }
-        // A release-stamped build (is_local_build=false) honors the remote enable
-        // Isolate config so neither on-disk user/managed config nor an ambient env flag can override it
-        // That means an empty FUIGO_HOME (no config.toml/managed_config.toml) and FUIGO_FOLDER_TRUST unset
-        // nextest's process-per-test makes fuigo_home()'s OnceLock pick up the temp dir
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("FUIGO_HOME", home.path());
-        let _flag = EnvVarGuard::unset("FUIGO_FOLDER_TRUST");
+    fn t6_grant_trusts_repo_and_its_subfolders() {
+        let Some(_w) = world() else { return };
+        let repo = repo_tmp();
+        let sub = repo.path().join("a/b");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert!(grant_folder_trust(&sub).dismisses_gate());
+        assert_eq!(decide(repo.path(), false), TrustDecision::Trusted);
+        assert_eq!(decide(&sub, false), TrustDecision::Trusted);
+        let _real = TestFolderTrust::real();
+        assert!(dir_trust(&sub).is_trusted());
+    }
 
-        let remote = RemoteSettings {
-            folder_trust_enabled: Some(true),
-            ..Default::default()
+    /// T6: a record from before 1.0.35 (consent 0) is asked once more (Upgrade), untrusted until then.
+    #[test]
+    fn t6_legacy_record_is_reasked_once() {
+        let Some(_w) = world() else { return };
+        let repo = repo_tmp();
+        let key = key_of(repo.path());
+        TrustStore::load().set_trusted_legacy(&key).unwrap();
+        assert_eq!(decide(repo.path(), true), TrustDecision::Prompt(PromptReason::Upgrade));
+        assert!(matches!(decide(repo.path(), false), TrustDecision::Untrusted(UntrustedReason::Legacy(_))));
+        assert!(grant_folder_trust_key(&key).dismisses_gate());
+        assert_eq!(decide(repo.path(), true), TrustDecision::Trusted);
+    }
+
+    /// T7 (item 2): a nested repository (vendored clone) keeps its own key: the parent's grant does not cover it,
+    /// and a more specific "no" beats an ancestor's "yes".
+    #[test]
+    fn t7_nested_repo_keeps_own_key_and_child_no_wins() {
+        let Some(_w) = world() else { return };
+        let parent = repo_tmp();
+        let nested = parent.path().join("vendor/lib");
+        std::fs::create_dir_all(&nested).unwrap();
+        git2::Repository::init(&nested).unwrap();
+        assert!(grant_folder_trust(parent.path()).dismisses_gate());
+        assert_eq!(decide(parent.path(), false), TrustDecision::Trusted);
+        assert!(!decide(&nested, false).is_trusted(), "an ancestor's grant must not cover a nested repository");
+        // A plain subfolder that the user declined explicitly beats the repository's "yes" for anything it covers.
+        let mut store = TrustStore::load();
+        store.set_untrusted(&key_of(&nested)).unwrap();
+        assert!(matches!(decide(&nested, false), TrustDecision::Untrusted(UntrustedReason::Declined(_))));
+    }
+
+    /// T7: home and the filesystem root are never trusted or asked, and a grant there is refused.
+    #[test]
+    fn t7_root_is_untrustable() {
+        let Some(_w) = world() else { return };
+        let root = Path::new("/");
+        assert!(matches!(decide(root, true), TrustDecision::Untrusted(r) if r.unrecordable()));
+        assert!(matches!(
+            grant_folder_trust(root),
+            GrantOutcome::Refused { reason: GrantRefuse::UnsafeRoot }
+        ));
+    }
+
+    /// T7: `[folder_trust] trusted_folders` in the user's own config trusts a folder (the headless path); a stored
+    /// "no" beats it, so `/untrust` always revokes.
+    #[test]
+    fn t7_config_list_trusts_and_stored_no_beats_it() {
+        let Some(w) = world() else { return };
+        let repo = repo_tmp();
+        let key = key_of(repo.path());
+        w.config(&format!("[folder_trust]\ntrusted_folders = [{:?}]\n", key.display().to_string()));
+        assert_eq!(decide(repo.path(), false), TrustDecision::Trusted);
+        let RevokeOutcome::Revoked { was_trusted, saved, .. } = revoke_folder_trust_store(repo.path()) else {
+            panic!("a recordable folder is revocable");
         };
-        let feature = feature_enabled_for_build(Some(&remote), false);
-        assert!(feature);
-        let i = DecideInputs {
-            is_interactive: true,
-            ..inputs()
-        };
-        assert_eq!(decide(feature, &i), TrustOutcome::Prompt);
+        assert!(was_trusted);
+        saved.expect("saved");
+        assert!(matches!(decide(repo.path(), true), TrustDecision::Untrusted(UntrustedReason::Declined(_))));
     }
 
+    /// T7 (item 6): a "no" in this process beats the store and the config list even when it could not be saved.
     #[test]
-    fn local_build_ignores_explicit_env_optin() {
+    fn t7_unsaved_process_decline_beats_store() {
+        let Some(w) = world() else { return };
+        let repo = repo_tmp();
+        let key = key_of(repo.path());
+        assert!(grant_folder_trust_key(&key).dismisses_gate());
+        // The store can no longer be written: its lock path is squatted by a directory.
+        let store_path = w.home.path().join(crate::trust::TRUST_FILE_NAME);
+        let lock = store_path.with_extension("toml.lock");
+        let _ = std::fs::remove_file(&lock);
+        std::fs::create_dir_all(&lock).unwrap();
+        assert!(decline_folder_trust_key(&key).is_err(), "the 'no' could not be saved");
+        assert!(matches!(decide(repo.path(), true), TrustDecision::Untrusted(UntrustedReason::Declined(_))));
+        // A later "yes" lifts it again (only once it is saved).
+        std::fs::remove_dir(store_path.with_extension("toml.lock")).unwrap();
+        assert!(grant_folder_trust_key(&key).dismisses_gate());
+        assert_eq!(decide(repo.path(), false), TrustDecision::Trusted);
+    }
+
+    /// T7: a "yes" that could not be saved leaves the folder untrusted (no session-only grant).
+    #[test]
+    fn t7_unsaved_grant_stays_untrusted() {
+        let Some(w) = world() else { return };
+        let repo = repo_tmp();
+        let key = key_of(repo.path());
+        let store_path = w.home.path().join(crate::trust::TRUST_FILE_NAME);
+        std::fs::create_dir_all(store_path.with_extension("toml.lock")).unwrap();
+        let outcome = grant_folder_trust_key(&key);
+        assert!(matches!(outcome, GrantOutcome::Granted { persist: PersistStatus::NotSaved { .. }, .. }));
+        assert_eq!(outcome.resolution(), GrantResolution::Unrecorded);
+        assert!(outcome.to_string().contains("stays untrusted"), "{outcome}");
+        assert!(!decide(repo.path(), false).is_trusted());
+    }
+
+    /// T11 (item 4): a relative `FUIGO_HOME` reads no user-home trust input: nothing is trusted, not even a folder
+    /// a store or config list in that relative directory names.
+    #[test]
+    fn t11_relative_home_trusts_nothing() {
         if fuigo_test_support::env::rerun_in_own_process() {
             return;
         }
-        // Auto-trust is absolute on a local build: even an explicit FUIGO_FOLDER_TRUST=1 does NOT enable the feature
-        // A self-built fuigo therefore never prompts
-        // FUIGO_HOME is isolated so on-disk config can't influence it
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("FUIGO_HOME", home.path());
-        let _flag = EnvVarGuard::set("FUIGO_FOLDER_TRUST", Path::new("1"));
-
-        assert!(!feature_enabled_for_build(None, true));
+        let cwd = tempfile::tempdir().unwrap();
+        let repo = repo_tmp();
+        let key = key_of(repo.path());
+        let rel = cwd.path().join("relhome");
+        std::fs::create_dir_all(&rel).unwrap();
+        std::fs::write(
+            rel.join(fuigo_config::USER_CONFIG_FILENAME),
+            format!("[folder_trust]\nenabled = false\ntrusted_folders = [{:?}]\n", key.display().to_string()),
+        )
+        .unwrap();
+        std::env::set_current_dir(cwd.path()).unwrap();
+        let _guards = [
+            EnvVarGuard::set("FUIGO_HOME", Path::new("relhome")),
+            EnvVarGuard::set(fuigo_version::TEST_VERSION_ENV, Path::new("0.0.0-sim")),
+            EnvVarGuard::unset("FUIGO_FOLDER_TRUST"),
+        ];
+        assert!(fuigo_config::user_fuigo_home().is_none());
+        assert!(matches!(decide(repo.path(), true), TrustDecision::Untrusted(UntrustedReason::Inputs)));
+        assert!(trust_input_paths().is_empty());
     }
 
+    /// The user's own switch turns folder trust off (with the warning); the remote kill switch is not read.
     #[test]
-    fn release_build_defaults_on() {
-        if fuigo_test_support::env::rerun_in_own_process() {
-            return;
-        }
-        // A release-stamped build with no env/config/managed/remote signal defaults the feature ON
-        // An empty FUIGO_HOME (no config.toml/managed config) and FUIGO_FOLDER_TRUST unset leave only the default
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("FUIGO_HOME", home.path());
-        let _flag = EnvVarGuard::unset("FUIGO_FOLDER_TRUST");
-
-        assert!(feature_enabled_for_build(None, false));
+    fn switch_off_trusts_every_folder() {
+        let Some(w) = world() else { return };
+        let repo = repo_tmp();
+        w.config("[folder_trust]\nenabled = false\n");
+        assert_eq!(decide(repo.path(), false), TrustDecision::Trusted);
+        assert!(folder_trust_disabled());
     }
 
+    /// An unstamped local build is inert: every folder is trusted and grants are no-ops.
     #[test]
-    fn is_local_build_honors_test_version_override() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // A pinned FUIGO_TEST_VERSION simulates a release build, so it is not a local build
-        {
-            let _sim = EnvVarGuard::set(fuigo_version::TEST_VERSION_ENV, Path::new("0.0.0-sim"));
-            assert!(!is_local_build());
-        }
-        // With it unset, an unstamped build (no FUIGO_VERSION) is a local build.
-        // Guard to the unstamped case so a release-stamped test binary (CI release) doesn't spuriously fail this arm
-        let _unset = EnvVarGuard::unset(fuigo_version::TEST_VERSION_ENV);
-        if option_env!("FUIGO_VERSION").is_none() {
-            assert!(is_local_build());
-        }
-    }
-
-    #[test]
-    fn store_io_is_noop_on_local_build() {
-        if fuigo_test_support::env::rerun_in_own_process() {
-            return;
-        }
-        // On a local/dev build the whole feature is inert
-        // Both halves pin a guard via a UNIQUE per-repo key (never store-file existence) so they hold under single-process `cargo test` too
-        // Assert ONLY when compiled unstamped (mirrors `is_local_build_honors_test_version_override`)
-        // FUIGO_HOME is isolated and ENV_LOCK held so toggling FUIGO_TEST_VERSION is race-safe
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("FUIGO_HOME", home.path());
+    fn local_build_is_inert() {
+        let Some(_w) = world() else { return };
         let _unset = EnvVarGuard::unset(fuigo_version::TEST_VERSION_ENV);
         if option_env!("FUIGO_VERSION").is_some() {
-            return; // a release-stamped test binary is not a local build
-        }
-        let tmp = repo_tmp();
-        let key = workspace_key(tmp.path());
-
-        // grant is a no-op: a local-build grant never trusts the fresh key.
-        grant_folder_trust(tmp.path());
-        assert!(
-            !TrustStore::load().is_trusted(&key),
-            "local build: grant_folder_trust must not trust the folder"
-        );
-
-        // Seed a genuinely-trusted folder under a simulated release build (so the store actually records the grant)
-        // The guard drops at block end, so the build looks local again
-        {
-            let _sim = simulate_release_build();
-            let mut store = TrustStore::load();
-            store.set_trusted(&key).unwrap();
-            assert!(
-                TrustStore::load().is_trusted(&key),
-                "release build: seeding must record the trust grant"
-            );
-        }
-
-        // revoke is a no-op: a local-build revoke returns false AND leaves the grant intact
-        // (Without the guard it would `set_untrusted` and return true.)
-        assert!(
-            !revoke_folder_trust_store(tmp.path()),
-            "local build: revoke_folder_trust_store must return false"
-        );
-        assert!(
-            TrustStore::load().is_trusted(&key),
-            "local build: revoke_folder_trust_store must not untrust the folder"
-        );
-    }
-
-    #[test]
-    fn revoke_folder_trust_store_persists_untrust_for_trusted_folder() {
-        if fuigo_test_support::env::rerun_in_own_process() {
             return;
         }
-        // This tests the store half of revoke directly (not just via the shell wrapper)
-        // A previously-trusted folder reports was_trusted=true AND gets an explicit `set_untrusted` persisted, so it is untrusted on reload
-        // FUIGO_HOME is isolated so the seed/deny hit a temp store, not the real file
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _env = EnvVarGuard::set("FUIGO_HOME", home.path());
-        let _sim = simulate_release_build();
-        let tmp = repo_tmp();
-        let key = workspace_key(tmp.path());
-
-        let mut store = TrustStore::load();
-        store.set_trusted(&key).unwrap();
-        assert!(TrustStore::load().is_trusted(&key));
-
-        assert!(
-            revoke_folder_trust_store(tmp.path()),
-            "a trusted folder must report was_trusted=true"
-        );
-        assert!(
-            !TrustStore::load().is_trusted(&key),
-            "store-only revoke must persist set_untrusted for a trusted folder"
-        );
-    }
-
-    #[test]
-    fn revoke_folder_trust_store_writes_no_deny_for_never_trusted_folder() {
-        if fuigo_test_support::env::rerun_in_own_process() {
-            return;
-        }
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _env = EnvVarGuard::set("FUIGO_HOME", home.path());
-        let _sim = simulate_release_build();
-        let tmp = repo_tmp();
-
-        assert!(
-            !revoke_folder_trust_store(tmp.path()),
-            "revoking a never-trusted folder must return false"
-        );
-
-        let store = TrustStore::load();
-        assert!(
-            !store.has_decision(&workspace_key(tmp.path())),
-            "revoking a never-trusted folder must not record a child deny"
-        );
-    }
-
-    #[test]
-    fn grant_folder_trust_skips_rewrite_when_already_trusted_but_flips_untrust() {
-        if fuigo_test_support::env::rerun_in_own_process() {
-            return;
-        }
-        // Already-trusted grant must not rewrite the store; an explicit untrust record must still persist `--trust`
-        // FUIGO_HOME is isolated so the seed hits a temp store, not the real file
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _env = EnvVarGuard::set("FUIGO_HOME", home.path());
-        let _sim = simulate_release_build();
-        let tmp = repo_tmp();
-        let key = workspace_key(tmp.path());
-
-        grant_folder_trust(tmp.path());
-        assert!(
-            TrustStore::load().is_trusted(&key),
-            "first grant must persist trust"
-        );
-
-        let store_path = TrustStore::default_path().expect("isolated FUIGO_HOME");
-        let after_grant = std::fs::read(&store_path).unwrap();
-        // Marker a rewrite would drop.
-        let mut marked = after_grant.clone();
-        marked.extend_from_slice(b"\n# keep-me\n");
-        std::fs::write(&store_path, &marked).unwrap();
-
-        grant_folder_trust(tmp.path());
-        let after_skip = std::fs::read(&store_path).unwrap();
-        assert!(
-            after_skip
-                .windows(b"# keep-me".len())
-                .any(|w| w == b"# keep-me"),
-            "already-trusted grant must not rewrite the store"
-        );
-        assert!(TrustStore::load().is_trusted(&key));
-
-        let mut store = TrustStore::load();
-        store.set_untrusted(&key).unwrap();
-        assert!(store.has_decision(&key));
-        assert!(!store.is_trusted(&key));
-
-        grant_folder_trust(tmp.path());
-        assert!(
-            TrustStore::load().is_trusted(&key),
-            "explicit untrust record must still persist --trust"
-        );
-    }
-
-    #[test]
-    fn grant_folder_trust_records_process_local_grant_when_persist_denied() {
-        if fuigo_test_support::env::rerun_in_own_process() {
-            return;
-        }
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _sim = simulate_release_build();
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("FUIGO_HOME", home.path());
-        // TrustStore writes through user_fuigo_home(), which reads the fuigo_home() OnceLock
-        // Bazel rust_test is one process, so the test denies persistence at the cached home
-        let store_home = fuigo_config::user_fuigo_home().expect("FUIGO_HOME is set");
-        // P167: deny the WRITE, not the read. A directory squatting on the write lock fails the publish while the
-        // store itself reads cleanly (missing), which is the `--sandbox` shape. A directory at the store path itself
-        // is an unreadable store, and a grant over it records nothing (see `grant_tests`).
-        let deny_path = store_home.join(format!("{}.lock", fuigo_config::TRUSTED_FOLDERS_FILENAME));
-        if deny_path.is_file() {
-            std::fs::remove_file(&deny_path).unwrap();
-        }
-        std::fs::create_dir_all(&deny_path).unwrap();
-        struct Restore(PathBuf);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let _restore = Restore(deny_path);
-        let tmp = repo_tmp();
-        let outcome = grant_folder_trust(tmp.path());
-        assert!(
-            matches!(
-                outcome,
-                GrantOutcome::Granted {
-                    persist: PersistStatus::ProcessLocalOnly { .. },
-                    ..
-                }
-            ),
-            "a denied write is a session-only grant: {outcome:?}"
-        );
-        assert_eq!(outcome.resolution(), GrantResolution::SessionLocal);
-        let key = workspace_key(tmp.path());
-        assert!(
-            !TrustStore::load().is_trusted(&key),
-            "durable store must stay ungranted when persist is denied"
-        );
-        assert!(
-            is_trusted_this_process(&key),
-            "explicit grant must be visible in-process after persist failure"
-        );
-
-        assert!(
-            revoke_folder_trust_store(tmp.path()),
-            "untrust must see the process-local grant"
-        );
-        assert!(
-            !is_trusted_this_process(&key),
-            "untrust must override the process-local grant even when persist is denied"
-        );
-        assert!(
-            !decide_inputs(tmp.path(), &key).store_trusted,
-            "reload/consume must not re-allow the revoked process-local grant"
-        );
-    }
-
-    #[test]
-    fn decide_inputs_flags_home_key_unrecordable() {
-        if fuigo_test_support::env::rerun_in_own_process() {
-            return;
-        }
-        // Case-2 wiring: cwd == $HOME, git-init'd so workspace_key discovers it as the home git root
-        // The gather flags key_recordable=false and decide() trusts it despite configs and interactive
-        // Pin HOME and USERPROFILE so fuigo_dirs::home_dir() sees the tempdir on Windows
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("HOME", home.path());
-        let _userprofile = EnvVarGuard::set("USERPROFILE", home.path());
-        git2::Repository::init(home.path()).unwrap();
-
-        let home_key = crate::trust::workspace_key(home.path());
-        let home_inputs = decide_inputs_with_interactive(home.path(), &home_key, true);
-        assert!(
-            !home_inputs.key_recordable,
-            "cwd == $HOME must gather key_recordable=false"
-        );
-        assert_eq!(
-            decide(true, &home_inputs),
-            TrustOutcome::Trusted,
-            "an unrecordable home key resolves Trusted (no prompt, no gate)"
-        );
-
-        // A non-home repo subdir key is recordable; the Case-2 rule can't over-trigger for a real fetched repo
         let repo = repo_tmp();
-        let subdir = repo.path().join("pkg");
-        std::fs::create_dir_all(&subdir).unwrap();
-        let repo_key = crate::trust::workspace_key(&subdir);
-        let repo_inputs = decide_inputs_with_interactive(&subdir, &repo_key, true);
-        assert!(
-            repo_inputs.key_recordable,
-            "a non-home repo key must gather key_recordable=true"
-        );
+        assert_eq!(decide(repo.path(), false), TrustDecision::Trusted);
+        assert!(matches!(grant_folder_trust(repo.path()), GrantOutcome::Refused { reason: GrantRefuse::InertBuild }));
+        assert!(matches!(revoke_folder_trust_store(repo.path()), RevokeOutcome::NotApplicable));
+    }
+
+    /// T7 (item 3): the trust inputs are protected by file identity: a hard link to the store (or the registry) is
+    /// the store.
+    #[test]
+    fn t7_trust_input_identity_catches_hard_links() {
+        let Some(w) = world() else { return };
+        let repo = repo_tmp();
+        assert!(grant_folder_trust(repo.path()).dismisses_gate());
+        let store = w.home.path().join(crate::trust::TRUST_FILE_NAME);
+        let elsewhere = tempfile::tempdir().unwrap();
+        let link = elsewhere.path().join("innocent.toml");
+        std::fs::hard_link(&store, &link).unwrap();
+        let physical = dunce::canonicalize(&link).unwrap();
+        assert!(is_trust_input(&dunce::canonicalize(&store).unwrap()));
+        assert!(is_trust_input(&physical), "a hard link to the store is the store");
+        let other = elsewhere.path().join("other.toml");
+        std::fs::write(&other, "x").unwrap();
+        assert!(!is_trust_input(&dunce::canonicalize(&other).unwrap()));
+    }
+
+    /// The command-side cache follows a grant made after a verdict was cached.
+    #[test]
+    fn dir_trust_cache_follows_grants_and_declines() {
+        let Some(_w) = world() else { return };
+        let _real = TestFolderTrust::real();
+        let repo = repo_tmp();
+        assert!(!dir_trust(repo.path()).is_trusted());
+        assert!(grant_folder_trust(repo.path()).dismisses_gate());
+        assert!(dir_trust(repo.path()).is_trusted());
+        let _ = revoke_folder_trust_store(repo.path());
+        assert!(!dir_trust(repo.path()).is_trusted());
+        assert!(!command_trust([repo.path(), Path::new("/")]).is_trusted());
+    }
+
+    /// A main checkout with one commit and a linked worktree outside it: `(tempdir, main, worktree)`.
+    pub(crate) fn main_with_outside_worktree() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let main = root.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let repo = git2::Repository::init(&main).unwrap();
+        let sig = git2::Signature::now("t", "t@t").unwrap();
+        let tree = {
+            let mut idx = repo.index().unwrap();
+            let oid = idx.write_tree().unwrap();
+            repo.find_tree(oid).unwrap()
+        };
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        let wt = root.join("wt");
+        repo.worktree("wt", &wt, None).unwrap();
+        (dir, main, wt)
+    }
+
+    /// Register `wt` (a standalone clone) as a Fuigo-managed worktree of `source` in `home`'s registry.
+    pub(crate) fn register_managed_worktree(home: &Path, wt: &Path, source: &Path) {
+        use fuigo_fast_worktree::{WorktreeDb, WorktreeKind, WorktreeRecord, WorktreeStatus};
+        let db = WorktreeDb::open(home).unwrap();
+        db.register(&WorktreeRecord {
+            id: "wt".to_string(),
+            path: wt.to_path_buf(),
+            source_repo: source.to_path_buf(),
+            repo_name: "repo".to_string(),
+            kind: WorktreeKind::Session,
+            creation_mode: "standalone".to_string(),
+            git_ref: None,
+            head_commit: None,
+            session_id: None,
+            creator_pid: None,
+            created_at: 100,
+            last_accessed_at: None,
+            status: WorktreeStatus::Alive,
+            metadata: None,
+        })
+        .unwrap();
+    }
+
+    /// u35 t2 (Fable H1, Astra 2): the main checkout's grant trusts its linked worktree outside it, for settings
+    /// (`decide`) and commands (`dir_trust`, the command route), without a new question.
+    #[test]
+    fn t2_a_linked_worktree_of_a_granted_checkout_is_trusted() {
+        let Some(_w) = world() else { return };
+        let (_dir, main, wt) = main_with_outside_worktree();
+        assert!(grant_folder_trust(&main).dismisses_gate());
+        assert_eq!(decide(&wt, true), TrustDecision::Trusted, "no question in the worktree");
+        assert_eq!(decide(&wt, false), TrustDecision::Trusted);
+        let _real = TestFolderTrust::real();
+        assert!(dir_trust(&wt).is_trusted());
+        assert!(command_trust([wt.as_path()]).is_trusted());
+    }
+
+    /// u35 t2 (Fable H1): a `fuigo -w` managed worktree outside its source repository is trusted by the source's grant.
+    #[test]
+    fn t2_a_managed_worktree_of_a_granted_repository_is_trusted() {
+        let Some(w) = world() else { return };
+        let source = repo_tmp();
+        let home = dunce::canonicalize(w.home.path()).unwrap();
+        let wt = home.join("worktrees").join("repo").join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        git2::Repository::init(&wt).unwrap();
+        register_managed_worktree(&home, &wt, &dunce::canonicalize(source.path()).unwrap());
+        assert!(grant_folder_trust(source.path()).dismisses_gate());
+        assert_eq!(decide(&wt, true), TrustDecision::Trusted);
+        let _real = TestFolderTrust::real();
+        assert!(dir_trust(&wt).is_trusted());
+        assert!(command_trust([wt.as_path()]).is_trusted());
+    }
+
+    /// u35 t2 (Astra 7): the test seam judges the physical folder only: a symlink inside a trusted folder that points
+    /// into another folder is that other folder.
+    #[cfg(unix)]
+    #[test]
+    fn t2_test_seam_judges_the_physical_folder() {
+        let r = tempfile::tempdir().unwrap();
+        let u = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(u.path(), r.path().join("l")).unwrap();
+        let _only = TestFolderTrust::only(&[r.path()]);
+        assert!(dir_trust(r.path()).is_trusted());
+        assert!(!dir_trust(&r.path().join("l")).is_trusted(), "R/l is U");
+        assert!(!dir_trust(&r.path().join("missing")).is_trusted(), "a folder that does not resolve is not trusted");
+    }
+
+    /// u35 t2 (Astra 3): a permission change on a trust input (the store made unreadable) changes the fingerprint,
+    /// so no verdict cached before it is reused.
+    #[cfg(unix)]
+    #[test]
+    fn t2_a_permission_change_on_a_trust_input_invalidates_the_cache() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(w) = world() else { return };
+        let repo = repo_tmp();
+        assert!(grant_folder_trust(repo.path()).dismisses_gate());
+        let store = w.home.path().join(crate::trust::TRUST_FILE_NAME);
+        let before = fingerprint();
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let after = fingerprint();
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_ne!(before, after, "chmod must invalidate cached trust verdicts");
+    }
+
+    /// u35 t2 (Astra 6): a trust input that failed to load (a malformed user config) does not untrust a granted
+    /// folder, but that verdict is not cached: it is decided again next time.
+    #[test]
+    fn t2_a_verdict_from_inputs_that_failed_to_load_is_not_cached() {
+        let Some(w) = world() else { return };
+        let repo = repo_tmp();
+        assert!(grant_folder_trust(repo.path()).dismisses_gate());
+        w.config("[folder_trust\nthis is not toml");
+        let _real = TestFolderTrust::real();
+        let canonical = dunce::canonicalize(repo.path()).unwrap();
+        assert!(dir_trust(repo.path()).is_trusted(), "the store grant still counts");
+        assert!(!DIR_CACHE.lock().contains_key(&canonical), "a verdict from failed inputs is never cached");
+        w.config("");
+        assert!(dir_trust(repo.path()).is_trusted());
+        assert!(DIR_CACHE.lock().contains_key(&canonical), "a verdict from clean inputs is cached");
+    }
+
+    /// The real decision as the repository-tool judge, on every thread (`spawn_blocking` included): no test seam.
+    fn real_repo_exec_judge(dir: &Path) -> bool {
+        decide(dir, false) == TrustDecision::Trusted
+    }
+
+    struct NoNotifier;
+
+    #[async_trait::async_trait]
+    impl crate::worktree::WorktreeNotificationSender for NoNotifier {
+        async fn send_worktree_status(&self, _progress: crate::worktree::WorktreeStatus) {}
+    }
+
+    /// `fuigo -w <label> [--ref <ref>]` with `[cli] worktree_type = "standalone"`: the workspace creation path, clean copy.
+    fn create_standalone(source: &Path, label: &str, git_ref: Option<&str>) -> crate::worktree::WorktreeStatus {
+        let req = crate::worktree::CreateWorktreeRequest {
+            session_id: format!("t3-{label}"),
+            source_path: source.to_string_lossy().into_owned(),
+            worktree_path: None,
+            copy_mode: crate::worktree::WorktreeCopyMode::Clean,
+            git_ref: git_ref.map(str::to_string),
+            copy_ignored_in_background: false,
+            ignored_skip_patterns: vec![],
+            worktree_type: Some(crate::worktree::WorktreeType::Standalone),
+            label: Some(label.to_string()),
+            grove_worktree: None,
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(crate::worktree::create_worktree_streaming(&req, &NoNotifier))
+    }
+
+    fn source_repo_with_main(dir: &Path) {
+        use fuigo_test_utils::git::{git_commit_all, init_git_repo, run_git};
+        init_git_repo(dir);
+        std::fs::write(dir.join("tracked.txt"), "x").unwrap();
+        git_commit_all(dir, "initial");
+        run_git(dir, &["checkout", "-q", "-B", "main"]);
+        run_git(dir, &["checkout", "-q", "-b", "side"]);
+    }
+
+    /// u35 t3 (Astra r2 H3): with a trusted source and standalone worktrees, clean creation and `--ref` creation run
+    /// git in the new destination before the worktree database records it; under the real judge that git is covered by
+    /// creation authority from the source, the worktree is created, it is trusted afterwards by its record, and the
+    /// authority is gone. A failed creation withdraws the authority and removes the partial destination.
+    #[test]
+    fn t3_standalone_creation_from_a_trusted_source_runs_under_the_real_judge() {
+        fuigo_test_utils::require_git!();
+        let Some(w) = world() else { return };
+        let source = tempfile::tempdir().unwrap();
+        source_repo_with_main(source.path());
+        assert!(grant_folder_trust(source.path()).dismisses_gate());
+        fuigo_tty_utils::install_repo_exec_judge(real_repo_exec_judge);
+        let base = dunce::canonicalize(w.home.path()).unwrap().join("worktrees");
+
+        for (label, git_ref) in [("fresh", None), ("fresh-main", Some("main"))] {
+            let status = create_standalone(source.path(), label, git_ref);
+            let crate::worktree::WorktreeStatus::Created { worktree_path, .. } = status else {
+                panic!("{label}: standalone creation from a trusted source failed: {status:?}");
+            };
+            let wt = PathBuf::from(&worktree_path);
+            assert!(dunce::canonicalize(&wt).unwrap().starts_with(&base), "{label}: {worktree_path}");
+            assert!(wt.join(".git").is_dir(), "{label}: standalone");
+            assert!(wt.join("tracked.txt").is_file(), "{label}");
+            assert_eq!(fuigo_tty_utils::worktree_creation_source(&wt), None, "{label}: authority withdrawn");
+            assert!(real_repo_exec_judge(&wt), "{label}: trusted by its record afterwards");
+        }
+
+        let status = create_standalone(source.path(), "bad-ref", Some("no-such-ref"));
+        assert!(matches!(status, crate::worktree::WorktreeStatus::Error { .. }), "{status:?}");
+        let partial = std::fs::read_dir(&base)
+            .unwrap()
+            .flatten()
+            .flat_map(|repo| std::fs::read_dir(repo.path()).into_iter().flatten().flatten())
+            .map(|e| e.path())
+            .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("bad-ref")));
+        assert_eq!(partial, None, "a failed creation leaves no partial worktree");
+    }
+
+    /// u35 t3: an untrusted source repository still gets no standalone worktree (and nothing is created).
+    #[test]
+    fn t3_an_untrusted_source_gets_no_standalone_worktree() {
+        fuigo_test_utils::require_git!();
+        let Some(w) = world() else { return };
+        let source = tempfile::tempdir().unwrap();
+        source_repo_with_main(source.path());
+        fuigo_tty_utils::install_repo_exec_judge(real_repo_exec_judge);
+        for git_ref in [None, Some("main")] {
+            let status = create_standalone(source.path(), "refused", git_ref);
+            let crate::worktree::WorktreeStatus::Error { message, .. } = status else {
+                panic!("an untrusted source must get no worktree: {status:?}");
+            };
+            assert!(message.contains("not a trusted folder"), "{message}");
+        }
+        let worktrees = w.home.path().join("worktrees");
+        let made = std::fs::read_dir(&worktrees)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .flat_map(|repo| std::fs::read_dir(repo.path()).into_iter().flatten().flatten())
+            .count();
+        assert_eq!(made, 0, "no worktree directory was created");
     }
 }
+

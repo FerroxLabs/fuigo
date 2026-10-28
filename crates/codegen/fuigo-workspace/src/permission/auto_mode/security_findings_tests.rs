@@ -1,7 +1,7 @@
 use super::*;
 use ClassifierSecurityFinding::*;
 
-const ALL: [ClassifierSecurityFinding; 10] = [
+const ALL: [ClassifierSecurityFinding; 12] = [
     FailClosedPolicy,
     UnparseableShell,
     UnresolvedArgument,
@@ -12,6 +12,8 @@ const ALL: [ClassifierSecurityFinding; 10] = [
     FileWrite,
     DangerousCommand,
     SpecialExecSurface,
+    InheritedEnvironment,
+    RepositoryHook,
 ];
 
 #[test]
@@ -30,6 +32,8 @@ fn tokens_are_stable_and_unique() {
             "file_write",
             "dangerous_command",
             "special_exec_surface",
+            "inherited_environment",
+            "repository_hook",
         ]
     );
     let mut sorted = tokens.clone();

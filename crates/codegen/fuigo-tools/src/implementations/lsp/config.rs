@@ -16,9 +16,12 @@ pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// This is the canonical merge function — both session startup and `fuigo inspect` call it.
 /// Accepts both file-based `.lsp.json` paths and inline `lspServers` JSON values
 /// from plugin manifests (`plugin.json`).
+///
+/// `plugin_lsp_paths` pairs each plugin LSP file with its plugin's resolved folder (`canonical_root`, pinned at
+/// discovery): the file is read only from inside that folder. The project `<cwd>/.fuigo/lsp.json` is read only from inside `cwd`.
 pub fn load_servers_with_plugins_sourced(
     cwd: &Path,
-    plugin_lsp_paths: &[PathBuf],
+    plugin_lsp_paths: &[(PathBuf, PathBuf)],
     plugin_inline_lsp: &[&serde_json::Value],
     plugin_names: &[&str],
     inline_plugin_names: &[&str],
@@ -50,7 +53,8 @@ pub fn load_servers_with_plugins_sourced(
         .collect();
 
     // Project-level overrides
-    for (name, cfg) in load_file(&project_path) {
+    let project_root = fuigo_dirs::contained::PinnedRoot::pin(cwd).ok();
+    for (name, cfg) in load_project_file(&project_path, project_root.as_ref()) {
         servers.insert(
             name,
             (
@@ -63,9 +67,10 @@ pub fn load_servers_with_plugins_sourced(
     }
 
     // Plugin file-based configs
-    for (i, lsp_path) in plugin_lsp_paths.iter().enumerate() {
+    for (i, (lsp_path, plugin_root)) in plugin_lsp_paths.iter().enumerate() {
         let pname = plugin_names.get(i).copied().unwrap_or("unknown");
-        for (name, cfg) in load_file(lsp_path) {
+        let plugin_root = fuigo_dirs::contained::PinnedRoot::from_canonical(plugin_root.clone());
+        for (name, cfg) in load_file_in(lsp_path, Some(&plugin_root)) {
             servers.entry(name).or_insert_with(|| {
                 (
                     cfg,
@@ -138,7 +143,8 @@ pub fn load_servers(cwd: &Path) -> BTreeMap<String, LspServerConfig> {
     let project_path = cwd.join(".fuigo").join("lsp.json");
 
     let mut merged = load_file(&user_path);
-    let project = load_file(&project_path);
+    let project_root = fuigo_dirs::contained::PinnedRoot::pin(cwd).ok();
+    let project = load_project_file(&project_path, project_root.as_ref());
 
     if !merged.is_empty() {
         tracing::info!(
@@ -188,7 +194,26 @@ pub fn load_servers(cwd: &Path) -> BTreeMap<String, LspServerConfig> {
 
 /// Load LSP server configs from a JSON file. Returns empty map on missing/invalid file.
 pub fn load_file(path: &Path) -> BTreeMap<String, LspServerConfig> {
-    let s = match std::fs::read_to_string(path) {
+    load_file_in(path, None)
+}
+
+/// A project `lsp.json`: held to the pinned project folder; nothing when that folder cannot be resolved.
+fn load_project_file(
+    path: &Path,
+    root: Option<&fuigo_dirs::contained::PinnedRoot>,
+) -> BTreeMap<String, LspServerConfig> {
+    match root {
+        Some(root) => load_file_in(path, Some(root)),
+        None => BTreeMap::new(),
+    }
+}
+
+/// [`load_file`] held to `root` when set (a project or plugin file): the file actually read must lie inside it.
+pub fn load_file_in(
+    path: &Path,
+    root: Option<&fuigo_dirs::contained::PinnedRoot>,
+) -> BTreeMap<String, LspServerConfig> {
+    let s = match fuigo_dirs::contained::read_scoped(path, root) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return BTreeMap::new(),
         Err(e) => {

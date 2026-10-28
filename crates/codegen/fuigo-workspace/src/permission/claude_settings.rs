@@ -101,10 +101,21 @@ pub fn load_claude_settings(path: &Path) -> Option<ClaudeSettings> {
         }
         Err(_) => return None,
     }
-    let content = match std::fs::read_to_string(path) {
+    // A project file (`<dir>/.claude/settings*.json`) is read only from inside `<dir>`, checked on the opened file: a
+    // settings file linked elsewhere on the machine is not loaded as this project's rules. The user's own
+    // `~/.claude` files follow links.
+    let project_dir = (!global_claude_settings_paths().iter().any(|g| g == path))
+        .then(|| path.parent().and_then(Path::parent))
+        .flatten();
+    let content = match fuigo_dirs::contained::PinnedRoot::pin_opt(project_dir)
+        .and_then(|root| fuigo_dirs::contained::read_scoped(path, root.as_ref()))
+    {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(_) => return None,
+        Err(e) => {
+            tracing::warn!(?path, error = %e, "settings file not loaded");
+            return None;
+        }
     };
 
     // Parse as generic JSON value for tolerant handling

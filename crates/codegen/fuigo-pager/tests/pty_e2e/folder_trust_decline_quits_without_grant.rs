@@ -2,9 +2,8 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Folder-trust decline quits the pager (no grant).
-/// Same setup; pressing `n` exits the pager (the process ends) and writes NO grant.
-/// The product decision: decline quits rather than proceeding in a gated state.
+/// Folder-trust quit: `q` on the question exits the pager (the process ends) and writes NO grant.
+/// (u35 t1: `n` declines and continues untrusted; `q` quits.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn folder_trust_decline_quits_without_grant() {
@@ -28,8 +27,8 @@ async fn folder_trust_decline_quits_without_grant() {
         .wait_for_text(TRUST_QUESTION_SENTINEL, WELCOME_TIMEOUT)
         .expect("trust question renders");
 
-    // Decline: the pager quits (no session, no grant)
-    harness.inject_keys(b"n").expect("inject n");
+    // Quit: the pager exits (no session, no grant)
+    harness.inject_keys(b"q").expect("inject q");
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if !harness.is_running().expect("poll pager liveness") {
@@ -40,11 +39,11 @@ async fn folder_trust_decline_quits_without_grant() {
     let running = harness.is_running().expect("poll pager liveness");
     assert!(
         !running,
-        "declining the trust question must quit the pager\nscreen:\n{}",
+        "q on the trust question must quit the pager\nscreen:\n{}",
         harness.screen_contents()
     );
     assert!(
         !folder_is_trusted(&content, repo.path()),
-        "declining must NOT persist a grant",
+        "quitting must NOT persist a grant",
     );
 }

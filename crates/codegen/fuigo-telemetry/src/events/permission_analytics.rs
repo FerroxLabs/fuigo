@@ -279,6 +279,8 @@ pub enum PermissionSecurityFinding {
     FileWrite,
     DangerousCommand,
     SpecialExecSurface,
+    InheritedEnvironment,
+    RepositoryHook,
 }
 
 impl PermissionSecurityFinding {
@@ -293,6 +295,8 @@ impl PermissionSecurityFinding {
         Self::FileWrite,
         Self::DangerousCommand,
         Self::SpecialExecSurface,
+        Self::InheritedEnvironment,
+        Self::RepositoryHook,
     ];
 }
 
@@ -310,6 +314,8 @@ impl TryFrom<&str> for PermissionSecurityFinding {
             "file_write" => Self::FileWrite,
             "dangerous_command" => Self::DangerousCommand,
             "special_exec_surface" => Self::SpecialExecSurface,
+            "inherited_environment" => Self::InheritedEnvironment,
+            "repository_hook" => Self::RepositoryHook,
             _ => return Err(()),
         })
     }

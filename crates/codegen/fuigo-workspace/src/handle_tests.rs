@@ -948,6 +948,8 @@ pub(crate) fn terminal_run_request(
     tool_call_id: &str,
 ) -> fuigo_tools::computer::types::TerminalRunRequest {
     fuigo_tools::computer::types::TerminalRunRequest {
+        request_cwd: None,
+        approved_without_grant: false,
         command: command.to_string(),
         working_directory: out_dir.to_path_buf(),
         env: std::collections::HashMap::new(),

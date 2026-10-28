@@ -114,6 +114,10 @@ impl fuigo_tool_runtime::Tool for MonitorTool {
             .join(format!("monitor-{}.log", ctx.call_id.as_str()));
         let bg_handle = terminal
             .run_background(crate::computer::types::TerminalRunRequest {
+                request_cwd: None,
+                approved_without_grant: crate::sandbox_launch::ApprovedWithoutGrant::of(
+                    ctx.extensions.get::<crate::sandbox_launch::ApprovedWithoutGrant>().as_deref(),
+                ),
                 command: input.command.clone(),
                 working_directory: cwd.clone(),
                 env: std::collections::HashMap::from([(
@@ -440,6 +444,8 @@ mod tests {
         // Start a persistent monitor: a process that effectively never exits.
         let handle = backend
             .run_background(TerminalRunRequest {
+                request_cwd: None,
+                approved_without_grant: false,
                 command: "while true; do echo tick; sleep 0.1; done".to_string(),
                 working_directory: tmp.path().to_path_buf(),
                 env: std::collections::HashMap::new(),
@@ -517,6 +523,8 @@ mod tests {
 
         let handle = backend
             .run_background(TerminalRunRequest {
+                request_cwd: None,
+                approved_without_grant: false,
                 command: "echo done".to_string(),
                 working_directory: tmp.path().to_path_buf(),
                 env: std::collections::HashMap::new(),
@@ -587,6 +595,8 @@ mod tests {
         // Monitor owned by the (soon-dead) child session, emitting over time.
         let handle = backend
             .run_background(TerminalRunRequest {
+                request_cwd: None,
+                approved_without_grant: false,
                 command: "for i in $(seq 1 50); do echo tick $i; sleep 0.1; done".to_string(),
                 working_directory: tmp.path().to_path_buf(),
                 env: std::collections::HashMap::new(),

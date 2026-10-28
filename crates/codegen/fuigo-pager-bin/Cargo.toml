@@ -85,7 +85,7 @@ serial_test = { workspace = true }
 # entrypoint registered this binary's parent-death hook. Dev-only: the
 # accessor is absent from every shipped build (resolver 2 keeps dev-dependency
 # features out of non-test builds).
-fuigo-tty-utils = { workspace = true, features = ["testing"] }
+fuigo-tty-utils = { workspace = true, features = ["testing", "unjudged-repo-exec"] }
 # `PagerArgs::try_parse_from` in the CLI-parsing unit tests (needs the
 # `clap::Parser` trait in scope).
 clap = { workspace = true, features = ["derive"] }

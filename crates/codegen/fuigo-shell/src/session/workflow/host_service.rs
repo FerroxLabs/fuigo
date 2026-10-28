@@ -933,16 +933,16 @@ impl HostService {
             )));
         }
 
-        let mut cmd = tokio::process::Command::new("git");
-        fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
+        // Untrusted folder: no git runs; the diff reads as failed.
+        let mut cmd = tokio::process::Command::from(
+            fuigo_tty_utils::git_command_in(&self.params.cwd)
+                .map_err(|e| HostError::Failed(format!("git diff: {e}")))?,
+        );
         cmd.arg("diff")
             .arg(commit)
-            .current_dir(&self.params.cwd)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .envs(fuigo_tty_utils::pager_env());
-        fuigo_tty_utils::detach_command(&mut cmd);
+            .stderr(std::process::Stdio::piped());
 
         let output = tokio::time::timeout(DIFF_TIMEOUT, cmd.output())
             .await

@@ -119,6 +119,17 @@ pub struct TerminalRunRequest {
     /// `BashOutputChunk.base.tool_call_id`.
     pub tool_call_id: String,
 
+    /// u35 g9: whether the permission check approved this call, or part of it, without a grant
+    /// ([`crate::sandbox_launch::ApprovedWithoutGrant`]): the shell runner then judges the
+    /// environment it runs the command under and refuses it when that steers what runs
+    /// ([`crate::sandbox_launch::check_child_env`]).
+    pub approved_without_grant: bool,
+
+    /// u35 t1 (design d2 §3.6): the directory the permission check judged the request in, when the command runs in
+    /// another (OpenCode bash `workdir`). The shell runner's folder-trust check judges both. `None`: the request's
+    /// directory is [`Self::working_directory`].
+    pub request_cwd: Option<PathBuf>,
+
     /// Original user command before isolation wrapping.
     ///
     /// When set, the terminal actor stores this on the `ProcessEntry` so

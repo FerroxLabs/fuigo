@@ -2071,6 +2071,10 @@ impl fuigo_tool_runtime::Tool for BashTool {
 
         let cwd = crate::types::tool_metadata::resolve_cwd(&ctx, &resources).await?;
         let tool_call_id = ctx.call_id.clone();
+        // u35 g9: how the permission check approved this call travels to the shell runner.
+        let approved_without_grant = crate::sandbox_launch::ApprovedWithoutGrant::of(
+            ctx.extensions.get::<crate::sandbox_launch::ApprovedWithoutGrant>().as_deref(),
+        );
 
         // --- Read resources ---
         let (backend, session_folder, env, notification_handle, owner_session_id) = {
@@ -2235,6 +2239,8 @@ impl fuigo_tool_runtime::Tool for BashTool {
                 &params,
             );
             let request = TerminalRunRequest {
+                request_cwd: None,
+                approved_without_grant,
                 command: command.clone(),
                 working_directory: cwd.clone(),
                 env,
@@ -2319,6 +2325,8 @@ impl fuigo_tool_runtime::Tool for BashTool {
             };
 
             let request = TerminalRunRequest {
+                request_cwd: None,
+                approved_without_grant,
                 command: command.clone(),
                 working_directory: cwd.clone(),
                 env,

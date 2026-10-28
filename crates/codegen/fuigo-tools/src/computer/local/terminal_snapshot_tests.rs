@@ -19,6 +19,8 @@ async fn snapshot_after_completion(command: &str, output_byte_limit: usize) -> T
     let backend = LocalTerminalBackend::new();
     let tmp = tempfile::TempDir::new().unwrap();
     let request = TerminalRunRequest {
+        request_cwd: None,
+        approved_without_grant: false,
         command: command.to_string(),
         working_directory: tmp.path().to_path_buf(),
         env: HashMap::new(),
@@ -100,6 +102,8 @@ async fn a_missing_log_is_not_reported_as_empty_output() {
     let tmp = tempfile::TempDir::new().unwrap();
     let output_file = tmp.path().join("task.log");
     let request = TerminalRunRequest {
+        request_cwd: None,
+        approved_without_grant: false,
         command: "echo gone".to_string(),
         working_directory: tmp.path().to_path_buf(),
         env: HashMap::new(),

@@ -35,6 +35,7 @@ default = []
 default-bazel = []
 
 [dev-dependencies]
+fuigo-tty-utils = { workspace = true, features = ["unjudged-repo-exec"] }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
 serial_test = { workspace = true }

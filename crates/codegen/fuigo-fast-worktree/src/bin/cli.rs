@@ -99,6 +99,8 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
+    // A user-invoked developer tool; every operation is one the user typed, so every folder it is pointed at is allowed.
+    fuigo_tty_utils::install_repo_exec_judge(|_| true);
     let cli = Cli::parse();
 
     // Initialize tracing

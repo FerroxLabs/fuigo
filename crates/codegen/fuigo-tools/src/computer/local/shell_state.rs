@@ -185,8 +185,9 @@ function dump_zsh_state() {
   zsh_opts=$(setopt 2>/dev/null | command grep -vE '^(nounset|errexit|errreturn|pipefail)$' | command awk '{printf "builtin setopt %s 2>/dev/null || true\n", $0}' || true)
   _emit_encoded "$zsh_opts" "ZSH_OPTS_B64"
 
+  # TRAP* and hook functions act as soon as they are defined (before the restore guard runs), so they are not kept.
   local all_functions
-  all_functions=$(builtin typeset -f 2>/dev/null || true)
+  all_functions=$(for __fuigo_fn in ${(ok)functions}; do case $__fuigo_fn in (__FUIGO_UNREPLAYED_FUNCTIONS__) ;; (*) builtin typeset -f -- "$__fuigo_fn";; esac; done 2>/dev/null || true)
   _emit_encoded "$all_functions" "FUNCTIONS_B64"
 
   local aliases
@@ -244,10 +245,9 @@ impl ShellKind {
         };
         // Scrub inside the capture subshell, before serialization. This handles
         // mixed-case names and multiline values without parsing shell source.
-        script.replace(
-            "__FUIGO_CREDENTIAL_SCRUB__",
-            &self.credential_scrub("builtin exit 1"),
-        )
+        script
+            .replace("__FUIGO_CREDENTIAL_SCRUB__", &self.credential_scrub("builtin exit 1"))
+            .replace("__FUIGO_UNREPLAYED_FUNCTIONS__", &super::restore_guard::zsh_unreplayed_functions())
     }
 
     /// Shell code that unsets every exported credential variable on the denylist, running
@@ -287,8 +287,10 @@ impl ShellKind {
             Self::Bash => "IFS=$' \\t\\n'; ",
             Self::Zsh => "",
         };
+        // The `(pattern)` form: bash 3.2 (stock macOS) cannot parse a `case` arm without the leading `(` inside the
+        // dump's `$(...)`.
         format!(
-            "{reset_ifs}for __fuigo_env_name in {names}; do case \"$__fuigo_env_name\" in {patterns}) builtin unset \"$__fuigo_env_name\" 2>/dev/null || {on_unset_failure};; esac; done"
+            "{reset_ifs}for __fuigo_env_name in {names}; do case \"$__fuigo_env_name\" in ({patterns}) builtin unset \"$__fuigo_env_name\" 2>/dev/null || {on_unset_failure};; esac; done"
         )
     }
 
@@ -508,16 +510,22 @@ impl ShellState {
                 // var=value` does NOT beat allexport) and unset it after the
                 // eval so it can never reach child processes or the state
                 // dump (`export -p`).
+                //
+                // u35: the restore guard runs first after the snapshot eval (shadowing functions and aliases out,
+                // parse-affecting options forced); the rest runs only if it succeeded. See `restore_guard`.
                 "{dump_script} \
                  snap=$(command cat <&3) && builtin shopt -s extglob && builtin eval -- \"$snap\" && \
-                 {{ builtin set +u 2>/dev/null || true; \
-                 builtin export FUIGO_AGENT=1; \
-                 builtin export PWD=\"$(builtin pwd)\"; \
-                 builtin shopt -s expand_aliases 2>/dev/null; {sudo_inject}{search_inject}\
-                 builtin printf '%s' \"${{2:-}}\"; \
-                 __fuigo_user_cmd=\"$1\"; builtin declare +x __fuigo_user_cmd 2>/dev/null; builtin set --; \
-                 builtin eval \"$__fuigo_user_cmd\" 2>&1; }}; \
-                 COMMAND_EXIT_CODE=$?; builtin unset __fuigo_user_cmd 2>/dev/null; {dump_fn} >&4; builtin exit $COMMAND_EXIT_CODE"
+                 {{ {guarded}}}; \
+                 COMMAND_EXIT_CODE=$?; builtin unset __fuigo_user_cmd 2>/dev/null; {dump_fn} >&4; builtin exit $COMMAND_EXIT_CODE",
+                guarded = super::restore_guard::bash_guarded(&format!(
+                    "builtin set +u 2>/dev/null || true; \
+                     builtin export FUIGO_AGENT=1; \
+                     builtin export PWD=\"$(builtin pwd)\"; \
+                     builtin shopt -s expand_aliases 2>/dev/null; {sudo_inject}{search_inject}\
+                     builtin printf '%s' \"${{2:-}}\"; \
+                     __fuigo_user_cmd=\"$1\"; builtin declare +x __fuigo_user_cmd 2>/dev/null; builtin set --; \
+                     builtin eval \"$__fuigo_user_cmd\" 2>&1; "
+                )),
             ),
             // After snapshot restore: force nonomatch so login dumps cannot re-arm NOMATCH for model globs.
             // See the bash wrapper comment for why positional parameters are
@@ -529,15 +537,18 @@ impl ShellState {
                  builtin unsetopt aliases 2>/dev/null; \
                  builtin unalias -m '*' 2>/dev/null || true; \
                  builtin eval \"$snap\" && \
-                 {{ builtin unsetopt nounset 2>/dev/null || true; \
-                 builtin setopt nonomatch 2>/dev/null || true; \
-                 builtin export FUIGO_AGENT=1; \
-                 builtin export PWD=\"$(builtin pwd)\"; \
-                 builtin setopt aliases 2>/dev/null; {sudo_inject}{search_inject}\
-                 builtin printf '%s' \"${{2:-}}\"; \
-                 __fuigo_user_cmd=\"$1\"; builtin typeset +x __fuigo_user_cmd 2>/dev/null; builtin set --; \
-                 builtin eval \"$__fuigo_user_cmd\" 2>&1; }}; \
-                 COMMAND_EXIT_CODE=$?; builtin unset __fuigo_user_cmd 2>/dev/null; {dump_fn} >&4; builtin exit $COMMAND_EXIT_CODE"
+                 {{ {guarded}}}; \
+                 COMMAND_EXIT_CODE=$?; builtin unset __fuigo_user_cmd 2>/dev/null; {dump_fn} >&4; builtin exit $COMMAND_EXIT_CODE",
+                guarded = super::restore_guard::zsh_guarded(&format!(
+                    "builtin unsetopt nounset 2>/dev/null || true; \
+                     builtin setopt nonomatch 2>/dev/null || true; \
+                     builtin export FUIGO_AGENT=1; \
+                     builtin export PWD=\"$(builtin pwd)\"; \
+                     builtin setopt aliases 2>/dev/null; {sudo_inject}{search_inject}\
+                     builtin printf '%s' \"${{2:-}}\"; \
+                     __fuigo_user_cmd=\"$1\"; builtin typeset +x __fuigo_user_cmd 2>/dev/null; builtin set --; \
+                     builtin eval \"$__fuigo_user_cmd\" 2>&1; "
+                )),
             ),
         };
 
@@ -577,6 +588,12 @@ impl ShellState {
             state_out_read,
             cwd: effective_cwd.to_path_buf(),
         })
+    }
+
+    /// What to write to the state-in pipe for the next command: the snapshot as a replay script (see
+    /// [`replay_script`]).
+    pub fn replay_script(&self) -> Vec<u8> {
+        replay_script(self.shell, &self.snapshot)
     }
 
     /// Update this state from a raw dump string (read from fd 4).
@@ -679,6 +696,76 @@ fn set_cloexec(fd: &OwnedFd) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The decoded blocks of a stored snapshot (`fuigo_snap_<NAME>=$(command base64 -d <<'FUIGO_SNAP_EOF_<NAME>'`, one
+/// base64 line, the end line), in order. Every other line (the `)`, `eval` and `unset` lines, comments) is skipped.
+fn snapshot_blocks(snapshot: &str) -> Vec<(&str, Vec<u8>)> {
+    let mut blocks = Vec::new();
+    let mut lines = snapshot.lines();
+    while let Some(line) = lines.next() {
+        let Some(name) = line
+            .strip_prefix("fuigo_snap_")
+            .and_then(|rest| rest.split_once("=$(command base64 -d <<'FUIGO_SNAP_EOF_"))
+            .and_then(|(name, rest)| (rest.strip_suffix('\'') == Some(name)).then_some(name))
+        else {
+            continue;
+        };
+        let (Some(payload), Some(end)) = (lines.next(), lines.next()) else {
+            break;
+        };
+        if end.strip_prefix("FUIGO_SNAP_EOF_") != Some(name) {
+            continue;
+        }
+        if let Ok(text) = base64::engine::general_purpose::STANDARD.decode(payload.trim()) {
+            blocks.push((name, text));
+        }
+    }
+    blocks
+}
+
+/// u35: the script the wrapper evaluates to restore `snapshot`, built from its decoded blocks so that the replay
+/// calls nothing a replayed definition can intercept (no `eval`, `command`, `base64` or `builtin` after the first
+/// definition): exports, then options with the lines that turn on `xtrace` (and bash history) left out (a traced command expands `PS4`,
+/// command substitutions included, before the restore guard could turn it off), then alias expansion off, the aliases,
+/// and the function definitions last. Defining a function runs nothing (zsh `TRAP*` and hook functions, which do act
+/// on definition, are not dumped), and the restore guard runs right after. Text outside the dump's blocks, and blocks
+/// of other names, are not replayed.
+pub(crate) fn replay_script(shell: ShellKind, snapshot: &str) -> Vec<u8> {
+    let blocks = snapshot_blocks(snapshot);
+    let block = |name: &str| -> &[u8] {
+        blocks.iter().find(|(n, _)| *n == name).map(|(_, text)| text.as_slice()).unwrap_or_default()
+    };
+    // Option lines left out: `xtrace` (see above), and in bash `history`/`histexpand`, which inside this one eval
+    // would turn on `!` history expansion for the definitions that follow (`eval` only switches history off for its
+    // own text, and the dump's per-block evals used to scope it). The guard forces `histexpand` off anyway.
+    let (options, dropped, aliases_off): (&[&str], &[&[u8]], &[u8]) = match shell {
+        ShellKind::Bash => (
+            &["POSIX_OPTS_B64", "BASH_OPTS_B64"],
+            &[b"set -o xtrace", b"set -o history", b"set -o histexpand"],
+            b"builtin shopt -u expand_aliases",
+        ),
+        ShellKind::Zsh => (&["ZSH_OPTS_B64"], &[b"builtin setopt xtrace "], b"builtin unsetopt aliases"),
+    };
+    let mut script = Vec::new();
+    let mut push = |text: &[u8]| {
+        script.extend_from_slice(text);
+        script.push(b'\n');
+    };
+    push(block("ENV_VARS_B64"));
+    for name in options {
+        for line in block(name).split(|&b| b == b'\n') {
+            if !dropped.iter().any(|d| line.starts_with(d)) {
+                push(line);
+            }
+        }
+    }
+    push(aliases_off);
+    push(block("ALIASES_B64"));
+    push(block("FUNCTIONS_B64"));
+    // The replay's status is the wrapper's go-ahead; a reserved word, so no definition can stand in for it.
+    push(b"[[ -n x ]]");
+    script
+}
+
 /// Parse a state dump, validating start/end markers.
 /// Returns `(cwd, snapshot_rest)` or `None` if markers are missing.
 fn parse_dump(shell: ShellKind, raw: &str) -> Option<(PathBuf, String)> {
@@ -715,14 +802,14 @@ fn parse_after_marker<'a>(output: &'a str, marker: &str) -> &'a str {
 
 /// Write the snapshot to the state-in pipe, then close the fd.
 /// Uses blocking I/O on a dedicated thread (pipes are not regular files).
-pub async fn write_snapshot_to_pipe(snapshot: &str, fd: OwnedFd) -> std::io::Result<()> {
-    let data = snapshot.to_string();
+pub async fn write_snapshot_to_pipe(snapshot: impl AsRef<[u8]>, fd: OwnedFd) -> std::io::Result<()> {
+    let data = snapshot.as_ref().to_vec();
     tokio::task::spawn_blocking(move || {
         use std::io::Write;
         // Safety: we own the fd.
         let mut file = unsafe { std::fs::File::from_raw_fd(fd.as_raw_fd()) };
         std::mem::forget(fd);
-        file.write_all(data.as_bytes())?;
+        file.write_all(&data)?;
         file.flush()?;
         drop(file); // closes the fd → child sees EOF on its read end
         Ok(())
@@ -1357,7 +1444,7 @@ mod tests {
         drop(cmd);
 
         // Write snapshot to fd 3
-        let snapshot = state.snapshot.clone();
+        let snapshot = state.replay_script();
         let write_handle =
             tokio::spawn(
                 async move { write_snapshot_to_pipe(&snapshot, prep.state_in_write).await },
@@ -1389,6 +1476,11 @@ mod tests {
 
     /// Helper: run a command against a ShellState, update state, return (exit_code, stdout).
     async fn run_command(state: &mut ShellState, command: &str) -> (i32, String) {
+        run_command_in(state, command, None).await
+    }
+
+    /// [`run_command`] with the shell binary replaced by `binary` (another bash version).
+    async fn run_command_in(state: &mut ShellState, command: &str, binary: Option<&str>) -> (i32, String) {
         use command_fds::CommandFdExt;
 
         let prep = state
@@ -1399,7 +1491,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let mut cmd = tokio::process::Command::new(&prep.binary);
+        let mut cmd = tokio::process::Command::new(binary.unwrap_or(&prep.binary));
         cmd.args(&prep.args)
             .current_dir(&prep.cwd)
             .stdin(Stdio::null())
@@ -1411,7 +1503,7 @@ mod tests {
         let child = cmd.spawn().unwrap();
         drop(cmd);
 
-        let snapshot = state.snapshot.clone();
+        let snapshot = state.replay_script();
         let write_handle =
             tokio::spawn(
                 async move { write_snapshot_to_pipe(&snapshot, prep.state_in_write).await },
@@ -1559,8 +1651,8 @@ mod tests {
     /// A user `.zshrc` that replaces `run-help` (oh-my-zsh and distro rc files alias it to
     /// `man` or redefine it) and aliases `grep` must not break replay. The wrapper turns
     /// aliases off, runs `unalias -m '*'`, and evals the snapshot (functions before aliases),
-    /// so a function body is never alias-expanded at definition time and the replayed
-    /// `grep` alias is only what the user command sees. The snapshot here is produced by the
+    /// so a function body is never alias-expanded at definition time. (u35: `grep` is a safe-listed
+    /// program name, so the restore guard then disables the replayed `grep` alias.) The snapshot here is produced by the
     /// real init path (`-ilc` dump) from a real startup file, not hand-written.
     #[tokio::test]
     async fn test_zsh_startup_run_help_and_grep_alias_replay() {
@@ -1808,5 +1900,300 @@ mod tests {
         assert_eq!(state.cwd, prev_cwd);
         let (_, stdout) = run_command(&mut state, "echo $SURVIVE_TEST").await;
         assert_eq!(stdout.trim(), "yes");
+    }
+
+    /// u35: a state whose snapshot carries `script` as its functions block, the last thing the replay evaluates.
+    fn raw_state(shell: ShellKind, script: &str) -> ShellState {
+        ShellState {
+            cwd: std::env::current_dir().unwrap(),
+            snapshot: encoded_blocks(&[("FUNCTIONS_B64", script)]),
+            shell,
+        }
+    }
+
+    /// Snapshot text in the dump's block format.
+    fn encoded_blocks(blocks: &[(&str, &str)]) -> String {
+        blocks
+            .iter()
+            .map(|(name, text)| {
+                let payload = base64::engine::general_purpose::STANDARD.encode(text);
+                format!(
+                    "fuigo_snap_{name}=$(command base64 -d <<'FUIGO_SNAP_EOF_{name}'\n{payload}\n\
+                     FUIGO_SNAP_EOF_{name}\n)\neval \"$fuigo_snap_{name}\"\n"
+                )
+            })
+            .collect()
+    }
+
+    /// u35: a restored `set -k` must not turn a later plain `NAME=value` argument into an environment assignment.
+    #[tokio::test]
+    async fn u35_restored_keyword_option_does_not_reinterpret_plain_args_bash() {
+        if !bash_available() {
+            return;
+        }
+        // The option line exactly as the dump's `shopt -po` writes it.
+        let mut state = raw_state(ShellKind::Bash, "set -o keyword\n");
+        let (code, stdout) = run_command(&mut state, "echo FOO=bar").await;
+        assert_eq!(code, 0, "{stdout:?}");
+        assert_eq!(stdout.trim(), "FOO=bar", "restored keyword option changed a plain argument");
+    }
+
+    /// u35: zsh `EQUALS` (`=name` becomes a path) is forced off, so a plain `=name` argument stays literal.
+    #[tokio::test]
+    async fn u35_restored_equals_option_does_not_reinterpret_plain_args_zsh() {
+        if !zsh_available() {
+            return;
+        }
+        let mut state = raw_state(ShellKind::Zsh, "builtin setopt equals magicequalsubst\n");
+        let (code, stdout) = run_command(&mut state, "echo =ls").await;
+        assert_eq!(code, 0, "{stdout:?}");
+        assert_eq!(stdout.trim(), "=ls", "restored EQUALS option changed a plain argument");
+    }
+
+    /// u35: replayed functions and aliases named after safe-listed programs (or after the builtins the wrapper uses,
+    /// or the command-not-found hook) never run in place of the real program.
+    #[tokio::test]
+    async fn u35_replayed_shadows_of_safe_listed_programs_are_dropped_bash() {
+        if !bash_available() {
+            return;
+        }
+        let mut state = raw_state(
+            ShellKind::Bash,
+            "builtin() { echo SHADOW; }\nunset() { echo SHADOW; }\nlocal() { echo SHADOW; }\n\
+             ls() { echo SHADOW; }\npython3.99() { echo SHADOW; }\n\
+             command_not_found_handle() { echo SHADOW; }\nalias wc='echo SHADOW'\nalias printf='echo SHADOW'\n",
+        );
+        let (_, stdout) = run_command(
+            &mut state,
+            "ls -d /\nwc -c /dev/null\nprintf '%s\\n' plain-ok\npython3.99 --version",
+        )
+        .await;
+        assert!(!stdout.contains("SHADOW"), "a replayed shadow ran: {stdout:?}");
+        assert!(stdout.lines().any(|l| l.trim() == "/"), "{stdout:?}");
+        assert!(stdout.contains("0 /dev/null") && stdout.contains("plain-ok"), "{stdout:?}");
+        // The shadows are gone from the next snapshot as well.
+        let (_, stdout) = run_command(&mut state, "ls -d /").await;
+        assert_eq!(stdout.trim(), "/");
+    }
+
+    /// u35: the zsh guard disables shadowing functions and aliases (including `builtin` itself), `TRAP*` functions,
+    /// and every global and suffix alias.
+    #[tokio::test]
+    async fn u35_replayed_shadows_of_safe_listed_programs_are_dropped_zsh() {
+        if !zsh_available() {
+            return;
+        }
+        let mut state = raw_state(
+            ShellKind::Zsh,
+            "builtin() { echo SHADOW; }\nls() { echo SHADOW; }\nTRAPZERR() { echo SHADOW; }\n\
+             alias wc='echo SHADOW'\nalias -g GLOBAL_WORD='; echo SHADOW'\nalias -s txt='echo SHADOW'\n",
+        );
+        let (_, stdout) = run_command(&mut state, "ls -d /\nwc -c /dev/null\necho GLOBAL_WORD\nfalse").await;
+        assert!(!stdout.contains("SHADOW"), "a replayed shadow ran: {stdout:?}");
+        assert!(stdout.lines().any(|l| l.trim() == "/"), "{stdout:?}");
+        assert!(stdout.contains("0 /dev/null") && stdout.contains("GLOBAL_WORD"), "{stdout:?}");
+    }
+
+    /// u35: a shadow the guard cannot remove (a read-only function) refuses the command instead of running it.
+    #[tokio::test]
+    async fn u35_unremovable_shadow_refuses_the_command_bash() {
+        if !bash_available() {
+            return;
+        }
+        let mut state = raw_state(ShellKind::Bash, "ls() { echo SHADOW; }\nreadonly -f ls\n");
+        let (code, stdout) = run_command(&mut state, "echo RAN; ls -d /").await;
+        assert_ne!(code, 0);
+        assert!(!stdout.contains("RAN") && !stdout.contains("SHADOW"), "{stdout:?}");
+    }
+
+    /// g5a: every bash on this machine (the resolved one, `/bin/bash`, and any listed in `FUIGO_TEST_EXTRA_BASH`,
+    /// colon-separated; on macOS `/bin/bash` is 3.2).
+    fn bash_binaries() -> Vec<String> {
+        let mut found: Vec<String> = vec![ShellKind::Bash.binary_path().to_owned(), "/bin/bash".to_owned()];
+        if let Ok(extra) = std::env::var("FUIGO_TEST_EXTRA_BASH") {
+            found.extend(extra.split(':').filter(|p| !p.is_empty()).map(str::to_owned));
+        }
+        found.retain(|p| std::path::Path::new(p).exists());
+        found.dedup();
+        found
+    }
+
+    /// g5a: the guard works on bash 3.2 through 5.x: an empty snapshot runs the command, functions named `[` and `ls`
+    /// are dropped (`[` only outside POSIX mode on 3.2), and a read-only `[` function refuses the command.
+    #[tokio::test]
+    async fn u35_guard_runs_on_every_available_bash() {
+        for bash in bash_binaries() {
+            let mut state = raw_state(ShellKind::Bash, "");
+            state.snapshot.clear();
+            let (code, stdout) = run_command_in(&mut state, "echo plain-ok", Some(&bash)).await;
+            assert_eq!((code, stdout.trim()), (0, "plain-ok"), "{bash}: empty snapshot");
+            // That bash's own dump replays: a function, an alias and an export persist.
+            let define = "g5a_fn() { echo FN; }; alias g5a_al='echo AL'; export G5A=v";
+            assert_eq!(run_command_in(&mut state, define, Some(&bash)).await.0, 0, "{bash}");
+            let (code, stdout) = run_command_in(&mut state, "g5a_fn; g5a_al; echo \"$G5A\"", Some(&bash)).await;
+            assert_eq!((code, stdout.split_whitespace().collect::<Vec<_>>()), (0, vec!["FN", "AL", "v"]), "{bash}");
+
+            let mut state = raw_state(ShellKind::Bash, "function [ { echo SHADOW; }\nls() { echo SHADOW; }\n");
+            let (code, stdout) = run_command_in(&mut state, "[ -d / ] && echo DIR; ls -d /", Some(&bash)).await;
+            assert_eq!(code, 0, "{bash}: {stdout:?}");
+            assert!(!stdout.contains("SHADOW") && stdout.contains("DIR"), "{bash}: {stdout:?}");
+            assert!(stdout.lines().any(|l| l.trim() == "/"), "{bash}: {stdout:?}");
+
+            let mut state = raw_state(ShellKind::Bash, "function [ { echo SHADOW; }\nreadonly -f '['\n");
+            let (code, stdout) = run_command_in(&mut state, "echo RAN", Some(&bash)).await;
+            assert_ne!(code, 0, "{bash}: {stdout:?}");
+            assert!(!stdout.contains("RAN"), "{bash}: {stdout:?}");
+        }
+    }
+
+    /// g5a: functions an earlier command defined named after what the old replay called (`eval`, `command`) never run
+    /// during the replay: it calls nothing after the first definition, and the guard then drops them.
+    #[tokio::test]
+    async fn u35_replay_calls_nothing_a_replayed_function_can_intercept() {
+        for (shell, available) in [(ShellKind::Bash, bash_available()), (ShellKind::Zsh, zsh_available())] {
+            if !available {
+                continue;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let mark = dir.path().join("mark");
+            let mut state = raw_state(shell, "");
+            state.snapshot.clear();
+            let define = format!(
+                "eval() {{ : >> '{m}'; builtin eval \"$@\"; }}; command() {{ : >> '{m}'; builtin command \"$@\"; }}; \
+                 alias fuigo_probe_alias=true",
+                m = mark.display()
+            );
+            run_command(&mut state, &define).await;
+            let _ = std::fs::remove_file(&mark);
+            let (code, stdout) = run_command(&mut state, "echo after").await;
+            assert_eq!((code, stdout.trim()), (0, "after"), "{shell:?}");
+            assert!(!mark.exists(), "{shell:?}: a replayed eval/command function ran");
+        }
+    }
+
+    /// u35 g6 (Astra r5 Low): a multiline alias makes the guard's alias loop skip continuation lines; a replayed
+    /// `continue` function must not run there (it could define `ls` again after the functions were dropped).
+    #[tokio::test]
+    async fn u35_replayed_continue_does_not_run_in_the_guard_bash() {
+        for bash in bash_binaries() {
+            let mut state = raw_state(ShellKind::Bash, "");
+            state.snapshot.clear();
+            let define = "alias g6_multi='echo one\necho two'; continue() { ls() { echo SHADOW; }; }";
+            assert_eq!(run_command_in(&mut state, define, Some(&bash)).await.0, 0, "{bash}");
+            let (_, stdout) = run_command_in(&mut state, "ls -d /", Some(&bash)).await;
+            assert!(!stdout.contains("SHADOW"), "{bash}: a replayed continue() ran in the guard: {stdout:?}");
+            assert!(stdout.lines().any(|l| l.trim() == "/"), "{bash}: {stdout:?}");
+        }
+    }
+
+    /// g5a: zsh `TRAPDEBUG`, `zshexit` and `chpwd` defined by an earlier command do not run in a later one (they are
+    /// not dumped, and the guard disables them).
+    #[tokio::test]
+    async fn u35_trap_and_hook_functions_are_not_replayed_zsh() {
+        if !zsh_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mark = |n: &str| dir.path().join(n);
+        let mut state = raw_state(ShellKind::Zsh, "");
+        state.snapshot.clear();
+        let define = format!(
+            "TRAPDEBUG() {{ : >> '{}'; }}; zshexit() {{ : >> '{}'; }}; chpwd() {{ : >> '{}'; }}",
+            mark("debug").display(),
+            mark("exit").display(),
+            mark("chpwd").display()
+        );
+        run_command(&mut state, &define).await;
+        for name in ["debug", "exit", "chpwd"] {
+            let _ = std::fs::remove_file(mark(name));
+        }
+        let target = dir.path().display().to_string();
+        let (code, stdout) = run_command(&mut state, &format!("cd '{target}'; echo after")).await;
+        assert_eq!((code, stdout.trim()), (0, "after"));
+        for name in ["debug", "exit", "chpwd"] {
+            assert!(!mark(name).exists(), "the replayed {name} hook ran");
+        }
+    }
+
+    /// g5a: a replayed `xtrace` and an exported `PS4` with a command substitution never run it: the replay leaves the
+    /// `xtrace` line out, and the guard turns `xtrace` off and resets `PS4` (zsh also `PROMPT_SUBST`), so neither a
+    /// later plain command nor a plain `set -x` expands the replayed `PS4`.
+    #[tokio::test]
+    async fn u35_replayed_xtrace_does_not_expand_a_replayed_ps4() {
+        for (shell, available, setup) in [
+            (ShellKind::Bash, bash_available(), ""),
+            (ShellKind::Zsh, zsh_available(), "setopt promptsubst; "),
+        ] {
+            if !available {
+                continue;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let mark = dir.path().join("mark");
+            let mut state = raw_state(shell, "");
+            state.snapshot.clear();
+            run_command(&mut state, &format!("{setup}export PS4='$(: >> {})+ '", mark.display())).await;
+            assert!(!mark.exists(), "{shell:?}: PS4 expanded without xtrace");
+            run_command(&mut state, "set -x").await;
+            assert!(!mark.exists(), "{shell:?}: set -x expanded the replayed PS4");
+            let (code, stdout) = run_command(&mut state, "echo after").await;
+            assert_eq!((code, stdout.trim()), (0, "after"), "{shell:?}");
+            assert!(!mark.exists(), "{shell:?}: the replayed xtrace expanded PS4");
+        }
+    }
+
+    /// g5a (Fable r4): the zsh fail-closed path. A snapshot that replaces the `functions` hash keeps a shadow the guard
+    /// cannot see, so the command is refused.
+    #[tokio::test]
+    async fn u35_unremovable_shadow_refuses_the_command_zsh() {
+        if !zsh_available() {
+            return;
+        }
+        let mut state =
+            raw_state(ShellKind::Zsh, "unset functions\ntypeset -A functions\nls() { echo SHADOW; }\n");
+        let (code, stdout) = run_command(&mut state, "echo RAN; ls -d /").await;
+        assert_ne!(code, 0);
+        assert!(!stdout.contains("RAN") && !stdout.contains("SHADOW"), "{stdout:?}");
+    }
+
+    /// g5a (Fable r4): bash `histexpand` restored from the options block is forced off, so `!` in a plain word stays.
+    #[tokio::test]
+    async fn u35_restored_histexpand_does_not_change_plain_args_bash() {
+        if !bash_available() {
+            return;
+        }
+        let mut state = raw_state(ShellKind::Bash, "");
+        state.snapshot = encoded_blocks(&[("POSIX_OPTS_B64", "set -o histexpand\n")]);
+        let (code, stdout) = run_command(&mut state, "echo hi!x").await;
+        assert_eq!((code, stdout.trim()), (0, "hi!x"));
+    }
+
+    /// g5a (Fable r4): zsh `AUTO_CD` restored from the options block is forced off, so a directory name in command
+    /// position does not change directory.
+    #[tokio::test]
+    async fn u35_restored_auto_cd_does_not_change_directory_zsh() {
+        if !zsh_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let target = dunce::canonicalize(dir.path()).unwrap().display().to_string();
+        let mut state = raw_state(ShellKind::Zsh, "");
+        state.snapshot = encoded_blocks(&[("ZSH_OPTS_B64", "builtin setopt autocd 2>/dev/null || true\n")]);
+        let (_, stdout) = run_command(&mut state, &format!("{target}\npwd -P")).await;
+        assert_ne!(stdout.lines().last().map(str::trim), Some(target.as_str()), "{stdout:?}");
+    }
+
+    /// g5a (Fable r4): a shadow an earlier command defined is dropped from the next command (both shells).
+    #[tokio::test]
+    async fn u35_shadow_from_an_earlier_command_is_dropped() {
+        for (shell, available) in [(ShellKind::Bash, bash_available()), (ShellKind::Zsh, zsh_available())] {
+            if !available {
+                continue;
+            }
+            let mut state = raw_state(shell, "");
+            state.snapshot.clear();
+            run_command(&mut state, "ls() { echo SHADOW; }").await;
+            let (code, stdout) = run_command(&mut state, "ls -d /").await;
+            assert_eq!((code, stdout.trim()), (0, "/"), "{shell:?}");
+        }
     }
 }

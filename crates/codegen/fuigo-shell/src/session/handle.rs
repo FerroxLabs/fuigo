@@ -163,6 +163,9 @@ pub struct SessionHandle {
     /// Plan mode tracker, shared with the session actor via Arc.
     /// Exposed so the `fuigo/toggle_plan_mode` handler can toggle plan mode without going through the session command channel.
     pub plan_mode: std::sync::Arc<parking_lot::Mutex<crate::session::plan_mode::PlanModeTracker>>,
+    /// The actor's live prompt mode (shared Arc), read with `plan_mode` to advertise `modes.current` on attach.
+    /// Read directly so an attach never waits on an actor that is mid-turn.
+    pub current_prompt_mode: std::sync::Arc<parking_lot::Mutex<crate::session::plan_mode::PromptMode>>,
     /// Debug flag: when set to `true`, the next turn unconditionally triggers auto-compaction regardless of context window usage.
     /// Consumed (reset to `false`) atomically on use via `compare_exchange`.
     /// Set via `fuigo/debug/arm_auto_compact`.

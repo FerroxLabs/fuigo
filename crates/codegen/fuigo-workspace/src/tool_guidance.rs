@@ -114,8 +114,15 @@ pub fn parse(
     (out, warnings)
 }
 
-fn read_file(path: &Path, known: &HashSet<String>) -> HashMap<String, ToolGuidance> {
-    match std::fs::read_to_string(path) {
+/// Read one guidance file. `root` set (a project file): the file actually opened must lie inside that folder, so a
+/// project file linked elsewhere on the machine is not applied; `None` (user file, `FUIGO_TOOL_GUIDANCE`): follows
+/// links.
+fn read_file(
+    path: &Path,
+    root: Option<&fuigo_dirs::contained::PinnedRoot>,
+    known: &HashSet<String>,
+) -> HashMap<String, ToolGuidance> {
+    match fuigo_dirs::contained::read_scoped(path, root) {
         Ok(src) => parse(&src, &path.display().to_string(), known).0,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
         Err(e) => {
@@ -135,9 +142,17 @@ pub fn load_from(
     user_file: Option<&Path>,
     known: &HashSet<String>,
 ) -> HashMap<String, ToolGuidance> {
-    let mut merged = user_file.map(|p| read_file(p, known)).unwrap_or_default();
+    let mut merged = user_file.map(|p| read_file(p, None, known)).unwrap_or_default();
     for p in project_files {
-        merged.extend(read_file(p, known));
+        // `<dir>/.fuigo/tool-guidance.toml` is held to `<dir>`, pinned when this load starts.
+        let Some(root) = p
+            .parent()
+            .and_then(Path::parent)
+            .and_then(|dir| fuigo_dirs::contained::PinnedRoot::pin(dir).ok())
+        else {
+            continue;
+        };
+        merged.extend(read_file(p, Some(&root), known));
     }
     merged
 }
@@ -154,12 +169,7 @@ pub fn project_files(cwd: &Path) -> Vec<PathBuf> {
 }
 
 fn folder_is_trusted(cwd: &Path) -> bool {
-    use crate::folder_trust::{TrustOutcome, decide, decide_inputs, feature_enabled};
-    let key = crate::trust::workspace_key(cwd);
-    matches!(
-        decide(feature_enabled(None), &decide_inputs(cwd, &key)),
-        TrustOutcome::Trusted
-    )
+    crate::folder_trust::dir_trust(cwd).is_trusted()
 }
 
 /// What a session rooted at `cwd` should apply. Honors the trust gate and `FUIGO_TOOL_GUIDANCE`.
@@ -186,7 +196,7 @@ fn load_with(
         Some(v) if v.eq_ignore_ascii_case("none") || v.eq_ignore_ascii_case("off") => {
             return HashMap::new();
         }
-        Some(v) if !v.is_empty() => return read_file(Path::new(v), known),
+        Some(v) if !v.is_empty() => return read_file(Path::new(v), None, known),
         _ => {}
     }
     let project = project_files(cwd);
@@ -322,6 +332,31 @@ mod tests {
         let user = write(t.path(), "home/tool-guidance.toml", USER);
         let m = load_with(None, t.path(), Some(&user), &known(), |_| false);
         assert_eq!(m["read_file"].text, "user");
+    }
+
+    /// Astra r4 Medium: a project guidance file linked outside its folder is not applied; one linked inside is; the
+    /// user file still follows links.
+    #[cfg(unix)]
+    #[test]
+    fn m5_project_guidance_linked_outside_its_folder_is_not_applied() {
+        let t = tempfile::tempdir().unwrap();
+        let repo = t.path().join("repo");
+        let outside = write(t.path(), "outside/guidance.toml", PROJ);
+        std::fs::create_dir_all(repo.join(".fuigo")).unwrap();
+        std::os::unix::fs::symlink(&outside, repo.join(".fuigo").join(FILE_NAME)).unwrap();
+        let m = load_from(&[repo.join(".fuigo").join(FILE_NAME)], None, &known());
+        assert!(m.is_empty(), "outside project guidance applied: {m:?}");
+
+        let inside = write(&repo, "docs/guidance.toml", PROJ);
+        std::fs::remove_file(repo.join(".fuigo").join(FILE_NAME)).unwrap();
+        std::os::unix::fs::symlink(&inside, repo.join(".fuigo").join(FILE_NAME)).unwrap();
+        let m = load_from(&[repo.join(".fuigo").join(FILE_NAME)], None, &known());
+        assert_eq!(m["read_file"].text, "project");
+
+        let user_link = t.path().join("user-link.toml");
+        std::os::unix::fs::symlink(&outside, &user_link).unwrap();
+        let m = load_from(&[], Some(&user_link), &known());
+        assert_eq!(m["read_file"].text, "project");
     }
 
     #[test]

@@ -29,30 +29,110 @@ const BLANK_RECHECK_DELAY: std::time::Duration = std::time::Duration::from_milli
 /// blank is accepted anyway.
 const BLANK_RECHECKS: usize = 3;
 
-fn read_toml_file_as(path: &Path, blank: BlankRead) -> std::io::Result<toml::Value> {
+/// Why the quiet core could not produce a table.
+enum QuietReadError {
+    /// The file is not valid TOML; the detail is span-built (never echoes a source line).
+    Syntax(String),
+    /// The file could not be read.
+    Io(std::io::Error),
+}
+
+/// The quiet core of [`read_toml_file_as`]: the same read, blank handling and parse, without logging.
+fn read_toml_file_quiet(path: &Path, blank: BlankRead) -> Result<toml::Value, QuietReadError> {
     let read = match std::fs::read_to_string(path) {
         Ok(s) if s.trim().is_empty() && blank == BlankRead::ConfirmStable => confirm_blank(path),
         other => other,
     };
     match read {
         Ok(s) if s.trim().is_empty() => Ok(toml::Value::Table(toml::map::Map::new())),
-        Ok(s) => match toml::from_str::<toml::Value>(&s) {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                // The detail is built from the span, never from Display: Display echoes the offending source line, which may carry a secret
-                // Safe to log and to return to a client
-                let detail = toml_error_detail(&s, &e);
-                tracing::error!(file = %path.display(), "config toml has syntax errors: {detail}");
-                Err(std::io::Error::other(detail))
-            }
-        },
+        // The detail is built from the span, never from Display: Display echoes the offending source line, which may carry a secret
+        // Safe to log and to return to a client
+        Ok(s) => toml::from_str::<toml::Value>(&s)
+            .map_err(|e| QuietReadError::Syntax(toml_error_detail(&s, &e))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Ok(toml::Value::Table(toml::map::Map::new()))
         }
-        Err(e) => {
+        Err(e) => Err(QuietReadError::Io(e)),
+    }
+}
+
+fn read_toml_file_as(path: &Path, blank: BlankRead) -> std::io::Result<toml::Value> {
+    match read_toml_file_quiet(path, blank) {
+        Ok(v) => Ok(v),
+        Err(QuietReadError::Syntax(detail)) => {
+            tracing::error!(file = %path.display(), "config toml has syntax errors: {detail}");
+            Err(std::io::Error::other(detail))
+        }
+        Err(QuietReadError::Io(e)) => {
             tracing::error!(file = %path.display(), "config file unreadable: {e}");
             Err(e)
         }
+    }
+}
+
+/// The user's own `config.toml` (`$FUIGO_HOME/config.toml`), read quietly: its path and the parsed table, or why it could
+/// not be read. A missing or blank file is an empty table. `None` when there is no user Fuigo home.
+///
+/// Only that one file: no project layer, no `FUIGO_CONFIG` / `FUIGO_CONFIG_PATH`, overlay, remote or managed config. For
+/// a setting a repo or the environment must never be able to set or clear (the user's always-approve lock). Quiet so a
+/// caller that reads it often can decide how loudly to report a bad file.
+pub fn user_config_raw() -> Option<(std::path::PathBuf, std::io::Result<toml::Value>)> {
+    let path = user_fuigo_home()?.join(USER_CONFIG_FILENAME);
+    let read = read_user_layer_once_confirmed(&path).map_err(|e| match e {
+        QuietReadError::Syntax(detail) => std::io::Error::other(detail),
+        QuietReadError::Io(e) => e,
+    });
+    Some((path, read))
+}
+
+/// Blank user files confirmed stable by [`confirm_blank`], with their identity at that moment (one entry per user home).
+static CONFIRMED_BLANK: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, FileStamp>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Whether a cached blank identity may stand in for a fresh confirm. Unix only: there the stamp carries ctime, which
+/// every write moves and no writer can set back. Windows has no ctime; its stamp is size, last-write time and file id,
+/// and the file system may defer the last-write update, so an in-place truncate-and-refill of the same file can show
+/// the old stamp while blank mid-save. There every blank read pays the confirm wait (fail closed).
+const BLANK_STAMP_CACHE: bool = cfg!(unix);
+
+/// [`read_toml_file_quiet`] with [`BlankRead::ConfirmStable`], paying the confirm wait once per blank file rather than per
+/// call: the hub reads the lock on every judgement. A blank read whose identity (inode, size, times) equals the one
+/// already confirmed stable is that same untouched blank file and is accepted at once. Any write to the file (an editor's
+/// in-place truncate included) moves its ctime, so a file caught mid-save never matches and is confirmed again; any
+/// read that sees content also drops the cached blank, so a later blank is confirmed afresh. See [`BLANK_STAMP_CACHE`]
+/// for Windows. `BlankRead::Accept` would be wrong here: a blank read in the middle of an in-place save of a file that
+/// sets the lock would drop the lock for that one judgement.
+fn read_user_layer_once_confirmed(path: &Path) -> Result<toml::Value, QuietReadError> {
+    let raw = std::fs::read_to_string(path);
+    let blank = matches!(&raw, Ok(s) if s.trim().is_empty());
+    let mut cache = CONFIRMED_BLANK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !blank {
+        cache.remove(path);
+        drop(cache);
+        return read_toml_file_quiet(path, BlankRead::ConfirmStable);
+    }
+    let stamp = FileStamp::of(path);
+    if BLANK_STAMP_CACHE && stamp.is_some() && cache.get(path) == stamp.as_ref() {
+        return Ok(toml::Value::Table(toml::map::Map::new()));
+    }
+    match confirm_blank(path) {
+        Ok(again) if again.trim().is_empty() => {
+            match FileStamp::of(path).filter(|_| BLANK_STAMP_CACHE) {
+                Some(s) => cache.insert(path.to_path_buf(), s),
+                None => cache.remove(path),
+            };
+            Ok(toml::Value::Table(toml::map::Map::new()))
+        }
+        Ok(again) => {
+            cache.remove(path);
+            toml::from_str::<toml::Value>(&again)
+                .map_err(|e| QuietReadError::Syntax(toml_error_detail(&again, &e)))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(toml::Value::Table(toml::map::Map::new()))
+        }
+        Err(e) => Err(QuietReadError::Io(e)),
     }
 }
 
@@ -244,7 +324,41 @@ pub fn load_config_file(path: &Path) -> std::io::Result<toml::Value> {
 
 /// [`load_config_file`] with the tier decided by the caller (`may_name_saved_key`).
 pub fn load_config_file_with_key_naming(path: &Path, may_name_saved_key: bool) -> std::io::Result<toml::Value> {
-    let mut v = read_toml_file(path)?;
+    finish_config_file(read_toml_file(path)?, path, may_name_saved_key)
+}
+
+/// A project's `<dir>/.fuigo/config.toml`, read only from inside `<dir>`: the file actually opened must lie there
+/// (checked on the opened handle, see [`fuigo_dirs::contained`]), so a project config linked to a file elsewhere on
+/// the machine is not loaded as this project's settings. Otherwise exactly [`load_config_file`]. A path with no
+/// `<dir>` (fewer than two parents) is refused.
+pub fn load_project_config_file(path: &Path) -> std::io::Result<toml::Value> {
+    let Some(project_dir) = path.parent().and_then(Path::parent) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a project config path", path.display()),
+        ));
+    };
+    // The project folder is pinned when this load starts; see `fuigo_dirs::contained::PinnedRoot`.
+    let parsed = match fuigo_dirs::contained::PinnedRoot::pin(project_dir)
+        .and_then(|root| fuigo_dirs::contained::read_contained(path, &root))
+    {
+        Ok(s) if s.trim().is_empty() => toml::Value::Table(toml::map::Map::new()),
+        Ok(s) => toml::from_str::<toml::Value>(&s).map_err(|e| {
+            let detail = toml_error_detail(&s, &e);
+            tracing::error!(file = %path.display(), "config toml has syntax errors: {detail}");
+            std::io::Error::other(detail)
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Value::Table(toml::map::Map::new()),
+        Err(e) => {
+            tracing::warn!(file = %path.display(), "project config not loaded: {e}");
+            return Err(e);
+        }
+    };
+    finish_config_file(parsed, path, crate::key_naming::source_may_name_saved_key(path))
+}
+
+/// The P118 refusals, `$VAR` expansion and `[[version_overrides]]` applied to a parsed config file.
+fn finish_config_file(mut v: toml::Value, path: &Path, may_name_saved_key: bool) -> std::io::Result<toml::Value> {
     let label = path.display().to_string();
     if !may_name_saved_key {
         // Refuse, and mark every server this file defines (also inside its `version_overrides`) so the mark travels
@@ -973,6 +1087,79 @@ fn expand_env_vars_in_string_keeping(input: &str, key_default_resolves: bool) ->
 #[cfg(test)]
 mod tests {
 
+    /// u35 r1 (Fable M): the always-approve lock re-reads the user file on every hub judgement; a blank file pays the
+    /// confirm wait once, not per call, and any write to it is confirmed again.
+    #[test]
+    fn user_layer_blank_confirm_is_paid_once_per_untouched_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        blank_hook::set(None);
+        for _ in 0..3 {
+            let v = read_user_layer_once_confirmed(&path).ok().expect("blank reads as empty");
+            assert!(v.as_table().is_some_and(toml::map::Map::is_empty));
+        }
+        assert_eq!(blank_hook::fired(), 1, "one confirm for three reads of the same blank file");
+        // A rewrite (same blank content, new identity) is confirmed again. The precondition is checked, not assumed:
+        // on a file system with a coarse ctime and inode reuse, rewrite until the identity really moved.
+        replace_until_new_stamp(&path, "");
+        blank_hook::set(None);
+        read_user_layer_once_confirmed(&path).ok().expect("blank reads as empty");
+        assert_eq!(blank_hook::fired(), 1, "a replaced file is not the confirmed one");
+        // Mid-save: blank at first read, content by the confirm; the content wins and nothing is cached as blank.
+        let writer = path.clone();
+        replace_until_new_stamp(&path, "");
+        blank_hook::set(Some(Box::new(move || {
+            std::fs::write(&writer, "[permissions]\nlock = true\n").unwrap();
+        })));
+        let v = read_user_layer_once_confirmed(&path).ok().expect("content read");
+        blank_hook::set(None);
+        assert!(v.get("permissions").is_some(), "the in-place save's content is used: {v:?}");
+        assert!(!confirmed_blank_cached(&path), "a mid-save read caches nothing");
+    }
+
+    /// Replace `path` with `contents` until its [`FileStamp`] differs from the cached confirmed-blank one, so a test of
+    /// "a new file is confirmed again" never rests on the clock ticking between two writes.
+    fn replace_until_new_stamp(path: &Path, contents: &str) {
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            std::fs::remove_file(path).unwrap();
+            std::fs::write(path, contents).unwrap();
+            let cached = CONFIRMED_BLANK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if cached.get(path) != FileStamp::of(path).as_ref() {
+                return;
+            }
+        }
+        panic!("{} kept its confirmed-blank identity across 100 rewrites", path.display());
+    }
+
+    fn confirmed_blank_cached(path: &Path) -> bool {
+        CONFIRMED_BLANK.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(path)
+    }
+
+    /// u35 r2 (Astra M): a read that sees content drops the cached blank, so a confirmed-blank file that gained content
+    /// and then reads blank again (an in-place truncate-and-refill whose stamp might not move, as a deferred last-write
+    /// time on Windows allows) pays a fresh confirm instead of matching the old identity.
+    #[test]
+    fn user_layer_content_read_drops_the_confirmed_blank() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        blank_hook::set(None);
+        read_user_layer_once_confirmed(&path).ok().expect("blank reads as empty");
+        assert_eq!(confirmed_blank_cached(&path), BLANK_STAMP_CACHE);
+        // In place (same inode): the file now sets the lock.
+        std::fs::write(&path, "[permissions]\nlock = true\n").unwrap();
+        let v = read_user_layer_once_confirmed(&path).ok().expect("content read");
+        assert!(v.get("permissions").is_some(), "{v:?}");
+        assert!(!confirmed_blank_cached(&path), "content seen: the confirmed blank is forgotten");
+        // Mid-save blank again: confirmed afresh, never answered from the old identity.
+        std::fs::write(&path, "").unwrap();
+        blank_hook::set(None);
+        read_user_layer_once_confirmed(&path).ok().expect("blank reads as empty");
+        assert_eq!(blank_hook::fired(), 1, "a blank after content is confirmed again");
+    }
+
     /// P183 round 7 (sweep): MDM-forced `[hooks]` load as a managed-policy layer (before, they were never read); a non-table
     /// `hooks` or no hooks is no layer.
     #[test]
@@ -1470,5 +1657,30 @@ mod tests {
             vec!["requirements/system"],
             "removed"
         );
+    }
+
+    /// m4: a project `.fuigo/config.toml` linking outside its folder is not loaded; an in-folder link is.
+    #[cfg(unix)]
+    #[test]
+    fn m4_project_config_linked_outside_its_folder_is_not_loaded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        std::fs::write(base.join("outside").join("c.toml"), "marker = \"outside\"\n").unwrap();
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".fuigo")).unwrap();
+        let config = repo.join(".fuigo").join("config.toml");
+        std::os::unix::fs::symlink(base.join("outside").join("c.toml"), &config).unwrap();
+        assert!(load_project_config_file(&config).is_err(), "outside config loaded");
+
+        std::fs::write(repo.join("shared.toml"), "marker = \"inside\"\n").unwrap();
+        std::fs::remove_file(&config).unwrap();
+        std::os::unix::fs::symlink(repo.join("shared.toml"), &config).unwrap();
+        let v = load_project_config_file(&config).unwrap();
+        assert_eq!(v.get("marker").and_then(|m| m.as_str()), Some("inside"));
+
+        // Missing file: an empty table, as `load_config_file` gives.
+        std::fs::remove_file(&config).unwrap();
+        assert!(load_project_config_file(&config).unwrap().as_table().unwrap().is_empty());
     }
 }

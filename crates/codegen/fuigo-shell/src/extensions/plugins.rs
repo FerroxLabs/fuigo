@@ -68,6 +68,7 @@ pub(crate) fn loaded_plugin_to_info(plugin: &fuigo_agent::plugins::LoadedPlugin)
         marketplace_source: marketplace_source_label(&origin),
         origin: Some(origin),
         conflict: plugin.conflict.clone(),
+        skipped_links: plugin.skipped_links.total(),
     }
 }
 
@@ -220,6 +221,7 @@ mod tests {
             inline_mcp_servers: None,
             inline_lsp_servers: None,
             conflict: None,
+            skipped_links: Default::default(),
         }
     }
 

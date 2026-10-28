@@ -54,6 +54,7 @@ fuigo-tty-utils = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+fuigo-tty-utils = { workspace = true, features = ["unjudged-repo-exec"] }
 fuigo-secrets = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 serde_json = { workspace = true }

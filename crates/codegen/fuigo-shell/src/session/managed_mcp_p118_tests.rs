@@ -56,7 +56,7 @@ fn a_plugin_mcp_file_under_the_user_home_is_still_refused() {
         r#"{"mcpServers":{"p118-dev":{"command":"x","env":{"TOKEN":"${FUIGO_API_KEY}","OTHER":"ok"}}}}"#,
     )
     .unwrap();
-    let (servers, _) = load_plugin_mcp_servers(&path, "acme", "/plugins/acme", "/data/acme");
+    let (servers, _) = load_plugin_mcp_servers(&path, &fuigo_dirs::contained::PinnedRoot::pin(&dir).unwrap(), "acme", "/plugins/acme", "/data/acme");
     let acp::McpServer::Stdio(s) = &servers[0] else { panic!("stdio") };
     assert_eq!(s.env.iter().find(|e| e.name == "TOKEN").unwrap().value, "");
 }

@@ -12,8 +12,6 @@
 
 use std::path::{Path, PathBuf};
 
-use fuigo_tty_utils::git_command;
-
 use crate::util::fuigo_home::fuigo_home;
 
 const WORKTREE_POOL_LOG: &str = "fuigo_worktree_pool";
@@ -133,9 +131,15 @@ fn cleanup_stale_pool_worktrees_inner() {
                     path = %wt_path.display(),
                     "CLEANUP_GIT_REMOVE: running git worktree remove --force"
                 );
-                let result = git_command()
-                    .args(["worktree", "remove", "--force", &p])
-                    .output();
+                // Judged on the repository the worktree belongs to (read from its `.git` file); a worktree whose
+                // source repository is unknown or untrusted is only deleted from disk, with no git started.
+                let result = pooled_worktree_source_repo(&wt_path)
+                    .ok_or_else(|| std::io::Error::other("source repository of the pooled worktree unknown"))
+                    .and_then(|source| {
+                        fuigo_tty_utils::git_command_for_worktree(&source, &wt_path, &pool_dir)
+                            .map_err(std::io::Error::from)
+                    })
+                    .and_then(|mut cmd| cmd.args(["worktree", "remove", "--force", &p]).output());
                 tracing::info!(
                     target: WORKTREE_POOL_LOG,
                     path = %wt_path.display(),
@@ -158,6 +162,22 @@ fn cleanup_stale_pool_worktrees_inner() {
     );
 }
 
+/// The repository a pooled worktree belongs to: its `.git` file names `<repo>/.git/worktrees/<name>`.
+fn pooled_worktree_source_repo(worktree: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(worktree.join(".git")).ok()?;
+    let gitdir = PathBuf::from(text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim());
+    let worktrees = gitdir.parent()?;
+    if worktrees.file_name()? != "worktrees" {
+        return None;
+    }
+    let common = worktrees.parent()?;
+    if common.file_name().is_some_and(|n| n == ".git") {
+        common.parent().map(Path::to_path_buf)
+    } else {
+        Some(common.to_path_buf())
+    }
+}
+
 /// The base pool directory under `~/.fuigo/`.
 fn pool_base_directory() -> PathBuf {
     fuigo_home().join("worktree_pool")
@@ -166,6 +186,19 @@ fn pool_base_directory() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pooled_worktree_names_the_repository_it_belongs_to() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), "gitdir: /src/repo/.git/worktrees/wt\n").unwrap();
+        assert_eq!(pooled_worktree_source_repo(&wt), Some(PathBuf::from("/src/repo")));
+        std::fs::write(wt.join(".git"), "gitdir: /src/repo/.git/modules/x\n").unwrap();
+        assert_eq!(pooled_worktree_source_repo(&wt), None, "not a linked worktree registration");
+        std::fs::remove_file(wt.join(".git")).unwrap();
+        assert_eq!(pooled_worktree_source_repo(&wt), None);
+    }
 
     #[test]
     fn test_pool_base_directory() {

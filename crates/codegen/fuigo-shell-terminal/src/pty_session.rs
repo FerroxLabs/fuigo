@@ -254,6 +254,25 @@ fn remove_fuigo_secrets(cmd: &mut CommandBuilder) {
     }
 }
 
+/// The [`ShellSpawnFailure`](fuigo_tools::util::spawn::ShellSpawnFailure) for a PTY spawn that
+/// failed with `err`. `portable-pty` 0.9 does not return the `io::Error` on Windows: it formats the
+/// `CreateProcessW` failure into its message (`... failed: <io error> (os error N)`) and returns
+/// that string, so a downcast finds nothing. The OS error code is then read back from the message
+/// chain ([`ShellSpawnFailure::from_error_text`](fuigo_tools::util::spawn::ShellSpawnFailure::from_error_text)).
+fn pty_spawn_failure(
+    shell_path: &str,
+    err: &(dyn std::error::Error + 'static),
+    path_set: bool,
+) -> fuigo_tools::util::spawn::ShellSpawnFailure {
+    let program = std::ffi::OsStr::new(shell_path);
+    let chain = || std::iter::successors(Some(err), |e| e.source());
+    if let Some(io) = chain().find_map(|e| e.downcast_ref::<std::io::Error>()) {
+        return fuigo_tools::util::spawn::ShellSpawnFailure::new("pty", program, io, path_set);
+    }
+    let text = chain().map(ToString::to_string).collect::<Vec<_>>().join(": ");
+    fuigo_tools::util::spawn::ShellSpawnFailure::from_error_text("pty", program, &text, path_set)
+}
+
 pub async fn create_pty(
     shell: Option<&str>,
     cwd: Option<&str>,
@@ -301,12 +320,16 @@ pub async fn create_pty(
     cmd.env("LANG", "en_US.UTF-8");
     cmd.env("LC_ALL", "en_US.UTF-8");
 
+    // For the spawn-failure log: whether the child's environment has a non-empty PATH (no value).
+    let path_set = cmd
+        .iter_full_env_as_str()
+        .any(|(name, value)| fuigo_tools::util::spawn::is_path_var(name) && !value.is_empty());
     // The child is enrolled below, and the guard reaps it until it reaches the registry
     #[allow(clippy::disallowed_methods)]
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| TerminalExtError::Internal(format!("failed to spawn shell: {e}")))?;
+    let child = pair.slave.spawn_command(cmd).map_err(|e| {
+        pty_spawn_failure(&shell_path, &*e, path_set).log();
+        TerminalExtError::Internal(format!("failed to spawn shell: {e}"))
+    })?;
 
     let mut shell = UnregisteredShell::new(child);
     if let Some(pid) = shell.pid() {
@@ -719,12 +742,14 @@ fn resolve_pty_shell(shell: Option<&str>) -> (String, Vec<String>) {
     #[cfg(not(unix))]
     {
         use fuigo_config::shell::{WindowsShell, detect_windows_shell};
-        match detect_windows_shell() {
-            WindowsShell::GitBash(path) => (path.clone(), vec!["-l".to_string()]),
-            WindowsShell::Pwsh => ("pwsh".to_string(), vec!["-NoLogo".to_string()]),
-            WindowsShell::PowerShell => ("powershell.exe".to_string(), vec!["-NoLogo".to_string()]),
-            WindowsShell::Cmd => ("cmd.exe".to_string(), vec![]),
-        }
+        // The absolute path resolved at detection, not a bare name re-resolved via `PATH`.
+        let shell = detect_windows_shell();
+        let args = match shell {
+            WindowsShell::GitBash(_) => vec!["-l".to_string()],
+            WindowsShell::Pwsh(_) | WindowsShell::PowerShell(_) => vec!["-NoLogo".to_string()],
+            WindowsShell::Cmd(_) => vec![],
+        };
+        (shell.program().to_string(), args)
     }
 }
 
@@ -837,10 +862,58 @@ pub async fn load(
     })
 }
 
-#[cfg(all(test, unix))]
+/// Runs on every platform: the Windows process check runs `pty_session::tests::failed_pty_spawn_reports_the_os_error_code`
+/// by name, and the rest of the PTY tests below are Unix-only.
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    /// u35-winenv r2 (Astra r2 Medium): a PTY shell that fails to start is logged with the OS error
+    /// code. `portable-pty` returns the Windows `CreateProcessW` failure as a formatted string, so the
+    /// r1 downcast logged `os_error=None, kind=Other`; the code is now read back from the message.
+    /// The real spawn runs on every platform; the code assertion is Windows' (on Unix
+    /// `portable-pty` rejects a missing program before any OS call, with no code to report).
+    #[test]
+    fn failed_pty_spawn_reports_the_os_error_code() {
+        let missing = if cfg!(windows) {
+            "C:\\nonexistent-u35-winenv\\fuigo-missing-shell.exe"
+        } else {
+            "/nonexistent-u35-winenv/fuigo-missing-shell"
+        };
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty");
+        #[allow(clippy::disallowed_methods)]
+        let Err(err) = pair.slave.spawn_command(CommandBuilder::new(missing)) else {
+            panic!("a missing shell must not start");
+        };
+        let failure = pty_spawn_failure(missing, &*err, true);
+        assert_eq!(failure.site, "pty");
+        assert_eq!(failure.program, missing);
+        assert!(failure.path_set);
+        if cfg!(windows) {
+            // ERROR_FILE_NOT_FOUND or ERROR_PATH_NOT_FOUND.
+            assert!(matches!(failure.os_error, Some(2 | 3)), "{failure:?} from {err:#}");
+            assert_eq!(failure.kind, std::io::ErrorKind::NotFound, "{failure:?}");
+        }
+        // The exact message portable-pty 0.9 builds on Windows, on every host.
+        let text = "CreateProcessW `\"C:\\\\x\\\\pwsh.exe\"` in cwd `None` failed: \
+                    The system cannot find the file specified. (os error 2)";
+        let failure = pty_spawn_failure(missing, &*anyhow_like(text), false);
+        assert_eq!(failure.os_error, Some(2), "{failure:?}");
+        assert_eq!(failure.kind, std::io::Error::from_raw_os_error(2).kind());
+    }
+
+    fn anyhow_like(text: &str) -> Box<dyn std::error::Error + Send + Sync> {
+        text.into()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use super::*;
     use std::cell::RefCell;
+
     use std::rc::Rc;
     use std::time::Duration;
 

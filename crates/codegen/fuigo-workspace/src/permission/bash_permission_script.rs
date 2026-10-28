@@ -37,6 +37,9 @@ enum PermissionWord {
 #[derive(Debug, Default)]
 pub struct PermissionScript {
     commands: Vec<Vec<PermissionWord>>,
+    /// u35 r2: per command word, a literal the shell word normaliser would not pin (ANSI-C `$'...'` quoting, a glob
+    /// pattern); the floor checks see it as unresolved.
+    unpinned: Vec<Vec<bool>>,
     complete: bool,
     eligible: bool,
     unresolved: bool,
@@ -91,6 +94,7 @@ impl PermissionScript {
                 continue;
             }
             let mut words = Vec::new();
+            let mut unpinned = Vec::new();
             let mut operands_safe = Vec::new();
             for child in node.named_children(&mut cursor) {
                 if child.kind() == "variable_assignment" {
@@ -111,6 +115,10 @@ impl PermissionScript {
                         {
                             script.eligible = false;
                         }
+                        let unquoted = matches!(word.kind(), "word" | "concatenation");
+                        unpinned.push(source.get(word.byte_range()).is_none_or(|spelling| {
+                            spelling.contains("$'") || (unquoted && spelling.contains(['*', '?', '[']))
+                        }));
                         words.push(PermissionWord::Literal(value));
                         operands_safe.push(true);
                     }
@@ -129,6 +137,7 @@ impl PermissionScript {
                             safe
                         });
                         operands_safe.push(safe);
+                        unpinned.push(true);
                         words.push(PermissionWord::UnresolvedArgument(spelling.to_owned()));
                     }
                     None => script.eligible = false,
@@ -137,6 +146,7 @@ impl PermissionScript {
             script.eligible &= readers_allow(&words, &operands_safe);
             script.complete &= matches!(words.first(), Some(PermissionWord::Literal(_)));
             script.commands.push(words);
+            script.unpinned.push(unpinned);
         }
         script.eligible &= script.complete
             && script.unresolved
@@ -152,6 +162,26 @@ impl PermissionScript {
     /// An incomplete script stays unparseable evidence instead.
     pub fn has_unresolved(&self) -> bool {
         self.complete && self.unresolved
+    }
+
+    /// u35 r2: [`Self::projections`] with every unresolved argument as
+    /// [`crate::permission::exec_surface::UNRESOLVED_WORD`], for the floor checks.
+    pub(crate) fn floor_projections(&self) -> Vec<Vec<String>> {
+        self.commands
+            .iter()
+            .zip(&self.unpinned)
+            .filter(|(words, _)| matches!(words.first(), Some(PermissionWord::Literal(_))))
+            .map(|(words, unpinned)| {
+                words
+                    .iter()
+                    .zip(unpinned)
+                    .map(|(word, &unpinned)| match word {
+                        PermissionWord::Literal(value) if !unpinned => value.clone(),
+                        _ => crate::permission::exec_surface::UNRESOLVED_WORD.to_owned(),
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     pub fn projections(&self) -> Vec<Vec<String>> {

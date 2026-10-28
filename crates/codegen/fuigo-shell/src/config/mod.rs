@@ -88,7 +88,22 @@ pub struct SubagentsConfig {
 use fuigo_subagent_resolution::config::{SubagentPersona, SubagentRole};
 impl SubagentsConfig {
     fn discover_personas_in_dir(&mut self, dir: &std::path::Path) {
+        self.discover_personas_in_dir_contained(dir, None);
+    }
+    /// With `contain` set (project definitions), the folder must resolve inside the pinned project root and each file
+    /// is read contained to it; a folder or file linked outside the project is skipped.
+    fn discover_personas_in_dir_contained(
+        &mut self,
+        dir: &std::path::Path,
+        contain: Option<&fuigo_dirs::contained::PinnedRoot>,
+    ) {
         if !dir.is_dir() {
+            return;
+        }
+        if let Some(root) = contain
+            && !fuigo_dirs::contained::is_contained(dir, root)
+        {
+            tracing::debug!(dir = %dir.display(), "Skipping personas folder linked outside the project");
             return;
         }
         let entries = match std::fs::read_dir(dir) {
@@ -109,10 +124,11 @@ impl SubagentsConfig {
             if self.personas.contains_key(&name) {
                 continue;
             }
-            match std::fs::read_to_string(&path) {
+            match fuigo_dirs::contained::read_scoped(&path, contain) {
                 Ok(content) => match toml::from_str::<SubagentPersona>(&content) {
                     Ok(mut persona) => {
                         persona.source_dir = path.parent().map(|p| p.to_path_buf());
+                        persona.contain_root = contain.cloned();
                         persona.source_path = Some(path.display().to_string());
                         tracing::debug!(persona = %name, "Loaded persona from file");
                         self.personas.insert(name, persona);
@@ -128,7 +144,22 @@ impl SubagentsConfig {
         }
     }
     fn discover_roles_in_dir(&mut self, dir: &std::path::Path) {
+        self.discover_roles_in_dir_contained(dir, None);
+    }
+    /// With `contain` set (project definitions), the folder must resolve inside the pinned project root and each file
+    /// is read contained to it; a folder or file linked outside the project is skipped.
+    fn discover_roles_in_dir_contained(
+        &mut self,
+        dir: &std::path::Path,
+        contain: Option<&fuigo_dirs::contained::PinnedRoot>,
+    ) {
         if !dir.is_dir() {
+            return;
+        }
+        if let Some(root) = contain
+            && !fuigo_dirs::contained::is_contained(dir, root)
+        {
+            tracing::debug!(dir = %dir.display(), "Skipping roles folder linked outside the project");
             return;
         }
         let entries = match std::fs::read_dir(dir) {
@@ -150,10 +181,11 @@ impl SubagentsConfig {
                 tracing::debug!(role = %name, "Skipping file-based role, higher-priority config takes precedence");
                 continue;
             }
-            match std::fs::read_to_string(&path) {
+            match fuigo_dirs::contained::read_scoped(&path, contain) {
                 Ok(content) => match toml::from_str::<SubagentRole>(&content) {
                     Ok(mut role) => {
                         role.source_dir = path.parent().map(|p| p.to_path_buf());
+                        role.contain_root = contain.cloned();
                         tracing::debug!(role = %name, "Loaded role from file");
                         self.roles.insert(name, role);
                     }
@@ -196,7 +228,10 @@ impl SubagentsConfig {
     /// Inline config takes precedence.
     pub(crate) fn discover_personas(&mut self, cwd: &std::path::Path) {
         let dir = cwd.join(".fuigo").join("personas");
-        self.discover_personas_in_dir(&dir);
+        match fuigo_dirs::contained::PinnedRoot::pin(cwd) {
+            Ok(root) => self.discover_personas_in_dir_contained(&dir, Some(&root)),
+            Err(e) => tracing::debug!(error = %e, "Cannot pin project root; skipping project personas"),
+        }
     }
     /// Validate all role definitions. Returns a list of (role_name, error_message) for invalid entries.
     pub fn validate_roles(&self) -> Vec<(String, String)> {
@@ -237,7 +272,10 @@ impl SubagentsConfig {
     /// Precedence: inline config roles override file-based roles with the same name.
     pub(crate) fn discover_roles(&mut self, cwd: &std::path::Path) {
         let roles_dir = cwd.join(".fuigo").join("roles");
-        self.discover_roles_in_dir(&roles_dir);
+        match fuigo_dirs::contained::PinnedRoot::pin(cwd) {
+            Ok(root) => self.discover_roles_in_dir_contained(&roles_dir, Some(&root)),
+            Err(e) => tracing::debug!(error = %e, "Cannot pin project root; skipping project roles"),
+        }
     }
     pub const ENV_MAX_DEPTH: &'static str = "FUIGO_SUBAGENTS_MAX_DEPTH";
     pub const DEFAULT_MAX_DEPTH: u32 = 1;
@@ -1783,11 +1821,22 @@ pub(crate) fn resolve_effective_plugins_config(
         .unwrap_or_default();
     let project_trusted = crate::agent::folder_trust::project_scope_allowed(cwd);
     for config_path in find_project_configs(cwd) {
-        if let Ok(toml_val) = load_config_file(&config_path)
+        if let Ok(toml_val) = fuigo_config::load_project_config_file(&config_path)
             && let Some(proj) = extract(&toml_val, &config_path.display().to_string())
         {
-            if project_trusted {
-                plugins_cfg.paths.extend(proj.paths);
+            // Repository-supplied paths keep their provenance: they are NOT the user's `[plugins].paths` (which are
+            // auto-enabled and auto-trusted under the home dir). Each is resolved against the folder the config
+            // belongs to and must stay inside that folder's repository (outside a git repo: that folder).
+            if project_trusted
+                && let Some(owner) = config_path.parent().and_then(std::path::Path::parent)
+            {
+                let repository = fuigo_workspace::session::git::find_git_root_from_path(owner)
+                    .unwrap_or_else(|_| owner.to_path_buf());
+                for entry in proj.paths {
+                    let path = std::path::Path::new(&entry);
+                    let dir = if path.is_absolute() { path.to_path_buf() } else { owner.join(path) };
+                    plugins_cfg.project_paths.push((dir, repository.clone()));
+                }
             }
             plugins_cfg.disabled.extend(proj.disabled);
         }

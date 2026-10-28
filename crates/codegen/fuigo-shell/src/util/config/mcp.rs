@@ -138,7 +138,7 @@ pub(crate) fn get_mcp_server_config_with_project(
     // Check project-scoped configs from cwd (highest priority) to repo root
     let project_configs = crate::config::find_project_configs(cwd);
     for config_path in project_configs.iter().rev() {
-        if let Ok(root) = crate::config::load_config_file(config_path) {
+        if let Ok(root) = fuigo_config::load_project_config_file(config_path) {
             let configs = parse_mcp_servers_from_toml(&root);
             if let Some(config) = configs.get(name) {
                 return Some(config.clone());
@@ -161,7 +161,7 @@ const MCP_SCOPE_USER: &str = "user";
 /// User scope covers the global config, `~/.claude.json`, `~/.cursor/mcp.json`, etc. See [`MCP_SCOPE_PROJECT`] / `MCP_SCOPE_USER`.
 pub(crate) fn mcp_server_scope(name: &str, cwd: &std::path::Path) -> &'static str {
     for config_path in crate::config::find_project_configs(cwd) {
-        if let Ok(root) = crate::config::load_config_file(&config_path)
+        if let Ok(root) = fuigo_config::load_project_config_file(&config_path)
             && parse_mcp_servers_from_toml(&root).contains_key(name)
         {
             return MCP_SCOPE_PROJECT;
@@ -189,7 +189,7 @@ pub(crate) fn load_mcp_servers_with_oauth(
 
     let project_configs = crate::config::find_project_configs(cwd);
     for config_path in &project_configs {
-        if let Ok(root) = crate::config::load_config_file(config_path) {
+        if let Ok(root) = fuigo_config::load_project_config_file(config_path) {
             for (name, config) in parse_mcp_servers_from_toml(&root) {
                 servers_map.insert(name, config);
             }
@@ -363,7 +363,7 @@ fn merged_mcp_server_configs(
 
     let project_configs = crate::config::find_project_configs(cwd);
     for config_path in &project_configs {
-        if let Ok(root) = crate::config::load_config_file(config_path) {
+        if let Ok(root) = fuigo_config::load_project_config_file(config_path) {
             let project_servers = parse_mcp_servers_from_toml(&root);
             if !project_servers.is_empty() {
                 tracing::info!(
@@ -421,12 +421,16 @@ pub(crate) fn load_mcp_json_servers(cwd: &std::path::Path) -> Vec<acp::McpServer
         return vec![];
     }
 
+    // Project files: held to the repository (outside one, the session folder), pinned once for this load.
+    let Some(project_root) = project_mcp_root(cwd) else {
+        return vec![];
+    };
     let mut result = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
     // Reverse so cwd entries win on name conflict.
     for mcp_path in mcp_json_files.iter().rev() {
-        let json_servers = load_mcp_json_file(mcp_path);
+        let json_servers = load_mcp_json_file(mcp_path, Some(&project_root));
         for server in json_servers {
             let name = match &server {
                 acp::McpServer::Http(acp::McpServerHttp { name, .. })
@@ -459,7 +463,7 @@ pub(crate) fn toml_mcp_server_origins(
     }
     // `find_project_configs` is repo-root-first, so a nearer file overwrites.
     for config_path in crate::config::find_project_configs(cwd) {
-        if let Ok(root) = crate::config::load_config_file(&config_path) {
+        if let Ok(root) = fuigo_config::load_project_config_file(&config_path) {
             for name in parse_mcp_servers_from_toml(&root).into_keys() {
                 origins.insert(name, ConfigSource::ConfigToml { path: config_path.clone() });
             }
@@ -471,9 +475,12 @@ pub(crate) fn toml_mcp_server_origins(
 /// The `.mcp.json` file each server comes from, from the repository root down to `cwd` (the closest file wins a name).
 pub(crate) fn mcp_json_server_origins(cwd: &std::path::Path) -> HashMap<String, PathBuf> {
     let mut origins = HashMap::new();
-    // Same order as `load_mcp_json_servers`: closest first, first seen wins.
+    let Some(project_root) = project_mcp_root(cwd) else {
+        return origins;
+    };
+    // Same order as `load_mcp_json_servers`: closest first, first seen wins; held to the repository the same way.
     for path in find_mcp_json_files(cwd).iter().rev() {
-        for server in load_mcp_json_file(path) {
+        for server in load_mcp_json_file(path, Some(&project_root)) {
             let name = match &server {
                 acp::McpServer::Http(acp::McpServerHttp { name, .. })
                 | acp::McpServer::Sse(acp::McpServerSse { name, .. })
@@ -702,7 +709,7 @@ pub(crate) fn collect_mcp_setup_configs(
             // File first, then inline; first-wins matches runtime plugin load.
             let mut plugin_configs = IndexMap::new();
             if let Some(ref mcp_path) = plugin.mcp_config_path
-                && let Some(config) = read_mcp_json(mcp_path)
+                && let Some(config) = read_mcp_json_contained(mcp_path, &plugin.pinned_root())
             {
                 for (name, server) in config.mcp_servers {
                     plugin_configs.entry(name).or_insert(server);
@@ -898,7 +905,7 @@ fn nearest_project_mcp_definition(cwd: &std::path::Path, server_name: &str) -> O
     crate::config::find_project_configs(cwd)
         .into_iter()
         .rev()
-        .find(|path| mcp_server_defined_at(path, server_name))
+        .find(|path| project_mcp_server_defined_at(path, server_name))
 }
 
 /// Apply `f`, write only if the serialized table changed. Returns whether written.
@@ -1411,11 +1418,24 @@ pub use fuigo_workspace::project_config::{
     MCP_JSON_FILENAME, find_mcp_json_files, mcp_json_candidate_paths,
 };
 
-pub(crate) fn load_mcp_json_file(path: &std::path::Path) -> Vec<acp::McpServer> {
+/// The folder every project MCP file (`.mcp.json` along the repository, the project `.cursor/mcp.json`) must stay
+/// inside: the git root of `cwd`, or `cwd` outside a repository, pinned (resolved once) when the load starts. `None`
+/// when that folder cannot be resolved: nothing project-scoped loads.
+pub(crate) fn project_mcp_root(cwd: &std::path::Path) -> Option<fuigo_dirs::contained::PinnedRoot> {
+    let root = fuigo_workspace::session::git::find_git_root_from_path(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    fuigo_dirs::contained::PinnedRoot::pin(&root).ok()
+}
+
+/// Servers of one MCP JSON file. `root` set (a project file): the file actually read must lie inside it, checked on
+/// the opened file; `None` only for the user's own files (`~/.cursor/mcp.json`), which follow links.
+pub(crate) fn load_mcp_json_file(
+    path: &std::path::Path,
+    root: Option<&fuigo_dirs::contained::PinnedRoot>,
+) -> Vec<acp::McpServer> {
     if !path.is_file() {
         return vec![];
     }
-    let Some(value) = read_mcp_json(path) else {
+    let Some(value) = read_mcp_json_in(path, root, fuigo_config::key_naming::source_may_name_saved_key(path)) else {
         return vec![];
     };
     let label = path.display().to_string();
@@ -1443,10 +1463,15 @@ pub(crate) fn load_mcp_json_servers_as_configs_unfiltered(
     }
 
     let mut result = IndexMap::new();
+    // Project files: read only from inside the repository (outside one, the session folder), so a `.mcp.json` linked
+    // to a file elsewhere on the machine is not loaded as this project's MCP config.
+    let Some(project_root) = project_mcp_root(cwd) else {
+        return result;
+    };
 
     // Reverse so cwd entries win on name conflict.
     for mcp_path in mcp_json_files.iter().rev() {
-        if let Some(config) = read_mcp_json(mcp_path) {
+        if let Some(config) = read_mcp_json_contained(mcp_path, &project_root) {
             for (name, cfg) in config.mcp_servers {
                 result.entry(name).or_insert(cfg);
             }
@@ -1652,9 +1677,14 @@ pub(crate) fn load_cursor_mcp_servers(
     let mut result = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
-    // Project-level (higher priority)
+    // Project-level (higher priority): held to the repository like `.mcp.json`.
     let project_path = cwd.join(".cursor").join("mcp.json");
-    for server in load_mcp_json_file(&project_path) {
+    let project_root = project_mcp_root(cwd);
+    let project_servers = match &project_root {
+        Some(root) => load_mcp_json_file(&project_path, Some(root)),
+        None => Vec::new(),
+    };
+    for server in project_servers {
         let name = match &server {
             acp::McpServer::Http(acp::McpServerHttp { name, .. })
             | acp::McpServer::Sse(acp::McpServerSse { name, .. })
@@ -1669,8 +1699,9 @@ pub(crate) fn load_cursor_mcp_servers(
 
     // Global (lower priority)
     if let Some(home) = fuigo_dirs::home_dir() {
+        // The user's own file: follows links.
         let global_path = home.join(".cursor").join("mcp.json");
-        for server in load_mcp_json_file(&global_path) {
+        for server in load_mcp_json_file(&global_path, None) {
             let name = match &server {
                 acp::McpServer::Http(acp::McpServerHttp { name, .. })
                 | acp::McpServer::Sse(acp::McpServerSse { name, .. })
@@ -1702,7 +1733,8 @@ pub(crate) fn load_cursor_mcp_servers_as_configs(
     // Project-level (higher priority)
     let project_path = cwd.join(".cursor").join("mcp.json");
     if project_path.is_file()
-        && let Some(config) = read_mcp_json(&project_path)
+        && let Some(root) = project_mcp_root(cwd)
+        && let Some(config) = read_mcp_json_contained(&project_path, &root)
     {
         for (name, cfg) in config.mcp_servers {
             result.insert(name, cfg);
@@ -1817,7 +1849,29 @@ pub(crate) fn read_mcp_json(path: &std::path::Path) -> Option<McpConfig> {
 /// [`read_mcp_json`] with the tier decided by the caller: a plugin's MCP file may not name the saved key wherever the
 /// plugin sits on disk (`--plugin-dir` under `$FUIGO_HOME`, say).
 pub(crate) fn read_mcp_json_as(path: &std::path::Path, may_name_saved_key: bool) -> Option<McpConfig> {
-    let content = std::fs::read_to_string(path)
+    read_mcp_json_in(path, None, may_name_saved_key)
+}
+
+/// [`read_mcp_json`] for a project or plugin file: the file actually read must lie inside `root` (the repository,
+/// or the plugin folder), checked on the opened file; the saved-key tier is decided by the path as usual.
+pub(crate) fn read_mcp_json_contained(
+    path: &std::path::Path,
+    root: &fuigo_dirs::contained::PinnedRoot,
+) -> Option<McpConfig> {
+    read_mcp_json_in(
+        path,
+        Some(root),
+        fuigo_config::key_naming::source_may_name_saved_key(path),
+    )
+}
+
+/// [`read_mcp_json_as`] held to `root` when set.
+pub(crate) fn read_mcp_json_in(
+    path: &std::path::Path,
+    root: Option<&fuigo_dirs::contained::PinnedRoot>,
+    may_name_saved_key: bool,
+) -> Option<McpConfig> {
+    let content = fuigo_dirs::contained::read_scoped(path, root)
         .map_err(|e| {
             tracing::warn!(error = %e, "failed to read MCP JSON");
         })
@@ -1861,7 +1915,7 @@ pub fn load_mcp_server_configs_with_project(
 
     // find_project_configs is repo-root-first, so nearer files overwrite.
     for config_path in crate::config::find_project_configs(cwd) {
-        if let Ok(root) = crate::config::load_config_file(&config_path) {
+        if let Ok(root) = fuigo_config::load_project_config_file(&config_path) {
             for (name, config) in parse_mcp_servers_from_toml(&root) {
                 servers.insert(name, (config, MCP_SCOPE_PROJECT));
             }
@@ -1880,7 +1934,7 @@ pub(crate) fn load_mcp_server_problems_with_project(
         problems.extend(parse_mcp_servers_with_problems(&global_config).problems);
     }
     for config_path in crate::config::find_project_configs(cwd) {
-        if let Ok(root) = crate::config::load_config_file(&config_path) {
+        if let Ok(root) = fuigo_config::load_project_config_file(&config_path) {
             problems.extend(parse_mcp_servers_with_problems(&root).problems);
         }
     }
@@ -2003,6 +2057,17 @@ pub fn user_config_path() -> PathBuf {
 /// Path to a project-level config file (`<dir>/.fuigo/config.toml`).
 pub fn project_config_path(dir: &std::path::Path) -> PathBuf {
     dir.join(".fuigo").join("config.toml")
+}
+
+/// [`mcp_server_defined_at`] for a project `<dir>/.fuigo/config.toml`, read through the contained project loader the
+/// session uses: a project config linked outside its folder defines nothing (the session never loaded it).
+pub fn project_mcp_server_defined_at(path: &std::path::Path, server_name: &str) -> bool {
+    let Ok(root) = fuigo_config::load_project_config_file(path) else {
+        return false;
+    };
+    root.get("mcp_servers")
+        .and_then(|v| v.as_table())
+        .is_some_and(|t| t.contains_key(server_name))
 }
 
 /// True when the config file at `path` defines `[mcp_servers.<name>]`.
@@ -2147,8 +2212,8 @@ mod tests {
         }
     }
 
-    /// The one-shot CLI registry must discover a trusted project's `[plugins].paths` plugin (a session-startup config source) and its agents.
-    /// Folder trust does not gate anything in dev builds, so the project path merges.
+    /// The one-shot CLI registry must discover a trusted project's `[plugins].paths` plugin (a session-startup config source).
+    /// Folder trust does not gate anything in dev builds, so the project path loads; as a project plugin it stays off until enabled.
     #[test]
     #[serial_test::serial]
     fn load_cli_plugin_registry_includes_project_config_path_plugins() {
@@ -2189,12 +2254,14 @@ mod tests {
             registry.get("proj-plugin").is_some(),
             "project [plugins].paths plugin must be discovered"
         );
+        // Since 1.0.35 a repository's `[plugins].paths` entry is a project plugin: off until the user enables it
+        // (and not trusted for sitting under the home dir), so its agents are not enumerable on discovery alone.
         let agents = fuigo_agent::discovery::plugin_agents(&registry);
         assert!(
-            agents
+            !agents
                 .iter()
                 .any(|a| a.qualified_name == "proj-plugin:reviewer"),
-            "project config-path plugin agent must be enumerable, got: {:?}",
+            "a repository-named plugin must not be auto-enabled, got: {:?}",
             agents.iter().map(|a| &a.qualified_name).collect::<Vec<_>>()
         );
     }
@@ -2807,7 +2874,7 @@ expose_image_base64 = true
         )
         .unwrap();
 
-        let servers = load_mcp_json_file(&mcp_path);
+        let servers = load_mcp_json_file(&mcp_path, None);
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             acp::McpServer::Http(acp::McpServerHttp { url, .. }) => {
@@ -3110,6 +3177,76 @@ enabled = false
     }
 
     // === merge_section tests ===
+
+    /// m4: a project `.mcp.json` or `.cursor/mcp.json` linking outside the project is not loaded; an in-project link is.
+    #[cfg(unix)]
+    #[test]
+    fn m4_project_mcp_json_linked_outside_the_project_is_not_loaded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        std::fs::write(
+            base.join("outside").join("mcp.json"),
+            r#"{"mcpServers":{"m4-outside":{"command":"x"}}}"#,
+        )
+        .unwrap();
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".cursor")).unwrap();
+        git2::Repository::init(&repo).unwrap();
+        std::os::unix::fs::symlink(base.join("outside").join("mcp.json"), repo.join(".mcp.json")).unwrap();
+        std::os::unix::fs::symlink(base.join("outside").join("mcp.json"), repo.join(".cursor").join("mcp.json")).unwrap();
+
+        let loaded = load_mcp_json_servers_as_configs_unfiltered(&repo);
+        assert!(!loaded.contains_key("m4-outside"), "linked-out .mcp.json loaded");
+        let cursor = load_cursor_mcp_servers_as_configs(&repo, &CompatConfig::default());
+        assert!(!cursor.contains_key("m4-outside"), "linked-out .cursor/mcp.json loaded");
+
+        std::fs::write(repo.join("shared.json"), r#"{"mcpServers":{"m4-inside":{"command":"x"}}}"#).unwrap();
+        std::fs::remove_file(repo.join(".mcp.json")).unwrap();
+        std::os::unix::fs::symlink(repo.join("shared.json"), repo.join(".mcp.json")).unwrap();
+        assert!(load_mcp_json_servers_as_configs_unfiltered(&repo).contains_key("m4-inside"));
+    }
+
+    /// Astra/Grok r4: every other project MCP route (the `acp::McpServer` loaders feeding live server assembly, the
+    /// origins map, the folder-trust name scan) holds project `.mcp.json` and `.cursor/mcp.json` to the repository;
+    /// an in-repository link still loads.
+    #[cfg(unix)]
+    #[test]
+    fn m5_every_project_mcp_route_refuses_files_linked_outside_the_repository() {
+        let names = |servers: Vec<acp::McpServer>| -> Vec<String> {
+            servers
+                .iter()
+                .map(|s| crate::session::managed_mcp::mcp_server_name(s).to_string())
+                .collect()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        std::fs::write(
+            base.join("outside").join("mcp.json"),
+            r#"{"mcpServers":{"m5-outside":{"command":"x"}}}"#,
+        )
+        .unwrap();
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".cursor")).unwrap();
+        git2::Repository::init(&repo).unwrap();
+        std::os::unix::fs::symlink(base.join("outside").join("mcp.json"), repo.join(".mcp.json")).unwrap();
+        std::os::unix::fs::symlink(base.join("outside").join("mcp.json"), repo.join(".cursor").join("mcp.json")).unwrap();
+
+        assert!(!names(load_mcp_json_servers(&repo)).contains(&"m5-outside".to_string()));
+        assert!(!names(load_cursor_mcp_servers(&repo, &CompatConfig::default())).contains(&"m5-outside".to_string()));
+        assert!(!mcp_json_server_origins(&repo).contains_key("m5-outside"));
+        assert!(!crate::agent::folder_trust::project_scoped_mcp_names(&repo).contains("m5-outside"));
+
+        std::fs::write(repo.join("shared.json"), r#"{"mcpServers":{"m5-inside":{"command":"x"}}}"#).unwrap();
+        for link in [repo.join(".mcp.json"), repo.join(".cursor").join("mcp.json")] {
+            std::fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink(repo.join("shared.json"), &link).unwrap();
+        }
+        assert!(names(load_mcp_json_servers(&repo)).contains(&"m5-inside".to_string()));
+        assert!(names(load_cursor_mcp_servers(&repo, &CompatConfig::default())).contains(&"m5-inside".to_string()));
+        assert!(mcp_json_server_origins(&repo).contains_key("m5-inside"));
+    }
 }
 
 #[cfg(test)]

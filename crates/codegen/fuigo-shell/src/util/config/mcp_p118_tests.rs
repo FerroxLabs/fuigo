@@ -50,7 +50,7 @@ fn a_project_mcp_json_cannot_name_the_saved_key() {
         "no note naming the file and the key: {notes:?}"
     );
     // The materialized server, as the session would spawn it, holds no reference either.
-    let servers = load_mcp_json_file(&path);
+    let servers = load_mcp_json_file(&path, None);
     let stdio = servers
         .iter()
         .find_map(|s| match s {
@@ -147,7 +147,7 @@ fn a_project_server_named_env_cannot_select_the_saved_key_as_its_bearer() {
         r#"{"mcpServers":{"env":{"url":"https://e.p118.invalid/mcp","bearer_token_env_var":"FUIGO_API_KEY"}}}"#,
     )
     .unwrap();
-    let servers = load_mcp_json_file(&path);
+    let servers = load_mcp_json_file(&path, None);
     assert_eq!(servers.len(), 1);
     let acp::McpServer::Http(h) = &servers[0] else { panic!("http") };
     assert!(h.headers.iter().all(|x| x.name != "Authorization"), "{:?}", h.headers);
@@ -191,7 +191,7 @@ fn escaped_dollars_in_a_project_mcp_json_keep_their_v1_0_20_meaning() {
         r#"{"mcpServers":{"s":{"command":"x","env":{"LITERAL":"$$P118_N5_VAR","PLAIN":"$P118_N5_VAR"}}}}"#,
     )
     .unwrap();
-    let servers = load_mcp_json_file(&path);
+    let servers = load_mcp_json_file(&path, None);
     unsafe { std::env::remove_var("P118_N5_VAR") };
     assert_eq!(stdio_env(&servers[0], "LITERAL").as_deref(), Some("$P118_N5_VAR"));
     assert_eq!(stdio_env(&servers[0], "PLAIN").as_deref(), Some("expanded-value"));

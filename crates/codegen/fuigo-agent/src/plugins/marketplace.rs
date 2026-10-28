@@ -18,7 +18,12 @@ pub struct ResolvedMarketplace {
 /// Only local directory sources are supported.
 pub fn resolve(git_root: &Path) -> Vec<ResolvedMarketplace> {
     let settings_path = git_root.join(".claude").join("settings.json");
-    let json: serde_json::Value = match std::fs::read_to_string(&settings_path) {
+    // Repository file: read only from inside the repository (a plugin root found through it must also resolve inside
+    // the repository; see `discovery::collect_plugin_in`).
+    let Ok(repo_root) = fuigo_dirs::contained::PinnedRoot::pin(git_root) else {
+        return vec![];
+    };
+    let json: serde_json::Value = match fuigo_dirs::contained::read_contained(&settings_path, &repo_root) {
         Ok(c) => match serde_json::from_str(&c) {
             Ok(v) => v,
             Err(e) => {
@@ -53,6 +58,12 @@ pub fn resolve(git_root: &Path) -> Vec<ResolvedMarketplace> {
 
         let marketplace_path = git_root.join(rel_path);
         let plugins_dir = marketplace_path.join("plugins");
+        // The marketplace folder is named by a repository file, so it is listed only when it resolves inside the
+        // repository (`../` or an absolute path elsewhere is skipped).
+        if !fuigo_dirs::contained::is_contained(&plugins_dir, &repo_root) {
+            tracing::debug!(marketplace = %name, path = %plugins_dir.display(), "marketplace outside the repository; skipped");
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&plugins_dir) else {
             continue;
         };
@@ -478,5 +489,46 @@ mod tests {
         assert!(enabled.is_empty());
         assert_eq!(disabled.len(), 1);
         assert!(disabled.contains(&"conflict".to_string()));
+    }
+
+    /// Fable r4 Medium: a project `.claude/settings.json` linked outside the repository names no marketplace.
+    #[cfg(unix)]
+    #[test]
+    fn m5_project_settings_linked_outside_repository_resolves_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        std::fs::create_dir_all(repo.join("mk/plugins/p")).unwrap();
+        let settings = r#"{"extraKnownMarketplaces":{"mk":{"source":{"path":"mk"}}},"enabledPlugins":{"p@mk":true}}"#;
+        std::fs::write(tmp.path().join("outside.json"), settings).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("outside.json"), repo.join(".claude/settings.json")).unwrap();
+        assert!(resolve(&repo).is_empty());
+
+        std::fs::remove_file(repo.join(".claude/settings.json")).unwrap();
+        std::fs::write(repo.join(".claude/settings.json"), settings).unwrap();
+        let resolved = resolve(&repo);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].plugin_dirs.len(), 1);
+    }
+
+    /// A marketplace path in the repository's settings that leads outside the repository is not listed.
+    #[cfg(unix)]
+    #[test]
+    fn m5_marketplace_path_outside_repository_is_not_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("elsewhere/plugins/p")).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("elsewhere"), repo.join("linked")).unwrap();
+        for path in ["../elsewhere", "linked"] {
+            let settings = format!(
+                r#"{{"extraKnownMarketplaces":{{"mk":{{"source":{{"path":"{path}"}}}}}},"enabledPlugins":{{"p@mk":true}}}}"#
+            );
+            std::fs::write(repo.join(".claude/settings.json"), settings).unwrap();
+            assert!(
+                resolve(&repo).iter().all(|m| m.plugin_dirs.is_empty()),
+                "{path}: marketplace outside the repository must not be listed"
+            );
+        }
     }
 }

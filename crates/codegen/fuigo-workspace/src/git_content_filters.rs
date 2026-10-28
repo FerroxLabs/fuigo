@@ -71,6 +71,35 @@ const GITLINK_MODE: u32 = 0o160_000;
 /// (a parent `git status` runs status inside each, which reads that submodule's filters; `-c`
 /// pins reach it through `GIT_CONFIG_PARAMETERS`). `None` on read errors; empty if not a repo.
 pub(crate) fn read_local_git_config_entries(cwd: &Path) -> Option<Vec<(String, String)>> {
+    read_local_git_config_entries_with(cwd, None)
+}
+
+/// [`read_local_git_config_entries`], running `git` (an absolute path) for the CLI reading instead
+/// of the default git (u35 g7: the permission scan runs only a git it trusts).
+pub(crate) fn read_local_git_config_entries_with(
+    cwd: &Path,
+    git: Option<&Path>,
+) -> Option<Vec<(String, String)>> {
+    read_entries(cwd, Reader::Cli(git))
+}
+
+/// u35 t1 (design d2 §3.3-5): [`read_local_git_config_entries`] for a folder that is not trusted: libgit2 only, no
+/// git process. A configuration that libgit2 may read differently from git (any `include`/`includeIf`) is `None`
+/// (fail closed), so the grant floors still see what git would run.
+pub(crate) fn read_local_git_config_entries_git2_only(cwd: &Path) -> Option<Vec<(String, String)>> {
+    read_entries(cwd, Reader::Git2Only)
+}
+
+/// How a repository's local configuration is read.
+#[derive(Clone, Copy)]
+enum Reader<'a> {
+    /// libgit2 and the git binary (the union); `Some`: that git program.
+    Cli(Option<&'a Path>),
+    /// libgit2 alone (an untrusted folder: Fuigo starts no git there).
+    Git2Only,
+}
+
+fn read_entries(cwd: &Path, git: Reader<'_>) -> Option<Vec<(String, String)>> {
     let repo = match git2::Repository::discover(cwd) {
         Ok(repo) => repo,
         Err(e)
@@ -81,9 +110,9 @@ pub(crate) fn read_local_git_config_entries(cwd: &Path) -> Option<Vec<(String, S
         }
         Err(_) => return None,
     };
-    let mut out = repo_local_config_entries(&repo)?;
+    let mut out = repo_local_config_entries(&repo, git)?;
     let mut budget = SUBMODULE_SCAN_LIMIT;
-    append_submodule_entries(&repo, 0, &mut budget, &mut out)?;
+    append_submodule_entries(&repo, 0, &mut budget, &mut out, git)?;
     Some(out)
 }
 
@@ -94,6 +123,7 @@ fn append_submodule_entries(
     depth: usize,
     budget: &mut usize,
     out: &mut Vec<(String, String)>,
+    git: Reader<'_>,
 ) -> Option<()> {
     let Some(workdir) = repo.workdir() else {
         return Some(());
@@ -121,8 +151,8 @@ fn append_submodule_entries(
         }
         *budget = budget.checked_sub(1)?;
         let sub = git2::Repository::open(&checkout).ok()?;
-        out.extend(repo_local_config_entries(&sub)?);
-        append_submodule_entries(&sub, depth + 1, budget, out)?;
+        out.extend(repo_local_config_entries(&sub, git)?);
+        append_submodule_entries(&sub, depth + 1, budget, out, git)?;
     }
     Some(())
 }
@@ -130,27 +160,186 @@ fn append_submodule_entries(
 /// One repository's local/worktree config entries, as libgit2 reads them and as git itself reads
 /// them (the union: where the two parsers disagree on an include, the entries git would act on
 /// must not be lost). `None` on read errors.
-fn repo_local_config_entries(repo: &git2::Repository) -> Option<Vec<(String, String)>> {
+fn repo_local_config_entries(
+    repo: &git2::Repository,
+    git: Reader<'_>,
+) -> Option<Vec<(String, String)>> {
     let mut out = libgit2_local_config_entries(repo)?;
-    for entry in git_cli_local_config_entries(repo)? {
+    let cli = match git {
+        Reader::Cli(git) => git_cli_local_config_entries(repo, git)?,
+        Reader::Git2Only => {
+            if config_has_include(repo, &out) {
+                return None;
+            }
+            Vec::new()
+        }
+    };
+    for entry in cli {
         if !out.contains(&entry) {
             out.push(entry);
         }
     }
+    out.extend(hooks_entry(repo)?);
     Some(out)
 }
 
+/// u35 t1: whether a repository's local configuration includes another file (`include.path`, `includeIf.*`), which
+/// only the git binary reads exactly as git does (e.g. `includeIf.hasconfig:`).
+fn config_has_include(repo: &git2::Repository, entries: &[(String, String)]) -> bool {
+    let named = entries.iter().any(|(name, _)| {
+        let name = name.to_ascii_lowercase();
+        name.starts_with("include.") || name.starts_with("includeif.")
+    });
+    let in_files = ["config", "config.worktree"].iter().any(|file| {
+        std::fs::read(repo.path().join(file))
+            .map(|bytes| String::from_utf8_lossy(&bytes).to_ascii_lowercase().contains("include"))
+            .unwrap_or(false)
+    });
+    named || in_files
+}
+
+/// u35 g8 (Grok r7): git runs hooks on safe verbs too (`post-index-change` when `git status` refreshes the index, in
+/// the repository and in each populated submodule). The effective hooks directory is `core.hooksPath` from any scope
+/// (a relative one taken from the work tree), else the common git directory's `hooks`, shared by linked worktrees. A
+/// hook found there is reported as a `core.hookspath` entry naming that directory, a command-valued key, so every git
+/// command there asks, grants included.
+///
+/// u35 g9 (Fable r8 Medium): only the hooks a read-only command can fire count ([`SAFE_VERB_HOOKS`]):
+/// `post-index-change`, and `fsmonitor-watchman` (also covered by `core.fsmonitor`). The hooks `git lfs install`,
+/// `pre-commit install`, lefthook or overcommit write (`pre-commit`, `post-checkout`, `pre-push`, ...) never run on a
+/// safe verb. On unix git skips a hook without an execute bit (`find_hook`: `access(X_OK)`), so such a file does not
+/// count; Git for Windows runs one without it. A missing directory adds nothing; a directory or hook that cannot be read
+/// is `None` (fail closed).
+///
+/// u35 g10 (Astra r9 High): a command that is not a read-only query runs the other hooks (`git commit` runs
+/// `pre-commit`, `checkout` runs `post-checkout`, ...). Any other hook git would run (every file but a `*.sample`) is
+/// reported as a [`REPOSITORY_HOOK_KEY`] entry naming the directory; the ambient scan turns it into a finding only
+/// for such a command, so it switches off approval without a grant for `git commit` and leaves `git status` alone.
+fn hooks_entry(repo: &git2::Repository) -> Option<Vec<(String, String)>> {
+    let configured = repo.config().ok()?.get_path("core.hooksPath").ok();
+    let dir = match configured {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => repo.workdir().unwrap_or_else(|| repo.path()).join(path),
+        None => repo.commondir().join("hooks"),
+    };
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Some(Vec::new());
+        }
+        Err(_) => return None,
+    };
+    let (mut safe_verb, mut other) = (false, false);
+    for entry in entries {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        let is_safe_verb_hook = names_safe_verb_hook(&name.to_string_lossy(), cfg!(windows));
+        // git looks a hook up by its name; a `*.sample` is never one (u35 g12, Fable r11 Low: in any letter case).
+        if !is_safe_verb_hook && is_sample_hook(&name.to_string_lossy()) {
+            continue;
+        }
+        if hook_would_run(&entry.path())? {
+            if is_safe_verb_hook {
+                safe_verb = true;
+            } else {
+                other = true;
+            }
+        }
+    }
+    let dir = dir.display().to_string();
+    let mut out = Vec::new();
+    if safe_verb {
+        out.push(("core.hookspath".to_owned(), dir.clone()));
+    }
+    if other {
+        out.push((REPOSITORY_HOOK_KEY.to_owned(), dir));
+    }
+    Some(out)
+}
+
+/// u35 g12 (Fable r11 Low): a `*.sample` file of the hooks directory, the extension in any letter case (git finds no
+/// hook by that name, so `pre-commit.SAMPLE` is not one).
+pub(crate) fn is_sample_hook(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".sample")
+}
+
+/// u35 g10: the pseudo config entry [`hooks_entry`] reports for a hook only a command that is not a read-only query
+/// runs. Not a git config key (it has no section git reads), so no config-key check matches it.
+pub(crate) const REPOSITORY_HOOK_KEY: &str = "fuigo.repository-hook";
+
+/// u35 g9: the hooks git can run for a command Fuigo approves without asking ([`hooks_entry`]).
+const SAFE_VERB_HOOKS: &[&str] = &["post-index-change", "fsmonitor-watchman"];
+
+/// u35 g11 (Grok r10 High): whether a hooks-directory file named `name` is one of [`SAFE_VERB_HOOKS`] as git finds
+/// it. `find_hook` opens the hook by name, so on a case-insensitive volume (the macOS and Windows defaults) any casing
+/// is that hook: names are compared ASCII case-insensitively everywhere (on a case-sensitive volume this only asks
+/// more). Git for Windows also runs `<name>.exe`, and runs scripts through their `#!` line; on Windows
+/// (`windows`) any extension after the name counts, except `.sample`. In doubt, the file is the hook.
+pub(crate) fn names_safe_verb_hook(name: &str, windows: bool) -> bool {
+    let name = name.to_ascii_lowercase();
+    SAFE_VERB_HOOKS.iter().any(|hook| {
+        name == *hook
+            || (windows
+                && name
+                    .strip_prefix(hook)
+                    .and_then(|rest| rest.strip_prefix('.'))
+                    .is_some_and(|extension| extension != "sample"))
+    })
+}
+
+/// Whether git would run the hook file at `path`: on unix a file with an execute bit (a dangling link or other
+/// unreadable entry is `None`); elsewhere any file.
+fn hook_would_run(path: &std::path::Path) -> Option<bool> {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(false),
+        Err(_) => return None,
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Some(meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        Some(meta.is_file())
+    }
+}
+
 /// The local and worktree entries as the git binary reads them (`config --list --show-scope
-/// --includes -z`: `scope NUL key LF value NUL`, a bare key without the LF). `None` when git
-/// fails or prints what cannot be parsed.
-fn git_cli_local_config_entries(repo: &git2::Repository) -> Option<Vec<(String, String)>> {
-    let mut cmd = fuigo_tty_utils::git_command();
+/// --show-origin --includes -z`: `scope NUL origin NUL key LF value NUL`, a bare key without the
+/// LF), plus every entry of another scope that comes from a file inside the repository (u35 g6,
+/// Astra r5: the user's global config or an environment `include.path` that pulls in a tracked
+/// file makes that file's settings the repository's). `None` when git fails or prints what cannot
+/// be parsed.
+fn git_cli_local_config_entries(
+    repo: &git2::Repository,
+    git: Option<&Path>,
+) -> Option<Vec<(String, String)>> {
+    // Judged on the repository's own directory (the work tree, else the git directory). An untrusted folder gets no
+    // git CLI read: the config is unreadable, which every caller already treats as "cannot tell".
+    let dir = repo.workdir().unwrap_or_else(|| repo.path());
+    let mut cmd = match git {
+        Some(git) => fuigo_tty_utils::git_command_at_in(git, dir),
+        None => fuigo_tty_utils::git_command_in(dir),
+    }
+    .ok()?;
     cmd.arg(format!("--git-dir={}", repo.path().display()));
     if let Some(workdir) = repo.workdir() {
         cmd.arg(format!("--work-tree={}", workdir.display()));
     }
+    #[cfg(test)]
+    cmd.envs(crate::permission::exec_risk::test_inherited_env());
+    for name in crate::permission::exec_risk::scan_env_removals() {
+        cmd.env_remove(name);
+    }
     let output = cmd
-        .args(["config", "--list", "--show-scope", "--includes", "-z"])
+        .args(["config", "--list", "--show-scope", "--show-origin", "--includes", "-z"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
@@ -165,14 +354,32 @@ fn git_cli_local_config_entries(repo: &git2::Repository) -> Option<Vec<(String, 
         if scope.is_empty() {
             break;
         }
+        let origin = fields.next()?;
         let record = fields.next()?;
-        if !matches!(scope, "local" | "worktree") {
+        if !matches!(scope, "local" | "worktree") && !origin_is_in_repository(origin, repo) {
             continue;
         }
         let (name, value) = record.split_once('\n').unwrap_or((record, "true"));
         out.push((name.to_owned(), value.to_owned()));
     }
     Some(out)
+}
+
+/// A `--show-origin` origin that is a file in the repository's work tree or git directory (a
+/// relative file name counts as inside). `command line:` and other non-file origins are not.
+fn origin_is_in_repository(origin: &str, repo: &git2::Repository) -> bool {
+    let Some(path) = origin.strip_prefix("file:") else {
+        return false;
+    };
+    let path = std::path::Path::new(path);
+    if !path.is_absolute() {
+        return true;
+    }
+    let resolved = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    [Some(repo.path()), repo.workdir()].into_iter().flatten().any(|root| {
+        let root_resolved = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        path.starts_with(root) || resolved.starts_with(&root_resolved)
+    })
 }
 
 /// One repository's local/worktree config entries as libgit2 reads them. `None` on read errors.
@@ -419,7 +626,7 @@ mod tests {
         }
         // The CLI reading alone finds it (whatever libgit2 makes of the include)
         let repo = git2::Repository::open(tmp.path()).unwrap();
-        let cli = git_cli_local_config_entries(&repo).expect("git config --list");
+        let cli = git_cli_local_config_entries(&repo, None).expect("git config --list");
         assert_eq!(
             git_reads.status.success(),
             cli.iter().any(|(name, _)| name == "filter.pwn.clean"),
@@ -445,5 +652,47 @@ mod tests {
             content_filter_config_pins(tmp.path()).is_none(),
             "section={section:?}"
         );
+    }
+
+    /// u35 g12 (Fable r11 Low): a `*.sample` file is no hook in any letter case; a hook name that merely contains
+    /// `sample` is one.
+    #[test]
+    fn u35_g12_sample_hooks_are_skipped_in_any_case() {
+        for name in ["pre-commit.sample", "pre-commit.SAMPLE", "Post-Index-Change.Sample"] {
+            assert!(is_sample_hook(name), "{name}");
+        }
+        for name in ["pre-commit", "sample-hook", "pre-commit.samples"] {
+            assert!(!is_sample_hook(name), "{name}");
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(tmp.path()).unwrap();
+        let hooks = tmp.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        for name in ["pre-commit.SAMPLE", "post-checkout.Sample"] {
+            let hook = hooks.join(name);
+            std::fs::write(&hook, "#!/bin/sh\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        assert_eq!(hooks_entry(&repo), Some(Vec::new()), "samples in any case are no hooks");
+    }
+
+    /// u35 g12 (Fable r11 Low): on Windows, Git for Windows runs `post-index-change.exe` for `git status`, so the
+    /// hooks directory reports it as a safe-verb hook (`core.hookspath`); a `.sample` of it is not one.
+    #[cfg(windows)]
+    #[test]
+    fn u35_g12_windows_exe_safe_verb_hook_is_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(tmp.path()).unwrap();
+        let hooks = tmp.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("post-index-change.sample"), "#!/bin/sh\n").unwrap();
+        assert_eq!(hooks_entry(&repo), Some(Vec::new()));
+        std::fs::write(hooks.join("Post-Index-Change.EXE"), "MZ").unwrap();
+        let entries = hooks_entry(&repo).expect("readable");
+        assert!(entries.iter().any(|(name, _)| name == "core.hookspath"), "{entries:?}");
     }
 }

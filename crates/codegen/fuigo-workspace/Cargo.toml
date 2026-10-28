@@ -11,6 +11,7 @@ fuigo-secrets = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 dunce = { workspace = true }
+same-file = { workspace = true }
 fuigo-version = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
@@ -142,6 +143,7 @@ default-bazel = [
     ]
 
 [dev-dependencies]
+fuigo-tty-utils = { workspace = true, features = ["unjudged-repo-exec"] }
 fuigo-secrets = { workspace = true, features = ["test-support"] }
 # P71 test seam: loopback mocks stand in for a FluxRouter-operated proxy. Dev-dependency ONLY (upload_gate_guard pins it).
 fuigo-file-utils = { path = "../fuigo-file-utils", features = ["test-loopback-operator"] }

@@ -592,8 +592,9 @@ pub struct PagerArgs {
         alias = "dangerously-skip-permissions"
     )]
     pub yolo: bool,
-    /// Trust this folder and persist the decision to the trust store.
-    #[arg(long = "trust", alias = "trust-folder", hide = true)]
+    /// Trust this folder (its repository): load its settings and run shell commands there without asking each time.
+    /// Saved in ~/.fuigo/trusted_folders.toml; home and root folders can't be trusted.
+    #[arg(long = "trust", alias = "trust-folder")]
     pub trust: bool,
     /// Permission allow rule (compat alias: --allowedTools).
     #[arg(

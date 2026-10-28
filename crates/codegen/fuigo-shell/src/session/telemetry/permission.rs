@@ -281,6 +281,7 @@ mod permission_analytics_tests {
             security_findings: Some(vec!["opaque_shell".into()]),
             classifier_verdict: Some(classifier_verdict.into()),
             remember_tool_approvals: Some(true),
+            approved_without_grant: None,
         }
     }
 
@@ -346,6 +347,7 @@ mod permission_analytics_tests {
             security_findings: None,
             classifier_verdict: None,
             remember_tool_approvals: Some(true),
+            approved_without_grant: None,
         };
         let decision = Decision::Allow;
         let resolved =
@@ -393,6 +395,7 @@ mod permission_analytics_tests {
             security_findings: None,
             classifier_verdict: None,
             remember_tool_approvals: Some(true),
+            approved_without_grant: None,
         };
         let decision = Decision::Allow;
         let resolved =

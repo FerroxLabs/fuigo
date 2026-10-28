@@ -451,7 +451,7 @@ pub enum AuthMode {
 }
 /// Folder-trust state for the welcome screen.
 ///
-/// Mirrors [`AuthState`]: a welcome sub-state that drives the "Do you trust the contents of this directory?" question.
+/// Mirrors [`AuthState`]: a welcome sub-state that drives the "Do you trust the files in this folder?" question.
 /// It gates session creation until the question is answered.
 /// Seeded once before the first render from the pure [`fuigo_workspace::folder_trust::decide`] verdict.
 /// When the feature flag is off `decide` returns trusted, so this is always [`TrustState::Done`].
@@ -460,10 +460,13 @@ pub enum TrustState {
     /// No question needed (feature off, already trusted, nothing to gate) or the question has been answered.
     /// Session creation may proceed.
     Done,
-    /// An untrusted folder with repo-local code-exec config: show the trust question and defer session creation until the user answers.
+    /// u35 t1: a folder never decided (or trusted before 1.0.35 for its settings only): show the trust question and
+    /// defer session creation until the user answers.
     Pending {
-        /// The resolved workspace root (git root) that is trusted on accept and is shown in the question.
+        /// The folder's trust key (its repository, or the folder itself), trusted on accept and shown in the question.
         workspace: std::path::PathBuf,
+        /// u35 t1: the folder was trusted before 1.0.35 for its settings only; the question explains the new scope once.
+        upgrade: bool,
     },
 }
 /// Result of `handle_input`. Tells the event loop what to do next.
@@ -4028,7 +4031,12 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             if key!('y').matches(key) || key!('Y').matches(key) || key!(Enter).matches(key) {
                 return InputOutcome::Action(Action::TrustFolder);
             }
+            // u35 t1 (design d2 §5.1): "n" continues without trusting the folder (its settings are not loaded and
+            // every shell command asks); "q" quits.
             if key!('n').matches(key) || key!('N').matches(key) || key!(Esc).matches(key) {
+                return InputOutcome::Action(Action::DeclineTrustFolder);
+            }
+            if key!('q').matches(key) || key!('Q').matches(key) {
                 return InputOutcome::Action(Action::QuitConfirmed);
             }
             if key!('c', CONTROL).matches(key) || key!('d', CONTROL).matches(key) {
@@ -4044,10 +4052,10 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         {
             for (i, rect) in ctx.menu_rects.iter().enumerate() {
                 if rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
-                    return InputOutcome::Action(if i == 0 {
-                        Action::TrustFolder
-                    } else {
-                        Action::QuitConfirmed
+                    return InputOutcome::Action(match i {
+                        0 => Action::TrustFolder,
+                        1 => Action::DeclineTrustFolder,
+                        _ => Action::QuitConfirmed,
                     });
                 }
             }

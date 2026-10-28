@@ -469,22 +469,51 @@ fn collect_project_cwds(batch: &[ConfigChangeEvent]) -> Vec<PathBuf> {
 /// change through their own events.
 ///
 /// Returns `None` on a non-`NotFound` read error so the caller dispatches rather than risk suppressing a real edit.
+///
+/// Each file is hashed through the same contained read the loaders use (a project `.fuigo/config.toml` held to the
+/// folder it belongs to, `.mcp.json` to the repository, `<cwd>/.claude.json` to `cwd`): a file linked outside hashes
+/// as "refused", so an edit to the outside target is not mistaken for a project edit and does not force a reload.
 fn hash_project_mcp_config(cwd: &Path) -> Option<u64> {
-    let mut paths = crate::config::find_project_configs(cwd);
-    paths.extend(crate::util::config::find_mcp_json_files(cwd));
-    paths.push(cwd.join(".claude.json"));
+    use fuigo_dirs::contained::PinnedRoot;
+    let mcp_root = crate::util::config::project_mcp_root(cwd);
+    let cwd_root = PinnedRoot::pin(cwd).ok();
+    let mut paths: Vec<(std::path::PathBuf, Option<PinnedRoot>)> = crate::config::find_project_configs(cwd)
+        .into_iter()
+        .map(|f| {
+            let owner = f.parent().and_then(Path::parent).and_then(|d| PinnedRoot::pin(d).ok());
+            (f, owner)
+        })
+        .collect();
+    paths.extend(
+        crate::util::config::find_mcp_json_files(cwd)
+            .into_iter()
+            .map(|f| (f, mcp_root.clone())),
+    );
+    paths.push((cwd.join(".claude.json"), cwd_root));
 
     let mut hasher = DefaultHasher::new();
     paths.len().hash(&mut hasher);
-    for f in &paths {
+    for (f, root) in &paths {
         f.to_string_lossy().hash(&mut hasher);
-        match std::fs::read(f) {
+        let read = match root {
+            Some(root) => fuigo_dirs::contained::read_contained_bytes(f, root),
+            // The owning folder cannot be resolved: nothing there the loaders would read.
+            None => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        };
+        match read {
             Ok(bytes) => {
                 1u8.hash(&mut hasher); // present
                 bytes.hash(&mut hasher);
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 0u8.hash(&mut hasher); // absent
+            }
+            Err(e)
+                if e.kind() == fuigo_dirs::contained::OUTSIDE_ROOT
+                    || e.kind() == std::io::ErrorKind::InvalidInput
+                    || e.kind() == std::io::ErrorKind::Unsupported =>
+            {
+                2u8.hash(&mut hasher); // refused by the loaders: stable whatever the outside target holds
             }
             Err(_) => return None, // can't read confidently, so dispatch
         }
@@ -835,6 +864,22 @@ mod tests {
         std::fs::write(cwd.join(".mcp.json"), "b").unwrap();
         let changed = hash_project_mcp_config(cwd).expect("readable");
         assert_ne!(created, changed, "editing content changes the hash");
+    }
+
+    /// Grok r4 Low: a project `.mcp.json` linked outside the repository is hashed as refused, so editing the outside
+    /// target does not look like a project edit.
+    #[cfg(unix)]
+    #[test]
+    fn m5_hash_ignores_edits_to_an_outside_linked_mcp_json() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git2::Repository::init(&repo).unwrap();
+        std::fs::write(tmp.path().join("outside.json"), "a").unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("outside.json"), repo.join(".mcp.json")).unwrap();
+        let before = hash_project_mcp_config(&repo).expect("hashable");
+        std::fs::write(tmp.path().join("outside.json"), "b").unwrap();
+        assert_eq!(before, hash_project_mcp_config(&repo).expect("hashable"));
     }
 
     /// The hash must reflect ancestor `.fuigo/config.toml` and `.mcp.json` under `cwd`; otherwise an ancestor edit would be wrongly suppressed.

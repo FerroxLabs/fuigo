@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use wait_timeout::ChildExt;
-use fuigo_tty_utils::{ProcessGroup, git_command, git_command_locking, global_process_scope};
+use fuigo_tty_utils::{ProcessGroup, git_command_in, git_command_locking_in, global_process_scope};
 
 /// Shared wall-clock budget for head and base targeted fetches.
 pub(crate) const RESTORE_FETCH_BUDGET: Duration = Duration::from_secs(60);
@@ -237,8 +237,11 @@ pub(crate) fn fetch_if_missing<G: RestoreGit>(
 
 /// Whether `git cat-file -t` resolves `spec` in `repo`.
 pub fn git_object_exists(repo: &Path, spec: &str) -> bool {
-    let output = git_command()
-        .current_dir(repo)
+    // An untrusted folder runs no git: the object reads as absent.
+    let Ok(mut cmd) = git_command_in(repo) else {
+        return false;
+    };
+    let output = cmd
         .args(["cat-file", "-t", spec])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -266,8 +269,10 @@ pub(crate) fn fetch_checkout_target_if_missing(
 }
 
 fn is_shallow_repository(repo: &Path) -> bool {
-    let output = git_command()
-        .current_dir(repo)
+    let Ok(mut cmd) = git_command_in(repo) else {
+        return false;
+    };
+    let output = cmd
         .args(["rev-parse", "--is-shallow-repository"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -298,13 +303,12 @@ pub(crate) fn targeted_fetch_command(
     repo: &Path,
     oid: &str,
     is_shallow: bool,
-) -> std::process::Command {
-    let mut cmd = git_command_locking();
-    cmd.current_dir(repo)
-        .args(targeted_fetch_args(oid, is_shallow))
+) -> Result<std::process::Command, fuigo_tty_utils::RepoUntrusted> {
+    let mut cmd = git_command_locking_in(repo)?;
+    cmd.args(targeted_fetch_args(oid, is_shallow))
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    cmd
+    Ok(cmd)
 }
 
 fn fetch_oid_from_origin(repo: &Path, oid: &str, timeout: Duration) -> Result<()> {
@@ -323,7 +327,7 @@ fn fetch_refspec_from_origin(repo: &Path, spec: &str, timeout: Duration) -> Resu
         "restore_fetch: targeted fetch"
     );
 
-    let mut child = FetchChild::spawn(targeted_fetch_command(repo, spec, is_shallow))?;
+    let mut child = FetchChild::spawn(targeted_fetch_command(repo, spec, is_shallow)?)?;
     let result = child.wait_success(timeout, spec);
     if result.is_err() {
         warn_leftover_git_locks(repo);
@@ -603,8 +607,8 @@ fn warn_leftover_git_locks(repo: &Path) {
 }
 
 fn git_rev_parse_path(repo: &Path, flag: &str) -> Option<PathBuf> {
-    let output = git_command()
-        .current_dir(repo)
+    let output = git_command_in(repo)
+        .ok()?
         .args(["rev-parse", flag])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

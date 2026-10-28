@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::manifest::{ManifestLoadResult, PluginManifest, load_manifest, name_from_dirname};
+use super::manifest::{ManifestLoadResult, PluginManifest, name_from_dirname};
 use super::trust::TrustStore;
 
 // ── Public types ──────────────────────────────────────────────────────
@@ -158,6 +158,12 @@ pub struct DiscoveredPlugin {
 }
 
 impl DiscoveredPlugin {
+    /// The plugin folder as resolved at discovery, pinned: every later containment check compares against this and
+    /// never resolves the folder again, so a plugin folder swapped for a link after discovery is refused.
+    pub fn pinned_root(&self) -> fuigo_dirs::contained::PinnedRoot {
+        fuigo_dirs::contained::PinnedRoot::from_canonical(self.canonical_root.clone())
+    }
+
     /// User-facing plugin name (from manifest or directory name).
     pub fn plugin_name(&self) -> &str {
         &self.manifest.name
@@ -171,8 +177,12 @@ pub struct DiscoveryConfig {
     pub auto_discover: Option<bool>,
     /// CLI `--plugin-dir` paths.
     pub cli_plugin_dirs: Vec<PathBuf>,
-    /// `[plugins].paths` from config.
+    /// `[plugins].paths` from the user's own config (user authority: auto-enabled, home-dir paths auto-trusted).
     pub config_paths: Vec<PathBuf>,
+    /// `[plugins].paths` from a repository's `.fuigo/config.toml`, each paired with the repository folder it must
+    /// stay inside. Repository-supplied, so they load as project plugins: held to that folder, trusted only with the
+    /// folder, and never auto-enabled.
+    pub project_config_paths: Vec<(PathBuf, PathBuf)>,
     /// `[plugins].disabled` plugin IDs or names.
     pub disabled: Vec<String>,
     /// `[plugins].enabled` plugin IDs or names (overrides default-disabled for project plugins).
@@ -299,6 +309,13 @@ pub fn project_plugin_dirs_in(chain_dirs: &[PathBuf]) -> Vec<PathBuf> {
     crate::repo::existing_subdirs_along(chain_dirs, &[".fuigo/plugins", ".claude/plugins"])
 }
 
+/// Pin a repository folder; one that cannot be resolved is used as given, which fails closed (no resolved plugin
+/// root lies under an unresolved path).
+fn pin_or_fail_closed(root: &Path) -> fuigo_dirs::contained::PinnedRoot {
+    fuigo_dirs::contained::PinnedRoot::pin(root)
+        .unwrap_or_else(|_| fuigo_dirs::contained::PinnedRoot::from_canonical(root))
+}
+
 /// `cwd` is used to find the git worktree root for project-scope plugins.
 /// `project_trusted` is the folder-trust verdict for `cwd`; it gates `Project`-scope plugins (CLI/User/ConfigPath scopes are unaffected).
 /// Returns plugins deduplicated by canonical path, with name conflicts resolved by scope precedence.
@@ -334,6 +351,10 @@ pub fn discover_plugins(
         // Scan the same dirs the folder-trust gate detects, via the shared `project_plugin_dirs` walk, so discovery and gating can never drift
         if let Some(cwd) = cwd {
             let (project_dirs, git_root) = project_plugin_dirs(Some(cwd));
+            // A repository-discovered plugin's root must itself resolve inside the repository (outside a git repo:
+            // the folder the session runs in), so `.fuigo/plugins/p -> /elsewhere` cannot adopt `/elsewhere`.
+            // Pinned once here: every project plugin below is checked against this resolved folder.
+            let repo_root = pin_or_fail_closed(&git_root.clone().unwrap_or_else(|| cwd.to_path_buf()));
             for plugins_dir in project_dirs {
                 let origin = project_plugins_dir_origin(&plugins_dir);
                 scan_plugin_dir(
@@ -344,6 +365,7 @@ pub fn discover_plugins(
                     project_trusted,
                     &mut seen_paths,
                     &mut candidates,
+                    Some(&repo_root),
                 );
             }
 
@@ -352,7 +374,7 @@ pub fn discover_plugins(
             if let Some(ref root) = git_root {
                 for marketplace in &super::marketplace::resolve(root) {
                     for dir in &marketplace.plugin_dirs {
-                        collect_plugin(
+                        collect_plugin_in(
                             dir,
                             PluginScope::Project,
                             PluginOrigin::ClaudeMarketplace {
@@ -362,6 +384,7 @@ pub fn discover_plugins(
                             project_trusted,
                             &mut seen_paths,
                             &mut candidates,
+                            Some(&repo_root),
                         );
                     }
                 }
@@ -382,6 +405,7 @@ pub fn discover_plugins(
                     project_trusted,
                     &mut seen_paths,
                     &mut candidates,
+                    None,
                 );
             }
         }
@@ -470,6 +494,25 @@ pub fn discover_plugins(
         }
     }
 
+    // 6b. `[plugins].paths` from a project config: repository-supplied, so loaded as project plugins held to their
+    // repository (not ConfigPath: no auto-enable, no home-dir auto-trust).
+    for (dir, repository) in &config.project_config_paths {
+        if dir.is_dir() {
+            collect_plugin_in(
+                dir,
+                PluginScope::Project,
+                PluginOrigin::ProjectFuigo,
+                trust_store,
+                project_trusted,
+                &mut seen_paths,
+                &mut candidates,
+                Some(&pin_or_fail_closed(repository)),
+            );
+        } else {
+            tracing::warn!(path = %dir.display(), "project [plugins].paths entry is not a directory; skipping");
+        }
+    }
+
     // P169: under strictKnownMarketplaces only installs from an allowed source load. Dropped before the name-conflict
     // pass, so a dropped plugin cannot shadow an allowed one of the same name.
     if let Some(restriction) = &config.source_restriction {
@@ -530,7 +573,8 @@ pub fn discover_plugins(
 // ── Internal helpers ──────────────────────────────────────────────────
 
 /// Scan a plugins parent directory (e.g. `~/.fuigo/plugins/`) and collect
-/// each subdirectory as a plugin candidate.
+/// each subdirectory as a plugin candidate. `repo_root`: see [`collect_plugin_in`].
+#[allow(clippy::too_many_arguments)]
 fn scan_plugin_dir(
     plugins_dir: &Path,
     scope: PluginScope,
@@ -539,6 +583,7 @@ fn scan_plugin_dir(
     project_trusted: bool,
     seen_paths: &mut HashSet<PathBuf>,
     candidates: &mut Vec<DiscoveredPlugin>,
+    repo_root: Option<&fuigo_dirs::contained::PinnedRoot>,
 ) {
     let entries = match std::fs::read_dir(plugins_dir) {
         Ok(entries) => entries,
@@ -562,7 +607,7 @@ fn scan_plugin_dir(
     subdirs.sort();
 
     for subdir in subdirs {
-        collect_plugin(
+        collect_plugin_in(
             &subdir,
             scope,
             origin.clone(),
@@ -570,6 +615,7 @@ fn scan_plugin_dir(
             project_trusted,
             seen_paths,
             candidates,
+            repo_root,
         );
     }
 }
@@ -651,6 +697,33 @@ fn collect_plugin(
     seen_paths: &mut HashSet<PathBuf>,
     candidates: &mut Vec<DiscoveredPlugin>,
 ) {
+    collect_plugin_in(
+        plugin_root,
+        scope,
+        origin,
+        trust_store,
+        project_trusted,
+        seen_paths,
+        candidates,
+        None,
+    );
+}
+
+/// [`collect_plugin`] for a plugin found through the repository (`.fuigo/plugins`, `.claude/plugins`, a project
+/// marketplace): when `repo_root` is set the plugin root must canonicalize inside it, or the plugin is skipped. A
+/// plugin the user placed or installed (`--plugin-dir`, `~/.fuigo/plugins`, `[plugins].paths`, installs) passes
+/// `None`: where it points is the user's choice.
+#[allow(clippy::too_many_arguments)]
+fn collect_plugin_in(
+    plugin_root: &Path,
+    scope: PluginScope,
+    origin: PluginOrigin,
+    trust_store: &TrustStore,
+    project_trusted: bool,
+    seen_paths: &mut HashSet<PathBuf>,
+    candidates: &mut Vec<DiscoveredPlugin>,
+    repo_root: Option<&fuigo_dirs::contained::PinnedRoot>,
+) {
     // Canonicalize for dedup
     let canonical = match dunce::canonicalize(plugin_root) {
         Ok(c) => c,
@@ -664,6 +737,18 @@ fn collect_plugin(
         }
     };
 
+    if let Some(repo_root) = repo_root
+        && !canonical.starts_with(repo_root.path())
+    {
+        tracing::warn!(
+            path = %plugin_root.display(),
+            target = %canonical.display(),
+            repository = %repo_root.path().display(),
+            "repository plugin folder links outside the repository; skipping"
+        );
+        return;
+    }
+
     // Deduplicate by canonical path
     if !seen_paths.insert(canonical.clone()) {
         tracing::debug!(
@@ -675,7 +760,9 @@ fn collect_plugin(
     }
 
     // Load manifest or derive from directory name
-    let manifest = match load_manifest(plugin_root) {
+    // The manifest is read from inside the folder resolved (and checked against the repository) just above.
+    let pinned = fuigo_dirs::contained::PinnedRoot::from_canonical(canonical.clone());
+    let manifest = match crate::plugins::manifest::load_manifest_in(plugin_root, &pinned) {
         Ok(ManifestLoadResult::Found(m)) => *m,
         Ok(ManifestLoadResult::NotFound) => {
             // Convention-based: derive name from directory, check for skills/ or agents/ or .mcp.json or hooks/hooks.json
@@ -960,6 +1047,7 @@ mod tests {
             auto_discover: Some(false),
             cli_plugin_dirs: vec![cli],
             config_paths: vec![configured],
+            project_config_paths: Vec::new(),
             ..Default::default()
         };
         let trust = TrustStore::load_from(tmp.path().join("trust"));
@@ -1026,6 +1114,7 @@ mod tests {
             auto_discover: Some(false),
             cli_plugin_dirs: vec![cli],
             config_paths: vec![configured],
+            project_config_paths: Vec::new(),
             ..Default::default()
         };
         let trust = TrustStore::load_from(tmp.path().join("trust"));
@@ -1118,6 +1207,7 @@ mod tests {
             false,
             &mut seen,
             &mut candidates,
+            None,
         );
 
         assert_eq!(candidates.len(), 1);
@@ -1142,6 +1232,7 @@ mod tests {
             false,
             &mut seen,
             &mut candidates,
+            None,
         );
 
         assert_eq!(candidates.len(), 1);
@@ -2033,6 +2124,50 @@ mod tests {
         assert_eq!(
             read_claude_installed_plugins(&json_path, Some(&project)).len(),
             1
+        );
+    }
+
+    /// m4 (Astra m3 High): a repository-discovered plugin whose folder links outside the repository is not loaded (its
+    /// target would otherwise become the plugin root); a plugin linked to another folder inside the repository loads.
+    #[cfg(unix)]
+    #[test]
+    fn m4_repo_plugin_dir_linked_outside_the_repository_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let project = base.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        git2::Repository::init(&project).unwrap();
+        make_manifest_plugin(&base.join("elsewhere"), "outsider");
+        make_manifest_plugin(&project.join("vendor"), "insider");
+        let plugins = project.join(".fuigo").join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::os::unix::fs::symlink(base.join("elsewhere").join("outsider"), plugins.join("outsider")).unwrap();
+        std::os::unix::fs::symlink(project.join("vendor").join("insider"), plugins.join("insider")).unwrap();
+
+        let trust = TrustStore::load_from(base.join("trust"));
+        let found = discover_plugins(Some(&project), &DiscoveryConfig::default(), &trust, true);
+        let names: Vec<&str> = found.iter().map(|p| p.plugin_name()).collect();
+        assert!(!names.contains(&"outsider"), "plugin linked outside the repository loaded: {names:?}");
+        assert!(names.contains(&"insider"), "plugin linked inside the repository missing: {names:?}");
+    }
+
+    /// m4: a whole project `.fuigo/plugins` dir linked outside the repository loads none of its plugins.
+    #[cfg(unix)]
+    #[test]
+    fn m4_repo_plugins_dir_linked_outside_the_repository_loads_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let project = base.join("project");
+        std::fs::create_dir_all(project.join(".fuigo")).unwrap();
+        git2::Repository::init(&project).unwrap();
+        make_manifest_plugin(&base.join("elsewhere"), "outsider");
+        std::os::unix::fs::symlink(base.join("elsewhere"), project.join(".fuigo").join("plugins")).unwrap();
+
+        let trust = TrustStore::load_from(base.join("trust"));
+        let found = discover_plugins(Some(&project), &DiscoveryConfig::default(), &trust, true);
+        assert!(
+            !found.iter().any(|p| p.plugin_name() == "outsider"),
+            "plugins dir linked outside the repository loaded a plugin"
         );
     }
 }

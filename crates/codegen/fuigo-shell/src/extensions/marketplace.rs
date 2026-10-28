@@ -8,6 +8,7 @@ use fuigo_hooks_plugins_types::{
 };
 
 use crate::agent::MvpAgent;
+use fuigo_plugin_marketplace::git::GitInvocation;
 
 type ExtResult = Result<acp::ExtResponse, acp::Error>;
 
@@ -53,7 +54,7 @@ async fn handle_list() -> ExtResult {
         .iter()
         .map(|source| {
             let source = source.clone();
-            tokio::task::spawn_blocking(move || scan_source(&source))
+            tokio::task::spawn_blocking(move || scan_source(&source, GitInvocation::Background))
         })
         .collect();
     let mut results = Vec::with_capacity(scan_handles.len());
@@ -165,10 +166,12 @@ fn refresh_sources(
         }
         if let fuigo_plugin_marketplace::SourceKind::Git { url, branch } = &source.kind {
             let cache_root = fuigo_plugin_marketplace::git::default_cache_root();
-            if let Err(e) = fuigo_plugin_marketplace::git::force_sync_source_cache(
+            // u35 t2 (Astra 5): Refresh is an action the user chose, so the fetch is user-invoked (design d2 §4.1).
+            if let Err(e) = fuigo_plugin_marketplace::git::sync_source_cache_user_invoked(
                 url,
                 branch.as_deref(),
                 &cache_root,
+                fuigo_plugin_marketplace::git::SyncMode::Force,
             ) {
                 errors.push(format!("{}: {e}", source.name));
             }
@@ -248,7 +251,8 @@ async fn handle_update(
         }
         fuigo_plugin_marketplace::SourceKind::Git { url, branch } => {
             let cache_root = fuigo_plugin_marketplace::git::default_cache_root();
-            match fuigo_plugin_marketplace::git::sync_source_cache_with_mode(
+            // A plugin install the user asked for: the source fetch is not judged (a listing is; see `handle_list`).
+            match fuigo_plugin_marketplace::git::sync_source_cache_user_invoked(
                 url,
                 branch.as_deref(),
                 &cache_root,
@@ -382,7 +386,8 @@ async fn handle_install(
     };
 
     // Check if this is a URL-sourced plugin by scanning the marketplace index.
-    let (scan, _) = scan_source(source);
+    // An install the user chose: its source sync is user-invoked (the listing's is not).
+    let (scan, _) = scan_source(source, GitInvocation::UserInvoked);
     let remote_entry = scan
         .plugins
         .iter()
@@ -464,7 +469,7 @@ async fn handle_install(
             }
             fuigo_plugin_marketplace::SourceKind::Git { url, branch } => {
                 let cache_root = fuigo_plugin_marketplace::git::default_cache_root();
-                match fuigo_plugin_marketplace::git::sync_source_cache_with_mode(
+                match fuigo_plugin_marketplace::git::sync_source_cache_user_invoked(
                     url,
                     branch.as_deref(),
                     &cache_root,
@@ -644,6 +649,7 @@ async fn handle_uninstall(
 
 fn scan_source(
     source: &fuigo_plugin_marketplace::MarketplaceSource,
+    invocation: GitInvocation,
 ) -> (MarketplaceScanResult, bool) {
     let lease;
     let (source_kind, source_url_or_path, root) = match &source.kind {
@@ -658,7 +664,8 @@ fn scan_source(
         fuigo_plugin_marketplace::SourceKind::Git { url, branch } => {
             let cache_root = fuigo_plugin_marketplace::git::default_cache_root();
             let t_git = std::time::Instant::now();
-            match fuigo_plugin_marketplace::git::sync_source_cache_with_mode(
+            match fuigo_plugin_marketplace::git::sync_source_cache_as(
+                invocation,
                 url,
                 branch.as_deref(),
                 &cache_root,

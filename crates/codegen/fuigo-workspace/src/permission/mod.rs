@@ -2,13 +2,20 @@ pub mod auto_mode;
 pub mod bash_command_splitting;
 mod bash_permission_script;
 mod branch_switch;
+/// The branch-switch listing child, for the folder-trust gate test (`repo_exec_gate_tests`).
+#[cfg(test)]
+pub(crate) use branch_switch::hardened_git_command as hardened_git_command_for_gate_tests;
 pub mod claude_settings;
 pub(crate) mod exec_risk;
+mod exec_surface;
 mod gate_preflight;
 mod hub_permission;
 mod manager;
 pub mod peer_denials;
 pub mod peer_guard;
+pub(crate) mod plain_text_gate;
+mod safe_forms;
+mod run_dirs;
 mod policy;
 #[cfg(test)]
 mod policy_bash_recovery_tests;
@@ -20,6 +27,7 @@ pub mod sandbox_wire;
 pub mod resolution;
 pub mod rules;
 mod shell_access;
+pub(crate) mod shell_words;
 mod state;
 pub mod types;
 
@@ -60,11 +68,14 @@ pub use auto_mode::{
     is_auto_mode_allowlisted_access, is_auto_mode_allowlisted_tool_name,
     parse_classifier_model_output, parse_classifier_model_text, permission_decision_args,
 };
+#[cfg(not(test))]
+pub(crate) use manager::child_env_steers;
+pub(crate) use manager::install_runner_env_judge;
 #[cfg(test)]
 pub(crate) use hub_permission::build_permission_payload_for_test;
 pub(crate) use hub_permission::{
     HubCallVerdict, HubPolicyContext, HubReadSpelling, hub_read_spellings, hub_input_accesses, hub_input_is_generic, hub_patch_targets,
-    hub_patch_targets_by_name, hub_policy_accesses, hub_policy_verdict_all, hub_searches_need_walk,
+    hub_patch_targets_by_name, hub_policy_accesses, hub_policy_verdict_all, hub_verdict_over_run_dirs, hub_searches_need_walk,
     settle_hub_asks, settle_hub_asks_caused, hub_denial_cause,
 };
 pub use hub_permission::{
@@ -107,6 +118,11 @@ pub use state::PermissionState;
 pub use state::cleanup_stale_permission_state;
 pub use types::{
     AccessKind, ClientType, Decision, EditTargets, HOOK_ASK_META_KEY, HookAsk, PermissionCommand,
-    EffectivePeerMode, EffectivePermissionMode, PermissionConfig, PermissionEvent, PermissionRequest, ResolvedBaseMode, PermissionResolution, ReadResolution, ReadTargets, edit_targets_for,
+    EffectivePeerMode, EffectivePermissionMode, PermissionConfig, PermissionEvent, PermissionRequest, ResolvedBaseMode, PermissionResolution, ReadResolution, ReadTargets, bash_exec_cwd_for, edit_targets_for,
     read_targets_for,
 };
+
+/// u35 t1 (design d2 §3.6): install the shell runner's folder-trust backstop for calls approved without a grant.
+pub(crate) fn install_runner_trust_judge() {
+    manager::install_runner_trust_judge();
+}

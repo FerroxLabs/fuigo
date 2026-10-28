@@ -109,7 +109,8 @@ pub fn resolve_effective_overrides(
     let role_prompt = role.and_then(|r| {
         let file_path = r.prompt_file.as_deref()?;
         let base_dir = r.source_dir.as_deref().or(cwd)?;
-        match std::fs::read_to_string(base_dir.join(file_path)) {
+        let cwd_based = r.source_dir.is_none();
+        match read_definition_file(base_dir, file_path, r.contain_root.as_ref(), cwd_based) {
             Ok(content) => Some(content),
             Err(e) => {
                 let msg = format!("role prompt_file \"{file_path}\": {e}");
@@ -142,6 +143,29 @@ pub fn resolve_effective_overrides(
         persona_error,
         isolation,
     }
+}
+
+/// Read a role `prompt_file` or persona `instructions_file`.
+///
+/// Project-discovered definitions carry the pinned project folder in `contain_root`; their file is read contained to it.
+/// A relative path resolved against the workspace cwd (inline definitions with no source folder) is repository content
+/// too, so it is read contained to the pinned cwd. User and bundled definitions, and absolute paths the user's own
+/// config names, keep following links.
+fn read_definition_file(
+    base_dir: &Path,
+    file_path: &str,
+    contain_root: Option<&fuigo_dirs::contained::PinnedRoot>,
+    cwd_based: bool,
+) -> std::io::Result<String> {
+    let path = base_dir.join(file_path);
+    if let Some(root) = contain_root {
+        return fuigo_dirs::contained::read_contained(&path, root);
+    }
+    if cwd_based && Path::new(file_path).is_relative() {
+        let root = fuigo_dirs::contained::PinnedRoot::pin(base_dir)?;
+        return fuigo_dirs::contained::read_contained(&path, &root);
+    }
+    std::fs::read_to_string(path)
 }
 
 /// Resolve persona instructions from inline text and/or instructions_file.
@@ -177,7 +201,12 @@ fn resolve_persona_instructions(
     if let Some(ref file_path) = p.instructions_file {
         let base = p.source_dir.as_deref().or(cwd);
         match base {
-            Some(base_dir) => match std::fs::read_to_string(base_dir.join(file_path)) {
+            Some(base_dir) => match read_definition_file(
+                base_dir,
+                file_path,
+                p.contain_root.as_ref(),
+                p.source_dir.is_none(),
+            ) {
                 Ok(content) => parts.push(content),
                 Err(e) => {
                     let err = format!(
@@ -764,5 +793,107 @@ mod tests {
             Some("CWD role instructions."),
         );
         assert!(result.role_prompt_warning.is_none());
+    }
+
+    // ── m5: project definition files are contained to the project ─────
+
+    #[cfg(unix)]
+    #[test]
+    fn m5_project_role_and_persona_files_linked_outside_the_project_are_not_read() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.md"), "OUTSIDE-SECRET").unwrap();
+        let roles = project.path().join(".fuigo/roles");
+        std::fs::create_dir_all(&roles).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret.md"), roles.join("role.md")).unwrap();
+        let pinned = fuigo_dirs::contained::PinnedRoot::pin(project.path()).unwrap();
+        let overrides = make_overrides(None, None, None, None, None);
+
+        // Role discovered in the project: prompt_file linked outside is refused (soft warning).
+        let role = SubagentRole {
+            prompt_file: Some("role.md".into()),
+            source_dir: Some(roles.clone()),
+            contain_root: Some(pinned.clone()),
+            ..Default::default()
+        };
+        let result = resolve_effective_overrides(
+            &overrides,
+            Some(&role),
+            &empty_personas(),
+            Some(project.path()),
+            None,
+        );
+        assert!(result.role_prompt.is_none(), "outside role prompt must not be read");
+        assert!(result.role_prompt_warning.is_some());
+
+        // Project persona: instructions_file linked outside is refused.
+        let mut personas = HashMap::new();
+        personas.insert(
+            "p".to_string(),
+            SubagentPersona {
+                instructions_file: Some("role.md".into()),
+                source_dir: Some(roles.clone()),
+                contain_root: Some(pinned),
+                ..Default::default()
+            },
+        );
+        let result = resolve_effective_overrides(
+            &make_overrides(None, Some("p"), None, None, None),
+            None,
+            &personas,
+            Some(project.path()),
+            None,
+        );
+        assert!(result.persona_instructions.is_none());
+        assert!(result.persona_error.is_some());
+    }
+
+    /// An inline role (no source folder) names its file relative to the workspace cwd: that is repository content,
+    /// so a link out of the workspace is refused.
+    #[cfg(unix)]
+    #[test]
+    fn m5_inline_role_file_relative_to_cwd_linked_outside_is_not_read() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.md"), "OUTSIDE-SECRET").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret.md"), project.path().join("inline.md"))
+            .unwrap();
+        let overrides = make_overrides(None, None, None, None, None);
+        let inline = SubagentRole {
+            prompt_file: Some("inline.md".into()),
+            ..Default::default()
+        };
+        let result = resolve_effective_overrides(
+            &overrides,
+            Some(&inline),
+            &empty_personas(),
+            Some(project.path()),
+            None,
+        );
+        assert!(result.role_prompt.is_none(), "cwd-relative link outside must not be read");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn m5_project_role_file_linked_inside_the_project_is_read() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("shared.md"), "INSIDE").unwrap();
+        let roles = project.path().join(".fuigo/roles");
+        std::fs::create_dir_all(&roles).unwrap();
+        std::os::unix::fs::symlink(project.path().join("shared.md"), roles.join("role.md")).unwrap();
+        let role = SubagentRole {
+            prompt_file: Some("role.md".into()),
+            source_dir: Some(roles),
+            contain_root: Some(fuigo_dirs::contained::PinnedRoot::pin(project.path()).unwrap()),
+            ..Default::default()
+        };
+        let result = resolve_effective_overrides(
+            &make_overrides(None, None, None, None, None),
+            Some(&role),
+            &empty_personas(),
+            Some(project.path()),
+            None,
+        );
+        assert_eq!(result.role_prompt.as_deref(), Some("INSIDE"));
     }
 }

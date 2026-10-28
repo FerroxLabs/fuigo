@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use fuigo_tools::implementations::skills::discovery::SkillWalk;
+
 use super::discovery::{DiscoveredPlugin, PluginId, PluginOrigin, PluginScope};
 
 /// A loaded plugin with resolved components, ready for use by the session.
@@ -72,9 +74,33 @@ pub struct LoadedPlugin {
     pub inline_lsp_servers: Option<serde_json::Value>,
     /// Warning if this plugin won a name collision with another plugin.
     pub conflict: Option<String>,
+    /// Skills, commands and agents not loaded because they link outside the plugin folder.
+    pub skipped_links: SkippedLinks,
+}
+
+/// Per-kind count of plugin components skipped because they resolve outside the plugin folder (a symlinked dir or
+/// file, or a manifest path that leaves the root). Shown by `/plugins` so a skip is never silent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SkippedLinks {
+    pub skills: usize,
+    pub commands: usize,
+    pub agents: usize,
+}
+
+impl SkippedLinks {
+    pub fn total(&self) -> usize {
+        self.skills + self.commands + self.agents
+    }
 }
 
 impl LoadedPlugin {
+    /// The plugin folder as resolved at discovery, pinned: every read of a plugin component (skills, agents, hooks,
+    /// MCP, LSP) is held to it and the folder is never resolved again, so a plugin folder swapped for a link after
+    /// discovery is refused.
+    pub fn pinned_root(&self) -> fuigo_dirs::contained::PinnedRoot {
+        fuigo_dirs::contained::PinnedRoot::from_canonical(self.canonical_root.clone())
+    }
+
     /// Data directory for this plugin: `~/.fuigo/plugin-data/<plugin_id>/`.
     pub fn data_dir(&self) -> PathBuf {
         fuigo_config::fuigo_home()
@@ -137,22 +163,38 @@ impl PluginRegistry {
                 );
             }
 
-            // Count components
-            let skill_count =
-                count_skill_subdirs(&dp.skill_dirs) + count_md_files(&dp.command_dirs);
-            let agent_count = count_md_files(&dp.agent_dirs);
+            // Count components with the same contained walk the loaders use, so counts equal what loads
+            let (skills_out, commands_out, agents_out) =
+                dp.manifest.component_dirs_outside(&dp.root);
+            let mut skill_walk = SkillWalk::contained_pinned(dp.pinned_root());
+            let skill_paths = skill_md_paths_in(&dp.skill_dirs, &mut skill_walk);
+            let mut command_walk = SkillWalk::contained_pinned(dp.pinned_root());
+            let command_files = md_files_in(&dp.command_dirs, &mut command_walk);
+            let mut agent_walk = SkillWalk::contained_pinned(dp.pinned_root());
+            let agent_files = md_files_in(&dp.agent_dirs, &mut agent_walk);
+            let skipped_links = SkippedLinks {
+                skills: skills_out + skill_walk.skipped(),
+                commands: commands_out + command_walk.skipped(),
+                agents: agents_out + agent_walk.skipped(),
+            };
+            let skill_count = skill_paths.len() + command_files.len();
+            let agent_count = agent_files.len();
             let skill_names = {
-                let mut names = collect_skill_names(&dp.skill_dirs);
-                names.extend(collect_md_names(&dp.command_dirs));
+                let mut names = skill_names_of(&skill_paths);
+                names.extend(md_stems(&command_files));
                 names
             };
-            let agent_names = collect_md_names(&dp.agent_dirs);
+            let agent_names = md_stems(&agent_files);
             let has_hooks = dp.hooks_path.is_some() || dp.manifest.inline_hooks().is_some();
             let has_inline_hooks_only =
                 dp.hooks_path.is_none() && dp.manifest.inline_hooks().is_some();
             let mcp_server_names = plugin_mcp_server_names(&dp);
             let mcp_server_count = mcp_server_names.len();
-            let hook_count = count_hook_specs(dp.hooks_path.as_deref(), dp.manifest.inline_hooks());
+            let hook_count = count_hook_specs(
+                dp.hooks_path.as_deref(),
+                &dp.pinned_root(),
+                dp.manifest.inline_hooks(),
+            );
             let has_inline_mcp_only =
                 dp.mcp_config_path.is_none() && dp.manifest.inline_mcp_servers().is_some();
             let lsp_server_count = count_lsp_servers(&dp);
@@ -204,6 +246,7 @@ impl PluginRegistry {
                 inline_mcp_servers,
                 inline_lsp_servers,
                 conflict: dp.conflict,
+                skipped_links,
             };
 
             // Track MCP server ownership for enabled and trusted plugins
@@ -267,8 +310,8 @@ impl PluginRegistry {
             .collect()
     }
 
-    /// List enabled plugins (both trusted and untrusted).
-    /// Useful for skill/agent discovery where trust only gates executables.
+    /// List enabled plugins (both trusted and untrusted): the metadata listing (`/agents`, telemetry). Anything that
+    /// reaches a prompt or runs (agents, skills, hooks, MCP) uses [`Self::active_plugins`].
     pub fn enabled_plugins(&self) -> Vec<&LoadedPlugin> {
         self.list().into_iter().filter(|p| p.enabled).collect()
     }
@@ -431,13 +474,18 @@ impl SharedPluginRegistryHandle {
 /// Paths come from `find_skill_md_paths` and are deduped by normalized parent-dir basename, the identity the skill loader dedupes on.
 /// Counts therefore equal what actually loads, both for overlapping dir entries and for same-basename dirs at different paths.
 pub fn skill_md_paths(skill_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    skill_md_paths_in(skill_dirs, &mut SkillWalk::follow_links())
+}
+
+/// [`skill_md_paths`] under a walk policy (a plugin's own dirs use [`SkillWalk::contained`] on its canonical root).
+pub fn skill_md_paths_in(skill_dirs: &[PathBuf], walk: &mut SkillWalk) -> Vec<PathBuf> {
     use fuigo_tools::implementations::skills::discovery::{
-        find_skill_md_paths, normalize_skill_name,
+        find_skill_md_paths_in, normalize_skill_name,
     };
 
     let mut paths: Vec<PathBuf> = skill_dirs
         .iter()
-        .flat_map(|d| find_skill_md_paths(d))
+        .flat_map(|d| find_skill_md_paths_in(d, walk))
         .collect();
     let mut seen = std::collections::HashSet::new();
     paths.retain(|p| {
@@ -450,48 +498,36 @@ pub fn skill_md_paths(skill_dirs: &[PathBuf]) -> Vec<PathBuf> {
     paths
 }
 
-/// Count skills under the skill dirs (each discovered SKILL.md is one skill).
-fn count_skill_subdirs(skill_dirs: &[PathBuf]) -> usize {
-    skill_md_paths(skill_dirs).len()
+/// The `.md` files directly in `dirs` that the walk admits (commands, agents).
+fn md_files_in(dirs: &[PathBuf], walk: &mut SkillWalk) -> Vec<PathBuf> {
+    use fuigo_tools::implementations::skills::discovery::scan_md_files_in;
+    dirs.iter().flat_map(|dir| scan_md_files_in(dir, walk)).collect()
 }
 
-fn count_md_files(dirs: &[PathBuf]) -> usize {
-    dirs.iter()
-        .flat_map(|dir| std::fs::read_dir(dir).ok())
-        .flatten()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_type().map(|ft| ft.is_file()).unwrap_or(false)
-                && e.path().extension().is_some_and(|ext| ext == "md")
-        })
-        .count()
-}
-
-fn collect_md_names(dirs: &[PathBuf]) -> Vec<String> {
-    dirs.iter()
-        .flat_map(|dir| std::fs::read_dir(dir).ok())
-        .flatten()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_type().map(|ft| ft.is_file()).unwrap_or(false)
-                && e.path().extension().is_some_and(|ext| ext == "md")
-        })
-        .filter_map(|e| {
-            e.path()
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(String::from)
-        })
+fn md_stems(files: &[PathBuf]) -> Vec<String> {
+    files
+        .iter()
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(String::from))
         .collect()
 }
 
-fn collect_skill_names(skill_dirs: &[PathBuf]) -> Vec<String> {
+fn skill_names_of(skill_paths: &[PathBuf]) -> Vec<String> {
     // The skill name is the basename of the directory containing SKILL.md
-    skill_md_paths(skill_dirs)
+    skill_paths
         .iter()
         .filter_map(|p| p.parent())
         .filter_map(|dir| dir.file_name().and_then(|n| n.to_str()).map(String::from))
         .collect()
+}
+
+#[cfg(test)]
+fn count_skill_subdirs(skill_dirs: &[PathBuf]) -> usize {
+    skill_md_paths(skill_dirs).len()
+}
+
+#[cfg(test)]
+fn collect_skill_names(skill_dirs: &[PathBuf]) -> Vec<String> {
+    skill_names_of(&skill_md_paths(skill_dirs))
 }
 
 /// Deduped union of MCP server names from a plugin's `.mcp.json` file and its inline `mcpServers` manifest block.
@@ -501,7 +537,7 @@ fn plugin_mcp_server_names(dp: &DiscoveredPlugin) -> Vec<String> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     if let Some(ref path) = dp.mcp_config_path
-        && let Ok(file_names) = read_mcp_server_names(path)
+        && let Ok(file_names) = read_mcp_server_names(path, &dp.pinned_root())
     {
         for server_name in file_names {
             if seen.insert(server_name.clone()) {
@@ -526,7 +562,7 @@ fn plugin_mcp_server_names(dp: &DiscoveredPlugin) -> Vec<String> {
 
 fn count_lsp_servers(dp: &DiscoveredPlugin) -> usize {
     if let Some(ref path) = dp.lsp_config_path {
-        std::fs::read_to_string(path)
+        fuigo_dirs::contained::read_contained(path, &dp.pinned_root())
             .ok()
             .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
             .and_then(|v| v.as_object().map(|o| o.len()))
@@ -542,7 +578,11 @@ fn count_lsp_servers(dp: &DiscoveredPlugin) -> usize {
 ///
 /// The hooks JSON structure is `{ "hooks": { "EventName": [ { "hooks": [...] } ] } }`.
 /// Each entry in the inner `hooks` array is one hook handler spec.
-fn count_hook_specs(hooks_path: Option<&Path>, inline_hooks: Option<&serde_json::Value>) -> usize {
+fn count_hook_specs(
+    hooks_path: Option<&Path>,
+    plugin_root: &fuigo_dirs::contained::PinnedRoot,
+    inline_hooks: Option<&serde_json::Value>,
+) -> usize {
     fn count_in_value(v: &serde_json::Value) -> usize {
         let Some(events) = v.get("hooks").and_then(|h| h.as_object()) else {
             return 0;
@@ -557,7 +597,7 @@ fn count_hook_specs(hooks_path: Option<&Path>, inline_hooks: Option<&serde_json:
     }
 
     let file_count = hooks_path
-        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|p| fuigo_dirs::contained::read_contained(p, plugin_root).ok())
         .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
         .map(|v| count_in_value(&v))
         .unwrap_or(0);
@@ -566,8 +606,11 @@ fn count_hook_specs(hooks_path: Option<&Path>, inline_hooks: Option<&serde_json:
 }
 
 /// Read MCP server names from a .mcp.json file.
-fn read_mcp_server_names(path: &Path) -> Result<Vec<String>, ()> {
-    let content = std::fs::read_to_string(path).map_err(|_| ())?;
+fn read_mcp_server_names(
+    path: &Path,
+    plugin_root: &fuigo_dirs::contained::PinnedRoot,
+) -> Result<Vec<String>, ()> {
+    let content = fuigo_dirs::contained::read_contained(path, plugin_root).map_err(|_| ())?;
     let value: serde_json::Value = serde_json::from_str(&content).map_err(|_| ())?;
     let names = value
         .get("mcpServers")

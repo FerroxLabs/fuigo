@@ -474,6 +474,16 @@ pub fn extract_skill_body(content: &str) -> String {
     content.to_string()
 }
 
+/// Read a skill's file as discovery admitted it: held to [`SkillInfo::content_root`] when set (plugin and project
+/// skills), so a link swapped in after discovery is refused here, at the read; a plain read for user scope.
+pub async fn read_skill_source(skill: &SkillInfo) -> std::io::Result<String> {
+    let path = std::path::PathBuf::from(&skill.path);
+    let root = skill.content_root.clone();
+    tokio::task::spawn_blocking(move || fuigo_dirs::contained::read_scoped(&path, root.as_ref()))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
 /// Load skill content from its file, stripping YAML frontmatter.
 ///
 /// Public entrypoint for the shell crate to load skill content at
@@ -494,7 +504,7 @@ pub async fn load_skill_content(skill: &SkillInfo) -> Result<String, String> {
         ));
     }
     let path = std::path::Path::new(&skill.path);
-    match tokio::fs::read_to_string(path).await {
+    match read_skill_source(skill).await {
         Ok(content) => {
             let body = extract_skill_body(&content);
             Ok(match path.parent() {
@@ -509,7 +519,7 @@ pub async fn load_skill_content(skill: &SkillInfo) -> Result<String, String> {
 /// Load skill body into SkillInfo.
 pub async fn load_skill_with_body(skill: &SkillInfo) -> Result<SkillInfo, String> {
     let path = std::path::Path::new(&skill.path);
-    let content = tokio::fs::read_to_string(path)
+    let content = read_skill_source(skill)
         .await
         .map_err(|e| format!("Failed to read {}: {}", skill.path, e))?;
     let body = extract_skill_body(&content);
@@ -585,6 +595,7 @@ It has multiple lines."#;
             paths: None,
             enabled: true,
             body: Some("---\n\nParagraph after a markdown HR.".to_string()),
+            content_root: None,
         };
         let loaded = load_skill_content(&skill).await.unwrap();
         assert_eq!(loaded, "---\n\nParagraph after a markdown HR.");
@@ -619,6 +630,7 @@ It has multiple lines."#;
             paths: None,
             enabled: true,
             body: None,
+            content_root: None,
         };
         let err = load_skill_content(&skill).await.unwrap_err();
         assert!(err.contains("no preloaded body"), "{err}");
@@ -654,6 +666,7 @@ It has multiple lines."#;
             paths: None,
             enabled: true,
             body: None,
+            content_root: None,
         };
         assert_eq!(format_skill_name(&skill), "user:commit");
 
@@ -684,6 +697,7 @@ It has multiple lines."#;
             paths: None,
             enabled: true,
             body: None,
+            content_root: None,
         };
         assert_eq!(format_skill_name(&local_skill), "local:build");
     }
@@ -717,6 +731,7 @@ It has multiple lines."#;
             paths: None,
             enabled: true,
             body: None,
+            content_root: None,
         };
         // Plugin skills use plugin_name as prefix, not scope.
         assert_eq!(format_skill_name(&skill), "my-plugin:deploy");
@@ -756,6 +771,7 @@ It has multiple lines."#;
             paths: None,
             enabled: true,
             body: None,
+            content_root: None,
         };
 
         let content = "# Git Commit Skill\n\nYou are helping the user create a commit.";

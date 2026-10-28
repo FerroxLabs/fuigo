@@ -46,11 +46,24 @@ pub struct PermissionEvent {
     pub classifier_verdict: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remember_tool_approvals: Option<bool>,
+    /// u35 g9: for an allowed call, whether some part of it was approved without a grant (the read-only lists or the
+    /// Auto mode fast path) rather than by a grant, an answer, a hook or an override. Carried to the shell runner
+    /// ([`PermissionResolution::approved_without_grant`]); not part of the event's wire form.
+    #[serde(skip)]
+    pub approved_without_grant: Option<bool>,
 }
 #[derive(Debug, Clone)]
 pub struct PermissionResolution {
     pub decision: Decision,
     pub event: Option<PermissionEvent>,
+}
+impl PermissionResolution {
+    /// u35 g9: the flag the approved call carries to the shell runner
+    /// ([`fuigo_tools::sandbox_launch::ApprovedWithoutGrant`]): `true` when some part of the call was approved without a
+    /// grant, so the runner judges the environment it runs under. A resolution that does not say counts as `true`.
+    pub fn approved_without_grant(&self) -> bool {
+        self.event.as_ref().and_then(|event| event.approved_without_grant).unwrap_or(true)
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ClientType {
@@ -232,6 +245,20 @@ pub struct PermissionRequest {
     /// S6.7: the turn origin and influenced flag for the classifier request. Filled by the permission handle from the session's
     /// own flag, never by the caller; `None` (request bytes unchanged) unless influenced or a peer-origin turn.
     pub peer_note: Option<crate::permission::PeerPayloadNote>,
+    /// u35 g11 (Astra r10 High): the directory a bash tool runs its command in when the tool names one (OpenCode bash
+    /// `workdir`, absolute or relative to the request's directory); every repository check runs there as well as in
+    /// the request's directory. Build it with [`bash_exec_cwd_for`] from the same input that runs.
+    pub exec_cwd: Option<std::path::PathBuf>,
+}
+/// u35 g11 (Astra r10 High): the working directory a bash tool input names (OpenCode bash `workdir`), resolved as the
+/// tool resolves it (absolute, or under `session_cwd`); `None` when the tool runs in the session directory.
+pub fn bash_exec_cwd_for(input: &fuigo_tools::types::ToolInput, session_cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    match input {
+        fuigo_tools::types::ToolInput::Bash(bash) => {
+            bash.workdir.as_deref().filter(|dir| !dir.is_empty()).map(|dir| session_cwd.join(dir))
+        }
+        _ => None,
+    }
 }
 impl PermissionRequest {
     pub fn new(access: AccessKind, tool_call_update: acp::ToolCallUpdate) -> Self {
@@ -246,6 +273,7 @@ impl PermissionRequest {
             edit_targets: None,
             read_targets: None,
             peer_note: None,
+            exec_cwd: None,
         }
     }
 }
@@ -380,6 +408,9 @@ pub enum PermissionCommand {
     SetClassifier(Option<std::sync::Arc<dyn super::auto_mode::PermissionClassifier>>),
     SetClassifierTranscript(Vec<super::auto_mode::ClassifierTurn>),
     SetProjectInstructions(Option<String>),
+    /// u35 t1 (design d2 §3.4): what the session policy was built from, so the manager can build it without the
+    /// project tier and rebuild it when folder trust changes.
+    SetSessionPolicyInputs(std::sync::Arc<super::resolution::SessionPolicyInputs>),
     ResetState,
     Shutdown,
 }
@@ -981,6 +1012,7 @@ pub(crate) mod tests {
             security_findings: Some(vec!["opaque_shell".into()]),
             classifier_verdict: Some("block".into()),
             remember_tool_approvals: Some(true),
+            approved_without_grant: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["subagent_session_id"], "child-1");
@@ -1026,6 +1058,7 @@ pub(crate) mod tests {
             security_findings: None,
             classifier_verdict: None,
             remember_tool_approvals: None,
+            approved_without_grant: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(!json.contains("subagent_session_id"));

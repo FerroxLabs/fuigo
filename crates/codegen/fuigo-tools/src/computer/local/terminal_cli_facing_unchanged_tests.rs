@@ -170,6 +170,7 @@ async fn cli_facing_spawn_shell_command_unchanged_without_hook() {
             SpawnSandbox {
                 hook: None,
                 tool_call_id: "pin-call",
+                env_check: None,
             },
         )
         .unwrap();
@@ -335,7 +336,7 @@ async fn cli_facing_static_shell_sites_unchanged_without_hook() {
     );
     let env = request_env();
     let mut live = actor
-        .spawn_static_command(PROBE, &cwd, &env, "pin-call")
+        .spawn_static_command(PROBE, &cwd, &env, "pin-call", None)
         .await
         .unwrap();
     let live = read_to_end(&mut live.child).await;
@@ -378,7 +379,7 @@ async fn main_spawn_persistent_command(
     #[allow(clippy::disallowed_methods)] // the golden for the pin; waited on by the test
     let mut child = cmd.spawn().unwrap();
     drop(cmd);
-    let snapshot = state.snapshot.clone();
+    let snapshot = state.replay_script();
     tokio::spawn(async move {
         shell_state::write_snapshot_to_pipe(&snapshot, prep.state_in_write)
             .await
@@ -411,7 +412,7 @@ async fn cli_facing_persistent_shell_sites_unchanged_without_hook() {
     let mut actor = actor(true, false, Some(policy.clone()));
     let env = request_env();
     let mut live = actor
-        .spawn_persistent_command(PROBE, &cwd, &env, "pin-call")
+        .spawn_persistent_command(PROBE, &cwd, &env, "pin-call", None)
         .await
         .unwrap();
     let live_out = read_to_end(&mut live.child).await;

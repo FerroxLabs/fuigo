@@ -680,11 +680,12 @@ impl LocalTerminalActor {
         cwd: &std::path::Path,
         env: &HashMap<String, String>,
         tool_call_id: &str,
+        env_check: Option<EnvCheck<'_>>,
     ) -> Result<SpawnResult, ComputerError> {
         #[cfg(unix)]
         if self.persistent_shell {
             return self
-                .spawn_persistent_command(command, cwd, env, tool_call_id)
+                .spawn_persistent_command(command, cwd, env, tool_call_id, env_check)
                 .await;
         }
 
@@ -692,7 +693,7 @@ impl LocalTerminalActor {
         if self.login_shell_capture && login_env_capture_enabled() {
             self.ensure_static_shell_initialized(cwd).await;
             return self
-                .spawn_static_command(command, cwd, env, tool_call_id)
+                .spawn_static_command(command, cwd, env, tool_call_id, env_check)
                 .await;
         }
 
@@ -718,6 +719,7 @@ impl LocalTerminalActor {
             SpawnSandbox {
                 hook: self.sandbox_hook(),
                 tool_call_id,
+                env_check,
             },
         )?;
         Ok(SpawnResult {
@@ -771,6 +773,7 @@ impl LocalTerminalActor {
         cwd: &std::path::Path,
         env: &HashMap<String, String>,
         tool_call_id: &str,
+        env_check: Option<EnvCheck<'_>>,
     ) -> Result<SpawnResult, ComputerError> {
         use command_fds::CommandFdExt;
 
@@ -789,6 +792,7 @@ impl LocalTerminalActor {
             self.login_env.as_ref(),
             env,
         );
+        judge_spawn_env(&plain, Vec::new, env_check)?;
         crate::sandbox_launch::prepare(
             self.sandbox_hook(),
             &mut plain,
@@ -927,6 +931,7 @@ impl LocalTerminalActor {
         cwd: &std::path::Path,
         env: &HashMap<String, String>,
         tool_call_id: &str,
+        env_check: Option<EnvCheck<'_>>,
     ) -> Result<SpawnResult, ComputerError> {
         use command_fds::CommandFdExt;
 
@@ -986,6 +991,7 @@ impl LocalTerminalActor {
         // The persistent backend restores login state from its snapshot, so no
         // login-env layering here.
         apply_child_env(&mut plain, self.shell_env_policy.as_ref(), None, env);
+        judge_spawn_env(&plain, || shell_state::snapshot_exports(&shell_state.snapshot), env_check)?;
         crate::sandbox_launch::prepare_restoring(
             self.sandbox_hook(),
             &mut plain,
@@ -1026,7 +1032,7 @@ impl LocalTerminalActor {
             tracing::debug!("Failed to attach persistent-shell child to ProcessGroup: {e}");
         }
 
-        let snapshot = shell_state.snapshot.clone();
+        let snapshot = shell_state.replay_script();
         tokio::spawn(async move {
             if let Err(e) =
                 shell_state::write_snapshot_to_pipe(&snapshot, prep.state_in_write).await
@@ -1297,6 +1303,7 @@ impl LocalTerminalActor {
                 &request.working_directory,
                 &request.env,
                 &request.tool_call_id,
+                env_check_for(&request),
             )
             .await
         {
@@ -1448,6 +1455,7 @@ impl LocalTerminalActor {
                 &request.working_directory,
                 &request.env,
                 &request.tool_call_id,
+                env_check_for(&request),
             )
             .await
         {
@@ -3527,6 +3535,45 @@ fn fd_mappings_for_spawn(
 struct SpawnSandbox<'a> {
     hook: Option<&'a dyn crate::sandbox_launch::SandboxLaunch>,
     tool_call_id: &'a str,
+    /// The command whose environment is judged, for a call approved without a grant
+    /// ([`env_check_for`]).
+    env_check: Option<EnvCheck<'a>>,
+}
+
+/// u35 g9: the command the shell runner judges the environment for: the user's command (isolation
+/// wraps it later, at the sandbox hook) when the call was approved without a grant, else `None` (a
+/// grant, an answer or an override approved it, and the environment is not judged).
+///
+/// u35 g11 (Fable r10 Low): the command itself, never `display_command`, which is a label for some
+/// callers (the monitor tool's `[monitor] DESCRIPTION`).
+fn env_check_for(request: &TerminalRunRequest) -> Option<EnvCheck<'_>> {
+    request.approved_without_grant.then_some(EnvCheck {
+        command: request.command.as_str(),
+        request_cwd: request.request_cwd.as_deref(),
+    })
+}
+
+/// u35 t1: what the shell runner judges for a call approved without a grant: the command, and the directory the
+/// permission check judged it in when it runs in another ([`TerminalRunRequest::request_cwd`]).
+#[derive(Clone, Copy)]
+pub(crate) struct EnvCheck<'a> {
+    command: &'a str,
+    request_cwd: Option<&'a std::path::Path>,
+}
+
+/// u35 g9: [`crate::sandbox_launch::check_child_env`] at a tool-call spawn site, before the
+/// sandbox hook: `cmd`'s environment with `restored()` exported on top, judged for `env_check`.
+fn judge_spawn_env(
+    cmd: &tokio::process::Command,
+    restored: impl FnOnce() -> Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    env_check: Option<EnvCheck<'_>>,
+) -> Result<(), crate::sandbox_launch::SandboxLaunchError> {
+    match env_check {
+        Some(check) => {
+            crate::sandbox_launch::check_child_env(cmd, &restored(), check.command, true, check.request_cwd)
+        }
+        None => Ok(()),
+    }
 }
 
 fn spawn_shell_command(
@@ -3556,7 +3603,7 @@ fn spawn_shell_command(
     // P189-placed: the sandbox hook rewrites a plain command; spawn_placed then rebuilds it from the captured
     // parts so the session-cgroup placement stays the first pre_exec.
     #[cfg(unix)]
-    let parts = {
+    let (parts, spawn_program, spawn_path_set) = {
         let mut plain = tokio::process::Command::new(shell.binary_path());
         // Non-interactive zsh still defaults to NOMATCH; pass via argv like init's -o extendedglob.
         if matches!(shell, shell_state::ShellKind::Zsh) {
@@ -3564,12 +3611,17 @@ fn spawn_shell_command(
         }
         plain.arg("-c").arg(&wrapped_command).current_dir(cwd);
         apply_child_env(&mut plain, shell_env_policy, login_env, env);
+        judge_spawn_env(&plain, Vec::new, sandbox.env_check)?;
         crate::sandbox_launch::prepare(
             sandbox.hook,
             &mut plain,
             &crate::sandbox_launch::CallId::tool(sandbox.tool_call_id),
         )?;
-        crate::sandbox_launch::CommandParts::capture(&plain)
+        (
+            crate::sandbox_launch::CommandParts::capture(&plain),
+            plain.as_std().get_program().to_os_string(),
+            crate::util::spawn::child_path_is_set(plain.as_std()),
+        )
     };
     #[cfg(unix)]
     // P189-placed: handed to ProcessScope::spawn_placed below, which registers the placement.
@@ -3606,6 +3658,7 @@ fn spawn_shell_command(
         layer_request_env(&mut cmd, env, active_policy);
         cmd.envs(crate::util::pager_env());
         crate::util::apply_fuigo_agent_marker(&mut cmd);
+        judge_spawn_env(&cmd, Vec::new, sandbox.env_check).map_err(std::io::Error::from)?;
         crate::sandbox_launch::prepare(
             sandbox.hook,
             &mut cmd,
@@ -3634,6 +3687,7 @@ fn spawn_shell_command(
             std::io::Error::other("session is stopping; command not started")
         }
         fuigo_tty_utils::SpawnPlacedError::Spawn(e) => {
+            crate::util::spawn::ShellSpawnFailure::new("bash_tool", &spawn_program, &e, spawn_path_set).log();
             std::io::Error::new(e.kind(), format!("spawn shell in {}: {e}", cwd.display()))
         }
     })?;
@@ -3656,10 +3710,15 @@ fn spawn_shell_command(
                 );
                 drop(cmd);
                 let mut cmd = build_cmd(false)?;
-                let child = cmd.spawn()?;
+                let child = cmd.spawn().inspect_err(|e| {
+                    crate::util::spawn::ShellSpawnFailure::for_command("bash_tool", cmd.as_std(), e).log();
+                })?;
                 (child, group)
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                crate::util::spawn::ShellSpawnFailure::for_command("bash_tool", cmd.as_std(), &e).log();
+                return Err(e);
+            }
         }
     };
 
@@ -3985,6 +4044,8 @@ mod tests {
         ));
 
         TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: command.to_string(),
             working_directory: PathBuf::from("/tmp"),
             env: HashMap::new(),
@@ -4211,6 +4272,8 @@ mod tests {
             std::env::temp_dir().join(format!("terminal-test-timeout-{}.out", std::process::id()));
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "sleep 60".to_string(),
             working_directory: PathBuf::from("/tmp"),
             env: HashMap::new(),
@@ -4242,6 +4305,8 @@ mod tests {
         let tool_call_id = "test-auto-bg";
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "sleep 60".to_string(),
             working_directory: PathBuf::from("/tmp"),
             env: HashMap::new(),
@@ -4297,6 +4362,8 @@ mod tests {
         let tool_call_id = "test-bg-all";
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "sleep 60".to_string(),
             working_directory: PathBuf::from("/tmp"),
             env: HashMap::new(),
@@ -4368,6 +4435,8 @@ mod tests {
         let tool_call_id = "test-fg-budget";
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "sleep 60".to_string(),
             working_directory: PathBuf::from("/tmp"),
             env: HashMap::new(),
@@ -4430,6 +4499,8 @@ mod tests {
         ));
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "sleep 60".to_string(),
             working_directory: PathBuf::from("/tmp"),
             env: HashMap::new(),
@@ -4472,6 +4543,8 @@ mod tests {
         let tool_call_id = "test-per-req-budget";
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "sleep 60".to_string(),
             working_directory: PathBuf::from("/tmp"),
             env: HashMap::new(),
@@ -4521,6 +4594,8 @@ mod tests {
         let tool_call_id = "test-max-budget";
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "sleep 60".to_string(),
             working_directory: PathBuf::from("/tmp"),
             env: HashMap::new(),
@@ -4568,6 +4643,8 @@ mod tests {
             std::env::temp_dir().join(format!("terminal-test-size-{}.out", std::process::id()));
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "yes".to_string(),
             working_directory: PathBuf::from("/tmp"),
             env: HashMap::new(),
@@ -4614,6 +4691,8 @@ mod tests {
             std::env::temp_dir().join(format!("terminal-test-bg-{}.out", std::process::id()));
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "echo background_test && sleep 0.1".to_string(),
             working_directory: PathBuf::from("/tmp"),
             env: HashMap::new(),
@@ -4652,6 +4731,8 @@ mod tests {
             std::env::temp_dir().join(format!("terminal-test-kill-{}.out", std::process::id()));
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "sleep 60".to_string(),
             working_directory: PathBuf::from("/tmp"),
             env: HashMap::new(),
@@ -4685,6 +4766,8 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "for i in 1 2 3; do echo chunk_$i; sleep 0.15; done".to_string(),
             working_directory: tmp.path().to_path_buf(),
             env: HashMap::new(),
@@ -4748,6 +4831,8 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             // ~1.8 KB against a 200-char limit: truncation fires early and keeps firing.
             command: "for i in $(seq 1 60); do printf 'LINE%03d-XXXXXXXXXXXXXXXXXXXX\\n' \"$i\"; sleep 0.03; done".to_string(),
             working_directory: tmp.path().to_path_buf(),
@@ -4811,6 +4896,8 @@ mod tests {
         let output_file = tmp.path().join("output.log");
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: format!("head -c {output_amount} /dev/zero | tr '\\0' 'x'"),
             working_directory: tmp.path().to_path_buf(),
             env: HashMap::new(),
@@ -4845,6 +4932,8 @@ mod tests {
         let output_file = tmp.path().join("output.log");
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "head -c 200000 /dev/zero | tr '\\0' 'x'".to_string(),
             working_directory: tmp.path().to_path_buf(),
             env: HashMap::new(),
@@ -4878,6 +4967,8 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "echo hello".to_string(),
             working_directory: tmp.path().to_path_buf(),
             env: HashMap::new(),
@@ -4908,6 +4999,8 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "echo test; sleep 0.15; echo done".to_string(),
             working_directory: tmp.path().to_path_buf(),
             env: HashMap::new(),
@@ -4947,6 +5040,8 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "echo once; sleep 0.5".to_string(),
             working_directory: tmp.path().to_path_buf(),
             env: HashMap::new(),
@@ -4987,6 +5082,8 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "sleep 60".to_string(),
             working_directory: PathBuf::from("/tmp"),
             env: HashMap::new(),
@@ -5016,6 +5113,8 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
 
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: "echo before_timeout; sleep 60".to_string(),
             working_directory: PathBuf::from("/tmp"),
             env: HashMap::new(),
@@ -5048,6 +5147,8 @@ mod tests {
         let left_behind = LeftBehindChild::new();
         let backend = LocalTerminalBackend::new();
         let request = TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
             command: format!("{} &\nsleep 1\necho done", left_behind.shell()),
             working_directory: PathBuf::from("/tmp"),
             env: HashMap::new(),
@@ -5417,6 +5518,38 @@ mod tests {
                 .any(|(call, vars)| *call == next_call && vars.contains(&base)),
             "{restored:?}"
         );
+    }
+
+    /// u35 g9 (Astra/Grok r8 High 1, Fable r8 High): the permission check judges Fuigo's
+    /// environment, but the persistent shell runs the next command under its snapshot's exports.
+    /// Every call approved without a grant is judged on the environment its shell gives it and
+    /// refused while that steers, each time (a batch sibling as well as the first call); a call
+    /// approved by a grant or an answer runs.
+    #[tokio::test]
+    async fn u35_persistent_shell_export_that_steers_refuses_every_no_grant_call() {
+        crate::sandbox_launch::install_env_judge(crate::sandbox_launch::u35_test_child_judge);
+        let backend = LocalTerminalBackend::new_inner(LocalTerminalConfig {
+            persistent_shell: true,
+            ..Default::default()
+        });
+        let mut export = make_request("export FUIGO_U35_CHILD_STEER=/opt/u35");
+        export.tool_call_id = "u35-export".to_owned();
+        backend.run(export).await.expect("export run");
+        for sibling in ["u35-next", "u35-sibling"] {
+            let mut next = make_request("echo ran");
+            next.tool_call_id = sibling.to_owned();
+            next.approved_without_grant = true;
+            let Err(refused) = backend.run(next).await else {
+                panic!("{sibling}: a no-grant call ran under the steering export");
+            };
+            let text = refused.to_string();
+            assert!(text.contains("FUIGO_U35_CHILD_STEER") && text.contains("approval"), "{text}");
+        }
+        let mut granted = make_request("echo granted");
+        granted.tool_call_id = "u35-granted".to_owned();
+        granted.approved_without_grant = false;
+        let ran = backend.run(granted).await.expect("a granted call is never refused");
+        assert!(ran.combined_output.contains("granted"), "{}", ran.combined_output);
     }
 
     /// A hook that replaces the command the way a backend does: a wrapper shell that prints a

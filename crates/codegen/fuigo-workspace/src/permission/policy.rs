@@ -504,6 +504,21 @@ impl CompiledPolicy {
             )
     }
 
+    /// Whether a Deny or Ask rule that reaches `probe`'s kind of access could match some path the shell glob `pattern`
+    /// matches (u35: a glob read target is checked as a pattern, so a file created after the check is covered too).
+    /// Over-approximates on purpose: rule wildcards may cross `/`, character classes match any character, letters
+    /// compare without case, and a relative or `~` rule is also tried at any depth.
+    pub(crate) fn restricted_pattern_may_match(&self, probe: &AccessKind, pattern: &str) -> bool {
+        self.config.rules.iter().any(|rule| {
+            matches!(rule.action, RuleAction::Deny | RuleAction::Ask)
+                && rule_reaches(probe, rule)
+                && match rule.pattern.as_deref() {
+                    None | Some("*") => true,
+                    Some(rule_pattern) => glob_patterns_may_intersect(pattern, rule_pattern),
+                }
+        })
+    }
+
     fn bash_chain_fully_allowed(
         &self,
         cmd: &str,
@@ -3041,5 +3056,127 @@ mod windows_spelling_tests {
                 "{path}"
             );
         }
+    }
+}
+
+/// One position of a glob, as a set of characters it consumes once or any number of times.
+#[derive(Clone, Copy)]
+enum GlobChars {
+    Literal(char),
+    /// Any character but `/`.
+    NotSlash,
+    /// Any character.
+    Any,
+}
+
+#[derive(Clone, Copy)]
+struct GlobStep {
+    chars: GlobChars,
+    repeat: bool,
+}
+
+fn glob_chars_meet(a: GlobChars, b: GlobChars) -> bool {
+    match (a, b) {
+        (GlobChars::Literal(x), GlobChars::Literal(y)) => x.to_lowercase().eq(y.to_lowercase()),
+        (GlobChars::Literal(c), GlobChars::NotSlash) | (GlobChars::NotSlash, GlobChars::Literal(c)) => c != '/',
+        _ => true,
+    }
+}
+
+/// A glob as steps. `shell`: bash pathname expansion (`*`, `?` and `[...]` never match `/`); otherwise a rule pattern,
+/// read loosely (its wildcards may match `/`).
+fn glob_steps(pattern: &str, shell: bool) -> Vec<GlobStep> {
+    let wild = if shell { GlobChars::NotSlash } else { GlobChars::Any };
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut steps = Vec::with_capacity(chars.len());
+    let mut at = 0;
+    while at < chars.len() {
+        let step = match chars[at] {
+            '*' => GlobStep { chars: wild, repeat: true },
+            '?' => GlobStep { chars: wild, repeat: false },
+            '[' => match chars[at + 1..].iter().skip(1).position(|c| *c == ']') {
+                Some(close) => {
+                    at += close + 2;
+                    GlobStep { chars: wild, repeat: false }
+                }
+                None => GlobStep { chars: GlobChars::Literal('['), repeat: false },
+            },
+            c => GlobStep { chars: GlobChars::Literal(c), repeat: false },
+        };
+        steps.push(step);
+        at += 1;
+    }
+    steps
+}
+
+/// Whether some path matches both the shell glob `shell` and the rule pattern `rule` (or a loosened form of it).
+pub(crate) fn glob_patterns_may_intersect(shell: &str, rule: &str) -> bool {
+    let shell = glob_steps(shell, true);
+    let mut rules = vec![rule.to_owned()];
+    if let Some(rest) = rule.strip_prefix('~') {
+        rules.push(format!("**{rest}"));
+    } else if !rule.starts_with('/') && rule.as_bytes().get(1) != Some(&b':') {
+        rules.push(format!("**/{rule}"));
+    }
+    rules.push(format!("{}/**", rule.trim_end_matches('/')));
+    rules
+        .iter()
+        .any(|rule| glob_steps_intersect(&shell, &glob_steps(rule, false)))
+}
+
+/// Product of the two glob automata: a step is consumed alone when it repeats (zero times) or together with the other
+/// side when both can take the same character.
+fn glob_steps_intersect(a: &[GlobStep], b: &[GlobStep]) -> bool {
+    let width = b.len() + 1;
+    let mut seen = vec![false; (a.len() + 1) * width];
+    let mut stack = vec![(0usize, 0usize)];
+    while let Some((i, j)) = stack.pop() {
+        if std::mem::replace(&mut seen[i * width + j], true) {
+            continue;
+        }
+        if i == a.len() && j == b.len() {
+            return true;
+        }
+        if a.get(i).is_some_and(|s| s.repeat) {
+            stack.push((i + 1, j));
+        }
+        if b.get(j).is_some_and(|s| s.repeat) {
+            stack.push((i, j + 1));
+        }
+        if let (Some(sa), Some(sb)) = (a.get(i), b.get(j))
+            && glob_chars_meet(sa.chars, sb.chars)
+        {
+            let next = (if sa.repeat { i } else { i + 1 }, if sb.repeat { j } else { j + 1 });
+            if next != (i, j) {
+                stack.push(next);
+            }
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod glob_intersection_tests {
+    use super::glob_patterns_may_intersect as meet;
+
+    #[test]
+    fn glob_read_targets_meet_rules_they_could_match() {
+        assert!(meet("*", ".env"));
+        assert!(meet("./*", "**/.env"));
+        assert!(meet("/w/*", "**/.env"));
+        assert!(meet("/w/.e*", "/w/.env"));
+        assert!(meet("/w/secrets/*.txt", "secrets/**"));
+        assert!(meet("/w/[.]env", ".env"));
+        assert!(meet("/home/u/*/id_rsa", "~/.ssh/id_rsa"));
+        assert!(meet("/w/src/*", "**/*.pem"));
+    }
+
+    #[test]
+    fn glob_read_targets_miss_rules_they_cannot_match() {
+        assert!(!meet("/w/src/*.rs", "**/.env"));
+        assert!(!meet("/w/*.md", "**/*.pem"));
+        assert!(!meet("/w/docs/*.md", "/w/secrets/**"));
+        // A shell `*` never crosses `/`.
+        assert!(!meet("/w/*.md", "/w/a/b.md"));
     }
 }

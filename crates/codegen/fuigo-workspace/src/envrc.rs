@@ -42,8 +42,16 @@ pub struct EnvrcLoad {
     deadline: tokio::time::Instant,
 }
 
-pub fn spawn_envrc_load(cwd: std::path::PathBuf, trusted: bool) -> EnvrcLoad {
-    spawn_envrc_load_sandboxed(cwd, trusted, None)
+pub fn spawn_envrc_load(cwd: std::path::PathBuf) -> EnvrcLoad {
+    spawn_envrc_load_sandboxed(cwd, None)
+}
+
+/// A load that never starts anything and joins to an empty environment: the session turned `.envrc` loading off.
+pub fn envrc_load_disabled() -> EnvrcLoad {
+    EnvrcLoad {
+        rx: None,
+        deadline: tokio::time::Instant::now() + loader_budget(),
+    }
 }
 
 /// [`spawn_envrc_load`] with the folder's per-command sandbox hook: the `direnv` / bash evaluator
@@ -51,11 +59,13 @@ pub fn spawn_envrc_load(cwd: std::path::PathBuf, trusted: bool) -> EnvrcLoad {
 /// (call id `shell-init:envrc-…`, so no denial is decoded from it).
 pub fn spawn_envrc_load_sandboxed(
     cwd: std::path::PathBuf,
-    trusted: bool,
     sandbox: Option<Arc<dyn SandboxLaunch>>,
 ) -> EnvrcLoad {
     let deadline = tokio::time::Instant::now() + loader_budget();
-    if !trusted {
+    // u35 t1: a `.envrc` is code the folder chose. In a folder the user has not trusted, nothing runs (neither direnv
+    // nor the bash evaluator); the load joins to an empty environment.
+    if !crate::folder_trust::dir_trust(&cwd).is_trusted() {
+        tracing::debug!(dir = %cwd.display(), "folder trust: .envrc not loaded in an untrusted folder");
         return EnvrcLoad { rx: None, deadline };
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -181,6 +191,11 @@ fn load_envrc_with_timeout(
         return None;
     }
 
+    // Also asked here so the direct `load_envrc` callers get the same answer as the spawned load.
+    if !crate::folder_trust::dir_trust(dir).is_trusted() {
+        tracing::debug!(?dir, "folder trust: .envrc not evaluated in an untrusted folder");
+        return None;
+    }
     match try_direnv_export(dir, deadline, sandbox) {
         DirenvExport::Env(env) => Some(env),
         DirenvExport::TimedOut => None,
@@ -204,8 +219,11 @@ fn try_direnv_export(
     deadline: Instant,
     sandbox: Option<&dyn SandboxLaunch>,
 ) -> DirenvExport {
-    let mut cmd = Command::new("direnv");
-    cmd.args(["export", "json"]).current_dir(dir);
+    // Refused: nothing ran, and the bash evaluator must not run either (it is the same folder).
+    let Ok(mut cmd) = fuigo_tty_utils::direnv_command_in(dir) else {
+        return DirenvExport::SideEffectsRan;
+    };
+    cmd.args(["export", "json"]);
     let output = match run_with_deadline(cmd, deadline, "direnv", sandbox) {
         RunOutcome::Completed {
             output,

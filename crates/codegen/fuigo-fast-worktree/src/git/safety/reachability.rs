@@ -24,7 +24,9 @@ pub(super) fn find_reflog_only_commits(
         return None;
     }
     let revisions = oids_to_stdin(discarded);
-    let mut command = probe_command(worktree);
+    let Ok(mut command) = probe_command(worktree) else {
+        return Some(KeepReason::CheckFailed);
+    };
     command.args([
         "rev-list",
         "--max-count=1",
@@ -51,7 +53,9 @@ pub(super) fn find_unpushed_commits(
         Ownership::Linked => exclude.extend(["--branches", "--tags"]),
         Ownership::Standalone => include.extend(["--branches", "--tags", "--reflog"]),
     }
-    let mut command = probe_command(worktree);
+    let Ok(mut command) = probe_command(worktree) else {
+        return Some(KeepReason::CheckFailed);
+    };
     command.args(["rev-list", "--max-count=1"]);
     command.args(&include);
     command.arg("--not");
@@ -122,7 +126,9 @@ pub(super) fn find_missing_objects(
         "checking which objects the surviving repo cannot reach"
     );
     let surviving_dir = surviving.git_dir();
-    let mut command = probe_command(surviving_dir);
+    let Ok(mut command) = probe_command(surviving_dir) else {
+        return Some(KeepReason::CheckFailed);
+    };
     command.env("GIT_DIR", surviving_dir);
     command.env("GIT_WORK_TREE", surviving_dir);
     command.args([

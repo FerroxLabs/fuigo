@@ -9,7 +9,7 @@ use fuigo_hooks::event::{HookEventEnvelope, HookEventName, HookPayload};
 use fuigo_hooks::runner::command::run_command_hook;
 use fuigo_hooks::runner::{GateKind, HookRunnerResult, RunContext};
 
-use super::hooks_adapter::parse_plugin_hooks;
+use super::hooks_adapter::parse_plugin_hooks_contained;
 
 fn copy_tree(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
@@ -53,8 +53,9 @@ fn envelope() -> HookEventEnvelope {
 
 /// Parse the fixture plugin rooted at `root` and run every hook it declares, returning (hook name, outcome) pairs.
 fn run_plugin_hooks(name: &str, root: &Path, extra_env: &[(&str, String)]) -> Vec<(String, String)> {
-    let (specs, warnings) = parse_plugin_hooks(
+    let (specs, warnings) = parse_plugin_hooks_contained(
         &root.join("hooks/hooks.json"),
+        &fuigo_dirs::contained::PinnedRoot::pin(root).unwrap(),
         name,
         &root.display().to_string(),
         &root.join("data").display().to_string(),

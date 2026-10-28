@@ -28,6 +28,26 @@ pub enum SyncMode {
     Force,
 }
 
+/// Who asked for the git work. A marketplace listing or background refresh is `Background`: outside Fuigo's own
+/// marketplace cache it runs git only if the folder-trust judge allows that directory, and otherwise leaves the cache
+/// as it is. Inside Fuigo's own cache (see [`cache_root_is_fuigos_own`]) it takes the `UserInvoked` path. An install,
+/// update or publish the user typed is `UserInvoked`: the user chose to fetch that source, so it runs as typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitInvocation {
+    UserInvoked,
+    Background,
+}
+
+impl GitInvocation {
+    /// The git command to run in `dir` (reader flavour): judged for `Background`, as typed for `UserInvoked`.
+    fn command_in(self, dir: &Path) -> Result<std::process::Command, String> {
+        match self {
+            Self::UserInvoked => Ok(fuigo_tty_utils::git_command_user_invoked(dir)),
+            Self::Background => fuigo_tty_utils::git_command_in(dir).map_err(|e| e.to_string()),
+        }
+    }
+}
+
 pub struct SourceCacheLease {
     pub path: PathBuf,
     lock_file: File,
@@ -58,11 +78,59 @@ pub fn force_sync_source_cache(
     Ok(lease.path.clone())
 }
 
+/// [`sync_source_cache_as`] for a listing or refresh: judged on the cache directory (see [`GitInvocation::Background`]).
 pub fn sync_source_cache_with_mode(
     url: &str,
     branch: Option<&str>,
     cache_root: &Path,
     mode: SyncMode,
+) -> Result<SourceCacheLease, String> {
+    sync_source_cache_as(GitInvocation::Background, url, branch, cache_root, mode)
+}
+
+/// Sync for an install, update or marketplace update the user typed (see [`GitInvocation::UserInvoked`]).
+pub fn sync_source_cache_user_invoked(
+    url: &str,
+    branch: Option<&str>,
+    cache_root: &Path,
+    mode: SyncMode,
+) -> Result<SourceCacheLease, String> {
+    sync_source_cache_as(GitInvocation::UserInvoked, url, branch, cache_root, mode)
+}
+
+pub fn sync_source_cache_as(
+    invocation: GitInvocation,
+    url: &str,
+    branch: Option<&str>,
+    cache_root: &Path,
+    mode: SyncMode,
+) -> Result<SourceCacheLease, String> {
+    sync_source_cache_in(
+        invocation,
+        url,
+        branch,
+        cache_root,
+        mode,
+        &default_cache_root(),
+    )
+}
+
+/// True when `cache_root` is, physically (canonicalized, symlinks resolved), `own_root` or inside it. Fuigo clones that
+/// cache itself from a URL in user or managed config, and a clone carries no repository configuration or hooks.
+fn cache_root_is_fuigos_own(cache_root: &Path, own_root: &Path) -> bool {
+    match (dunce::canonicalize(cache_root), dunce::canonicalize(own_root)) {
+        (Ok(root), Ok(own)) => root.starts_with(own),
+        _ => false,
+    }
+}
+
+fn sync_source_cache_in(
+    invocation: GitInvocation,
+    url: &str,
+    branch: Option<&str>,
+    cache_root: &Path,
+    mode: SyncMode,
+    own_root: &Path,
 ) -> Result<SourceCacheLease, String> {
     let url = fuigo_agent::plugins::git_install::validate_git_url(url)?;
     let branch = branch
@@ -75,7 +143,15 @@ pub fn sync_source_cache_with_mode(
     std::fs::create_dir_all(cache_root).map_err(|e| format!("failed to create cache root: {e}"))?;
     let lock_file = acquire_cache_lock(&cache_root.join(format!("{hash}.lock")), LOCK_TIMEOUT)?;
 
-    let result = sync_cache_locked(url, branch, &cache_dir, mode);
+    let invocation = if invocation == GitInvocation::Background
+        && cache_root_is_fuigos_own(cache_root, own_root)
+        && (!cache_dir.exists() || cache_root_is_fuigos_own(&cache_dir, own_root))
+    {
+        GitInvocation::UserInvoked
+    } else {
+        invocation
+    };
+    let result = sync_cache_locked(invocation, url, branch, &cache_dir, mode);
     match &result {
         Ok(()) => {
             tracing::debug!(mode = ?mode, elapsed_ms = start.elapsed().as_millis(), "marketplace cache sync complete")
@@ -93,6 +169,7 @@ pub fn sync_source_cache_with_mode(
 }
 
 fn sync_cache_locked(
+    invocation: GitInvocation,
     url: &str,
     branch: Option<&str>,
     cache_dir: &Path,
@@ -106,12 +183,22 @@ fn sync_cache_locked(
         if mode == SyncMode::UseTtl && is_cache_fresh(cache_dir) {
             return Ok(());
         }
-        fetch_reset_cached_repo(cache_dir, branch).or_else(|e| {
+        // A listing or refresh in a cache directory the folder-trust judge does not allow starts no git: the cached
+        // copy is served as it is.
+        if invocation == GitInvocation::Background && !fuigo_tty_utils::repo_exec_allowed(cache_dir)
+        {
+            tracing::warn!(
+                dir = %cache_dir.display(),
+                "marketplace cache not refreshed: git is not run in an untrusted folder; using the cached copy"
+            );
+            return Ok(());
+        }
+        fetch_reset_cached_repo(invocation, cache_dir, branch).or_else(|e| {
             tracing::warn!(error = %e, "git fetch/reset failed, re-cloning marketplace cache");
-            reclone_repo(url, branch, cache_dir)
+            reclone_repo(invocation, url, branch, cache_dir)
         })
     } else {
-        clone_repo(url, branch, cache_dir)
+        clone_repo(invocation, url, branch, cache_dir)
     }
 }
 
@@ -176,18 +263,28 @@ fn cache_hash(url: &str) -> String {
 
 /// Clone a git repo with depth 1.
 /// Uses the git CLI (not libgit2): a libgit2 clone cannot be killed on timeout, so a hung remote would pin a thread forever.
-fn clone_repo(url: &str, branch: Option<&str>, dest: &Path) -> Result<(), String> {
+fn clone_repo(
+    invocation: GitInvocation,
+    url: &str,
+    branch: Option<&str>,
+    dest: &Path,
+) -> Result<(), String> {
     let url = fuigo_agent::plugins::git_install::validate_git_url(url)?;
     let branch = branch
         .map(fuigo_agent::plugins::git_install::validate_git_ref)
         .transpose()?;
-    let mut cmd = clone_cli_command(url, branch, dest);
+    let mut cmd = clone_cli_command(invocation, url, branch, dest)?;
     run_git_timed(&mut cmd, "clone", NETWORK_OP_TIMEOUT).inspect_err(|_| {
         let _ = std::fs::remove_dir_all(dest);
     })
 }
 
-fn reclone_repo(url: &str, branch: Option<&str>, dest: &Path) -> Result<(), String> {
+fn reclone_repo(
+    invocation: GitInvocation,
+    url: &str,
+    branch: Option<&str>,
+    dest: &Path,
+) -> Result<(), String> {
     let parent = dest
         .parent()
         .ok_or_else(|| format!("cache path has no parent: {}", dest.display()))?;
@@ -202,7 +299,7 @@ fn reclone_repo(url: &str, branch: Option<&str>, dest: &Path) -> Result<(), Stri
     let _ = std::fs::remove_dir_all(&temp_dest);
     let _ = std::fs::remove_dir_all(&backup_dest);
 
-    clone_repo(url, branch, &temp_dest).inspect_err(|_| {
+    clone_repo(invocation, url, branch, &temp_dest).inspect_err(|_| {
         let _ = std::fs::remove_dir_all(&temp_dest);
     })?;
 
@@ -239,30 +336,54 @@ fn unique_reclone_suffix() -> u128 {
         .unwrap_or(0)
 }
 
-pub use fuigo_tty_utils::{GIT_AUTH_SUPPRESSION_ENVS, git_command, git_command_locking};
+pub use fuigo_tty_utils::GIT_AUTH_SUPPRESSION_ENVS;
 
-fn clone_cli_command(url: &str, branch: Option<&str>, dest: &Path) -> std::process::Command {
-    let mut cmd = git_command();
+/// `git clone` runs in the cache root (the directory that will hold `dest`), which is what a `Background` clone is judged on.
+fn clone_cli_command(
+    invocation: GitInvocation,
+    url: &str,
+    branch: Option<&str>,
+    dest: &Path,
+) -> Result<std::process::Command, String> {
+    let parent = match dest.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let mut cmd = invocation.command_in(parent)?;
     cmd.args(["clone", "--depth", "1"]);
     if let Some(b) = branch {
         cmd.args(["--branch", b]);
     }
     cmd.arg("--").arg(url).arg(dest.as_os_str());
-    cmd
+    Ok(cmd)
 }
 
 /// Probe whether `url` is a reachable git repository via a timed `git ls-remote`, without touching any cache.
 /// Used to reject non-git URLs (e.g. MCP endpoints) at add time instead of persisting a source that fails on every scan.
 pub fn probe_git_remote(url: &str) -> Result<(), String> {
     let url = fuigo_agent::plugins::git_install::validate_git_url(url)?;
-    let mut cmd = git_command();
+    // Typed by the user (adding a marketplace). `ls-remote` needs no repository, so it runs from outside every
+    // repository: no repository's configuration can reach it.
+    let outside = outside_every_repository();
+    let mut cmd = fuigo_tty_utils::git_command_user_invoked(&outside);
+    cmd.env("GIT_CEILING_DIRECTORIES", &outside);
     cmd.args(["ls-remote", "--", url, "HEAD"]);
     run_git_timed(&mut cmd, "ls-remote", NETWORK_OP_TIMEOUT)
 }
 
-fn fetch_cli_command(repo_dir: &Path, branch: Option<&str>) -> std::process::Command {
-    let mut cmd = git_command();
-    cmd.current_dir(repo_dir).args([
+/// The filesystem root of the temp directory: never inside a repository.
+fn outside_every_repository() -> PathBuf {
+    let tmp = std::env::temp_dir();
+    tmp.ancestors().last().map(Path::to_path_buf).unwrap_or(tmp)
+}
+
+fn fetch_cli_command(
+    invocation: GitInvocation,
+    repo_dir: &Path,
+    branch: Option<&str>,
+) -> Result<std::process::Command, String> {
+    let mut cmd = invocation.command_in(repo_dir)?;
+    cmd.args([
         "fetch",
         "--depth",
         "1",
@@ -270,7 +391,7 @@ fn fetch_cli_command(repo_dir: &Path, branch: Option<&str>) -> std::process::Com
         "origin",
         branch.unwrap_or("HEAD"),
     ]);
-    cmd
+    Ok(cmd)
 }
 
 /// Run a git command, wait up to `timeout`, kill and reap on hang.
@@ -641,26 +762,26 @@ fn git_message_with_stderr(prefix: String, what: &str, stderr: Option<&[u8]>) ->
     }
 }
 
-fn fetch_reset_cached_repo(repo_dir: &Path, branch: Option<&str>) -> Result<(), String> {
+fn fetch_reset_cached_repo(
+    invocation: GitInvocation,
+    repo_dir: &Path,
+    branch: Option<&str>,
+) -> Result<(), String> {
     let branch = branch
         .map(fuigo_agent::plugins::git_install::validate_git_ref)
         .transpose()?;
     run_git_timed(
-        &mut fetch_cli_command(repo_dir, branch),
+        &mut fetch_cli_command(invocation, repo_dir, branch)?,
         "fetch",
         NETWORK_OP_TIMEOUT,
     )?;
 
-    let mut checkout_cmd = git_command();
-    checkout_cmd
-        .current_dir(repo_dir)
-        .args(["checkout", "--detach", "FETCH_HEAD"]);
+    let mut checkout_cmd = invocation.command_in(repo_dir)?;
+    checkout_cmd.args(["checkout", "--detach", "FETCH_HEAD"]);
     run_git_timed(&mut checkout_cmd, "checkout", NETWORK_OP_TIMEOUT)?;
 
-    let mut reset_cmd = git_command();
-    reset_cmd
-        .current_dir(repo_dir)
-        .args(["reset", "--hard", "FETCH_HEAD"]);
+    let mut reset_cmd = invocation.command_in(repo_dir)?;
+    reset_cmd.args(["reset", "--hard", "FETCH_HEAD"]);
     run_git_timed(&mut reset_cmd, "reset", NETWORK_OP_TIMEOUT)
 }
 
@@ -676,7 +797,10 @@ mod tests {
         let holder = File::create(&lock_path).unwrap();
         holder.lock_exclusive().unwrap();
         let err = acquire_cache_lock(&lock_path, Duration::from_millis(200)).unwrap_err();
-        assert!(err.starts_with("cache lock timeout after"), "unexpected error: {err}");
+        assert!(
+            err.starts_with("cache lock timeout after"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -703,7 +827,13 @@ mod tests {
 
     #[test]
     fn cli_git_args_terminate_options_before_operands() {
-        let clone_cmd = clone_cli_command("repo", Some("main"), Path::new("dest"));
+        let clone_cmd = clone_cli_command(
+            GitInvocation::Background,
+            "repo",
+            Some("main"),
+            Path::new("dest"),
+        )
+        .unwrap();
         let clone_args: Vec<_> = clone_cmd
             .get_args()
             .map(|arg| arg.to_str().unwrap())
@@ -723,7 +853,8 @@ mod tests {
             ]
         );
 
-        let fetch_cmd = fetch_cli_command(Path::new("repo"), Some("main"));
+        let fetch_cmd =
+            fetch_cli_command(GitInvocation::Background, Path::new("repo"), Some("main")).unwrap();
         let fetch_args: Vec<_> = fetch_cmd
             .get_args()
             .map(|arg| arg.to_str().unwrap())
@@ -740,6 +871,95 @@ mod tests {
                 "main",
             ]
         );
+    }
+
+    /// u35 t1: a background listing outside Fuigo's own cache, in a directory the judge refuses, starts no git; inside
+    /// Fuigo's own cache it fetches. The judge is process-global: refuse only a directory unique to this process.
+    #[test]
+    fn a_background_sync_fetches_in_fuigos_own_cache_and_is_refused_elsewhere() {
+        fn refused_root() -> PathBuf {
+            std::env::temp_dir().join(format!("fuigo-t1-mkt-untrusted-{}", std::process::id()))
+        }
+        struct RestoreAllowAll;
+        impl Drop for RestoreAllowAll {
+            fn drop(&mut self) {
+                fuigo_tty_utils::install_repo_exec_judge(|_| true);
+                let _ = std::fs::remove_dir_all(refused_root());
+            }
+        }
+        if !git_available() {
+            eprintln!("skipping git-dependent test: git binary not available");
+            return;
+        }
+        let remote = tempfile::tempdir().unwrap();
+        init_remote_repo(remote.path());
+        let url = remote.path().to_string_lossy().to_string();
+        let own_root = refused_root().join("own");
+        let other_root = refused_root().join("other");
+        std::fs::create_dir_all(&own_root).unwrap();
+        std::fs::create_dir_all(&other_root).unwrap();
+        fuigo_tty_utils::install_repo_exec_judge(|dir| !dir.starts_with(refused_root()));
+        let _restore = RestoreAllowAll;
+
+        // Outside the cache root: cached copy served untouched, a new clone cannot start.
+        let cached = other_root.join(cache_hash(&url));
+        std::fs::create_dir_all(cached.join(".git")).unwrap();
+        let lease = sync_source_cache_in(
+            GitInvocation::Background,
+            &url,
+            Some("main"),
+            &other_root,
+            SyncMode::Force,
+            &own_root,
+        )
+        .expect("the cached copy is served, no git is started");
+        assert_eq!(lease.path, cached);
+        drop(lease);
+        assert!(!cached.join("file.txt").exists());
+        let err = clone_cli_command(
+            GitInvocation::Background,
+            &url,
+            None,
+            &other_root.join("new"),
+        )
+        .unwrap_err();
+        assert!(err.contains("not a trusted folder"), "{err}");
+
+        // Inside the cache root: the background sync clones, then fetches new commits.
+        let lease = sync_source_cache_in(
+            GitInvocation::Background,
+            &url,
+            Some("main"),
+            &own_root,
+            SyncMode::Force,
+            &own_root,
+        )
+        .expect("background clone into Fuigo's own cache");
+        assert!(lease.path.join("file.txt").exists());
+        let dir = lease.path.clone();
+        drop(lease);
+        add_commit(remote.path(), "second.txt", "two");
+        let lease = sync_source_cache_in(
+            GitInvocation::Background,
+            &url,
+            Some("main"),
+            &own_root,
+            SyncMode::Force,
+            &own_root,
+        )
+        .expect("background fetch in Fuigo's own cache");
+        assert_eq!(lease.path, dir);
+        assert!(dir.join("second.txt").exists());
+
+        // A symlink pointing out of the cache root does not count as inside it.
+        #[cfg(unix)]
+        {
+            let link = own_root.join("escape");
+            std::os::unix::fs::symlink(&other_root, &link).unwrap();
+            assert!(!cache_root_is_fuigos_own(&link, &own_root));
+        }
+        assert!(cache_root_is_fuigos_own(&own_root.join("."), &own_root));
+        assert!(!cache_root_is_fuigos_own(&other_root, &own_root));
     }
 
     #[test]
@@ -1030,7 +1250,7 @@ mod tests {
     }
 
     fn current_head(repo: &Path) -> String {
-        let output = git_command()
+        let output = fuigo_tty_utils::git_command()
             .current_dir(repo)
             .args(["rev-parse", "HEAD"])
             .output()

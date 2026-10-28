@@ -214,7 +214,7 @@ pub(crate) async fn start_dual_agent_type_content() -> ContentController {
 // ── Folder-trust welcome sub-state e2e ──────────────────────────────────
 
 /// Title line of the folder-trust question (see `render_welcome_trust`).
-pub(crate) const TRUST_QUESTION_SENTINEL: &str = "Do you trust the contents of this directory";
+pub(crate) const TRUST_QUESTION_SENTINEL: &str = "Do you trust the files in this folder";
 
 /// A `git init`'d temp dir containing a repo-local `.mcp.json` (code-exec config).
 /// `repo_configs_present` returns true for it, so an untrusted clone with the feature on resolves to `Prompt` and the trust question renders.

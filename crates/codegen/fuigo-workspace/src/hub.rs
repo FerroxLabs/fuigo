@@ -566,7 +566,8 @@ pub(crate) struct HubCallFacts {
 /// when it is not the session cwd (a bash `workdir`), the display cwd model paths resolve against, and whether the
 /// search tool applies the Read-deny excludes itself. The policy is resolved per call from the session's
 /// cwd, so a config edit applies to the next call. Every access that needs approval is asked for on its own; one
-/// refusal refuses the call. Returns the resolved Read-deny globs, which the caller hands to this call's search.
+/// refusal refuses the call. Returns the resolved Read-deny globs, which the caller hands to this call's search, and
+/// how the call was approved ([`HubCleared`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn enforce_hub_policy(
     workspace: &WorkspaceHandle,
@@ -577,7 +578,7 @@ pub(crate) async fn enforce_hub_policy(
     accesses: &[crate::permission::AccessKind],
     prompt_accesses: &[crate::permission::AccessKind],
     facts: HubCallFacts,
-) -> Result<Vec<String>, ToolError> {
+) -> Result<HubCleared, ToolError> {
     // What the denial keys need, copied before `facts` is consumed (no hashing here).
     let basis = (facts.patch_targets.clone(), facts.read_targets.clone(), facts.display_cwd.clone());
     let result =
@@ -586,7 +587,7 @@ pub(crate) async fn enforce_hub_policy(
     // reject, a policy or guard deny, a shown-then-cancelled prompt and a human follow-up are denials the session
     // remembers (kind and hash only); a prompt error or timeout, a prompt never shown and a failed check are not.
     match result {
-        Ok(globs) => Ok(globs),
+        Ok(cleared) => Ok(cleared),
         Err((e, cause)) => {
             if e.kind == ToolErrorKind::PermissionDenied && crate::permission::records_denial(cause) {
                 let keys = hub_denial_keys(session, accesses, basis.0, basis.1, basis.2, false).await.unwrap_or_default();
@@ -653,7 +654,7 @@ async fn enforce_hub_policy_inner(
     accesses: &[crate::permission::AccessKind],
     prompt_accesses: &[crate::permission::AccessKind],
     facts: HubCallFacts,
-) -> Result<Vec<String>, HubRefusal> {
+) -> Result<HubCleared, HubRefusal> {
     use crate::permission::{DenialCause, HubPolicyContext, hub_policy_verdict_all};
     // P184: a patch that does not parse, or writes nothing, is refused in every mode before anything is judged.
     let patch_targets = match facts.patch_targets {
@@ -678,7 +679,7 @@ async fn enforce_hub_policy_inner(
         None => Vec::new(),
     };
     if accesses.is_empty() {
-        return Ok(Vec::new());
+        return Ok(HubCleared { deny_read_globs: Vec::new(), approved_without_grant: true });
     }
     let session_cwd = session.cwd().to_path_buf();
     // S6.3 (hub-routed path): a peer-influenced session's protected edits are denied before the hub verdict, whatever
@@ -734,11 +735,18 @@ async fn enforce_hub_policy_inner(
             }
         }
     }
-    let config = crate::permission::resolution::resolve_permission_config_with_fallback(
-        &session_cwd,
-        workspace.shared.project_permissions_trusted,
-    )
-    .await;
+    // u35 t1 (design d2 §4.3): the session folder's project tier only when this host trusts that folder (read from
+    // this host's own store, never from a message); and the same policy without it, for a shell command whose folder
+    // is not trusted.
+    let project_trusted = crate::folder_trust::dir_trust(&session_cwd).is_trusted();
+    let base_config = crate::permission::resolution::resolve_permission_config_with_fallback(&session_cwd, false).await;
+    let config = if project_trusted {
+        crate::permission::resolution::resolve_permission_config_with_fallback(&session_cwd, true).await
+    } else {
+        base_config.clone()
+    };
+    let base_prompt_policy = base_config.as_ref().map(|c| c.prompt_policy).unwrap_or_default();
+    let base_policy = base_config.map(crate::permission::CompiledPolicy::new);
     let deny_read_globs = config
         .as_ref()
         .map(crate::permission::resolution::deny_read_globs_from_config)
@@ -761,7 +769,7 @@ async fn enforce_hub_policy_inner(
     let excludes = deny_read_globs.clone();
     // A `workdir` is judged as well as, never instead of, the session cwd: a tool that ignores the argument runs in the
     // session cwd, so the call must pass in both.
-    let mut cwds = vec![session_cwd];
+    let mut cwds = vec![session_cwd.clone()];
     cwds.extend(facts.exec_cwd.filter(|w| *w != cwds[0]));
     let display_cwd = facts.display_cwd;
     // Every spelling of the files a read opens, as the local manager judges them (P198).
@@ -775,14 +783,12 @@ async fn enforce_hub_policy_inner(
     // The verdict can scan repository config (ambient git risk) and walk a search's files: keep it off the async
     // workers.
     let verdict = tokio::task::spawn_blocking(move || {
-        let mut merged = crate::permission::HubCallVerdict {
-            denied: None,
-            asks: Vec::new(),
-        };
-        for cwd in &cwds {
+        crate::permission::hub_verdict_over_run_dirs(&cwds, |cwd| {
             let ctx = HubPolicyContext {
                 policy: policy.as_ref(),
                 prompt_policy,
+                base_policy: base_policy.as_ref(),
+                base_prompt_policy,
                 cwd,
                 display_cwd: display_cwd.as_deref(),
                 yolo,
@@ -794,17 +800,8 @@ async fn enforce_hub_policy_inner(
                 read_spellings: &read_spellings,
                 sandbox_cover: sandbox_cover.as_ref(),
             };
-            let verdict = hub_policy_verdict_all(&judged, &ctx);
-            if verdict.denied.is_some() {
-                return verdict;
-            }
-            for ask in verdict.asks {
-                if !merged.asks.iter().any(|(_, i)| *i == ask.1) {
-                    merged.asks.push(ask);
-                }
-            }
-        }
-        merged
+            hub_policy_verdict_all(&judged, &ctx)
+        })
     })
     .await;
     let verdict = match verdict {
@@ -812,6 +809,7 @@ async fn enforce_hub_policy_inner(
         Err(e) => crate::permission::HubCallVerdict {
             denied: Some((format!("the permission check did not complete: {e}"), 0)),
             asks: Vec::new(),
+            approved_without_grant: true,
         },
     };
     let check_failed = verdict.denied.as_ref().is_some_and(|(r, _)| r.starts_with("the permission check did not complete"));
@@ -831,8 +829,9 @@ async fn enforce_hub_policy_inner(
             if check_failed { DenialCause::ManagerFailure } else { DenialCause::Policy },
         ));
     }
+    let cleared = HubCleared { deny_read_globs, approved_without_grant: verdict.approved_without_grant };
     if verdict.asks.is_empty() {
-        return Ok(deny_read_globs);
+        return Ok(cleared);
     }
     let transport = workspace.hub_server_blocking().await.and_then(|server| {
         crate::permission::ToolServerPermissionTransport::from_session_id(server, session_id)
@@ -846,9 +845,19 @@ async fn enforce_hub_policy_inner(
         prompt_accesses,
         call_id,
         tool_name,
+        Some(&session_cwd),
     )
     .await?;
-    Ok(deny_read_globs)
+    Ok(cleared)
+}
+
+/// u35 g9: a hub-routed call the local policy cleared: the Read-deny globs its search applies, and whether some part
+/// of it was allowed without a grant ([`fuigo_tools::sandbox_launch::ApprovedWithoutGrant`]), carried to the shell
+/// runner with the call. Accesses the hub prompt settled were the user's answer and do not count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HubCleared {
+    pub(crate) deny_read_globs: Vec<String>,
+    pub(crate) approved_without_grant: bool,
 }
 /// P173: a session MCP server's tool as advertised to the hub, gated by the local permission policy like every other
 /// hub-routed call. The bridge handlers that `workspace.configure_mcp` and the bind-time MCP set advertise would
@@ -1105,7 +1114,7 @@ impl ToolServerHandler for SessionRoutedToolHandler {
             sandbox_cover: crate::permission::SandboxCover::for_call(sandbox.as_deref(), mode, path),
             ..facts
         };
-        let deny_read_globs = match enforce_hub_policy(
+        let HubCleared { deny_read_globs, approved_without_grant } = match enforce_hub_policy(
             &self.workspace,
             &session,
             session_id,
@@ -1117,7 +1126,7 @@ impl ToolServerHandler for SessionRoutedToolHandler {
         )
         .await
         {
-            Ok(globs) => globs,
+            Ok(cleared) => cleared,
             Err(e) => return terminal_only(Err(e)),
         };
         let args = real_args;
@@ -1188,11 +1197,18 @@ impl ToolServerHandler for SessionRoutedToolHandler {
                         args.clone(),
                         &dispatch_call_id,
                         deny_read_globs.clone(),
+                        approved_without_grant,
                     )
                 },
             )
         } else {
-            toolset.call_streaming_with_deny_read_globs(self.name(), args, &call_id, deny_read_globs)
+            toolset.call_streaming_with_deny_read_globs(
+                self.name(),
+                args,
+                &call_id,
+                deny_read_globs,
+                approved_without_grant,
+            )
         };
         Box::pin(async_stream::stream! {
             use futures::StreamExt;
@@ -2692,7 +2708,7 @@ mod peer_guard_hub_tests {
     use super::*;
     use crate::permission::{AccessKind, PeerInfluence};
 
-    async fn protected_edit(handle: &WorkspaceHandle, id: &str) -> Result<Vec<String>, ToolError> {
+    async fn protected_edit(handle: &WorkspaceHandle, id: &str) -> Result<HubCleared, ToolError> {
         let session = handle.session(id).expect("session");
         let target = session.cwd().join("CLAUDE.md").to_string_lossy().into_owned();
         let accesses = [AccessKind::Edit(target)];
@@ -2711,7 +2727,7 @@ mod peer_guard_hub_tests {
         handle.session("child").unwrap().bind_peer_influence(flag.clone());
         for id in ["parent", "child"] {
             let before = protected_edit(&handle, id).await;
-            let not_guard = |r: &Result<Vec<String>, ToolError>| {
+            let not_guard = |r: &Result<HubCleared, ToolError>| {
                 r.as_ref().err().is_none_or(|e| !e.to_string().contains("/peers clear-influence"))
             };
             assert!(not_guard(&before), "{id}: a clear session meets no guard denial");

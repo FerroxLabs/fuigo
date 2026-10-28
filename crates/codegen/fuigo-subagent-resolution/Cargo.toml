@@ -12,6 +12,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 fuigo-agent = { path = "../fuigo-agent" }
+fuigo-dirs = { workspace = true }
 fuigo-sampling-types = { path = "../fuigo-sampling-types" }
 fuigo-tools = { path = "../fuigo-tools" }
 fuigo-tool-types.workspace = true

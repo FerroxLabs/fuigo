@@ -4,6 +4,8 @@ pub mod embedded_search_tools;
 pub mod file_system;
 pub mod mock_fs;
 #[cfg(unix)]
+pub mod restore_guard;
+#[cfg(unix)]
 pub mod shell_state;
 #[cfg(unix)]
 pub mod static_shell;

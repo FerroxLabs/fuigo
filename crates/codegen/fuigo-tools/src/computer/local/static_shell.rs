@@ -64,12 +64,16 @@ impl StaticShellSnapshot {
     ) -> Self {
         let shell = fuigo_config::shell::detect_unix_shell_kind();
 
+        // Aliases first, then functions: the replay defines them in this order (see `prepare_command`). Zsh `TRAP*`
+        // and hook functions act as soon as they are defined, before the restore guard, so they are not captured.
         let capture = match shell {
-            UnixShellKind::Bash => "builtin alias -p 2>/dev/null; builtin declare -f 2>/dev/null",
-            UnixShellKind::Zsh => {
-                "{ builtin alias -L; builtin alias -gL; builtin alias -sL } 2>/dev/null; \
-                 builtin typeset -f 2>/dev/null"
-            }
+            UnixShellKind::Bash => "builtin alias -p 2>/dev/null; builtin declare -f 2>/dev/null".to_owned(),
+            UnixShellKind::Zsh => format!(
+                "{{ builtin alias -L; builtin alias -gL; builtin alias -sL }} 2>/dev/null; \
+                 for __fuigo_fn in ${{(ok)functions}}; do case $__fuigo_fn in ({unreplayed}) ;; \
+                 (*) builtin typeset -f -- \"$__fuigo_fn\";; esac; done 2>/dev/null",
+                unreplayed = super::restore_guard::zsh_unreplayed_functions()
+            ),
         };
         let script = format!(
             "source \"$HOME/{rc}\" 2>/dev/null; \
@@ -154,25 +158,35 @@ impl StaticShellSnapshot {
         // auto-export the temp variable into the user command's child
         // processes — strip the export attribute post-assignment (inline
         // `declare +x var=value` does NOT beat allexport).
+        //
+        // u35: the restore guard runs right after the snapshot eval (shadowing functions and aliases out,
+        // parse-affecting options forced); the rest runs only if it succeeded. See `restore_guard`. The snapshot is
+        // aliases then function definitions, evaluated with alias expansion off, so the replay calls nothing a
+        // replayed alias or function can stand in for; the guard turns alias expansion back on.
         let wrapper = match self.shell {
             UnixShellKind::Bash => format!(
                 "snap=$(command cat <&3); builtin shopt -s extglob 2>/dev/null; \
-                 builtin shopt -s expand_aliases 2>/dev/null; \
-                 builtin eval -- \"$snap\"; \
-                 builtin export FUIGO_AGENT=1; \
-                 builtin export PWD=\"$(builtin pwd)\"; {sudo_inject}{search_inject}\
-                 __fuigo_user_cmd=\"$1\"; builtin declare +x __fuigo_user_cmd 2>/dev/null; builtin set --; \
-                 builtin eval \"$__fuigo_user_cmd\" 2>&1"
+                 builtin shopt -u expand_aliases 2>/dev/null; \
+                 builtin eval -- \"$snap\"; {}",
+                super::restore_guard::bash_guarded(&format!(
+                    "builtin export FUIGO_AGENT=1; \
+                     builtin export PWD=\"$(builtin pwd)\"; {sudo_inject}{search_inject}\
+                     __fuigo_user_cmd=\"$1\"; builtin declare +x __fuigo_user_cmd 2>/dev/null; builtin set --; \
+                     builtin eval \"$__fuigo_user_cmd\" 2>&1; "
+                ))
             ),
             UnixShellKind::Zsh => format!(
                 "snap=$(command cat <&3); \
-                 builtin setopt nonomatch 2>/dev/null; \
-                 builtin eval \"$snap\"; \
-                 builtin export FUIGO_AGENT=1; \
-                 builtin export PWD=\"$(builtin pwd)\"; \
-                 builtin setopt aliases 2>/dev/null; {sudo_inject}{search_inject}\
-                 __fuigo_user_cmd=\"$1\"; builtin typeset +x __fuigo_user_cmd 2>/dev/null; builtin set --; \
-                 builtin eval \"$__fuigo_user_cmd\" 2>&1"
+                 builtin setopt nonomatch 2>/dev/null; builtin unsetopt aliases 2>/dev/null; \
+                 builtin eval \"$snap\"; {}",
+                super::restore_guard::zsh_guarded(&format!(
+                    "builtin setopt nonomatch 2>/dev/null; \
+                     builtin export FUIGO_AGENT=1; \
+                     builtin export PWD=\"$(builtin pwd)\"; \
+                     builtin setopt aliases 2>/dev/null; {sudo_inject}{search_inject}\
+                     __fuigo_user_cmd=\"$1\"; builtin typeset +x __fuigo_user_cmd 2>/dev/null; builtin set --; \
+                     builtin eval \"$__fuigo_user_cmd\" 2>&1; "
+                ))
             ),
         };
 
@@ -269,9 +283,19 @@ mod tests {
     }
 
     async fn run_static(snapshot: &str, command: &str) -> std::process::Output {
+        run_static_in(UnixShellKind::Bash, None, snapshot, command).await
+    }
+
+    /// [`run_static`] in `shell`, optionally with the shell binary replaced by `binary` (another bash version).
+    async fn run_static_in(
+        shell: UnixShellKind,
+        binary: Option<&str>,
+        snapshot: &str,
+        command: &str,
+    ) -> std::process::Output {
         let state = StaticShellSnapshot {
             snapshot: snapshot.to_string(),
-            shell: UnixShellKind::Bash,
+            shell,
         };
         let prep = state
             .prepare_command(
@@ -279,7 +303,7 @@ mod tests {
                 crate::computer::local::SearchShadowConfig::default(),
             )
             .unwrap();
-        let mut cmd = tokio::process::Command::new(&prep.binary);
+        let mut cmd = tokio::process::Command::new(binary.unwrap_or(&prep.binary));
         cmd.args(&prep.args)
             .current_dir(std::env::current_dir().unwrap())
             .stdin(Stdio::null())
@@ -370,5 +394,74 @@ mod tests {
             "sourced script must see zero positional args, got: {stdout:?}"
         );
         assert!(stdout.contains("AFTER_SOURCE_OK"), "got: {stdout:?}");
+    }
+
+    /// u35: the static replay applies the same restore guard: no restored `set -k`, and no function or alias named
+    /// after a safe-listed program or a wrapper builtin.
+    #[tokio::test]
+    async fn u35_static_replay_drops_shadows_and_keyword_option() {
+        if !bash_available() {
+            return;
+        }
+        let output = run_static(
+            "set -k\nbuiltin() { echo SHADOW; }\nls() { echo SHADOW; }\nalias wc='echo SHADOW'\n",
+            "ls -d /; wc -c /dev/null; echo FOO=bar",
+        )
+        .await;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{output:?}");
+        assert!(!stdout.contains("SHADOW"), "a replayed shadow ran: {stdout:?}");
+        assert!(stdout.lines().any(|l| l.trim() == "/"), "{stdout:?}");
+        assert!(stdout.contains("0 /dev/null") && stdout.contains("FOO=bar"), "{stdout:?}");
+    }
+
+    /// g5a (Fable r4): the static zsh replay applies the zsh guard: shadows, `TRAP*` and hook functions are disabled,
+    /// and a restored `EQUALS` is off.
+    #[tokio::test]
+    async fn u35_static_replay_drops_shadows_and_hooks_zsh() {
+        if !std::path::Path::new(shell_binary(UnixShellKind::Zsh)).exists() {
+            return;
+        }
+        let output = run_static_in(
+            UnixShellKind::Zsh,
+            None,
+            "alias wc='echo SHADOW'\nbuiltin setopt equals\nls() { echo SHADOW; }\n\
+             TRAPZERR() { echo SHADOW; }\nzshexit() { echo SHADOW; }\n",
+            "ls -d /; wc -c /dev/null; echo =ls; false; true",
+        )
+        .await;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{output:?}");
+        assert!(!stdout.contains("SHADOW"), "a replayed shadow ran: {stdout:?}");
+        assert!(stdout.lines().any(|l| l.trim() == "/"), "{stdout:?}");
+        assert!(stdout.contains("0 /dev/null") && stdout.contains("=ls"), "{stdout:?}");
+    }
+
+    /// g5a: the static replay guard on every bash this machine has (on macOS `/bin/bash` is 3.2; more through
+    /// `FUIGO_TEST_EXTRA_BASH`, colon-separated).
+    #[tokio::test]
+    async fn u35_static_guard_runs_on_every_available_bash() {
+        let mut found: Vec<String> = vec![shell_binary(UnixShellKind::Bash).to_owned(), "/bin/bash".to_owned()];
+        if let Ok(extra) = std::env::var("FUIGO_TEST_EXTRA_BASH") {
+            found.extend(extra.split(':').filter(|p| !p.is_empty()).map(str::to_owned));
+        }
+        found.retain(|p| std::path::Path::new(p).exists());
+        found.dedup();
+        for bash in found {
+            let output = run_static_in(UnixShellKind::Bash, Some(&bash), "", "echo plain-ok").await;
+            assert!(output.status.success(), "{bash}: {output:?}");
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "plain-ok", "{bash}");
+            let output = run_static_in(
+                UnixShellKind::Bash,
+                Some(&bash),
+                "alias wc='echo SHADOW'\nfunction [ { echo SHADOW; }\n",
+                "[ -d / ] && echo DIR; wc -c /dev/null",
+            )
+            .await;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "{bash}: {output:?}");
+            assert!(!stdout.contains("SHADOW") && stdout.contains("DIR"), "{bash}: {stdout:?}");
+            assert!(stdout.contains("0 /dev/null"), "{bash}: {stdout:?}");
+        }
     }
 }

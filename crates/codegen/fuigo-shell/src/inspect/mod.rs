@@ -1069,7 +1069,14 @@ fn list_plugins(
                 provides: PluginProvides {
                     // Count the SKILL.md files discovered (root-level or in subdirs), not the number of configured skill dirs
                     // The reported count then matches what the skills registry loads
-                    skills: fuigo_agent::plugins::registry::skill_md_paths(&p.skill_dirs).len(),
+                    // Contained to the plugin folder, like the loader
+                    skills: fuigo_agent::plugins::registry::skill_md_paths_in(
+                        &p.skill_dirs,
+                        &mut fuigo_tools::implementations::skills::discovery::SkillWalk::contained_pinned(
+                            p.pinned_root(),
+                        ),
+                    )
+                    .len(),
                     agents: p.agent_dirs.len(),
                     hooks: p.hooks_path.is_some(),
                     mcp_servers: if p.mcp_config_path.is_some() { 1 } else { 0 },
@@ -1192,9 +1199,9 @@ fn list_lsp_servers(
     discovered_plugins: &[fuigo_agent::plugins::DiscoveredPlugin],
 ) -> Vec<LspServerEntry> {
     let trusted: Vec<_> = discovered_plugins.iter().filter(|p| p.trusted).collect();
-    let plugin_lsp_paths: Vec<std::path::PathBuf> = trusted
+    let plugin_lsp_paths: Vec<(std::path::PathBuf, std::path::PathBuf)> = trusted
         .iter()
-        .filter_map(|p| p.lsp_config_path.clone())
+        .filter_map(|p| p.lsp_config_path.clone().map(|path| (path, p.canonical_root.clone())))
         .collect();
     let plugin_names: Vec<&str> = trusted
         .iter()
@@ -1361,7 +1368,7 @@ fn list_config_sources(cwd: &Path) -> ConfigSources {
     // Project configs (from git root up); each is its own "project" role entry
     for p in crate::config::find_project_configs(cwd) {
         if p.exists()
-            && let Some((path_s, note)) = describe_config_file(&p)
+            && let Some((path_s, note)) = describe_project_config_file(&p)
         {
             layers.push(ConfigLayer {
                 role: "project".to_string(),
@@ -1392,6 +1399,25 @@ fn describe_config_file(path: &Path) -> Option<(String, Option<String>)> {
                     None
                 },
             ))
+        }
+        Err(_) => Some((path_s, Some("parse error".to_string()))),
+    }
+}
+
+/// [`describe_config_file`] for a project `.fuigo/config.toml`, through the same contained loader a session uses: a
+/// project config linked outside its folder is shown as not loaded, as the session refuses it.
+fn describe_project_config_file(path: &Path) -> Option<(String, Option<String>)> {
+    if !path.exists() {
+        return None;
+    }
+    let path_s = path.display().to_string();
+    match fuigo_config::load_project_config_file(path) {
+        Ok(v) => {
+            let empty = v.as_table().is_none_or(|t| t.is_empty());
+            Some((path_s, empty.then(|| "empty".to_string())))
+        }
+        Err(e) if e.kind() == fuigo_dirs::contained::OUTSIDE_ROOT => {
+            Some((path_s, Some("not loaded: links outside its project folder".to_string())))
         }
         Err(_) => Some((path_s, Some("parse error".to_string()))),
     }
@@ -1557,7 +1583,7 @@ fn enforced_label(p: &EnforcedPolicy) -> String {
 fn claude_bypass_advisory_message(p: &PermissionsReport) -> Option<&'static str> {
     p.claude_bypass_lock_advisory.then_some(
         "Claude disableBypassPermissionsMode: advisory only -- not enforced for fuigo \
-         (lock via requirements.toml [ui] disable_bypass_permissions_mode)",
+         (lock via requirements.toml [ui] disable_bypass_permissions_mode, or for yourself in your own config.toml)",
     )
 }
 
@@ -2137,6 +2163,24 @@ mod tests {
             ),
             "agents_md"
         );
+    }
+
+    /// Fable r4 Low: `fuigo inspect` shows a project config linked outside its folder as not loaded, matching the
+    /// session, instead of as a parsed layer.
+    #[cfg(unix)]
+    #[test]
+    fn m5_inspect_project_config_linked_outside_is_shown_not_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("proj");
+        std::fs::create_dir_all(project.join(".fuigo")).unwrap();
+        std::fs::write(dir.path().join("outside.toml"), "[mcp_servers.x]\ncommand = \"y\"\n").unwrap();
+        let cfg = project.join(".fuigo").join("config.toml");
+        std::os::unix::fs::symlink(dir.path().join("outside.toml"), &cfg).unwrap();
+        let (_, note) = describe_project_config_file(&cfg).unwrap();
+        assert_eq!(note.as_deref(), Some("not loaded: links outside its project folder"));
+        assert!(!crate::util::config::project_mcp_server_defined_at(&cfg, "x"));
+        // The user-layer helper still follows links.
+        assert!(crate::util::config::mcp_server_defined_at(&cfg, "x"));
     }
 
     #[test]

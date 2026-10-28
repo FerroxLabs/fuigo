@@ -2373,21 +2373,36 @@ fn welcome_ctrl_w_noop_outside_git_repo() {
     assert!(matches!(outcome, InputOutcome::Unchanged));
 }
 #[test]
-fn welcome_trust_decline_keys_quit() {
+fn welcome_trust_decline_keys_continue_untrusted_and_q_quits() {
+    // u35 t1 (design d2 §5.1): "n" declines and continues; "q" quits.
     for code in [KeyCode::Char('n'), KeyCode::Char('N'), KeyCode::Esc] {
         let mut app = test_app();
         app.trust_state = TrustState::Pending {
             workspace: std::path::PathBuf::from("/tmp/x"),
+            upgrade: false,
         };
         let outcome = app.handle_input(&key_event(code, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::Quit)),
+            matches!(outcome, InputOutcome::Action(Action::DeclineTrustFolder)),
+            "{code:?} on the trust prompt must decline, got {outcome:?}"
+        );
+    }
+    for code in [KeyCode::Char('q'), KeyCode::Char('Q')] {
+        let mut app = test_app();
+        app.trust_state = TrustState::Pending {
+            workspace: std::path::PathBuf::from("/tmp/x"),
+            upgrade: false,
+        };
+        let outcome = app.handle_input(&key_event(code, KeyModifiers::NONE));
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::QuitConfirmed | Action::Quit)),
             "{code:?} on the trust prompt must quit, got {outcome:?}"
         );
     }
     let mut app = test_app();
     app.trust_state = TrustState::Pending {
         workspace: std::path::PathBuf::from("/tmp/x"),
+        upgrade: false,
     };
     let outcome = app.handle_input(&key_event(KeyCode::Char('y'), KeyModifiers::NONE));
     assert!(matches!(outcome, InputOutcome::Action(Action::TrustFolder)));
@@ -2399,6 +2414,7 @@ fn consent_pending_app() -> AppView {
     let mut app = test_app();
     app.trust_state = TrustState::Pending {
         workspace: std::path::PathBuf::from("/tmp/x"),
+        upgrade: false,
     };
     app.consent_state = crate::app::consent::ConsentState::Pending {
         notice: ConsentNotice {

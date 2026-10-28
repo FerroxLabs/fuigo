@@ -4,6 +4,8 @@
 use fuigo_shell::agent::config::{Config, TitlePolicy};
 
 fn main() -> anyhow::Result<()> {
+    // u35 t1: folder trust gates every git, jj and direnv the agent starts; installed before anything can spawn.
+    fuigo_workspace::folder_trust::install_process_judges();
     // The main thread of a Windows process has a 1 MiB stack, too small for the agent; run on a thread with a large one.
     std::thread::Builder::new()
         .name("p15d-agent".into())

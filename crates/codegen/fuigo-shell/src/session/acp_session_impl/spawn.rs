@@ -452,12 +452,6 @@ pub(crate) async fn spawn_session_actor(
         };
         let project_trusted =
             crate::agent::folder_trust::project_scope_allowed(tool_context.cwd.as_path());
-        let mut permission_config =
-            fuigo_workspace::permission::resolution::resolve_permission_config_with_fallback(
-                tool_context.cwd.as_path(),
-                project_trusted,
-            )
-            .await;
         let yolo_pin = fuigo_workspace::permission::resolution::yolo_disabled_by_policy();
         let (cli_permission_rules, dropped_catchalls) =
             drop_cli_catchall_allows(cli_permission_rules, yolo_pin);
@@ -467,7 +461,7 @@ pub(crate) async fn spawn_session_actor(
             tracing::warn!(
                 reason,
                 dropped = dropped_catchalls.len(),
-                "CLI --allow catch-all ignored: always-approve disabled by managed policy"
+                "CLI --allow catch-all ignored: always-approve is locked off"
             );
             if startup_hints.non_interactive {
                 fuigo_tty_utils::cli_eprintln!(
@@ -476,26 +470,19 @@ pub(crate) async fn spawn_session_actor(
                 );
             }
         }
-        if !cli_permission_rules.is_empty() {
-            match &mut permission_config {
-                Some(config) => {
-                    let mut merged = cli_permission_rules;
-                    merged.append(&mut config.rules);
-                    config.rules = merged;
-                }
-                None => {
-                    permission_config =
-                        Some(fuigo_workspace::permission::types::PermissionConfig::new(
-                            cli_permission_rules,
-                        ));
-                }
-            }
-        }
-        fuigo_workspace::permission::resolution::apply_permission_mode_hint(
-            &mut permission_config,
-            startup_hints.permission_mode.as_deref(),
+        // u35 t1 (design d2 §3.4): the inputs go to the manager too, which builds the same policy without the
+        // project tier for a command whose folder is not trusted and rebuilds both when folder trust changes.
+        let policy_inputs = fuigo_workspace::permission::resolution::SessionPolicyInputs {
+            cwd: tool_context.cwd.as_path().to_path_buf(),
+            cli_rules: cli_permission_rules,
+            mode_hint: startup_hints.permission_mode.clone(),
             yolo_pin,
-        );
+        };
+        let permission_config = fuigo_workspace::permission::resolution::resolve_session_policy(
+            &policy_inputs,
+            project_trusted,
+        )
+        .await;
         let deny_read_globs = permission_config
             .as_ref()
             .map(fuigo_workspace::permission::resolution::deny_read_globs_from_config)
@@ -540,6 +527,7 @@ pub(crate) async fn spawn_session_actor(
                 crate::util::config::remember_tool_approvals_from_disk(),
                 hub_permission,
             );
+        permissions.set_session_policy_inputs(policy_inputs);
         // S6.1: the session's ONE peer-influenced flag is `tool_context.peer_influence` (a subagent's is the PARENT's, set from
         // its spawn context). It is handed to the permission handle below and to the hub session at `bind_local_session`;
         // no component creates a flag of its own.
@@ -2565,6 +2553,7 @@ pub(crate) async fn spawn_session_actor(
             ask_user_question_enabled,
             non_interactive: session_non_interactive,
             plan_mode: plan_mode.clone(),
+            current_prompt_mode: current_prompt_mode.clone(),
             force_compact,
             permission_handle: permissions_for_handle,
             attribution_callback: attribution_callback_for_handle,

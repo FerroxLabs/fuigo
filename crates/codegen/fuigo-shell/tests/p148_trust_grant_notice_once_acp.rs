@@ -4,7 +4,8 @@
 //! post-grant reload announced it again.
 //!
 //! Real path: a release-stamped (simulated) agent with folder trust on, a git repo whose `.fuigo/config.toml` defines a
-//! server naming the key, a client that advertises `fuigo/folderTrust.interactive` and answers `trust` at once.
+//! server naming the key, a client that advertises `fuigo/folderTrust.v2` and answers the v2 grant
+//! `{"outcome":"trust","scope":"configAndCommands"}` at once (u35 design §5.3: a v1-only client is never asked).
 #![cfg(unix)]
 
 #[allow(dead_code)]
@@ -41,7 +42,7 @@ impl acp::Client for TrustingClient {
     async fn ext_method(&self, args: acp::ExtRequest) -> acp::Result<acp::ExtResponse> {
         if args.method.as_ref() == "fuigo/folder_trust/request" {
             *self.trust_requests.borrow_mut() += 1;
-            let raw = serde_json::value::to_raw_value(&json!({ "outcome": "trust" })).expect("raw");
+            let raw = serde_json::value::to_raw_value(&json!({ "outcome": "trust", "scope": "configAndCommands" })).expect("raw");
             return Ok(acp::ExtResponse::new(std::sync::Arc::from(raw)));
         }
         Err(acp::Error::method_not_found())
@@ -77,7 +78,7 @@ fn a_trust_grant_tells_the_session_about_a_refused_key_reference_once() {
             client.clone(),
             "p148-trust-grant",
             spawn_agent_local_with_config(config),
-            Some(json!({ "fuigo/folderTrust": { "interactive": true } })),
+            Some(json!({ "fuigo/folderTrust": { "v2": true } })),
             json!({ "headless": true }),
         )
         .await;

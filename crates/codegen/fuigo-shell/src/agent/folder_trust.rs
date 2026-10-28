@@ -1,150 +1,75 @@
-//! Folder-trust gate ("do you trust this folder?").
+//! Folder-trust gate, consume side ("do you trust this folder?").
 //!
-//! Repo-local MCP / LSP servers, permission policy, and project instructions/skills are configured by files an attacker can ship inside a cloned repository.
-//! Those files include `.mcp.json`, project `.fuigo/config.toml` (`[permission]` / `[mcp_servers]` / `[plugins].paths`), `.fuigo/lsp.json`, `AGENTS.md` / `CLAUDE.md` / rules dirs, and `.fuigo/skills` / `.fuigo/commands`.
-//! `~/.claude.json` `projects.<cwd>` is another such source.
-//! Those configs contain commands, auto-approve rules, or agent instructions the CLI would otherwise honor automatically, a 1-click RCE / policy bypass.
-//! This module resolves a VS-Code-style trust decision ONCE per workspace, BEFORE any repo-local server is spawned.
-//! It exposes a cheap [`project_scope_allowed`] check that the MCP/LSP/permission, instruction, and skill loaders consult.
+//! Repo-local MCP / LSP servers, hooks, workflows, plugins, `.envrc`, permission policy, and project instructions and
+//! skills are configured by files an attacker can ship inside a cloned repository. Every loader of such config asks
+//! [`project_scope_allowed`], which is the workspace's one folder-trust decision
+//! ([`fuigo_workspace::folder_trust::decide`], via the cached [`fuigo_workspace::folder_trust::dir_trust`]): the same
+//! decision that lets the folder's shell commands run without asking (u35 t1). There is no separate cache here and no
+//! exemption: a folder with no project settings, the user's home and the filesystem root are all untrusted until the
+//! user says otherwise (the first is asked; the last two never are).
 //!
-//! Resolution lives here (not in `acp_session`) so the session core stays free of feature logic.
-//! The loaders only call [`project_scope_allowed`].
-//!
-//! The DECISION side lives in `fuigo-workspace` (client-side).
-//! It holds the workspace scan, the pure [`decide`] precedence, and the interactive prompt.
-//! It also owns the durable [`fuigo_workspace::trust::TrustStore`] reads/writes.
-//! This module keeps the CONSUME/gating side: the `DECISIONS` cache, [`resolve_and_record`], and the loader filters.
-//! The ordered trust precedence is documented canonically on [`fuigo_workspace::folder_trust::decide`].
-//! The consume-side nuance is that two allows are PROVISIONAL (NOT cached).
-//! The first is the "no repo configs" allow.
-//! Configs appearing after the first resolve (git pull / agent write) are re-checked on the next resolve rather than riding a stale grant.
-//! The second is the unrecordable-key allow (cwd is $HOME / fs-root), which can never be persisted (see [`resolve_and_record_inner`] / [`compute`]).
+//! The DECISION side (key, store, precedence, grants) lives in `fuigo-workspace`.
 
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::collections::HashSet;
+use std::path::Path;
 
 use agent_client_protocol as acp;
-use fuigo_workspace::trust::{TrustStore, is_unsafe_trust_root, workspace_key};
-use parking_lot::Mutex;
+use fuigo_workspace::trust::{TrustStore, workspace_key};
 
-// Decision-side (scan/decide/prompt/store) lives in `fuigo-workspace` (client crate)
-// Only the helpers used by this consume-side module are imported; callers should use the workspace API for explicit trust decisions
 use fuigo_workspace::folder_trust::{
-    DecideInputs, TrustOutcome, claude_project_mcp_names, decide, decide_inputs,
-    decide_inputs_with_interactive, feature_enabled, folder_trust_inert, persist_trust,
+    PromptReason, TrustDecision, claude_project_mcp_names, decide, dir_trust, folder_trust_inert, persist_trust,
     prompt_for_trust,
 };
 
 use crate::session::managed_mcp::mcp_server_name;
 use crate::util::config::{MCP_SCOPE_PROJECT, RemoteSettings};
 
-// NOTE: this folder-trust store (`~/.fuigo/trusted_folders.toml`) is SEPARATE
-// from the pre-existing per-plugin trust store
-// (`fuigo_agent::plugins::TrustStore` at `~/.fuigo/trusted-plugins`, plus the
-// hooks' own project-trust gating)
-// Trusting a folder here does NOT imply plugin trust and vice versa; the two are independent and non-contradicting
-// Unifying them is a tracked follow-up
-
-/// Per-workspace resolved decision: `true` = repo-local (project-scoped)
-/// servers are allowed to spawn. Keyed by canonical workspace key.
-static DECISIONS: LazyLock<Mutex<HashMap<PathBuf, bool>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+// NOTE: this folder-trust store (`~/.fuigo/trusted_folders.toml`) is SEPARATE from the per-plugin trust store
+// (`fuigo_agent::plugins::TrustStore` at `~/.fuigo/trusted-plugins`). Trusting a folder does NOT imply plugin trust
+// and vice versa.
 
 /// Compatibility alias; new call sites should use the workspace API directly.
 pub use fuigo_workspace::folder_trust::grant_folder_trust;
 
-/// Revoke trust for `cwd`'s workspace and downgrade the consume-side cache.
-///
-/// Without the cache downgrade a cached grant would short-circuit [`resolve_and_record`], so hooks would keep loading until restart.
-/// Unrecordable roots ($HOME / fs-root) are refused because no later grant can lift a cache deny for them.
-/// Returns whether the folder had been trusted.
-pub(crate) fn revoke_folder_trust(cwd: &Path) -> bool {
-    // Local/dev builds are fully inert: nothing was trusted-via-gate to revoke
-    // Recording `false` here would make `project_scope_allowed` wrongly gate
-    if folder_trust_inert() {
-        return false;
-    }
-    let key = workspace_key(cwd);
-    // Mirror the store's over-broad-root refusal: an unrecordable key resolves Trusted by rule and can never be store-granted
-    // A cache deny here would be permanent for the process with no in-product recovery
-    if is_unsafe_trust_root(&key) {
-        tracing::warn!(
-            key = %key.display(),
-            "refusing folder-trust revoke for an over-broad root (never gated)"
-        );
-        return false;
-    }
-    let was_trusted = fuigo_workspace::folder_trust::revoke_folder_trust_store(cwd);
-    // Always downgrade the in-process cache so a mid-session untrust takes effect immediately for this process
-    // That holds even for a cached grant with no backing store record (e.g. a kill-switch / feature-off resolve).
-    // A later legitimate grant reconciles it: the `Some(false)` arm of `resolve_and_record_inner` re-checks the store
-    record(&key, false);
-    was_trusted
+/// `/untrust` for `cwd`'s folder: declined in the store and in this process (see
+/// [`fuigo_workspace::folder_trust::revoke_folder_trust_store`]); the next command asks and project settings stop.
+pub(crate) fn revoke_folder_trust(cwd: &Path) -> fuigo_workspace::folder_trust::RevokeOutcome {
+    fuigo_workspace::folder_trust::revoke_folder_trust_store(cwd)
 }
 
-/// Whether repo-local (project-scoped) MCP/LSP servers may spawn for `cwd`.
-///
-/// Authoritative and fail-closed, mirroring [`resolve_and_record_inner`]'s arms.
-/// A cached **grant** short-circuits (allow).
-/// A cached **untrusted** verdict is RE-READ against the store so a `grant_folder_trust` issued AFTER the untrusted resolve is honored.
-/// That re-read records the upgrade and allows.
-/// An **unrecorded** key re-resolves via [`resolve_and_record`].
-/// That denies ONLY the dangerous case: feature on AND repo-local code-exec configs present AND untrusted.
-/// It allows no-configs / unrecordable-key ($HOME / fs-root) / store-trusted / feature-off / inert.
-/// So this never over-denies the common no-configs case, whose Trusted verdict is provisional and therefore never cached.
-///
-/// The cache is consulted BEFORE delegating so a recorded `Some(false)` is reconciled even on an inert build.
-/// There [`resolve_and_record`] would short-circuit to allow before reaching the cache.
-/// `remote = None`: durable feature-off / kill-switch verdicts are cached by the launch/session resolve that ran with the real RemoteSettings.
-///
-/// `DECISIONS` uses `parking_lot::Mutex` (no poisoning), so this gate cannot fail OPEN on a poisoned lock.
+/// Whether `cwd`'s project settings (MCP/LSP servers, hooks, workflows, plugins, `.envrc`, permission rules,
+/// instructions, skills) may load: the folder is Trusted ([`fuigo_workspace::folder_trust::decide`], not
+/// interactive). Fail closed: an undecided, Legacy, declined or key-less folder is not.
 pub(crate) fn project_scope_allowed(cwd: &Path) -> bool {
-    let key = workspace_key(cwd);
-    // Copy out of the lock so the Some(false) reconcile can re-acquire it (parking_lot mutexes are not re-entrant)
-    let cached = DECISIONS.lock().get(&key).copied();
-    match cached {
-        Some(true) => true,
-        // Re-read the store so a grant issued after the untrusted resolve is honored without a restart (mirrors `resolve_and_record_inner`)
-        Some(false) => {
-            if fuigo_workspace::folder_trust::is_trusted_this_process(&key) {
-                record(&key, true);
-                true
-            } else {
-                false
-            }
-        }
-        // Unrecorded: re-resolve fail-closed (no-configs / trusted / feature-off / inert allow; untrusted with configs deny)
-        None => resolve_and_record(cwd, None, false),
+    #[cfg(test)]
+    if let Some(forced) = test_override(cwd) {
+        return forced;
+    }
+    dir_trust(cwd).is_trusted()
+}
+
+/// Whether an interactive trust PROMPT is warranted for `cwd` (the client can ask: it advertised the v2 capability).
+pub(crate) fn prompt_warranted(cwd: &Path, _remote: Option<&RemoteSettings>) -> bool {
+    matches!(decide(cwd, true), TrustDecision::Prompt(_))
+}
+
+/// Why the prompt for `cwd` would be asked (`None`: no prompt is warranted).
+pub(crate) fn prompt_reason(cwd: &Path) -> Option<PromptReason> {
+    match decide(cwd, true) {
+        TrustDecision::Prompt(reason) => Some(reason),
+        _ => None,
     }
 }
 
-/// Whether an interactive GUI trust PROMPT is warranted for `cwd`.
-/// Warranted means the feature is on, the workspace is NOT store-trusted, and repo-local code-exec configs are present (something to gate).
-/// Interactivity is forced `true` because the caller already confirmed the client can prompt (it advertised `fuigo/folderTrust.interactive`).
-/// The TTY-based [`decide_inputs`] default is false under the ACP stdio transport.
-/// Mirrors the [`decide`] precedence so it cannot drift from the gate.
-/// Feature-off (kill-switch / opt-out) / store-trusted / no-configs all collapse to a non-`Prompt` verdict and return false.
-pub(crate) fn prompt_warranted(cwd: &Path, remote: Option<&RemoteSettings>) -> bool {
-    let key = workspace_key(cwd);
-    matches!(
-        decide(
-            feature_enabled(remote),
-            &decide_inputs_with_interactive(cwd, &key, true),
-        ),
-        TrustOutcome::Prompt
-    )
+/// Hand [`project_scope_allowed`] to fuigo-agent as the trust check for project agent files (`.fuigo/agents`,
+/// `.claude/agents`). fuigo-agent cannot depend on this crate, and without the hook it loads no project agent at all.
+/// Not cfg-gated: production entry points and the unit-test fixtures that need trusted loading both call it, and it is
+/// set-once, so the only hook a process ever holds is this one.
+pub fn install_project_agent_trust() {
+    fuigo_agent::discovery::install_project_agent_trust(project_scope_allowed);
 }
 
-/// Display-only summary of which repo-local code-exec config kinds are present for `cwd`, for the interactive trust prompt's UI.
-/// The kinds are the reasons the folder is gated.
-/// Single-sourced from the SAME scan as the canonical gate ([`fuigo_workspace::folder_trust::repo_config_kinds`] / [`repo_configs_present`]).
-/// The prompt's reason list therefore cannot drift from what actually gated the folder (same markers, same cwd-to-git-root walk).
-///
-/// ALL detected kinds are reported, including `lsp`: it is a genuine reason the folder is gated.
-/// So an `.fuigo/lsp.json`-only repo still has a non-empty reason list.
-/// Only the post-grant *hot-reload* skips LSP; project LSP applies on the next session open (the backend is spawn-baked into the tool bridge).
-/// See the `mvp_agent::folder_trust_prompt` module docs.
+/// Display-only summary of which repo-local config kinds are present for `cwd`, for the trust prompt's UI.
 pub(crate) fn detected_config_kinds(cwd: &Path) -> Vec<String> {
     fuigo_workspace::folder_trust::repo_config_kinds(cwd)
         .into_iter()
@@ -156,7 +81,6 @@ pub(crate) fn detected_config_kinds(cwd: &Path) -> Vec<String> {
 /// Shared by primary-session hook append (`agent_ops.rs`) and by subagent hook append and owned `mcpServers` spawn (`handle_request.rs`).
 /// Plugin deny is call-site-only, before this predicate.
 /// `trusted` is evaluated lazily so non-project agents skip the filesystem-walking trust verdict.
-/// Primary-session passes its already-computed `hooks_trusted`; subagent sites pass `project_scope_allowed(parent_cwd)`.
 pub(crate) fn agent_inline_hooks_allowed(
     scope: fuigo_agent::config::AgentScope,
     trusted: impl FnOnce() -> bool,
@@ -171,187 +95,85 @@ pub(crate) fn agent_hooks_allowed(trusted: impl FnOnce() -> bool) -> bool {
     trusted()
 }
 
-fn record(workspace_key: &Path, allowed: bool) {
-    DECISIONS
-        .lock()
-        .insert(workspace_key.to_path_buf(), allowed);
+#[cfg(test)]
+static TEST_OVERRIDES: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<std::path::PathBuf, bool>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+fn test_override(cwd: &Path) -> Option<bool> {
+    TEST_OVERRIDES.lock().get(&workspace_key(cwd)).copied()
 }
 
-/// Test-only: force the recorded decision for `cwd`'s workspace key.
+/// Test-only: force the verdict for `cwd`'s folder in this process.
 ///
-/// Tests use UNIQUE temp-dir keys and never globally clear `DECISIONS`, so they can run in parallel without clobbering each other's decisions.
-///
-/// Consumed by the MCP project-scope gate tests here and in `managed_mcp`.
+/// Tests use UNIQUE temp-dir keys and never globally clear the overrides, so they can run in parallel.
 #[cfg(test)]
 pub(crate) fn record_for_test(cwd: &Path, allowed: bool) {
-    record(&workspace_key(cwd), allowed);
+    TEST_OVERRIDES.lock().insert(workspace_key(cwd), allowed);
 }
 
-/// Resolve the trust decision for `cwd` ONCE and record it for the loaders.
-///
-/// Returns whether project-scoped servers are allowed.
-/// A cached **grant** short-circuits.
-/// A cached **untrusted** verdict is re-checked against the store so a later `--trust` grant is honored without a restart.
-/// See [`resolve_and_record_inner`].
-/// Persists on an accepted interactive prompt; an explicit `--trust` grant is persisted up front by [`grant_folder_trust`].
-///
-/// `allow_prompt` must be `true` ONLY where a blocking stdin y/N read is safe.
-/// That is agent `initialize` for the launch directory, before the TUI takes over the terminal.
-/// Every other call site (per-session cwd, leader-served sessions whose cwd differs from the launch dir, `fuigo mcp doctor`) passes `false`.
-/// An unresolved interactive-but-untrusted workspace therefore resolves **fail-closed** (untrusted, no prompt).
-/// Only the launch dir is ever prompted for.
+/// Resolve `cwd`'s folder trust for a loader, asking on stderr when `allow_prompt` (only agent `initialize` for the
+/// launch directory, before the TUI owns the terminal) and stdin/stderr are a terminal. Returns whether project
+/// settings may load. A "yes" is saved as a grant (settings and commands); a "no" is held in this process and saved.
 pub(crate) fn resolve_and_record(
     cwd: &Path,
-    remote: Option<&RemoteSettings>,
+    _remote: Option<&RemoteSettings>,
     allow_prompt: bool,
 ) -> bool {
-    // Local/dev builds are fully inert: project scope is always allowed, so skip the `trusted_folders.toml` read entirely
+    #[cfg(test)]
+    if let Some(forced) = test_override(cwd) {
+        return forced;
+    }
     if folder_trust_inert() {
         return true;
     }
-    let key = workspace_key(cwd);
-    resolve_and_record_inner(
-        &key,
-        || fuigo_workspace::folder_trust::is_trusted_this_process(&key),
-        || compute(cwd, &key, remote, allow_prompt),
-    )
+    let interactive = allow_prompt && stdio_is_terminal();
+    match decide(cwd, interactive) {
+        TrustDecision::Trusted => true,
+        TrustDecision::Untrusted(_) => false,
+        TrustDecision::Prompt(_) => {
+            let Ok(key) = fuigo_workspace::trust::trust_key(cwd) else {
+                return false;
+            };
+            stderr_prompt_decision(
+                prompt_for_trust(&key),
+                || persist_trust(&mut TrustStore::load(), &key),
+                || fuigo_workspace::folder_trust::decline_folder_trust_key(&key),
+            )
+        }
+    }
 }
 
-/// Resolve the launch dir's project-scope trust verdict with a SINGLE expensive gather, so the one-time deferred init helpers can share it.
-/// The verdict is recorded into `DECISIONS` exactly as [`resolve_and_record`] would record it.
-/// This is the AUTHORITATIVE description of the launch-dir dedup and TOCTOU contract (the `MvpAgent` field/method docs point here).
-///
-/// The deferred init helpers (`ensure_plugin_registry` and `ensure_local_workspace_ops`) each gather independently.
-/// The provisional "no repo configs" allow is non-durable (never absorbed by the `DECISIONS` cache).
-/// So without memoization the launch dir is scanned multiple times during init.
-/// This gathers [`decide_inputs`] (store read plus `repo_configs_present` scan) ONCE.
-/// It derives the verdict through the same [`resolve_and_record_inner`] cache contract.
-/// Durable verdicts are recorded into `DECISIONS`; the provisional allows (no-configs, unrecordable key) are left uncached.
-///
-/// TOCTOU: this records ONLY what [`resolve_and_record`] records.
-/// A later per-session `resolve_and_record(session_cwd)` still re-scans the provisional no-configs case.
-/// A config added post-startup via git pull / agent write is therefore caught.
-/// The init-time dedup belongs to the one-shot caller (a `OnceCell` on `MvpAgent`), NOT to any new shared-cache entry.
+fn stdio_is_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// The launch directory's verdict (one call shared by the deferred init helpers).
 pub(crate) fn resolve_launch_dir_trust(cwd: &Path, remote: Option<&RemoteSettings>) -> bool {
-    // Local/dev builds are fully inert: project scope is always allowed, skipping the store read and repo scan entirely
-    if folder_trust_inert() {
-        return true;
-    }
-    let key = workspace_key(cwd);
-    let feature = feature_enabled(remote);
-    let inputs = decide_inputs(cwd, &key);
-    // Re-read the store for the cached-untrusted reconciliation EXACTLY as resolve_and_record does
-    // A `--trust` granted after a parallel resolve recorded untrusted is then still honored
-    // Reuse the gathered inputs only for the recompute
-    // That keeps the DECISIONS cache contract identical to resolve_and_record without repeating the expensive repo_configs scan
-    resolve_and_record_inner(
-        &key,
-        || fuigo_workspace::folder_trust::is_trusted_this_process(&key),
-        || compute_from_inputs(&inputs, feature, &key, false),
-    )
+    let _ = remote;
+    project_scope_allowed(cwd)
 }
 
-/// Cache-reconciling core of [`resolve_and_record`], split out so the invalidation path is testable without the process-global trust store.
-///
-/// - A cached **grant** (`Some(true)`) is durable and short-circuits; neither `store_trusted` nor `recompute` runs.
-/// - A cached **untrusted** verdict (`Some(false)`) is re-checked via `store_trusted`.
-///   A `fuigo --trust` grant issued AFTER this workspace was first resolved writes the store, so honor it on the next session without a restart.
-///   Without this re-read a long-lived leader would mask the grant.
-/// - An **unrecorded** key (`None`) does a full `recompute`, which reports `(allowed, durable)`; the verdict is recorded ONLY when `durable`.
-///   The provisional "no repo configs" allow is non-durable, so it stays unrecorded.
-///   Every resolve then re-checks for code-exec config that appeared after the folder was first opened (TOCTOU).
-fn resolve_and_record_inner(
-    key: &Path,
-    store_trusted: impl FnOnce() -> bool,
-    recompute: impl FnOnce() -> (bool, bool),
-) -> bool {
-    // Copy out of the lock so `record` below can re-acquire it (parking_lot mutexes are not re-entrant)
-    let cached = DECISIONS.lock().get(key).copied();
-    match cached {
-        Some(true) => true,
-        Some(false) => {
-            if store_trusted() {
-                record(key, true);
-                true
-            } else {
-                false
-            }
-        }
-        None => {
-            // Record only durable verdicts; a provisional no-configs allow is left uncached so the next resolve re-checks `repo_configs_present`
-            let (allowed, durable) = recompute();
-            if durable {
-                record(key, allowed);
-            }
-            allowed
-        }
-    }
-}
-
-/// Returns `(allowed, durable)`. `durable` is whether the verdict may be cached.
-/// Two allows are NON-durable.
-/// (1) The "no repo configs" allow: repo-local code-exec config can appear after this resolve (git pull / agent write).
-/// Caching that provisional grant would let a later `/hooks reload` or new session run the new code with no trust decision (TOCTOU).
-/// (2) The unrecordable-key allow (cwd is $HOME / fs-root), which the store can never persist anyway.
-/// Store-trusted, feature-off, and an accepted prompt are durable.
-/// An untrusted verdict is recorded so a later `--trust` grant can reconcile it (see [`resolve_and_record_inner`]).
-fn compute(
-    cwd: &Path,
-    key: &Path,
-    remote: Option<&RemoteSettings>,
-    allow_prompt: bool,
-) -> (bool, bool) {
-    let feature = feature_enabled(remote);
-    let inputs = decide_inputs(cwd, key);
-    compute_from_inputs(&inputs, feature, key, allow_prompt)
-}
-
-/// [`compute`] split at the gather: derive `(allowed, durable)` from an already-gathered [`DecideInputs`].
-/// A caller needing more than one verdict (see [`resolve_launch_dir_trust`]) then pays for the expensive `decide_inputs` gather only ONCE.
-/// That gather is the store read plus the `repo_configs_present` scan.
-fn compute_from_inputs(
-    inputs: &DecideInputs,
-    feature: bool,
-    key: &Path,
-    allow_prompt: bool,
-) -> (bool, bool) {
-    match decide(feature, inputs) {
-        TrustOutcome::Trusted => {
-            // Within the Trusted arm the non-durable ("provisional") allows are the "no repo configs" rule and the unrecordable-key rule
-            // The latter is Case 2: cwd is $HOME / fs-root, which can never be persisted
-            // Both are feature-on and not store-trusted; feature-off and store-trusted are durable
-            // Leave the non-durable allows uncached.
-            let durable = !feature || inputs.store_trusted;
-            (true, durable)
-        }
-        TrustOutcome::Prompt if allow_prompt => {
-            // Reload the store (the inputs gather dropped its copy) to persist the accepted prompt grant
-            stderr_prompt_decision(prompt_for_trust(key), || persist_trust(&mut TrustStore::load(), key))
-        }
-        // Untrusted, OR interactive where prompting is unsafe here (TUI owns stdin); the agent-`initialize` path owns the launch-dir prompt
-        // Both resolve fail-closed
-        TrustOutcome::Untrusted | TrustOutcome::Prompt => (false, true),
-    }
-}
-
-/// `(allowed, durable)` for the stderr trust prompt, given whether the user accepted and how to record the grant.
-/// The prompt was on stderr, so a grant that was not saved (or recorded nothing) is reported there too. It fails closed
-/// when nothing was recorded (e.g. an unreadable store): the "yes" did not take effect, so this resolve must not allow
-/// project config (Astra r1). Saved or session-only grants allow. A refusal ("no") never calls `persist`.
+/// Whether project settings may load after the stderr trust prompt was answered. A "yes" that was not saved (or
+/// recorded nothing) is reported on stderr and leaves the folder untrusted; a "no" is held in-process and saved, and a
+/// failure to save it is reported too.
 fn stderr_prompt_decision(
     accepted: bool,
     persist: impl FnOnce() -> fuigo_workspace::folder_trust::GrantOutcome,
-) -> (bool, bool) {
+    decline: impl FnOnce() -> Result<(), std::io::Error>,
+) -> bool {
     if !accepted {
-        return (false, true);
+        if let Err(e) = decline() {
+            fuigo_tty_utils::cli_eprintln!(
+                "This folder is untrusted for this session, but the answer couldn't be saved ({e}); Fuigo will ask again next time."
+            );
+        }
+        return false;
     }
     let outcome = persist();
     fuigo_workspace::folder_trust::report_cli_trust_grant(&outcome);
-    let allowed = !matches!(
-        outcome.resolution(),
-        fuigo_workspace::folder_trust::GrantResolution::Unrecorded
-    );
-    (allowed, true)
+    outcome.dismisses_gate()
 }
 
 /// PROJECT-scoped MCP server display names for `cwd`: the names dropped from a merged server list when the workspace is untrusted.
@@ -389,8 +211,11 @@ pub(crate) fn project_scoped_mcp_names(cwd: &Path) -> HashSet<String> {
 
     // Project `.cursor/mcp.json` only
     // `load_cursor_mcp_servers` would also merge the user-scoped `~/.cursor/mcp.json`, so read the project file directly instead
-    for server in crate::util::config::load_mcp_json_file(&cwd.join(".cursor").join("mcp.json")) {
-        names.insert(mcp_server_name(&server).to_string());
+    // Held to the repository like the session loader, so the names here are exactly the servers a session could load.
+    if let Some(root) = crate::util::config::project_mcp_root(cwd) {
+        for server in crate::util::config::load_mcp_json_file(&cwd.join(".cursor").join("mcp.json"), Some(&root)) {
+            names.insert(mcp_server_name(&server).to_string());
+        }
     }
 
     // `~/.claude.json projects.<cwd>.mcpServers` object keys.
@@ -461,6 +286,7 @@ pub(crate) fn filter_untrusted_project_lsp(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     // Used only by the consume-side regression test below
     // Imported here (not at module scope) so the non-test build doesn't carry an unused import
     use fuigo_workspace::folder_trust::repo_configs_present;
@@ -480,21 +306,18 @@ mod tests {
     }
 
     #[test]
-    fn record_and_lookup_round_trip() {
-        // `repo_tmp` git-inits the dir so `workspace_key` yields a unique key
-        // It returns the git-repo root, which would otherwise collapse to a shared ambient root if `$TMPDIR` is inside a checkout
-        // The `DECISIONS` map is process-global, so unique keys keep parallel tests from clobbering each other's recorded decisions
+    fn record_for_test_overrides_the_verdict() {
         let tmp = repo_tmp();
-        let key = tmp.path().to_path_buf();
-        // A fresh, never-recorded key re-resolves fail-closed and is allowed here (inert local build / no repo configs, never a durable default-open)
-        assert!(project_scope_allowed(&key));
-        record(&workspace_key(&key), false);
-        assert!(!project_scope_allowed(&key));
+        record_for_test(tmp.path(), false);
+        assert!(!project_scope_allowed(tmp.path()));
+        record_for_test(tmp.path(), true);
+        assert!(project_scope_allowed(tmp.path()));
     }
 
+    /// u35 t1: `/trust` and the question's "yes" trust the folder at once (the one decision; no separate cache).
     #[test]
     #[serial_test::serial]
-    fn grant_folder_trust_seeds_decisions_cache() {
+    fn grant_folder_trust_is_visible_to_project_scope() {
         if fuigo_test_support::env::rerun_in_own_process() {
             return;
         }
@@ -503,109 +326,67 @@ mod tests {
         let _env = EnvGuard::set("FUIGO_HOME", home.path());
         let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
         let tmp = repo_tmp();
-        std::fs::create_dir_all(tmp.path().join(".fuigo").join("hooks")).unwrap();
-        grant_folder_trust(tmp.path());
-        let key = workspace_key(tmp.path());
-        assert!(
-            fuigo_workspace::folder_trust::is_trusted_this_process(&key),
-            "explicit grant must be visible to consume-side resolution"
-        );
+        assert!(!project_scope_allowed(tmp.path()), "undecided: untrusted");
+        assert!(grant_folder_trust(tmp.path()).dismisses_gate());
+        assert!(project_scope_allowed(tmp.path()), "explicit grant must be visible to consume-side resolution");
     }
 
+    /// `/untrust` of a trusted folder takes effect at once and reports that it was trusted.
     #[test]
     #[serial_test::serial]
-    fn revoke_folder_trust_downgrades_cache() {
+    fn revoke_folder_trust_is_immediate() {
         if fuigo_test_support::env::rerun_in_own_process() {
             return;
         }
         let _sim = simulate_release_build();
-        // A mid-session untrust of a TRUSTED folder must take effect immediately
-        // Revoke downgrades the in-process cache so `project_scope_allowed` flips to false at once
-        // A cached grant would otherwise short-circuit `resolve_and_record`
-        // Seed the trust store so `was_trusted` is genuinely true
-        // FUIGO_HOME-isolated so the seed can't touch the real user file, and `#[serial]` because FUIGO_HOME is process-global
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("FUIGO_HOME", home.path());
+        let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
         let tmp = repo_tmp();
-        let mut store = TrustStore::load();
-        store.set_trusted(&workspace_key(tmp.path())).unwrap();
-        record(&workspace_key(tmp.path()), true);
+        assert!(grant_folder_trust(tmp.path()).dismisses_gate());
         assert!(project_scope_allowed(tmp.path()));
-        assert!(
-            revoke_folder_trust(tmp.path()),
-            "a store-trusted folder must report was_trusted=true"
-        );
-        assert!(
-            !project_scope_allowed(tmp.path()),
-            "cache must be downgraded so untrust is immediate"
-        );
+        assert!(revoke_folder_trust(tmp.path()).was_trusted(), "a trusted folder reports was_trusted=true");
+        assert!(!project_scope_allowed(tmp.path()), "untrust is immediate");
     }
 
+    /// u35 t1: `/untrust` of a never-trusted folder records the "no" (the folder is not asked again).
     #[test]
     #[serial_test::serial]
-    fn revoke_never_trusted_folder_writes_no_deny() {
+    fn revoke_never_trusted_folder_records_the_no() {
         if fuigo_test_support::env::rerun_in_own_process() {
             return;
         }
         let _sim = simulate_release_build();
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("FUIGO_HOME", home.path());
+        let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
         let tmp = repo_tmp();
-
-        record(&workspace_key(tmp.path()), true);
-
-        assert!(
-            !revoke_folder_trust(tmp.path()),
-            "revoking a never-trusted folder must return false"
-        );
-
-        assert!(
-            !project_scope_allowed(tmp.path()),
-            "revoke must downgrade the in-process cache even for a never-trusted folder"
-        );
-
-        let store = TrustStore::load();
-        assert!(
-            !store.has_decision(&workspace_key(tmp.path())),
-            "revoking a never-trusted folder must not record a child deny"
-        );
+        assert!(!revoke_folder_trust(tmp.path()).was_trusted());
+        assert!(!project_scope_allowed(tmp.path()));
+        assert!(!prompt_warranted(tmp.path(), None), "a declined folder is not asked again");
+        assert!(TrustStore::load().has_decision(&workspace_key(tmp.path())));
     }
 
+    /// u35 t1: the home folder is never trusted and has nothing to revoke.
     #[test]
     #[serial_test::serial]
-    fn revoke_on_unrecordable_home_root_records_no_deny() {
+    fn home_is_never_trusted_and_revoke_is_not_applicable() {
         if fuigo_test_support::env::rerun_in_own_process() {
             return;
         }
         let _sim = simulate_release_build();
-        // cwd == $HOME (git-inited so `workspace_key` resolves the home root, which the store refuses to record)
-        // Revoke must NOT seed a cache deny
-        // decide() always trusts an unrecordable root and no grant/store/prompt could ever lift the deny
-        // The gate must therefore keep allowing after an untrust click
-        // HOME overridden so workspace_key sees the tempdir as home; FUIGO_HOME-isolated store
-        // FUIGO_FOLDER_TRUST unset so the default-on flag applies.
         let home = tempfile::tempdir().unwrap();
         let _home = EnvGuard::set("HOME", home.path());
         let fuigo_home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("FUIGO_HOME", fuigo_home.path());
         let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
         git2::Repository::init(home.path()).unwrap();
-        // Repo-local code-exec config, so the final allow is the unrecordable-key rule at work
-        // A recordable key with configs and an empty store would deny
-        std::fs::create_dir_all(home.path().join(".fuigo").join("hooks")).unwrap();
-
-        assert!(
-            !revoke_folder_trust(home.path()),
-            "an unrecordable root reports was_trusted=false"
-        );
-        assert!(
-            DECISIONS.lock().get(&workspace_key(home.path())).is_none(),
-            "revoke must record no cache deny for an unrecordable root"
-        );
-        assert!(
-            project_scope_allowed(home.path()),
-            "$HOME must stay allowed after a revoke attempt"
-        );
+        assert!(matches!(
+            revoke_folder_trust(home.path()),
+            fuigo_workspace::folder_trust::RevokeOutcome::NotApplicable
+        ));
+        assert!(!project_scope_allowed(home.path()), "$HOME is never trusted");
+        assert!(!prompt_warranted(home.path(), None), "and never asked");
     }
 
     #[test]
@@ -633,7 +414,7 @@ mod tests {
 
         // Store-trust the folder: the verdict reconciles to true and the loader runs
         let mut store = TrustStore::load();
-        store.set_trusted(&workspace_key(tmp.path())).unwrap();
+        store.grant(&workspace_key(tmp.path())).unwrap();
         assert!(resolve_and_record(tmp.path(), None, false));
         let env = fuigo_workspace::envrc::load_envrc_or_empty(tmp.path());
         assert_eq!(
@@ -678,7 +459,7 @@ mod tests {
 
         // Store-trust: the verdict reconciles to true and the repo-tree env is merged
         let mut store = TrustStore::load();
-        store.set_trusted(&workspace_key(tmp.path())).unwrap();
+        store.grant(&workspace_key(tmp.path())).unwrap();
         assert!(resolve_and_record(tmp.path(), None, false));
         let trusted =
             load_claude_env_with_project(tmp.path(), resolve_and_record(tmp.path(), None, false));
@@ -730,7 +511,7 @@ mod tests {
 
         // Granting trust re-enables it (proves the env file is real/loadable).
         let mut store = TrustStore::load();
-        store.set_trusted(&workspace_key(&subdir)).unwrap();
+        store.grant(&workspace_key(&subdir)).unwrap();
         assert!(resolve_and_record(&subdir, None, false));
         let trusted =
             load_claude_env_with_project(&subdir, resolve_and_record(&subdir, None, false));
@@ -747,8 +528,10 @@ mod tests {
         if fuigo_test_support::env::rerun_in_own_process() {
             return;
         }
+        // The production hook, installed first: "not loaded" below is the hook denying the folder.
+        install_project_agent_trust();
         let _sim = simulate_release_build();
-        // A cwd-discovered PROJECT agent's inline `hooks:` is gated on folder-trust (it can SHADOW a built-in subagent, near-auto RCE)
+        // A cwd-discovered PROJECT agent loads only from a trusted folder, and its inline `hooks:` are gated on trust too
         // A user/built-in agent's hooks are kept
         // Exercises real discovery and the exact call-site predicate used at mvp_agent/subagent
         // FUIGO_HOME-isolated (empty store)
@@ -759,25 +542,25 @@ mod tests {
         let tmp = repo_tmp();
         let agents = tmp.path().join(".fuigo").join("agents");
         std::fs::create_dir_all(&agents).unwrap();
-        // Shadows the built-in `explore` subagent and carries a command hook.
+        // A plain-named project agent carrying a command hook.
         std::fs::write(
-            agents.join("explore.md"),
-            "---\nname: explore\ndescription: x\nhooks:\n  PreToolUse:\n    - hooks:\n        - type: command\n          command: \"true\"\n---\nbody\n",
+            agents.join("reviewer.md"),
+            "---\nname: reviewer\ndescription: x\nhooks:\n  PreToolUse:\n    - hooks:\n        - type: command\n          command: \"true\"\n---\nbody\n",
         )
         .unwrap();
-        let def = fuigo_agent::discovery::by_name_in_cwd("explore", tmp.path())
-            .expect("project agent must be discovered");
-        assert_eq!(def.scope, AgentScope::Project);
-        assert!(def.hooks.is_some(), "project agent must carry inline hooks");
+        assert!(
+            fuigo_agent::discovery::by_name_in_cwd("reviewer", tmp.path()).is_none(),
+            "untrusted: the project agent file must not load at all"
+        );
 
         // Exercise the REAL shared predicate both append sites use (not a copy).
         let allowed = |scope: AgentScope| {
             agent_inline_hooks_allowed(scope, || project_scope_allowed(tmp.path()))
         };
 
-        // Untrusted: the project agent's inline hooks are dropped...
+        // Untrusted: a project agent's inline hooks are dropped...
         assert!(
-            !allowed(def.scope),
+            !allowed(AgentScope::Project),
             "untrusted project agent inline hooks must be gated"
         );
         // ...while user/built-in agents (not cwd-sourced) keep their hooks.
@@ -791,10 +574,14 @@ mod tests {
             );
         }
 
-        // Grant trust and reconcile the cache (as the post-grant reload flow does): the project agent's inline hooks are appended
+        // Grant trust and reconcile the cache (as the post-grant reload flow does): the project agent loads and its inline hooks are appended
         let mut store = TrustStore::load();
-        store.set_trusted(&workspace_key(tmp.path())).unwrap();
+        store.grant(&workspace_key(tmp.path())).unwrap();
         resolve_and_record(tmp.path(), None, false);
+        let def = fuigo_agent::discovery::by_name_in_cwd("reviewer", tmp.path())
+            .expect("trusted: the project agent loads");
+        assert_eq!(def.scope, AgentScope::Project);
+        assert!(def.hooks.is_some(), "project agent must carry inline hooks");
         assert!(
             allowed(def.scope),
             "trusted project agent inline hooks must be appended"
@@ -827,25 +614,21 @@ mod tests {
         );
     }
 
+    /// u35 t1: there is no "no project settings, so trusted" exemption: an undecided folder is untrusted whatever it
+    /// contains (its commands ask, and anything it later adds stays off).
     #[test]
     #[serial_test::serial]
-    fn project_scope_allowed_allows_repo_without_configs() {
+    fn project_scope_allowed_denies_undecided_repo_without_configs() {
         if fuigo_test_support::env::rerun_in_own_process() {
             return;
         }
-        // The over-deny guard: a folder with NO repo-local code-exec config has nothing to gate
-        // It must be ALLOWED even though its (provisional) Trusted verdict is never cached
-        // A naive `.unwrap_or(false)` cache peek would wrongly deny it
-        // Release-stamped and FUIGO_HOME-isolated so the verdict comes from `decide` rule 4 (no repo configs), not the inert short-circuit
         let _sim = simulate_release_build();
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("FUIGO_HOME", home.path());
         let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
         let tmp = repo_tmp();
-        assert!(
-            project_scope_allowed(tmp.path()),
-            "a folder with no repo configs must be allowed (no over-deny)"
-        );
+        assert!(!project_scope_allowed(tmp.path()));
+        assert!(!resolve_and_record(tmp.path(), None, false));
     }
 
     #[test]
@@ -863,7 +646,7 @@ mod tests {
         let tmp = repo_tmp();
         std::fs::create_dir_all(tmp.path().join(".fuigo").join("hooks")).unwrap();
         let mut store = TrustStore::load();
-        store.set_trusted(&workspace_key(tmp.path())).unwrap();
+        store.grant(&workspace_key(tmp.path())).unwrap();
         assert!(
             project_scope_allowed(tmp.path()),
             "a store-trusted folder must be allowed"
@@ -1075,16 +858,14 @@ mod tests {
         );
     }
 
+    /// u35 t1: the remote kill switch is not read (owner decision D2): only the user's own config or env turns folder
+    /// trust off.
     #[test]
     #[serial_test::serial]
-    fn kill_switch_allows_untrusted_repo_after_authoritative_resolve() {
+    fn remote_kill_switch_is_ignored() {
         if fuigo_test_support::env::rerun_in_own_process() {
             return;
         }
-        // Regression (chat/load-path kill-switch)
-        // An untrusted folder WITH repo configs under a remote kill-switch (folder_trust_enabled = Some(false)) must resolve ALLOWED
-        // The session spawn path resolves once with the real RemoteSettings before any gate read, so the gate cache-hits that verdict
-        // FUIGO_HOME-isolated (empty store); FUIGO_FOLDER_TRUST unset so the kill-switch is the only signal
         let _sim = simulate_release_build();
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("FUIGO_HOME", home.path());
@@ -1093,26 +874,14 @@ mod tests {
             folder_trust_enabled: Some(false),
             ..Default::default()
         };
-
         let tmp = repo_tmp();
         std::fs::create_dir_all(tmp.path().join(".fuigo").join("hooks")).unwrap();
-        assert!(
-            resolve_and_record(tmp.path(), Some(&remote), false),
-            "kill-switch (feature off) must resolve trusted even with repo configs"
-        );
-        assert!(
-            project_scope_allowed(tmp.path()),
-            "gate must allow a kill-switched folder once the authoritative resolve ran"
-        );
-
-        // Contrast: a cold `remote = None` gate read (no prior authoritative resolve) misses the kill-switch and denies the same scenario
-        // That is the exact gap the up-front spawn resolve closes for chat/load sessions
-        let cold = repo_tmp();
-        std::fs::create_dir_all(cold.path().join(".fuigo").join("hooks")).unwrap();
-        assert!(
-            !project_scope_allowed(cold.path()),
-            "cold remote=None gate read denies a kill-switched folder (regression contrast)"
-        );
+        assert!(!resolve_and_record(tmp.path(), Some(&remote), false));
+        assert!(!project_scope_allowed(tmp.path()));
+        assert!(prompt_warranted(tmp.path(), Some(&remote)));
+        // The user's own switch does turn it off.
+        let _off = EnvGuard::set("FUIGO_FOLDER_TRUST", "0");
+        assert!(project_scope_allowed(tmp.path()));
     }
 
     #[test]
@@ -1531,133 +1300,11 @@ mod tests {
         assert_eq!(kept.len(), 4);
     }
 
-    #[test]
-    fn cached_grant_short_circuits_without_store_read() {
-        let tmp = repo_tmp();
-        let key = workspace_key(tmp.path());
-        record(&key, true);
-        // A cached grant must consult neither the store nor a recompute.
-        let allowed = resolve_and_record_inner(
-            &key,
-            || panic!("store must not be read for a cached grant"),
-            || panic!("must not recompute for a cached grant"),
-        );
-        assert!(allowed);
-    }
 
-    #[test]
-    fn cached_untrusted_is_upgraded_by_a_later_grant() {
-        let tmp = repo_tmp();
-        let key = workspace_key(tmp.path());
-        record(&key, false);
-        assert!(!project_scope_allowed(tmp.path()));
-        // Simulate a `fuigo --trust` grant landing in the store after the untrusted verdict was cached
-        // The re-read sees trusted, so the next resolve upgrades the cache without a process restart
-        let allowed = resolve_and_record_inner(
-            &key,
-            || true,
-            || panic!("must not recompute when reconciling from the store"),
-        );
-        assert!(allowed);
-        // The cheap gate the merge consults now allows (cache refreshed).
-        assert!(project_scope_allowed(tmp.path()));
-    }
 
-    #[test]
-    fn cached_untrusted_stays_untrusted_when_store_still_denies() {
-        let tmp = repo_tmp();
-        let key = workspace_key(tmp.path());
-        record(&key, false);
-        let allowed =
-            resolve_and_record_inner(&key, || false, || panic!("must not recompute when cached"));
-        assert!(!allowed);
-        assert!(!project_scope_allowed(tmp.path()));
-    }
 
-    #[test]
-    fn unrecorded_key_recomputes_then_caches() {
-        let tmp = repo_tmp();
-        let key = workspace_key(tmp.path());
-        // No prior record: recompute and record the (durable untrusted) verdict
-        let allowed = resolve_and_record_inner(
-            &key,
-            || panic!("store re-read is only for a cached untrusted verdict"),
-            || (false, true),
-        );
-        assert!(!allowed);
-        assert!(!project_scope_allowed(tmp.path()));
-        // Now cached untrusted: a later resolve re-reads the store (still denies).
-        let allowed =
-            resolve_and_record_inner(&key, || false, || panic!("must not recompute when cached"));
-        assert!(!allowed);
-    }
 
-    #[test]
-    fn explicit_child_untrust_survives_reload_despite_ancestor_trust() {
-        // Untrust-undone-on-reload: an ancestor is trusted and the child is explicitly untrusted, so a reload must NOT re-promote the child
-        // revoke downgrades the cache to untrusted
-        // The reconcile re-reads the store, which honors the most-specific (child) decision and stays untrusted
-        // The ancestor's cascade no longer undoes the explicit untrust
-        let tmp = tempfile::tempdir().unwrap();
-        let store_path = tmp.path().join(fuigo_workspace::trust::TRUST_FILE_NAME);
-        let parent = tmp.path().join("parent");
-        let child = parent.join("child");
-        std::fs::create_dir_all(&child).unwrap();
 
-        let mut store = TrustStore::load_from(store_path);
-        store.set_trusted(&parent).unwrap();
-        store.set_untrusted(&child).unwrap();
-
-        // revoke downgraded the in-process cache for the child.
-        record(&child, false);
-
-        let allowed = resolve_and_record_inner(
-            &child,
-            || store.is_trusted(&child),
-            || panic!("must not recompute when reconciling a cached untrusted verdict"),
-        );
-        assert!(
-            !allowed,
-            "explicit child untrust must survive the ancestor's trust on reload"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn no_configs_trust_is_provisional_and_regated_when_configs_appear() {
-        // F5 regression: the "no repo configs means Trusted" verdict is PROVISIONAL, so it must NOT be cached as a durable grant
-        // Otherwise a clone that is empty when first resolved, then gains a code-exec config (git pull / agent write), would ride the stale grant
-        // The new hooks/plugins would then load and run ungated on the next /hooks reload or new session (TOCTOU)
-        //
-        // Drives the real `resolve_and_record` and `project_scope_allowed`
-        // Force the feature on via env (highest precedence) so the test does not depend on the host's folder-trust config
-        unsafe { std::env::set_var("FUIGO_FOLDER_TRUST", "1") };
-        // Simulate a release-stamped build
-        // An unstamped local/dev build (as in CI, no FUIGO_VERSION) auto-trusts, so the gate would never engage without this
-        unsafe { std::env::set_var(fuigo_version::TEST_VERSION_ENV, "0.0.0-sim") };
-        let tmp = repo_tmp();
-
-        // Empty repo: nothing to gate, so allowed, but left UNRECORDED (provisional)
-        assert!(resolve_and_record(tmp.path(), None, false));
-        assert!(
-            DECISIONS.lock().get(&workspace_key(tmp.path())).is_none(),
-            "provisional no-configs allow must not be cached as a durable grant"
-        );
-
-        // A repo-local code-exec config appears after the first resolve.
-        std::fs::create_dir_all(tmp.path().join(".fuigo").join("hooks")).unwrap();
-
-        // The next resolve re-checks `repo_configs_present` (no stale grant to ride)
-        // Headless resolves untrusted, so the newly-added hooks are now gated
-        assert!(
-            !resolve_and_record(tmp.path(), None, false),
-            "configs that appear after the first resolve must be re-checked and gated"
-        );
-        assert!(!project_scope_allowed(tmp.path()));
-
-        unsafe { std::env::remove_var(fuigo_version::TEST_VERSION_ENV) };
-        unsafe { std::env::remove_var("FUIGO_FOLDER_TRUST") };
-    }
 
     #[test]
     #[serial_test::serial]
@@ -1665,41 +1312,21 @@ mod tests {
         if fuigo_test_support::env::rerun_in_own_process() {
             return;
         }
-        // `resolve_launch_dir_trust` derives the launch-dir verdict from one gather
-        // It must agree with `resolve_and_record(cwd, None, false)`
-        // It must leave the provisional no-configs grant UNCACHED (the TOCTOU contract on the shared path)
-        // Force the gate on via env (highest precedence) so the test does not depend on the host config
-        // Isolate FUIGO_HOME so the store is empty/seeded in temp; `#[serial]` because both vars are process-global
-        let _feature = EnvGuard::set("FUIGO_FOLDER_TRUST", "1");
+        let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
         let _sim = simulate_release_build();
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("FUIGO_HOME", home.path());
-
-        // (a) No configs: provisional Trusted, NOT cached by the shared path
         let empty = repo_tmp();
-        let lt = resolve_launch_dir_trust(empty.path(), None);
-        assert!(
-            DECISIONS.lock().get(&workspace_key(empty.path())).is_none(),
-            "provisional no-configs allow must not be cached by resolve_launch_dir_trust"
-        );
-        assert_eq!(lt, resolve_and_record(empty.path(), None, false));
-        assert!(lt, "no-configs launch dir must be allowed");
-
-        // (b) Configs present and untrusted (empty store, headless): false
         let untrusted = repo_tmp();
         std::fs::create_dir_all(untrusted.path().join(".fuigo").join("hooks")).unwrap();
-        let lt = resolve_launch_dir_trust(untrusted.path(), None);
-        assert_eq!(lt, resolve_and_record(untrusted.path(), None, false));
-        assert!(!lt, "untrusted configs launch dir must be denied");
-
-        // (c) Configs present and store-trusted: true
         let trusted = repo_tmp();
         std::fs::create_dir_all(trusted.path().join(".fuigo").join("hooks")).unwrap();
-        let mut store = TrustStore::load();
-        store.set_trusted(&workspace_key(trusted.path())).unwrap();
-        let lt = resolve_launch_dir_trust(trusted.path(), None);
-        assert_eq!(lt, resolve_and_record(trusted.path(), None, false));
-        assert!(lt, "store-trusted launch dir must be allowed");
+        assert!(grant_folder_trust(trusted.path()).dismisses_gate());
+        for (dir, want) in [(empty.path(), false), (untrusted.path(), false), (trusted.path(), true)] {
+            let lt = resolve_launch_dir_trust(dir, None);
+            assert_eq!(lt, resolve_and_record(dir, None, false));
+            assert_eq!(lt, want, "{}", dir.display());
+        }
     }
 
     #[test]
@@ -1748,86 +1375,44 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn prompt_warranted_true_for_untrusted_repo_with_configs() {
+    fn prompt_warranted_true_for_undecided_repo() {
         if fuigo_test_support::env::rerun_in_own_process() {
             return;
         }
-        // Feature on (via remote), untrusted (empty store), repo configs present: the GUI prompt is warranted
-        // FUIGO_HOME-isolated so the store starts empty; `#[serial]` because FUIGO_HOME is process-global
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("FUIGO_HOME", home.path());
-        let tmp = repo_tmp();
-        std::fs::write(tmp.path().join(".mcp.json"), "{}").unwrap();
-        // Simulate a release-stamped build so the inert local-build gate is off and the remote `folder_trust_enabled` flag actually engages
-        // FUIGO_FOLDER_TRUST unset: env outranks the remote flag, so an ambient opt-out would otherwise false-fail the Prompt assertion
-        let _sim = EnvGuard::set(fuigo_version::TEST_VERSION_ENV, "0.0.0-sim");
-        let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
-        let remote = RemoteSettings {
-            folder_trust_enabled: Some(true),
-            ..Default::default()
-        };
-        assert!(prompt_warranted(tmp.path(), Some(&remote)));
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn prompt_warranted_false_when_feature_disabled() {
-        if fuigo_test_support::env::rerun_in_own_process() {
-            return;
-        }
-        // The remote kill-switch (folder_trust_enabled = Some(false)) disables the feature even on a release-stamped build
-        // So no prompt is warranted even with repo configs present
-        // Simulate a release build so the inert local-build path is not what's under test
-        // FUIGO_HOME-isolated and FUIGO_FOLDER_TRUST unset so the kill-switch is the only signal
-        let home = tempfile::tempdir().unwrap();
-        let _env = EnvGuard::set("FUIGO_HOME", home.path());
-        let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
         let _sim = simulate_release_build();
-        let tmp = repo_tmp();
-        std::fs::write(tmp.path().join(".mcp.json"), "{}").unwrap();
-        let remote = RemoteSettings {
-            folder_trust_enabled: Some(false),
-            ..Default::default()
-        };
-        assert!(!prompt_warranted(tmp.path(), Some(&remote)));
+        let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
+        let with_configs = repo_tmp();
+        std::fs::write(with_configs.path().join(".mcp.json"), "{}").unwrap();
+        let without = repo_tmp();
+        let plain = tempfile::tempdir().unwrap();
+        for dir in [with_configs.path(), without.path(), plain.path()] {
+            assert!(prompt_warranted(dir, None), "{}", dir.display());
+            assert_eq!(prompt_reason(dir), Some(fuigo_workspace::folder_trust::PromptReason::New));
+        }
     }
+
 
     #[test]
     #[serial_test::serial]
-    fn prompt_warranted_false_when_store_trusted() {
+    fn prompt_warranted_false_when_store_trusted_and_upgrade_for_legacy() {
         if fuigo_test_support::env::rerun_in_own_process() {
             return;
         }
-        // A folder the user already trusted resolves Trusted, not Prompt.
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("FUIGO_HOME", home.path());
+        let _sim = simulate_release_build();
+        let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
         let tmp = repo_tmp();
-        std::fs::write(tmp.path().join(".mcp.json"), "{}").unwrap();
-        let mut store = TrustStore::load();
-        store.set_trusted(&workspace_key(tmp.path())).unwrap();
-        let remote = RemoteSettings {
-            folder_trust_enabled: Some(true),
-            ..Default::default()
-        };
-        assert!(!prompt_warranted(tmp.path(), Some(&remote)));
+        let key = workspace_key(tmp.path());
+        TrustStore::load().set_trusted_legacy(&key).unwrap();
+        assert_eq!(prompt_reason(tmp.path()), Some(fuigo_workspace::folder_trust::PromptReason::Upgrade));
+        assert!(!project_scope_allowed(tmp.path()), "a pre-1.0.35 record loads nothing until asked");
+        assert!(grant_folder_trust(tmp.path()).dismisses_gate());
+        assert!(!prompt_warranted(tmp.path(), None));
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn prompt_warranted_false_without_repo_configs() {
-        if fuigo_test_support::env::rerun_in_own_process() {
-            return;
-        }
-        // Nothing repo-local to gate resolves Trusted, not Prompt
-        let home = tempfile::tempdir().unwrap();
-        let _env = EnvGuard::set("FUIGO_HOME", home.path());
-        let tmp = repo_tmp();
-        let remote = RemoteSettings {
-            folder_trust_enabled: Some(true),
-            ..Default::default()
-        };
-        assert!(!prompt_warranted(tmp.path(), Some(&remote)));
-    }
 
     #[test]
     fn detected_config_kinds_summarizes_present_markers() {
@@ -1854,28 +1439,34 @@ mod tests {
         assert_eq!(kinds, vec!["lsp".to_string()]);
     }
 
-    /// P180 (P167 Astra LOW): the stderr trust prompt fails closed when nothing was saved. An accepted prompt whose
-    /// grant records nothing (unreadable store, no home, moved folder) must not allow project config; a session-only or
-    /// durable grant allows; a refusal never records anything.
+    /// P180 / u35 t1: the stderr trust prompt fails closed when nothing was saved: only a saved grant allows (there is
+    /// no session-only grant). A "no" is held and saved; a refusal records nothing.
     #[test]
     fn p180_stderr_prompt_fails_closed_when_nothing_was_saved() {
         use fuigo_workspace::folder_trust::{GrantOutcome, GrantRefuse, PersistStatus};
-        for reason in [GrantRefuse::Unreadable, GrantRefuse::NoHome, GrantRefuse::KeyMoved] {
-            let decided = stderr_prompt_decision(true, || GrantOutcome::Refused { reason });
-            assert_eq!(decided, (false, true), "an unrecorded grant must not allow project config");
+        let no_decline = || -> Result<(), std::io::Error> { panic!("an accepted prompt declines nothing") };
+        for reason in [GrantRefuse::Unreadable, GrantRefuse::NoHome, GrantRefuse::KeyMoved, GrantRefuse::UnsafeRoot] {
+            assert!(!stderr_prompt_decision(true, || GrantOutcome::Refused { reason }, no_decline));
         }
         let key = std::path::PathBuf::from("/p180/key");
-        let durable = stderr_prompt_decision(true, || GrantOutcome::Granted {
-            key: key.clone(),
-            persist: PersistStatus::Durable,
-        });
-        assert_eq!(durable, (true, true));
-        let session_only = stderr_prompt_decision(true, || GrantOutcome::Granted {
-            key: key.clone(),
-            persist: PersistStatus::ProcessLocalOnly { error: std::io::Error::other("denied") },
-        });
-        assert_eq!(session_only, (true, true), "a session-only grant still allows this session");
-        let declined = stderr_prompt_decision(false, || panic!("a declined prompt must record nothing"));
-        assert_eq!(declined, (false, true));
+        assert!(stderr_prompt_decision(
+            true,
+            || GrantOutcome::Granted { key: key.clone(), persist: PersistStatus::Durable },
+            no_decline
+        ));
+        assert!(!stderr_prompt_decision(
+            true,
+            || GrantOutcome::Granted {
+                key: key.clone(),
+                persist: PersistStatus::NotSaved { error: std::io::Error::other("denied") },
+            },
+            no_decline
+        ));
+        let mut declined = false;
+        assert!(!stderr_prompt_decision(false, || panic!("a declined prompt grants nothing"), || {
+            declined = true;
+            Ok(())
+        }));
+        assert!(declined);
     }
 }

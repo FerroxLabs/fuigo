@@ -341,3 +341,114 @@ async fn string_tool_input_root_is_parsed_before_permission() {
         })
         .await;
 }
+
+/// u35 g10 (Fable r9 Medium): the ACP call carries the permission check's flag to dispatch: a read-only-list
+/// approval is judged by the runner, an always-approve one is not.
+#[tokio::test(flavor = "current_thread")]
+async fn u35_g10_prepared_call_carries_the_permission_flag() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (mut actor, _event_rx) = open_actor().await;
+            let cwd = fuigo_paths::AbsPathBuf::new(std::path::PathBuf::from(actor.session_info.cwd.clone()))
+                .unwrap_or_else(|_| fuigo_paths::AbsPathBuf::new(crate::test_support::abs_tmp()).unwrap());
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (handle, _events) = fuigo_workspace::permission::spawn_permission_manager(
+                actor.session_info.id.clone(),
+                fuigo_acp_lib::AcpAgentGatewaySender::new(gateway_tx),
+                cwd,
+                fuigo_workspace::permission::ClientType::Generic,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+            );
+            actor.permissions = handle;
+            let tool = |id: &str| fuigo_tools::registry::types::ToolConfig::from_id(id.to_owned());
+            *actor.agent.borrow_mut() = test_agent_with_tools(vec![
+                tool("FuigoBuild:run_terminal_cmd"),
+                tool("FuigoBuild:get_task_output"),
+                tool("FuigoBuild:kill_task"),
+            ])
+            .await;
+            let listed = prepare(&actor, "run_terminal_cmd", r#"{"command":"ls -la","description":"u35"}"#).await;
+            assert!(listed.approved_without_grant, "the read-only lists approved it");
+            actor.permissions.set_yolo_mode(true);
+            let yolo = prepare(&actor, "run_terminal_cmd", r#"{"command":"ls -la","description":"u35"}"#).await;
+            assert!(!yolo.approved_without_grant, "always-approve is an override");
+        })
+        .await;
+}
+
+/// u35 g11 (Astra r10 High): an OpenCode bash call runs in its `workdir`, so every repository check runs there too: a
+/// nested repository whose config runs a program (`core.fsmonitor`) makes `git status` there ask, though the session
+/// directory is clean. u35 g12 (Fable r11 Low): the client answers every ask with allow and records it, so the test
+/// proves which call asked (and what about) instead of reading a timeout; both calls are bounded.
+#[tokio::test(flavor = "current_thread")]
+async fn u35_g11_opencode_workdir_is_judged_where_the_command_runs() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (mut actor, _event_rx) = open_actor().await;
+            let session_dir = std::path::PathBuf::from(actor.session_info.cwd.clone());
+            let nested = session_dir.join("u35-g11-nested");
+            std::fs::create_dir_all(&nested).unwrap();
+            let repo = git2::Repository::init(&nested).expect("init the nested repository");
+            repo.config().unwrap().set_str("core.fsmonitor", "./payload").unwrap();
+            let cwd = fuigo_paths::AbsPathBuf::new(session_dir.clone()).unwrap();
+            let (gateway_tx, mut gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+            let asks: std::rc::Rc<std::cell::RefCell<Vec<acp::RequestPermissionRequest>>> = Default::default();
+            let recorded = std::rc::Rc::clone(&asks);
+            tokio::task::spawn_local(async move {
+                while let Some(message) = gateway_rx.recv().await {
+                    if let fuigo_acp_lib::AcpClientMessage::RequestPermission(args) = message {
+                        recorded.borrow_mut().push(args.request.clone());
+                        let _ = args.response_tx.send(Ok(acp::RequestPermissionResponse::new(
+                            acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                                acp::PermissionOptionId::new("allow-once"),
+                            )),
+                        )));
+                    }
+                }
+            });
+            let (handle, _events) = fuigo_workspace::permission::spawn_permission_manager(
+                actor.session_info.id.clone(),
+                fuigo_acp_lib::AcpAgentGatewaySender::new(gateway_tx),
+                cwd,
+                fuigo_workspace::permission::ClientType::Generic,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+            );
+            actor.permissions = handle;
+            let tool = |id: &str| fuigo_tools::registry::types::ToolConfig::from_id(id.to_owned());
+            *actor.agent.borrow_mut() = test_agent_with_tools(vec![tool("OpenCode:bash")]).await;
+            let here = prepare(&actor, "bash", r#"{"command":"git status","description":"u35"}"#).await;
+            assert!(here.approved_without_grant, "the session directory is clean: the read-only lists approve it");
+            assert!(asks.borrow().is_empty(), "the session-directory call did not ask");
+            let call = ToolCallResponse {
+                id: "call-2".to_owned(),
+                kind: "function".to_owned(),
+                function: crate::sampling::types::ToolCallFunction::new(
+                    "bash",
+                    r#"{"command":"git status","description":"u35","workdir":"u35-g11-nested"}"#,
+                ),
+            };
+            let mut deferred = Vec::new();
+            let nested = tokio::time::timeout(Duration::from_secs(10), actor.prepare_tool_call(call, &mut deferred))
+                .await
+                .expect("the asked call resolves once the client answers")
+                .expect("prepare_tool_call must not error")
+                .unwrap_or_else(|blocked| panic!("the answered call must be prepared, got {blocked:?}"));
+            assert!(!nested.approved_without_grant, "the user's answer approved it");
+            let asks = asks.borrow();
+            assert_eq!(asks.len(), 1, "the nested repository's config runs a program: the call asks");
+            let asked = serde_json::to_string(&asks[0]).unwrap();
+            assert!(asked.contains("git status") && asked.contains(r#""toolCallId":"call-2""#), "{asked}");
+        })
+        .await;
+}

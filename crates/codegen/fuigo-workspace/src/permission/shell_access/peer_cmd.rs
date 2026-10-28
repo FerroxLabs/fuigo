@@ -127,7 +127,7 @@ pub(super) fn peer_command_targets(program: &str, inner: &[String], out: &mut Co
         "source" | "." | "eval" => out.unpinned(),
         "xargs" | "find" => {
             if launched_commands(program, inner).into_iter().any(launched_writer)
-                || (program == "find" && inner.iter().any(|w| w == "-delete"))
+                || (program == "find" && inner.iter().any(|w| w == "-delete" || w == "-rm"))
             {
                 out.unpinned();
             }

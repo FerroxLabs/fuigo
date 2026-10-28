@@ -484,6 +484,8 @@ pub(crate) mod hub_ask_reason {
     pub(crate) const SEARCH_COVERS_ASK: &str = "the search would read files an ask rule covers";
     pub(crate) const DEFAULT_PROMPT: &str =
         "the local policy would prompt for it and FUIGO_HITL_PERMISSION_LIVE is set";
+    /// u35 t1: a shell command that starts in a folder that is not trusted.
+    pub(crate) const UNTRUSTED_FOLDER: &str = "it starts in a folder that is not trusted";
 }
 
 /// What the workspace's local permission policy says about one hub-routed access (P173).
@@ -496,9 +498,14 @@ pub(crate) enum HubPolicyVerdict {
 }
 
 /// The local state a hub-routed call is judged against.
+#[derive(Clone, Copy)]
 pub(crate) struct HubPolicyContext<'a> {
     pub(crate) policy: Option<&'a crate::permission::policy::CompiledPolicy>,
     pub(crate) prompt_policy: crate::permission::types::PromptPolicy,
+    /// u35 t1 (design d2 §3.4, §4.3): the policy without any project tier, and its prompt policy, for a shell command
+    /// whose folder is not trusted.
+    pub(crate) base_policy: Option<&'a crate::permission::policy::CompiledPolicy>,
+    pub(crate) base_prompt_policy: crate::permission::types::PromptPolicy,
     /// The session's real working directory (path rules and relative paths anchor here).
     pub(crate) cwd: &'a std::path::Path,
     /// The toolset's display cwd ([`fuigo_tools::types::resources::DisplayCwd`]), which the tools resolve model paths
@@ -632,9 +639,14 @@ pub(crate) fn hub_policy_verdict(
     access: &AccessKind,
     ctx: &HubPolicyContext<'_>,
 ) -> HubPolicyVerdict {
-    let verdict = hub_access_verdict(access, ctx);
+    hub_policy_judged(access, ctx).0
+}
+
+/// [`hub_policy_verdict`], with whether an allow was given without a grant (u35 g9, see [`hub_access_judged`]).
+fn hub_policy_judged(access: &AccessKind, ctx: &HubPolicyContext<'_>) -> (HubPolicyVerdict, bool) {
+    let (verdict, without_grant) = hub_access_judged(access, ctx);
     let AccessKind::Grep { path, glob } = access else {
-        return verdict;
+        return (verdict, without_grant);
     };
     // The search root as the tool resolves it is judged too, not only the literal argument (Grok #1).
     let roots = hub_search_roots(path.as_deref(), ctx);
@@ -643,12 +655,12 @@ pub(crate) fn hub_policy_verdict(
             path: Some(root.to_string_lossy().into_owned()),
             glob: glob.clone(),
         };
-        stricter(verdict, hub_access_verdict(&resolved, ctx))
+        stricter(verdict, hub_access_judged(&resolved, ctx).0)
     });
     // A root that only needs approval still has its files walked: a denied descendant must refuse the search, or
     // approving the prompt would release it (Grok r2).
     if !ctx.walk_searches || matches!(verdict, HubPolicyVerdict::Deny(_)) {
-        return verdict;
+        return (verdict, without_grant);
     }
     let walked = roots
         .iter()
@@ -659,7 +671,7 @@ pub(crate) fn hub_policy_verdict(
         HubPolicyVerdict::Ask(reason) => settle_prompt_policy(reason, ctx),
         other => other,
     };
-    stricter(verdict, walked)
+    (stricter(verdict, walked), without_grant)
 }
 
 /// An explicit need for approval under `prompt_policy`: dontAsk refuses, bypassPermissions allows (as locally).
@@ -674,7 +686,63 @@ fn settle_prompt_policy(reason: &'static str, ctx: &HubPolicyContext<'_>) -> Hub
     }
 }
 
-fn hub_access_verdict(access: &AccessKind, ctx: &HubPolicyContext<'_>) -> HubPolicyVerdict {
+/// u35 g9: the verdict for one access, and for an allow whether it was given without a grant: the local check found
+/// nothing that needs approval and no allow rule covers the access (the read-only lists), or it left the access to
+/// the hub side's agent. Always-approve, an allow rule, `bypassPermissions` and the sandbox card are grants or
+/// overrides (`false`). An approval the hub prompt settles is the user's answer and is not an allow here.
+fn hub_access_judged(access: &AccessKind, ctx: &HubPolicyContext<'_>) -> (HubPolicyVerdict, bool) {
+    // u35 t1 (design d2 §4.3): a shell command is judged on the folder trust of the directory it starts in (u35 t3: a
+    // folder it names does not count), read from this host's own trust store, never from the message.
+    if let AccessKind::Bash(cmd) = access
+        && let crate::folder_trust::CommandTrust::Untrusted(reason) =
+            crate::permission::run_dirs::run_dirs_trust(&[ctx.cwd.to_path_buf()])
+    {
+        let base = HubPolicyContext { policy: ctx.base_policy, prompt_policy: ctx.base_prompt_policy, ..*ctx };
+        return hub_untrusted_bash_judged(cmd, access, &base, &reason);
+    }
+    hub_access_judged_in_trusted(access, ctx)
+}
+
+/// u35 t1 (design d2 §4.3): [`hub_access_judged`] for a shell command whose folder is not trusted, under the policy
+/// without any project tier. Always-approve, an allow rule that covers it (under the floors) and a user
+/// `bypassPermissions` run it; otherwise the user is asked (never left to the hub side's agent, never the sandbox
+/// card), and dontAsk refuses with the folder-trust text. Nothing the folder configures runs to judge it.
+fn hub_untrusted_bash_judged(
+    cmd: &str,
+    access: &AccessKind,
+    ctx: &HubPolicyContext<'_>,
+    reason: &crate::folder_trust::UntrustedReason,
+) -> (HubPolicyVerdict, bool) {
+    use crate::permission::types::{Decision, PromptPolicy};
+    let preflight = crate::permission::gate_preflight::GatePreflight::evaluate(ctx.policy, access, ctx.cwd, false);
+    let decision = preflight.policy_decision();
+    if let Some(Decision::Reject(reason) | Decision::PolicyDeny(reason)) = &decision {
+        return (HubPolicyVerdict::Deny(reason.clone()), true);
+    }
+    let protected = crate::permission::manager::hub_protected_target(access, ctx.cwd).is_some();
+    let ask = |ctx: &HubPolicyContext<'_>| match ctx.prompt_policy {
+        PromptPolicy::Deny => HubPolicyVerdict::Deny(crate::folder_trust::untrusted_command_refusal(reason)),
+        PromptPolicy::Allow => HubPolicyVerdict::Allow,
+        PromptPolicy::Ask | PromptPolicy::Auto => HubPolicyVerdict::Ask(hub_ask_reason::UNTRUSTED_FOLDER),
+    };
+    if preflight.shell_forced_prompt() || protected {
+        return (ask(ctx), false);
+    }
+    if ctx.yolo {
+        return (HubPolicyVerdict::Allow, false);
+    }
+    if preflight.policy_forced_prompt() {
+        return (ask(ctx), false);
+    }
+    let policy_allows = matches!(decision, Some(Decision::Allow));
+    if !crate::permission::manager::hub_untrusted_bash_needs_prompt(cmd, ctx.policy, policy_allows, ctx.cwd) {
+        return (HubPolicyVerdict::Allow, false);
+    }
+    (ask(ctx), false)
+}
+
+/// [`hub_access_judged`] for every access but a shell command whose folder is not trusted.
+fn hub_access_judged_in_trusted(access: &AccessKind, ctx: &HubPolicyContext<'_>) -> (HubPolicyVerdict, bool) {
     use crate::permission::types::{Decision, PromptPolicy};
     const DONT_ASK: &str = "denied by prompt policy (tool not pre-approved)";
     use crate::permission::gate_preflight::{EditTargetSpellings, GatePreflight};
@@ -715,14 +783,14 @@ fn hub_access_verdict(access: &AccessKind, ctx: &HubPolicyContext<'_>) -> HubPol
     };
     let decision = preflight.policy_decision();
     if let Some(Decision::Reject(reason) | Decision::PolicyDeny(reason)) = &decision {
-        return HubPolicyVerdict::Deny(reason.clone());
+        return (HubPolicyVerdict::Deny(reason.clone()), true);
     }
     let explicit_ask = if preflight.shell_forced_prompt() {
         Some(hub_ask_reason::SHELL_GATE)
     } else if protected {
         Some(hub_ask_reason::PROTECTED_PATH)
     } else if ctx.yolo {
-        return HubPolicyVerdict::Allow;
+        return (HubPolicyVerdict::Allow, false);
     } else if preflight.policy_forced_prompt() {
         Some(hub_ask_reason::ASK_RULE)
     } else if matches!(access, AccessKind::Tool(name) if !crate::permission::manager::is_auto_allowed_tool(name))
@@ -733,7 +801,7 @@ fn hub_access_verdict(access: &AccessKind, ctx: &HubPolicyContext<'_>) -> HubPol
         None
     };
     if let Some(reason) = explicit_ask {
-        return settle_prompt_policy(reason, ctx);
+        return (settle_prompt_policy(reason, ctx), false);
     }
     let policy_allows = matches!(decision, Some(Decision::Allow));
     let default_prompt = crate::permission::manager::hub_default_prompt(
@@ -744,20 +812,21 @@ fn hub_access_verdict(access: &AccessKind, ctx: &HubPolicyContext<'_>) -> HubPol
         ctx.sandbox_cover,
     );
     if !default_prompt.needs {
-        return HubPolicyVerdict::Allow;
+        return (HubPolicyVerdict::Allow, !policy_allows);
     }
     match ctx.prompt_policy {
         // dontAsk refuses what would need approval; the sandbox card is not an approval, so it refuses still.
-        PromptPolicy::Deny => HubPolicyVerdict::Deny(DONT_ASK.to_owned()),
-        PromptPolicy::Allow => HubPolicyVerdict::Allow,
+        PromptPolicy::Deny => (HubPolicyVerdict::Deny(DONT_ASK.to_owned()), false),
+        PromptPolicy::Allow => (HubPolicyVerdict::Allow, false),
         PromptPolicy::Ask | PromptPolicy::Auto if ctx.default_prompts => {
             if crate::permission::card_replaces(&default_prompt.causes, ctx.sandbox_cover).is_some() {
-                HubPolicyVerdict::Allow
+                (HubPolicyVerdict::Allow, false)
             } else {
-                HubPolicyVerdict::Ask(hub_ask_reason::DEFAULT_PROMPT)
+                (HubPolicyVerdict::Ask(hub_ask_reason::DEFAULT_PROMPT), false)
             }
         }
-        PromptPolicy::Ask | PromptPolicy::Auto => HubPolicyVerdict::Allow,
+        // Left to the hub side's agent: nothing here judged this environment.
+        PromptPolicy::Ask | PromptPolicy::Auto => (HubPolicyVerdict::Allow, true),
     }
 }
 
@@ -769,6 +838,9 @@ pub(crate) struct HubCallVerdict {
     /// Every access that needs approval (reason, index), each asked for on its own, deduplicated: approving one
     /// target never releases another (Astra r3 H).
     pub(crate) asks: Vec<(&'static str, usize)>,
+    /// u35 g9: some access was allowed without a grant ([`hub_access_judged`]), so the call carries
+    /// `ApprovedWithoutGrant(true)` to the shell runner. Accesses the hub prompt settles do not count: the user answered.
+    pub(crate) approved_without_grant: bool,
 }
 
 pub(crate) fn hub_policy_verdict_all(
@@ -777,12 +849,15 @@ pub(crate) fn hub_policy_verdict_all(
 ) -> HubCallVerdict {
     let mut asks: Vec<(&'static str, usize)> = Vec::new();
     let mut asked: Vec<String> = Vec::new();
+    let mut approved_without_grant = false;
     for (i, access) in accesses.iter().enumerate() {
-        match hub_policy_verdict(access, ctx) {
+        let (verdict, without_grant) = hub_policy_judged(access, ctx);
+        match verdict {
             HubPolicyVerdict::Deny(reason) => {
                 return HubCallVerdict {
                     denied: Some((reason, i)),
                     asks: Vec::new(),
+                    approved_without_grant: true,
                 };
             }
             HubPolicyVerdict::Ask(reason) => {
@@ -792,10 +867,38 @@ pub(crate) fn hub_policy_verdict_all(
                     asks.push((reason, i));
                 }
             }
-            HubPolicyVerdict::Allow => {}
+            HubPolicyVerdict::Allow => approved_without_grant |= without_grant,
         }
     }
-    HubCallVerdict { denied: None, asks }
+    HubCallVerdict { denied: None, asks, approved_without_grant }
+}
+
+/// u35 g11 / t4b: one hub-routed call judged in every directory it starts in (the session cwd, and a bash `workdir`,
+/// judged as well as, never instead of, it), each by `verdict_in`: the first refusal refuses the call, and every ask
+/// is asked once. u35 t4b (Grok r3): the call carries "approved without a grant" only when every one of those
+/// directories is trusted. In one that is not, a shell command runs only on a grant or the user's answer, so that, not
+/// another directory's read-only allow, approved it, and the shell runner must not refuse it afterwards.
+pub(crate) fn hub_verdict_over_run_dirs(
+    run_dirs: &[std::path::PathBuf],
+    mut verdict_in: impl FnMut(&std::path::Path) -> HubCallVerdict,
+) -> HubCallVerdict {
+    let mut merged = HubCallVerdict { denied: None, asks: Vec::new(), approved_without_grant: false };
+    for dir in run_dirs {
+        let verdict = verdict_in(dir);
+        if verdict.denied.is_some() {
+            return verdict;
+        }
+        merged.approved_without_grant |= verdict.approved_without_grant;
+        for ask in verdict.asks {
+            if !merged.asks.iter().any(|(_, i)| *i == ask.1) {
+                merged.asks.push(ask);
+            }
+        }
+    }
+    if !crate::permission::run_dirs::run_dirs_trust(run_dirs).is_trusted() {
+        merged.approved_without_grant = false;
+    }
+    merged
 }
 
 /// Astra r3 G/J: a content search under a permitted root reads every file below it. Walk what ripgrep would search
@@ -894,7 +997,7 @@ pub(crate) async fn settle_hub_asks(
     tool_call_id: &str,
     tool_name: &str,
 ) -> Result<(), fuigo_tool_runtime::ToolError> {
-    settle_hub_asks_caused(transport, asks, accesses, prompt_accesses, tool_call_id, tool_name)
+    settle_hub_asks_caused(transport, asks, accesses, prompt_accesses, tool_call_id, tool_name, None)
         .await
         .map_err(|(e, _)| e)
 }
@@ -907,10 +1010,17 @@ pub(crate) async fn settle_hub_asks_caused(
     prompt_accesses: &[AccessKind],
     tool_call_id: &str,
     tool_name: &str,
+    cwd: Option<&std::path::Path>,
 ) -> Result<(), (fuigo_tool_runtime::ToolError, DenialCause)> {
     for &(reason, index) in asks {
         let prompt_access = prompt_accesses.get(index).unwrap_or(&accesses[index]);
-        settle_hub_ask_caused(transport, prompt_access, tool_call_id, tool_name, reason).await?;
+        // u35 g9 (Fable r8 Low): a command asked about because of the environment names the variable, as the local
+        // prompt does.
+        let note = match (&accesses[index], cwd) {
+            (AccessKind::Bash(cmd), Some(cwd)) => crate::permission::manager::env_steering_of(cmd, cwd),
+            _ => None,
+        };
+        settle_hub_ask_noted(transport, prompt_access, tool_call_id, tool_name, reason, note).await?;
     }
     Ok(())
 }
@@ -945,6 +1055,18 @@ pub(crate) async fn settle_hub_ask_caused(
     tool_name: &str,
     reason: &str,
 ) -> Result<(), (fuigo_tool_runtime::ToolError, DenialCause)> {
+    settle_hub_ask_noted(transport, access, tool_call_id, tool_name, reason, None).await
+}
+
+/// [`settle_hub_ask_caused`], the prompt naming `env_var` when the environment is why it asks.
+async fn settle_hub_ask_noted(
+    transport: Option<&dyn PermissionHookTransport>,
+    access: &AccessKind,
+    tool_call_id: &str,
+    tool_name: &str,
+    reason: &str,
+    env_var: Option<&str>,
+) -> Result<(), (fuigo_tool_runtime::ToolError, DenialCause)> {
     use fuigo_tool_runtime::{ToolError, ToolErrorKind};
     let Some(transport) = transport else {
         tracing::warn!(
@@ -962,7 +1084,7 @@ pub(crate) async fn settle_hub_ask_caused(
             DenialCause::NotShown,
         ));
     };
-    let outcome = request_permission_via_hub(transport, access, tool_call_id, None).await;
+    let outcome = request_permission_via_hub_noted(transport, access, tool_call_id, None, env_var).await;
     if prompt_outcome_allows(&outcome) {
         return Ok(());
     }
@@ -998,7 +1120,28 @@ pub async fn request_permission_via_hub(
     tool_call_id: &str,
     hook_ask: Option<&HookAsk>,
 ) -> PromptOutcome {
-    let payload = build_permission_payload(access, tool_call_id, hook_ask);
+    request_permission_via_hub_noted(transport, access, tool_call_id, hook_ask, None).await
+}
+
+/// u35 g9 (Fable r8 Low): the hub prompt's description names the environment variable the command asks because of
+/// (`GIT_ASKPASS` from an editor terminal), as the local prompt's title does.
+pub(crate) fn with_env_steering_description(mut payload: Value, env_var: Option<&str>) -> Value {
+    if let (Some(var), Some(Value::String(description))) =
+        (env_var, payload.as_object_mut().and_then(|map| map.get_mut("description")))
+    {
+        description.push_str(&format!(" (asks because of {var} in your environment)"));
+    }
+    payload
+}
+
+async fn request_permission_via_hub_noted(
+    transport: &dyn PermissionHookTransport,
+    access: &AccessKind,
+    tool_call_id: &str,
+    hook_ask: Option<&HookAsk>,
+    env_var: Option<&str>,
+) -> PromptOutcome {
+    let payload = with_env_steering_description(build_permission_payload(access, tool_call_id, hook_ask), env_var);
     match transport.request_permission(payload).await {
         Ok(reply) => match reply_to_outcome(&reply) {
             PromptOutcome::AllowAlways if matches!(access, AccessKind::Edit(_)) => {
@@ -1368,6 +1511,8 @@ mod tests {
         HubPolicyContext {
             policy,
             prompt_policy: crate::permission::types::PromptPolicy::Ask,
+            base_policy: policy,
+            base_prompt_policy: crate::permission::types::PromptPolicy::Ask,
             cwd,
             display_cwd: None,
             yolo,
@@ -1975,9 +2120,96 @@ mod tests {
             hub_policy_verdict_all(&[ok], &c),
             HubCallVerdict {
                 denied: None,
-                asks: Vec::new()
+                asks: Vec::new(),
+                approved_without_grant: true,
             }
         );
+    }
+
+    /// u35 g9 (Fable r8 High, hub path): a hub-routed call carries whether it was approved without a grant. A command
+    /// the read-only lists approve carries `true`, so the shell runner judges its environment; one approved by
+    /// always-approve, an allow rule, `bypassPermissions` or the sandbox card carries `false` and is never refused for
+    /// its environment.
+    #[test]
+    fn u35_g9_hub_approval_carries_whether_a_grant_approved() {
+        use crate::permission::types::PromptPolicy;
+        let dir = tempfile::tempdir().unwrap();
+        let ls = [AccessKind::Bash("ls -la".to_owned())];
+        let lists = hub_policy_verdict_all(&ls, &ctx(None, dir.path(), false, false));
+        assert!(lists.denied.is_none() && lists.asks.is_empty() && lists.approved_without_grant, "{lists:?}");
+        let yolo = hub_policy_verdict_all(&ls, &ctx(None, dir.path(), true, false));
+        assert!(yolo.asks.is_empty() && !yolo.approved_without_grant, "always-approve: {yolo:?}");
+        let catch_all = compiled("[permission]\nallow = [\"Bash\"]\n");
+        let rule = hub_policy_verdict_all(&ls, &ctx(Some(&catch_all), dir.path(), false, true));
+        assert!(rule.asks.is_empty() && !rule.approved_without_grant, "allow rule: {rule:?}");
+        let mut bypass = ctx(None, dir.path(), false, true);
+        bypass.prompt_policy = PromptPolicy::Allow;
+        let rm = [AccessKind::Bash("rm -rf build".to_owned())];
+        let bypassed = hub_policy_verdict_all(&rm, &bypass);
+        assert!(bypassed.asks.is_empty() && !bypassed.approved_without_grant, "bypassPermissions: {bypassed:?}");
+        // An access the hub prompt settles is the user's answer: it does not make the call carry `true`.
+        let asked = hub_policy_verdict_all(&rm, &ctx(None, dir.path(), false, true));
+        assert!(!asked.asks.is_empty() && !asked.approved_without_grant, "asked: {asked:?}");
+    }
+
+    /// u35 t4b (Grok r3 Medium): a hub call whose session cwd R is trusted and whose `workdir` U is not. `ls` asks
+    /// (judged in U), and the call does not carry "approved without a grant" from R's read-only allow: the user's answer
+    /// approved it, so the shell runner, which refuses an ungranted command outside a trusted folder, lets it run. A
+    /// call whose every directory is trusted still carries it (the runner still judges its environment).
+    #[test]
+    fn u35_t4b_hub_workdir_outside_a_trusted_folder_asks_and_the_answer_runs_it() {
+        let (r_tmp, u_tmp) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let r = dunce::canonicalize(r_tmp.path()).unwrap();
+        let u = dunce::canonicalize(u_tmp.path()).unwrap();
+        std::fs::create_dir(r.join("sub")).unwrap();
+        let _trust = crate::folder_trust::TestFolderTrust::only(&[r.as_path()]);
+        let ls = [AccessKind::Bash("ls".to_owned())];
+        let judged = |dirs: &[std::path::PathBuf]| {
+            hub_verdict_over_run_dirs(dirs, |dir| hub_policy_verdict_all(&ls, &ctx(None, dir, false, true)))
+        };
+        let split = judged(&[r.clone(), u.clone()]);
+        assert!(split.denied.is_none() && !split.asks.is_empty(), "workdir U asks: {split:?}");
+        assert!(!split.approved_without_grant, "the answer approves it, not R's read-only allow: {split:?}");
+        assert!(
+            !crate::permission::manager::runner_trust_judge("ls", &[u.as_path(), r.as_path()]),
+            "premise: the runner refuses an ungranted command in U"
+        );
+        let trusted = judged(&[r.clone(), r.join("sub")]);
+        assert!(trusted.denied.is_none() && trusted.asks.is_empty() && trusted.approved_without_grant, "{trusted:?}");
+    }
+
+    /// u35 g9 (Fable r8 Low): a hub prompt for a command asked about because of the environment names the variable,
+    /// as the local prompt does; a command the environment does not steer gets no note.
+    #[test]
+    fn u35_g9_hub_prompt_names_the_steering_variable() {
+        let dir = tempfile::tempdir().unwrap();
+        let description = |extra: (&str, &str), cmd: &str| {
+            let env = vec![
+                ("PATH".to_owned(), "/usr/local/bin:/usr/bin".to_owned()),
+                (extra.0.to_owned(), extra.1.to_owned()),
+            ];
+            let transport = StubTransport { reply: Ok(serde_json::json!({"outcome": "approve"})), seen: Mutex::new(None) };
+            let accesses = [AccessKind::Bash(cmd.to_owned())];
+            crate::permission::exec_risk::with_env_view(&env, || {
+                futures::executor::block_on(settle_hub_asks_caused(
+                    Some(&transport),
+                    &[(hub_ask_reason::SHELL_GATE, 0)],
+                    &accesses,
+                    &accesses,
+                    "tc-env",
+                    "bash",
+                    Some(dir.path()),
+                ))
+            })
+            .expect("approved");
+            let seen = transport.seen.lock().unwrap().clone().expect("prompt sent");
+            seen["description"].as_str().unwrap_or_default().to_owned()
+        };
+        let steered = description(("LD_PRELOAD", "payload"), "cat README.md");
+        assert!(steered.contains("LD_PRELOAD"), "{steered}");
+        // A variable that only steers other programs adds no note.
+        let plain = description(("GIT_SSH_COMMAND", "/usr/bin/ssh -4"), "ls -la");
+        assert!(!plain.contains("in your environment"), "{plain}");
     }
 
     #[tokio::test]
@@ -2267,5 +2499,49 @@ mod tests {
         assert!(denied("/abs/proj/secrets/**", "secrets/key_material.txt"));
         assert!(denied("/abs/proj/secrets/**", "/abs/proj/secrets/key_material.txt"));
         assert!(!denied("/abs/other/**", "secrets/key_material.txt"));
+    }
+
+    /// u35 t1 T8 (design d2 §4.3): a hub-routed shell command whose folder is not trusted needs the user's grant: the
+    /// read-only lists and "left to the hub side's agent" ask, the session folder's project rule is not used for it,
+    /// dontAsk refuses with the folder-trust text; always-approve and the user's own rule run it.
+    #[test]
+    fn t8_hub_command_outside_a_trusted_folder_needs_a_grant() {
+        use crate::permission::types::PromptPolicy;
+        let trusted = tempfile::tempdir().unwrap();
+        git2::Repository::init(trusted.path()).unwrap();
+        let untrusted = tempfile::tempdir().unwrap();
+        git2::Repository::init(untrusted.path()).unwrap();
+        let _trust = crate::folder_trust::TestFolderTrust::only(&[trusted.path()]);
+        let project = compiled("[permission]\nallow = [\"Bash(make *)\"]\n");
+        let ls = AccessKind::Bash("ls".into());
+        let make = AccessKind::Bash("make all".into());
+        let untrusted_ask = HubPolicyVerdict::Ask(hub_ask_reason::UNTRUSTED_FOLDER);
+        // In the trusted folder: r14 (the project rule, the read-only lists).
+        let mut here = ctx(Some(&project), trusted.path(), false, true);
+        here.base_policy = None;
+        assert_eq!(hub_policy_verdict(&make, &here), HubPolicyVerdict::Allow);
+        assert_eq!(hub_policy_verdict(&ls, &here), HubPolicyVerdict::Allow);
+        // The same call judged in an untrusted folder: no project rule, no read-only list.
+        let mut there = ctx(Some(&project), untrusted.path(), false, true);
+        there.base_policy = None;
+        assert_eq!(hub_policy_verdict(&make, &there), untrusted_ask);
+        assert_eq!(hub_policy_verdict(&ls, &there), untrusted_ask);
+        // u35 t3: a folder the command names does not change the answer: judged by the folder it starts in.
+        let cd_there = AccessKind::Bash(format!("cd {} && ls", untrusted.path().display()));
+        assert_ne!(hub_policy_verdict(&cd_there, &here), untrusted_ask, "judged by the trusted start folder (R2)");
+        let cd_here = AccessKind::Bash(format!("cd {} && ls", trusted.path().display()));
+        assert_eq!(hub_policy_verdict(&cd_here, &there), untrusted_ask, "an untrusted start folder still asks");
+        // Left to the hub side's agent (no live prompts): asks instead.
+        let (verdict, without_grant) = hub_policy_judged(&ls, &ctx(None, untrusted.path(), false, false));
+        assert_eq!((verdict, without_grant), (untrusted_ask, false));
+        // dontAsk refuses with the folder-trust text.
+        let mut dont_ask = ctx(None, untrusted.path(), false, true);
+        dont_ask.base_prompt_policy = PromptPolicy::Deny;
+        let HubPolicyVerdict::Deny(text) = hub_policy_verdict(&ls, &dont_ask) else { panic!("dontAsk refuses") };
+        assert!(text.contains("trusted_folders"), "{text}");
+        // Always-approve and the user's own rule (in the base policy) run it.
+        assert_eq!(hub_policy_verdict(&ls, &ctx(None, untrusted.path(), true, true)), HubPolicyVerdict::Allow);
+        let user = ctx(Some(&project), untrusted.path(), false, true);
+        assert_eq!(hub_policy_verdict(&make, &user), HubPolicyVerdict::Allow, "the user's own rule");
     }
 }

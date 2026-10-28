@@ -114,9 +114,10 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
 
         #[allow(clippy::disallowed_methods)]
         // The child is killed via its process group on timeout; an unreapable (D-state) child is abandoned to the runtime's orphan reaper
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| TerminalError::Other(format!("Failed to start shell: {e}")))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            fuigo_tools::util::spawn::ShellSpawnFailure::for_command("local_terminal", cmd.as_std(), &e).log();
+            TerminalError::Other(format!("Failed to start shell: {e}"))
+        })?;
 
         // Own the whole tree, not just the direct shell
         // On timeout the group is killed so grandchildren can't keep running (and can't hold the output pipes open past the kill)
@@ -218,6 +219,28 @@ mod tests {
             stream: false,
             output_file: None,
         }
+    }
+
+    /// u35-winenv r2 (Fable/Grok Low): a `!` command whose shell fails to start is logged at THIS
+    /// site with the program, the OS error and the PATH flag, and no environment value.
+    #[tokio::test]
+    async fn failed_bang_spawn_is_logged_at_the_local_terminal_site() {
+        let capture = fuigo_tools::util::spawn::capture::CaptureEvents::default();
+        let _guard = tracing::subscriber::set_default(capture.clone());
+        let mut request = make_request("true");
+        let missing_cwd = std::env::temp_dir().join("u35-winenv-r2-missing-cwd").join("gone");
+        request.cwd = AbsPathBuf::new(missing_cwd).unwrap();
+        request.env.insert("U35_CANARY".into(), "u35-canary-env-value".into());
+        assert!(LocalTerminalRunner.run(request).await.is_err());
+        let logged = capture.text();
+        let line = logged
+            .lines()
+            .find(|line| line.contains("site=\"local_terminal\""))
+            .unwrap_or_else(|| panic!("no spawn-failure event: {logged}"));
+        assert!(line.starts_with("WARN:"), "{line}");
+        assert!(line.contains("os_error=Some("), "{line}");
+        assert!(line.contains("path_set="), "{line}");
+        assert!(!logged.contains("u35-canary"), "an environment value was logged: {logged}");
     }
 
     /// Verify that `detach_from_tty` prevents child processes from opening `/dev/tty`.

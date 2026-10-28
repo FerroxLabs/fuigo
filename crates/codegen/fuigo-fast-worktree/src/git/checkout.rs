@@ -16,7 +16,9 @@ pub const GIT_AUTH_SUPPRESSION_ENVS: [(&str, &str); 4] = [
     ("GIT_SSH_COMMAND", "ssh -o BatchMode=yes"),
 ];
 
-/// Git command with auth/LFS/SSH prompt suppression and `--no-optional-locks`.
+/// Git command with auth/LFS/SSH prompt suppression and `--no-optional-locks`, with no folder-trust judgement and no
+/// working directory: test fixtures only. Production code uses [`git_command_judged`] / [`git_command_for_source`].
+#[cfg(test)]
 pub(crate) fn git_command() -> Command {
     let mut cmd = Command::new("git");
     fuigo_tty_utils::remove_fuigo_owned_secrets(&mut cmd);
@@ -30,11 +32,76 @@ pub(crate) fn git_command() -> Command {
     cmd
 }
 
+/// The Fuigo worktree directory `run_dir` belongs to (`<fuigo home>/worktrees`, or the pool next to it); the first when
+/// `run_dir` is in neither. With no resolvable Fuigo home, `run_dir` itself (so only the source-repository case passes).
+pub(crate) fn managed_root_for(run_dir: &Path) -> PathBuf {
+    let Some(home) = fuigo_dirs::resolve_fuigo_home() else {
+        return run_dir.to_path_buf();
+    };
+    // The same two directories `discovery::managed_worktree_roots` names (that module is metadata-gated).
+    let roots = [home.join("worktrees"), home.join("worktree_pool")];
+    let physical = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let run = physical(run_dir);
+    roots
+        .iter()
+        .find(|root| run.starts_with(physical(root)))
+        .unwrap_or(&roots[0])
+        .clone()
+}
+
+/// The repository a linked worktree at `worktree` belongs to, read from its `.git` file
+/// (`gitdir: <repo>/.git/worktrees/<name>`). `None` when `worktree` is not a linked worktree.
+fn linked_worktree_source(worktree: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(worktree.join(".git")).ok()?;
+    let line = text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim();
+    let gitdir = {
+        let p = PathBuf::from(line);
+        if p.is_relative() { worktree.join(p) } else { p }
+    };
+    let worktrees = gitdir.parent()?;
+    if worktrees.file_name()? != "worktrees" {
+        return None;
+    }
+    let common = worktrees.parent()?;
+    if common.file_name().is_some_and(|n| n == ".git") {
+        common.parent().map(Path::to_path_buf)
+    } else {
+        Some(common.to_path_buf())
+    }
+}
+
+/// Judged git that runs in `run_dir`, for an operation on a Fuigo-managed worktree: judged on the repository the
+/// worktree belongs to (so a fresh managed worktree is not refused for being unknown), with the run directory confined
+/// to that repository or the Fuigo worktree directory. A directory that is neither (a worktree the user made elsewhere)
+/// is judged on itself. A refusal is the "trust this folder first" error and starts nothing.
+///
+/// u35 t3 (Astra r2 H3): a standalone worktree Fuigo is still creating has its own `.git` directory and no database
+/// record yet; while its [`fuigo_tty_utils::WorktreeCreation`] lives it is judged on the source it is built from.
+pub(crate) fn git_command_judged(run_dir: &Path) -> Result<Command, fuigo_tty_utils::RepoUntrusted> {
+    match linked_worktree_source(run_dir).or_else(|| fuigo_tty_utils::worktree_creation_source(run_dir)) {
+        Some(source) => git_command_for_source(&source, run_dir),
+        None => fuigo_tty_utils::git_command_in(run_dir),
+    }
+}
+
+/// [`git_command_judged`] when the caller already knows the source repository. A refused source stands: it is never
+/// retried as git in `run_dir` (u35 t2, Grok 2). Only a run directory outside the source and the Fuigo worktree
+/// directory (a worktree the user made elsewhere) is judged on itself instead.
+pub(crate) fn git_command_for_source(
+    source_repo: &Path,
+    run_dir: &Path,
+) -> Result<Command, fuigo_tty_utils::RepoUntrusted> {
+    if !fuigo_tty_utils::repo_exec_allowed(source_repo) {
+        return Err(fuigo_tty_utils::RepoUntrusted { dir: source_repo.to_path_buf() });
+    }
+    fuigo_tty_utils::git_command_for_worktree(source_repo, run_dir, &managed_root_for(run_dir))
+        .or_else(|_| fuigo_tty_utils::git_command_in(run_dir))
+}
+
 /// Run `git reset --hard <target>` (defaults to `HEAD`). Blocking.
 pub(crate) fn git_reset_hard_command(worktree_path: &Path, target: Option<&str>) -> Result<()> {
     let tgt = target.unwrap_or("HEAD");
-    let output = git_command()
-        .current_dir(worktree_path)
+    let output = git_command_judged(worktree_path)?
         .args(["reset", "--hard", tgt])
         .output()
         .context("failed to run git reset")?;
@@ -60,8 +127,7 @@ pub(crate) fn git_reset_hard_command(worktree_path: &Path, target: Option<&str>)
 /// This is a blocking operation.
 pub(crate) fn git_clean_fd(worktree_path: &Path, include_ignored: bool) -> Result<()> {
     let flags = if include_ignored { "-fdx" } else { "-fd" };
-    let output = git_command()
-        .current_dir(worktree_path)
+    let output = git_command_judged(worktree_path)?
         .args(["clean", flags])
         .output()
         .context("failed to run git clean")?;
@@ -80,8 +146,7 @@ pub(crate) fn git_clean_fd(worktree_path: &Path, include_ignored: bool) -> Resul
 /// Run `git checkout <ref>`. Blocking.
 pub(crate) fn checkout_ref(worktree_path: &Path, git_ref: &str) -> Result<()> {
     let git_ref = crate::git::operand::validate_git_ref(git_ref).map_err(|e| anyhow::anyhow!(e))?;
-    let output = git_command()
-        .current_dir(worktree_path)
+    let output = git_command_judged(worktree_path)?
         .args(["checkout", git_ref, "--"])
         .output()
         .context("failed to run git checkout")?;
@@ -105,9 +170,8 @@ pub(crate) fn checkout_ref(worktree_path: &Path, git_ref: &str) -> Result<()> {
 /// Blocking.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn diff_index_dirty(worktree_path: &Path, cached: bool) -> Result<bool> {
-    let mut cmd = git_command();
-    cmd.current_dir(worktree_path)
-        .args(["diff-index", "--quiet"]);
+    let mut cmd = git_command_judged(worktree_path)?;
+    cmd.args(["diff-index", "--quiet"]);
     if cached {
         cmd.arg("--cached");
     }
@@ -146,8 +210,8 @@ pub(crate) fn has_staged_changes(worktree_path: &Path) -> Result<bool> {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn worktree_at_ref(worktree_path: &Path, git_ref: &str) -> Result<bool> {
     let rev = |what: &str| -> Option<String> {
-        let out = git_command()
-            .current_dir(worktree_path)
+        let out = git_command_judged(worktree_path)
+            .ok()?
             .args(["rev-parse", "--verify", "--quiet", what])
             .output()
             .ok()?;
@@ -192,11 +256,10 @@ fn git_capture_in<S: AsRef<OsStr>>(
     args: &[S],
     envs: &[(&str, &OsStr)],
 ) -> Result<String> {
-    let mut cmd = git_command();
+    let mut cmd = git_command_judged(worktree_path)?;
     // Same reason the probes do it: the snapshot runs unattended, and the
     // hooks are the worktree's own.
-    cmd.current_dir(worktree_path)
-        .args(["-c", &format!("core.hooksPath={NO_HOOKS}")])
+    cmd.args(["-c", &format!("core.hooksPath={NO_HOOKS}")])
         .args(args);
     // Before the caller's own, which is what carries the scratch index: the
     // snapshot has to read the configuration the gate's probes read, or the

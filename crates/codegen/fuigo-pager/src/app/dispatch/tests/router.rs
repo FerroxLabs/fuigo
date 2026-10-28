@@ -446,6 +446,7 @@ fn resume_foreign_session_stashes_prompt_behind_trust_and_auth() {
         } else {
             app.trust_state = TrustState::Pending {
                 workspace: std::path::PathBuf::from("/work/proj"),
+                upgrade: false,
             };
         }
         seed_foreign_resume_hint(&mut app, tool);

@@ -557,6 +557,11 @@ impl WorkspaceHandle {
         tool_defs_enabled: bool,
         identity: crate::upload::environment::WorkspaceIdentity,
     ) -> WorkspaceResult<Self> {
+        // u35 g10 (Fable r9 Medium): the shell runner's check for calls approved without a grant is installed with
+        // the workspace, so a hub-routed call is judged even in a process where no permission manager was spawned.
+        crate::permission::install_runner_env_judge();
+        // u35 t1: and its folder-trust check, likewise.
+        crate::permission::install_runner_trust_judge();
         let sessions = std::collections::HashMap::new();
         let local_registry = fuigo_computer_hub_sdk::LocalRegistry::new();
         let capacity = if config.event_buffer_capacity == 0 {
@@ -679,7 +684,6 @@ impl WorkspaceHandle {
             hub_handle: tokio::sync::Mutex::new(None),
             hub_tools_snapshot: arc_swap::ArcSwap::new(Arc::new(vec![])),
             hub_config: config.hub_config,
-            project_permissions_trusted: config.project_lsp_trusted,
             auth_provider: config.auth_provider,
             activity_notify_handle: arc_swap::ArcSwap::new(Arc::new(None)),
             client_ext_sink: arc_swap::ArcSwap::new(Arc::new(None)),
@@ -5064,6 +5068,9 @@ impl WorkspaceHandle {
     /// Tools are dispatched in-process via a [`LocalRegistry`]; no hub connection needed.
     /// Each tool is resolved dynamically from the session's live [`FinalizedToolset`] at call time.
     /// Tool config hot-reloads (via `update_tool_config()`) therefore take effect automatically.
+    ///
+    /// u35 g10 (Fable r9 Low): no permission check runs here, so a call carries no approval flag and the shell runner
+    /// judges it as approved without a grant (a granted command is refused under a steering environment).
     pub fn create_local_harness(
         &self,
         session_id: &str,

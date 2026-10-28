@@ -25,6 +25,13 @@ on:
       # with the gate never running -- the gap C-R6-3 closed for the manifests, in the step after it.
       - 'crates/codegen/fuigo-sampler/**'
       - 'crates/codegen/fuigo-test-support/**'
+      # 1.0.35: Windows shell detection (absolute shell paths from PATH and the OS system
+      # directory) and the Windows env-name rules behind the credential filter.
+      - 'crates/codegen/fuigo-config/src/shell.rs'
+      - 'crates/codegen/fuigo-config/Cargo.toml'
+      - 'crates/codegen/fuigo-secrets/src/child_env.rs'
+      - 'crates/codegen/fuigo-shell-terminal/src/pty_session.rs'
+      - 'crates/codegen/fuigo-tools/src/util/spawn.rs'
       - '.github/workflows/windows-process-check.yml'
   pull_request:
     paths:
@@ -47,6 +54,13 @@ on:
       # with the gate never running -- the gap C-R6-3 closed for the manifests, in the step after it.
       - 'crates/codegen/fuigo-sampler/**'
       - 'crates/codegen/fuigo-test-support/**'
+      # 1.0.35: Windows shell detection (absolute shell paths from PATH and the OS system
+      # directory) and the Windows env-name rules behind the credential filter.
+      - 'crates/codegen/fuigo-config/src/shell.rs'
+      - 'crates/codegen/fuigo-config/Cargo.toml'
+      - 'crates/codegen/fuigo-secrets/src/child_env.rs'
+      - 'crates/codegen/fuigo-shell-terminal/src/pty_session.rs'
+      - 'crates/codegen/fuigo-tools/src/util/spawn.rs'
       - '.github/workflows/windows-process-check.yml'
   workflow_dispatch:
 permissions:
@@ -134,6 +148,24 @@ jobs:
           grep -F 'leader::tests::leader_spawn_gets_its_own_windowless_console ... ok' process-receipts/fuigo-shell-leader.log
           grep -F 'leader::tests::leader_spawn_flags_match_the_windows_crate ... ok' process-receipts/fuigo-shell-leader.log
           grep -F 'agent::app::tests::the_stdio_agent_entrypoint_arms_the_parent_death_binding ... ok' process-receipts/fuigo-shell-leader.log
+      # 1.0.35: the Windows shell detection the bash tool, terminals, hooks and the status line
+      # spawn through (stored absolute path, system directory from the OS), and the Windows
+      # env-name equality the credential filter uses. Linux runs the pure helpers; the
+      # cfg(not(unix)) consumers below run only here.
+      - name: fuigo-config shell detection and fuigo-secrets env-name tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p process-receipts
+          cargo test --locked -p fuigo-config --lib shell:: 2>&1 | tee process-receipts/fuigo-config-shell.log
+          grep -E '^test result: ok\. [1-9][0-9]* passed; 0 failed' process-receipts/fuigo-config-shell.log
+          grep -F 'shell::tests::invocation_for_spawns_the_stored_absolute_path ... ok' process-receipts/fuigo-config-shell.log
+          grep -F 'shell::tests::system_directories_come_from_the_os ... ok' process-receipts/fuigo-config-shell.log
+          cargo test --locked -p fuigo-secrets --lib child_env:: 2>&1 | tee process-receipts/fuigo-secrets-child-env.log
+          grep -E '^test result: ok\. [1-9][0-9]* passed; 0 failed' process-receipts/fuigo-secrets-child-env.log
+          # A failed PTY spawn reports the Windows error code (portable-pty returns it only as text).
+          cargo test --locked -p fuigo-shell-terminal --lib pty_session::tests::failed_pty_spawn_reports_the_os_error_code 2>&1 | tee process-receipts/fuigo-shell-terminal-pty-spawn.log
+          grep -F 'pty_session::tests::failed_pty_spawn_reports_the_os_error_code ... ok' process-receipts/fuigo-shell-terminal-pty-spawn.log
       # The FluxRouter cache opt-out, proved on Windows. Added at release-branch
       # level for 1.0.18: it belongs to no cluster, and until now the ONLY run of
       # this file was the release gate in release.yml, i.e. after the tag. The

@@ -19,6 +19,25 @@ pub(super) fn session_mode_id_from_prompt_mode(prompt_mode: PromptMode) -> acp::
     };
     acp::SessionModeId::new(mode.as_id())
 }
+/// The mode id a client is told the session is in (`session/new`, `session/load`, `session/resume` `modes.current`).
+///
+/// One calculation for every advertiser: `plan` while the plan tracker is on (`Pending` or `Active`); `ExitPending` means
+/// the user already switched plan off mid-turn and a non-plan update went out, so it falls through. Otherwise `ask` for
+/// the Ask prompt mode, else `default`. `browser_use` runs in the Agent prompt mode, so it is reported as `default`.
+pub(crate) fn advertised_mode_id(
+    plan: crate::session::plan_mode::PlanModeState,
+    prompt: PromptMode,
+) -> &'static str {
+    use crate::session::plan_mode::PlanModeState;
+    use fuigo_tools::types::SessionMode;
+    if matches!(plan, PlanModeState::Pending | PlanModeState::Active) {
+        return SessionMode::Plan.as_id();
+    }
+    if prompt == PromptMode::Ask {
+        return SessionMode::Ask.as_id();
+    }
+    SessionMode::Default.as_id()
+}
 /// Pass-through twin: no toolset in this build carries a plan-gated tool.
 pub(super) fn filter_cursor_tools_by_plan_mode(
     defs: Vec<ToolDefinition>,
@@ -43,6 +62,16 @@ impl SessionActor {
     }
     pub(super) async fn handle_session_mode(&self, session_mode_id: acp::SessionModeId) {
         use fuigo_tools::types::SessionMode;
+        // The ACP edge refuses these; an id from persisted state or an internal sender is ignored the same way, leaving
+        // the prompt mode, the plan tracker and the agent untouched.
+        if !fuigo_tools::types::is_supported_mode_id(session_mode_id.0.as_ref()) {
+            tracing::warn!(
+                session_id = %self.session_info.id.0,
+                mode_id = ?session_mode_id.0,
+                "ignoring unsupported session mode id"
+            );
+            return;
+        }
         let prompt_mode = prompt_mode_from_session_mode_id(&session_mode_id);
         *self.current_prompt_mode.lock() = prompt_mode;
         let mode = SessionMode::from_id(session_mode_id.0.as_ref());
@@ -90,7 +119,6 @@ impl SessionActor {
             let turn_in_flight = self.state.lock().await.running_task.is_some();
             self.plan_mode.lock().user_exit(turn_in_flight);
             self.persist_plan_mode_state();
-            self.enqueue_current_mode_update(session_mode_id.clone());
             tracing::info!(
                 session_id = %self.session_info.id.0,
                 new_mode = %session_mode_id.0,
@@ -112,6 +140,12 @@ impl SessionActor {
             )
             .in_scope(|| {});
         }
+        // Every accepted non-plan switch is reported, as the id attach advertises (`browser_use` runs in Agent prompt
+        // mode, so it is reported as `default`).
+        self.enqueue_current_mode_update(acp::SessionModeId::new(advertised_mode_id(
+            crate::session::plan_mode::PlanModeState::Inactive,
+            prompt_mode,
+        )));
         let agent_def = match session_mode_id.0.as_ref() {
             "browser_use" => Some(AgentDefinition::browser_use()),
             name => {

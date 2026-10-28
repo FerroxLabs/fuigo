@@ -516,10 +516,6 @@ pub fn build_agent_list(
             definition: def,
         });
     }
-    let subagent_names: Vec<String> = BuiltinAgentName::subagent_variants()
-        .iter()
-        .map(|b| b.definition().name)
-        .collect();
     let discovered = fuigo_agent::discovery::discover(cwd);
     fn scope_priority(scope: AgentScope) -> usize {
         match scope {
@@ -530,11 +526,8 @@ pub fn build_agent_list(
         }
     }
     for def in discovered {
-        if def.scope == AgentScope::BuiltIn {
-            continue;
-        }
-        let is_subagent_name = subagent_names.contains(&def.name);
-        if is_subagent_name && def.scope != AgentScope::Project {
+        // No file of any scope replaces a built-in row: the row set equals what name resolution can call.
+        if def.scope == AgentScope::BuiltIn || def.name.parse::<BuiltinAgentName>().is_ok() {
             continue;
         }
         if let Some(pos) = entries.iter().position(|e| e.name == def.name) {
@@ -633,16 +626,31 @@ pub fn merge_persona_lists(bundle: &BundleState, cwd: &Path) -> Vec<PersonaDetai
         (ConfigFileScope::User, fuigo_home.join("personas")),
     ];
     for (scope, dir) in dirs {
-        append_local_personas_in_dir(&dir, scope, &mut list, &mut names);
+        // Project personas are listed the way the runtime loads them: contained to the pinned project folder, so a
+        // folder or file linked outside it is not shown (it would not load either).
+        let contain = match scope {
+            ConfigFileScope::Project => match fuigo_dirs::contained::PinnedRoot::pin(cwd) {
+                Ok(root) => Some(root),
+                Err(_) => continue,
+            },
+            _ => None,
+        };
+        append_local_personas_in_dir(&dir, scope, contain.as_ref(), &mut list, &mut names);
     }
     list
 }
 fn append_local_personas_in_dir(
     dir: &Path,
     scope: ConfigFileScope,
+    contain: Option<&fuigo_dirs::contained::PinnedRoot>,
     list: &mut Vec<PersonaDetail>,
     names: &mut std::collections::HashSet<String>,
 ) {
+    if let Some(root) = contain
+        && !fuigo_dirs::contained::is_contained(dir, root)
+    {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -662,7 +670,7 @@ fn append_local_personas_in_dir(
             continue;
         }
         let path = dir.join(format!("{name}.toml"));
-        if let Some(detail) = persona_detail_from_local_file(&path, &name, scope) {
+        if let Some(detail) = persona_detail_from_local_file(&path, &name, scope, contain) {
             names.insert(name);
             list.push(detail);
         }
@@ -672,8 +680,9 @@ fn persona_detail_from_local_file(
     path: &Path,
     name: &str,
     scope: ConfigFileScope,
+    contain: Option<&fuigo_dirs::contained::PinnedRoot>,
 ) -> Option<PersonaDetail> {
-    let content = std::fs::read_to_string(path).ok()?;
+    let content = fuigo_dirs::contained::read_scoped(path, contain).ok()?;
     let table: toml::Value = toml::from_str(&content).ok()?;
     let desc = table
         .get("description")
@@ -2908,6 +2917,22 @@ mod tests {
         assert!(!list[1].has_inputs);
         assert!(list[1].has_outputs);
     }
+    /// The /agents persona list shows project personas only as the runtime loads them: a persona file linked outside
+    /// the project folder is not listed; an in-project one is.
+    #[cfg(unix)]
+    #[test]
+    fn m5_project_persona_linked_outside_is_not_listed() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let dir = project.path().join(".fuigo/personas");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(outside.path().join("x.toml"), "description = \"outside\"\n").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("x.toml"), dir.join("m5linked.toml")).unwrap();
+        std::fs::write(dir.join("m5inside.toml"), "description = \"inside\"\n").unwrap();
+        let list = merge_persona_lists(&BundleState::default(), project.path());
+        assert!(list.iter().any(|p| p.name == "m5inside"));
+        assert!(!list.iter().any(|p| p.name == "m5linked"), "outside-linked persona must not be listed");
+    }
     #[test]
     fn build_persona_list_fallback_to_names() {
         let bundle = BundleState {
@@ -3707,6 +3732,46 @@ mod tests {
             .find(|e| e.name == "my-plugin:reviewer")
             .expect("disabled plugin agent stays visible in the list");
         assert!(!entry.enabled);
+    }
+
+    /// u35 (A2): no agent file of any scope replaces a built-in row or appears as a custom row under a built-in name,
+    /// whether the built-in name is its file stem or its frontmatter `name`.
+    #[test]
+    #[serial_test::serial]
+    fn build_agent_list_never_lets_a_file_replace_a_builtin_row() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        use std::str::FromStr;
+        let home = fuigo_test_support::FuigoHome::new();
+        let agents = home.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        for (stem, name) in [
+            ("fuigo-build", "fuigo-build"),
+            ("browser-use", "browser-use"),
+            ("codex", "codex"),
+            ("notes", "explore"),
+        ] {
+            std::fs::write(
+                agents.join(format!("{stem}.md")),
+                format!("---\nname: {name}\ndescription: user {stem}\n---\nbody\n"),
+            )
+            .unwrap();
+        }
+        let cwd = tempfile::tempdir().unwrap();
+        let entries = build_agent_list(cwd.path(), &HashMap::new(), None);
+        for entry in &entries {
+            if BuiltinAgentName::from_str(&entry.name).is_ok() {
+                assert!(entry.is_builtin, "{} row must be the built-in", entry.name);
+                assert_eq!(entry.scope, AgentScope::BuiltIn, "{}", entry.name);
+            }
+        }
+        assert!(
+            !entries.iter().any(|e| e.name == "codex" && !e.is_builtin),
+            "no custom codex row"
+        );
+        assert!(!entries.iter().any(|e| e.name == "notes"));
+        assert!(!entries.iter().any(|e| e.description.starts_with("user ")));
     }
 
     // ---- P49: config writes leave the input thread ----

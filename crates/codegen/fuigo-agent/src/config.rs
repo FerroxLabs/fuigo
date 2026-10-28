@@ -640,7 +640,7 @@ where
 /// Eliminates string matching in discovery and ensures built-in names are defined in exactly one place.
 ///
 /// `subagent_variants()` returns only the 3 that are exposed to the LLM via the `TaskTool` description.
-/// The remaining 6 are top-level agent profiles resolvable by name but not advertised as subagent types.
+/// The remaining 9 are top-level agent profiles resolvable by name but not advertised as subagent types.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter, AsRefStr, IntoStaticStr,
 )]
@@ -662,7 +662,7 @@ pub enum BuiltinAgentName {
 }
 /// Resolves via `BuiltinAgentName` and delegates to [`AgentDefinition::is_strict_harness`].
 /// Unknown names return `false`: never enforce a harness we can't verify.
-/// Callers that already hold an `AgentDefinition` should call that method directly so project-level shadowing is honored.
+/// No agent file of any scope shadows a built-in name, so this agrees with the definition a by-name lookup returns.
 pub fn is_strict_harness_agent_type(name: &str) -> bool {
     use std::str::FromStr;
     BuiltinAgentName::from_str(name)
@@ -1115,6 +1115,86 @@ impl MemoryScope {
         }
     }
 }
+impl MemoryScope {
+    /// The agent's `MEMORY.md` for injection into its prompt, with the memory directory it was resolved from.
+    ///
+    /// Project and local memory (`<project>/.fuigo/agent-memory{,-local}/<name>/MEMORY.md`) are repository content:
+    /// the file actually read must lie inside the project folder (pinned here), checked on the opened file, so a
+    /// `MEMORY.md` or memory folder linked elsewhere on the machine is not injected. User memory (`~/.fuigo`) follows
+    /// links. `None` when there is no readable memory file.
+    pub fn read_memory_md(
+        self,
+        agent_name: &str,
+        project_cwd: &std::path::Path,
+    ) -> Option<(std::path::PathBuf, String)> {
+        let resolved = self.resolve_dir(agent_name, project_cwd);
+        let memory_md = resolved.path.join("MEMORY.md");
+        if !memory_md.is_file() {
+            return None;
+        }
+        let root = if resolved.is_project_scoped {
+            Some(fuigo_dirs::contained::PinnedRoot::pin(project_cwd).ok()?)
+        } else {
+            None
+        };
+        match fuigo_dirs::contained::read_scoped(&memory_md, root.as_ref()) {
+            Ok(content) => Some((resolved.path, content)),
+            Err(e) => {
+                tracing::debug!(path = %memory_md.display(), error = %e, "agent memory not loaded");
+                None
+            }
+        }
+    }
+
+    /// Whether the agent's memory directory may be used as its memory store.
+    ///
+    /// User memory is always allowed. Project and local memory must resolve inside the project folder (pinned here):
+    /// the deepest existing part of `<project>/.fuigo/agent-memory{,-local}/<name>` is resolved, so a memory folder (or
+    /// any parent of it) linked elsewhere on the machine is refused and the child gets no persistent memory, rather
+    /// than reading and writing a store outside the repository.
+    pub fn memory_dir_contained(self, agent_name: &str, project_cwd: &std::path::Path) -> bool {
+        let resolved = self.resolve_dir(agent_name, project_cwd);
+        if !resolved.is_project_scoped {
+            return true;
+        }
+        let Ok(root) = fuigo_dirs::contained::PinnedRoot::pin(project_cwd) else {
+            return false;
+        };
+        // Static links checked into the repo: the leaf and every existing folder between the project and the leaf must be
+        // real folders, not links (even links that stay inside the project).
+        let mut link_probe = resolved.path.as_path();
+        while link_probe != project_cwd && link_probe.starts_with(project_cwd) {
+            if std::fs::symlink_metadata(link_probe).is_ok_and(|m| m.file_type().is_symlink()) {
+                tracing::warn!(
+                    dir = %link_probe.display(),
+                    "agent memory path is a link; memory disabled for this agent"
+                );
+                return false;
+            }
+            match link_probe.parent() {
+                Some(parent) => link_probe = parent,
+                None => break,
+            }
+        }
+        let mut probe = resolved.path.as_path();
+        loop {
+            if std::fs::symlink_metadata(probe).is_ok() {
+                let contained = fuigo_dirs::contained::is_contained(probe, &root);
+                if !contained {
+                    tracing::warn!(
+                        dir = %resolved.path.display(),
+                        "agent memory folder links outside the project; memory disabled for this agent"
+                    );
+                }
+                return contained;
+            }
+            match probe.parent() {
+                Some(parent) => probe = parent,
+                None => return false,
+            }
+        }
+    }
+}
 /// Hooks config is validated as an object at parse time; semantic parsing is deferred to spawn.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct HooksConfig(pub serde_json::Map<String, serde_json::Value>);
@@ -1254,8 +1334,19 @@ impl AgentDefinition {
     /// System prompt body goes here...
     /// ```
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, AgentBuildError> {
+        Self::from_file_in(path, None)
+    }
+
+    /// [`Self::from_file`] for a plugin or project agent: the file actually read must lie inside `root` (the plugin
+    /// folder, or the folder the project agents dir belongs to), checked on the opened handle so a link swapped in
+    /// after discovery is refused. `None` reads as [`Self::from_file`] does (user scope, links followed).
+    pub fn from_file_in(
+        path: impl AsRef<Path>,
+        root: Option<&fuigo_dirs::contained::PinnedRoot>,
+    ) -> Result<Self, AgentBuildError> {
         let path = path.as_ref();
-        let content = std::fs::read_to_string(path).map_err(AgentBuildError::IoError)?;
+        let content =
+            fuigo_dirs::contained::read_scoped(path, root).map_err(AgentBuildError::IoError)?;
         let mut def = Self::parse(&content)?;
         def.source_path = Some(path.to_path_buf());
         def.plugin_name = None;
@@ -1264,8 +1355,17 @@ impl AgentDefinition {
     }
     /// Parse only YAML frontmatter from an agent file, leaving prompt_body unset.
     pub fn from_file_frontmatter_only(path: impl AsRef<Path>) -> Result<Self, AgentBuildError> {
+        Self::from_file_frontmatter_only_in(path, None)
+    }
+
+    /// [`Self::from_file_frontmatter_only`] held to `root` as [`Self::from_file_in`] is.
+    pub fn from_file_frontmatter_only_in(
+        path: impl AsRef<Path>,
+        root: Option<&fuigo_dirs::contained::PinnedRoot>,
+    ) -> Result<Self, AgentBuildError> {
         let path = path.as_ref();
-        let content = std::fs::read_to_string(path).map_err(AgentBuildError::IoError)?;
+        let content =
+            fuigo_dirs::contained::read_scoped(path, root).map_err(AgentBuildError::IoError)?;
         let trimmed = content.trim_start();
         if !trimmed.starts_with("---") {
             return Err(AgentBuildError::ParseError(
@@ -1279,8 +1379,11 @@ impl AgentDefinition {
         let yaml_content = &after_opening[..closing_idx];
         let mut def: AgentDefinition = serde_yaml::from_str(yaml_content)
             .map_err(|e| AgentBuildError::ParseError(e.to_string()))?;
+        // Metadata only: nothing from an unread body or a prompt override survives (prompt mode, user template).
         def.prompt_body = None;
         def.system_prompt = TemplateOverride::None;
+        def.prompt_mode = default_prompt_mode();
+        def.user_message_template = UserMessageTemplate::Default;
         def.source_path = Some(path.to_path_buf());
         def.plugin_name = None;
         def.scope = Self::scope_from_path(path);
@@ -1629,6 +1732,74 @@ impl AgentDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Astra r4 High: project and local agent memory (`<project>/.fuigo/agent-memory{,-local}/<name>/MEMORY.md`) is
+    /// read only from inside the project: a linked `MEMORY.md` or memory folder pointing elsewhere is not injected;
+    /// an in-project link still is.
+    #[cfg(unix)]
+    #[test]
+    fn m5_project_agent_memory_linked_outside_the_project_is_not_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let project = base.join("project");
+        std::fs::create_dir_all(base.join("outside").join("mem")).unwrap();
+        std::fs::write(base.join("outside").join("mem").join("MEMORY.md"), "TOP SECRET").unwrap();
+        // File link: project memory.
+        let mem = project.join(".fuigo").join("agent-memory").join("rev");
+        std::fs::create_dir_all(&mem).unwrap();
+        std::os::unix::fs::symlink(base.join("outside").join("mem").join("MEMORY.md"), mem.join("MEMORY.md")).unwrap();
+        assert!(MemoryScope::Project.read_memory_md("rev", &project).is_none());
+        // Directory link: local memory.
+        let local = project.join(".fuigo").join("agent-memory-local");
+        std::fs::create_dir_all(&local).unwrap();
+        std::os::unix::fs::symlink(base.join("outside").join("mem"), local.join("rev")).unwrap();
+        assert!(MemoryScope::Local.read_memory_md("rev", &project).is_none());
+        // An in-project link still reads.
+        std::fs::write(project.join("notes.md"), "own notes").unwrap();
+        std::fs::remove_file(mem.join("MEMORY.md")).unwrap();
+        std::os::unix::fs::symlink(project.join("notes.md"), mem.join("MEMORY.md")).unwrap();
+        let (_, content) = MemoryScope::Project.read_memory_md("rev", &project).unwrap();
+        assert_eq!(content, "own notes");
+    }
+
+    /// The memory store itself (not just `MEMORY.md`) is refused when the project memory folder, or a parent of it,
+    /// links outside the project; an absent folder inside the project and user memory stay allowed.
+    #[cfg(unix)]
+    #[test]
+    fn m5_project_memory_store_linked_outside_the_project_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let project = base.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        assert!(MemoryScope::Project.memory_dir_contained("rev", &project), "not created yet: allowed");
+        std::fs::create_dir_all(project.join(".fuigo")).unwrap();
+        std::os::unix::fs::symlink(base.join("outside"), project.join(".fuigo").join("agent-memory")).unwrap();
+        assert!(!MemoryScope::Project.memory_dir_contained("rev", &project));
+        std::fs::create_dir_all(base.join("outside").join("rev")).unwrap();
+        assert!(!MemoryScope::Project.memory_dir_contained("rev", &project));
+        assert!(MemoryScope::Local.memory_dir_contained("rev", &project));
+        assert!(MemoryScope::User.memory_dir_contained("rev", &project));
+    }
+
+    /// A link at the memory leaf or an existing ancestor is refused even when it points inside the project.
+    #[cfg(unix)]
+    #[test]
+    fn m6_project_memory_store_leaf_or_ancestor_link_inside_project_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = dunce::canonicalize(tmp.path()).unwrap().join("project");
+        std::fs::create_dir_all(project.join(".fuigo").join("agent-memory")).unwrap();
+        std::fs::create_dir_all(project.join("real")).unwrap();
+        let leaf = project.join(".fuigo").join("agent-memory").join("rev");
+        std::os::unix::fs::symlink(project.join("real"), &leaf).unwrap();
+        assert!(!MemoryScope::Project.memory_dir_contained("rev", &project), "leaf link");
+        std::fs::remove_file(&leaf).unwrap();
+        assert!(MemoryScope::Project.memory_dir_contained("rev", &project), "plain dir allowed");
+        std::fs::remove_dir(project.join(".fuigo").join("agent-memory")).unwrap();
+        std::os::unix::fs::symlink(project.join("real"), project.join(".fuigo").join("agent-memory")).unwrap();
+        assert!(!MemoryScope::Project.memory_dir_contained("rev", &project), "ancestor link");
+    }
+
     /// Pins the `spawn_subagent` rename to the shared predicate.
     #[test]
     fn task_tool_rename_matches_task_tool_id_predicate() {

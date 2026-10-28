@@ -224,7 +224,8 @@ fn p175_item4c_replace_refs_do_not_hide_the_real_tree() {
 /// The listing child's guards: the lazy-fetch switch, an empty protocol allow-list and every transport denied.
 #[test]
 fn p175_item2_hardened_command_denies_lazy_fetch_and_every_transport() {
-    let command = crate::permission::branch_switch::hardened_git_command(Path::new("/"), &["rev-parse", "HEAD"]);
+    let command = crate::permission::branch_switch::hardened_git_command(Path::new("/"), &["rev-parse", "HEAD"])
+        .expect("test builds allow without a judge");
     let env: Vec<(String, Option<String>)> = command
         .get_envs()
         .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
@@ -500,13 +501,18 @@ fn p175_r2_readonly_listing_forms_do_not_unsettle() {
         "git branch", "git branch --list", "git branch -l", "git branch -a", "git branch -r", "git branch -v", "git branch -vv",
         "git branch -avv", "git branch --show-current", "git branch --contains HEAD", "git branch --merged", "git branch --no-merged main",
         "git branch --format='%(refname)'", "git branch --format '%(refname)'", "git branch --sort=-committerdate", "git branch --color",
-        "git branch --list feat*", "git tag", "git tag -l", "git tag --list", "git tag -n", "git tag -n5", "git tag -l v*",
+        "git tag", "git tag -l", "git tag --list", "git tag -n", "git tag -n5",
         "git reflog", "git reflog show",
         "git reflog main", "git reflog show main", "git reflog HEAD", "git reflog show HEAD", "git tag -ln", "git tag -nl",
-        "git tag -ln5", "git tag -n3", "git tag -ln v*",
+        "git tag -ln5", "git tag -n3",
     ] {
         let cmd = format!("{pre} && git checkout feature");
         assert!(!hub_prompts(&cmd, dir), "{cmd}");
+    }
+    // u35 r1: an unquoted glob in a git pattern position is not a modelled path operand, so it asks on its own.
+    for pre in ["git branch --list feat*", "git tag -l v*", "git tag -ln v*"] {
+        let cmd = format!("{pre} && git checkout feature");
+        assert!(hub_prompts(&cmd, dir), "{cmd}");
     }
 }
 
@@ -947,7 +953,11 @@ fn p175b_r4_ln_cwd_tilde_source_is_the_cwd() {
         &["ln -s ~+/.git /tmp/out && git checkout main", "ln -s ~+/pg /tmp/out && git checkout main"],
         true,
     );
-    assert_rows(repo.path(), &["ln -s ~+/build /tmp/out && git checkout main"], false);
+    // u35 r1: `~+` (and every tilde form other than `~` / `~/x`) is unresolved in the word normaliser, so the plan is
+    // still determined but the request prompts.
+    let cmd = "ln -s ~+/build /tmp/out && git checkout main";
+    assert!(!matches!(plan_with_facts(cmd, repo.path()), crate::permission::branch_switch::BranchSwitchPlan::Undetermined));
+    assert!(prompts_allowing_writers(cmd, repo.path()), "{cmd}");
 }
 
 /// `ln -s .git sub/` makes `sub/.git -> .git`, which resolves to `sub/.git` (not this repository's `.git`): silent.

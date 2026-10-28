@@ -138,9 +138,13 @@ async fn cursor_rule_reminder_for_read_inner(
         )
     };
 
+    // Every rules folder and file must resolve inside the workspace (pinned once per lookup, from the resolved
+    // workspace root): a `.cursor` or `.cursor/rules` link to another tree is not scanned, and each file is read
+    // through a contained open so a file swapped for a link is refused at the read.
+    let pinned_root = fuigo_dirs::contained::PinnedRoot::from_canonical(workspace_root.clone());
     let mut discovered = Vec::new();
     for scope_dir in &dirs_to_scan {
-        discovered.extend(scan_scope_dir(scope_dir).await);
+        discovered.extend(scan_scope_dir(scope_dir, &pinned_root).await);
     }
     let normalized_injected_rule_paths =
         normalize_existing_paths(injected_rule_paths_to_normalize, &workspace_root).await;
@@ -232,12 +236,23 @@ async fn normalize_existing_paths(
     normalized
 }
 
-async fn scan_scope_dir(scope_dir: &Path) -> Vec<ParsedCursorRule> {
+async fn scan_scope_dir(
+    scope_dir: &Path,
+    root: &fuigo_dirs::contained::PinnedRoot,
+) -> Vec<ParsedCursorRule> {
     let rules_dir = scope_dir.join(".cursor").join("rules");
     let Ok(metadata) = tokio::fs::metadata(&rules_dir).await else {
         return Vec::new();
     };
     if !metadata.is_dir() {
+        return Vec::new();
+    }
+    if !fuigo_dirs::contained::is_contained(&rules_dir, root) {
+        tracing::debug!(
+            path = %rules_dir.display(),
+            root = %root.path().display(),
+            "cursor rules folder links outside the workspace; skipping"
+        );
         return Vec::new();
     }
 
@@ -261,7 +276,12 @@ async fn scan_scope_dir(scope_dir: &Path) -> Vec<ParsedCursorRule> {
         files.sort();
         stack.extend(dirs.into_iter().rev());
         for file in files {
-            let Ok(content) = tokio::fs::read_to_string(&file).await else {
+            let (read_file, read_root) = (file.clone(), root.clone());
+            let Ok(Ok(content)) = tokio::task::spawn_blocking(move || {
+                fuigo_dirs::contained::read_contained(&read_file, &read_root)
+            })
+            .await
+            else {
                 continue;
             };
             let full_path = normalize_existing(&file).await;
@@ -664,8 +684,9 @@ mod tests {
         )
         .unwrap();
 
-        let first = scan_scope_dir(root).await;
-        let second = scan_scope_dir(root).await;
+        let pinned = fuigo_dirs::contained::PinnedRoot::pin(root).unwrap();
+        let first = scan_scope_dir(root, &pinned).await;
+        let second = scan_scope_dir(root, &pinned).await;
         let mut rules = Vec::new();
         append_new_rules(&mut rules, first);
         append_new_rules(&mut rules, second);
@@ -747,6 +768,58 @@ mod tests {
             non_matching.is_none(),
             "non-matching parallel read should not receive the rule"
         );
+    }
+
+    /// Astra/Grok/Fable r4: a `.cursor` (or `.cursor/rules`) folder that links outside the workspace is not scanned,
+    /// so its rules never reach tool-read output; a rules folder linked inside the workspace still is.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn m5_cursor_rules_dir_linked_outside_workspace_is_not_read() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("repo");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(outside.join("rules")).unwrap();
+        std::fs::write(
+            outside.join("rules").join("all.mdc"),
+            "---\nglobs: *.rs\nalwaysApply: false\n---\nOUTSIDE RULE",
+        )
+        .unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join(".cursor")).unwrap();
+        std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
+        let out =
+            cursor_rule_reminder_for_read_inner(resources(&root), &root, &root.join("main.rs")).await;
+        assert!(
+            !out.as_deref().is_some_and(|t| t.contains("OUTSIDE RULE")),
+            "an outside rules folder must not be read: {out:?}"
+        );
+
+        // A nested scope dir whose `.cursor/rules` links outside is skipped as well.
+        let sub = root.join("sub");
+        std::fs::create_dir_all(sub.join(".cursor")).unwrap();
+        std::os::unix::fs::symlink(outside.join("rules"), sub.join(".cursor").join("rules")).unwrap();
+        std::fs::write(sub.join("lib.rs"), "\n").unwrap();
+        let out =
+            cursor_rule_reminder_for_read_inner(resources(&root), &root, &sub.join("lib.rs")).await;
+        assert!(!out.as_deref().is_some_and(|t| t.contains("OUTSIDE RULE")), "{out:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn m5_cursor_rules_dir_linked_inside_workspace_is_read() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("shared-rules")).unwrap();
+        std::fs::write(
+            root.join("shared-rules").join("rust.mdc"),
+            "---\nglobs: *.rs\nalwaysApply: false\n---\nINSIDE RULE",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".cursor")).unwrap();
+        std::os::unix::fs::symlink(root.join("shared-rules"), root.join(".cursor").join("rules")).unwrap();
+        std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
+        let out = cursor_rule_reminder_for_read_inner(resources(root), root, &root.join("main.rs")).await;
+        assert!(out.as_deref().is_some_and(|t| t.contains("INSIDE RULE")), "{out:?}");
     }
 
     #[test]

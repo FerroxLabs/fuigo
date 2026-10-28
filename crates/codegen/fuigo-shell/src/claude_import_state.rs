@@ -129,10 +129,21 @@ pub(crate) fn update_import_state_at(
 /// Files that don't exist or can't be read are skipped.
 ///
 /// Paths are sorted before hashing so the result is deterministic regardless of discovery order.
-fn compute_settings_hash(paths: &[PathBuf]) -> String {
+///
+/// With `root`, each file is read contained to that pinned project root: a file linked outside it is skipped (as if absent).
+fn compute_settings_hash(
+    paths: &[PathBuf],
+    root: Option<&fuigo_dirs::contained::PinnedRoot>,
+) -> String {
     let mut existing: Vec<(&PathBuf, Vec<u8>)> = paths
         .iter()
-        .filter_map(|p| std::fs::read(p).ok().map(|content| (p, content)))
+        .filter_map(|p| {
+            let bytes = match root {
+                Some(root) => fuigo_dirs::contained::read_contained_bytes(p, root),
+                None => std::fs::read(p),
+            };
+            bytes.ok().map(|content| (p, content))
+        })
         .collect();
 
     // Sort by path for determinism.
@@ -161,7 +172,7 @@ fn compute_global_hash() -> (String, Vec<PathBuf>) {
         paths.push(home.join(".claude").join("settings.local.json"));
         paths.push(home.join(".claude.json"));
     }
-    let hash = compute_settings_hash(&paths);
+    let hash = compute_settings_hash(&paths, None);
     (hash, paths)
 }
 
@@ -189,9 +200,11 @@ fn compute_project_hash(cwd: &Path) -> (String, Vec<PathBuf>) {
     // Non-existent files are skipped by compute_settings_hash(), so we unconditionally add candidates (avoids a TOCTOU race vs .exists())
     let mut all = project_paths;
     let mut current = cwd.to_path_buf();
+    let mut project_root = cwd.to_path_buf();
     loop {
         all.push(current.join(".mcp.json"));
         if current.join(".git").exists() {
+            project_root = current.clone();
             break;
         }
         match current.parent() {
@@ -200,7 +213,12 @@ fn compute_project_hash(cwd: &Path) -> (String, Vec<PathBuf>) {
         }
     }
 
-    let hash = compute_settings_hash(&all);
+    // Project files are hashed through the contained read, pinned to the project root: a link checked into the repo that
+    // points elsewhere is not hashed. If the root cannot be pinned nothing project-side is hashed.
+    let hash = match fuigo_dirs::contained::PinnedRoot::pin(&project_root) {
+        Ok(root) => compute_settings_hash(&all, Some(&root)),
+        Err(_) => compute_settings_hash(&[], None),
+    };
     (hash, all)
 }
 
@@ -256,12 +274,12 @@ mod tests {
         std::fs::write(&f2, r#"{"env": {"FOO": "bar"}}"#).unwrap();
 
         // Same order.
-        let h1 = compute_settings_hash(&[f1.clone(), f2.clone()]);
-        let h2 = compute_settings_hash(&[f1.clone(), f2.clone()]);
+        let h1 = compute_settings_hash(&[f1.clone(), f2.clone()], None);
+        let h2 = compute_settings_hash(&[f1.clone(), f2.clone()], None);
         assert_eq!(h1, h2, "same order should produce same hash");
 
         // Reversed order produces the same hash (sorted internally)
-        let h3 = compute_settings_hash(&[f2.clone(), f1.clone()]);
+        let h3 = compute_settings_hash(&[f2.clone(), f1.clone()], None);
         assert_eq!(
             h1, h3,
             "reversed order should produce same hash due to sorting"
@@ -275,8 +293,8 @@ mod tests {
         let missing = dir.path().join("does_not_exist.json");
         std::fs::write(&existing, "content").unwrap();
 
-        let h1 = compute_settings_hash(std::slice::from_ref(&existing));
-        let h2 = compute_settings_hash(&[existing.clone(), missing]);
+        let h1 = compute_settings_hash(std::slice::from_ref(&existing), None);
+        let h2 = compute_settings_hash(&[existing.clone(), missing], None);
         assert_eq!(h1, h2, "missing files should be skipped");
     }
 
@@ -286,10 +304,10 @@ mod tests {
         let f = dir.path().join("settings.json");
 
         std::fs::write(&f, "version1").unwrap();
-        let h1 = compute_settings_hash(std::slice::from_ref(&f));
+        let h1 = compute_settings_hash(std::slice::from_ref(&f), None);
 
         std::fs::write(&f, "version2").unwrap();
-        let h2 = compute_settings_hash(std::slice::from_ref(&f));
+        let h2 = compute_settings_hash(std::slice::from_ref(&f), None);
 
         assert_ne!(h1, h2, "different content should produce different hash");
     }
@@ -297,9 +315,26 @@ mod tests {
     #[test]
     fn compute_settings_hash_empty_input() {
         // No paths at all still produces a deterministic hash
-        let h1 = compute_settings_hash(&[]);
-        let h2 = compute_settings_hash(&[]);
+        let h1 = compute_settings_hash(&[], None);
+        let h2 = compute_settings_hash(&[], None);
         assert_eq!(h1, h2, "empty input should produce same hash");
         assert!(h1.starts_with("sha256:"), "hash should have sha256: prefix");
+    }
+
+    /// A project `.mcp.json` linked outside the project does not feed the hash; user-scope paths (root `None`) still follow links.
+    #[cfg(unix)]
+    #[test]
+    fn m6_project_hash_ignores_file_linked_outside_the_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let project = base.join("project");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::write(base.join("secret.json"), "{\"a\":1}").unwrap();
+        std::os::unix::fs::symlink(base.join("secret.json"), project.join(".mcp.json")).unwrap();
+        let path = project.join(".mcp.json");
+        let root = fuigo_dirs::contained::PinnedRoot::pin(&project).unwrap();
+        let contained = compute_settings_hash(std::slice::from_ref(&path), Some(&root));
+        assert_eq!(contained, compute_settings_hash(&[], None), "outside link is not hashed");
+        assert_ne!(contained, compute_settings_hash(std::slice::from_ref(&path), None), "user scope follows links");
     }
 }

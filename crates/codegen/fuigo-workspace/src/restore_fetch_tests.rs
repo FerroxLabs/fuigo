@@ -447,7 +447,8 @@ fn targeted_fetch_args_exact_for_shallow_and_full() {
 #[test]
 fn targeted_fetch_command_argv_matches_args_helper() {
     for is_shallow in [true, false] {
-        let cmd = targeted_fetch_command(Path::new("/repo"), HEAD, is_shallow);
+        let cmd = targeted_fetch_command(Path::new("/repo"), HEAD, is_shallow)
+            .expect("test builds allow without a judge");
         let args: Vec<String> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())

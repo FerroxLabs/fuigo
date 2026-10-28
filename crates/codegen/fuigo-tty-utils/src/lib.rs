@@ -87,6 +87,13 @@ pub const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(2
 pub mod runtime;
 pub mod best_effort_stderr;
 pub mod best_effort_stdout;
+pub mod repo_exec;
+pub use repo_exec::{
+    RepoExecJudge, RepoUntrusted, WorktreeCreation, begin_worktree_creation, direnv_command_in, git_command_at_in,
+    git_command_for_worktree, git_command_global, git_command_in, git_command_locking_for_worktree,
+    git_command_locking_in, git_command_locking_user_invoked, git_command_user_invoked, install_repo_exec_judge,
+    jj_command_in, repo_exec_allowed, repo_exec_judge_installed, worktree_creation_source,
+};
 
 /// Win32 `CreateProcess` creation-flag values, spelled out so a spawn policy can
 /// be computed and pinned by tests on every host (the `windows` crate only
@@ -127,10 +134,12 @@ pub mod win32_creation_flags {
 #[cfg(unix)]
 pub fn detach_from_tty() -> io::Result<()> {
     use nix::errno::Errno;
-    use nix::unistd::{Pid, setpgid, setsid};
+    use nix::unistd::{Pid, getpid, getsid, setpgid, setsid};
 
     match setsid() {
         Ok(_) => Ok(()),
+        // Already detached: a command built detached (the judged git builders) and detached again by its runner.
+        Err(Errno::EPERM) if getsid(None).is_ok_and(|sid| sid == getpid()) => Ok(()),
         Err(Errno::EPERM) => {
             setpgid(Pid::from_raw(0), Pid::from_raw(0))
                 .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
@@ -1156,26 +1165,53 @@ pub fn remove_fuigo_owned_secrets_tokio(cmd: &mut tokio::process::Command) {
     }
 }
 
-/// Git command with auth/LFS/SSH prompt suppression and `--no-optional-locks`.
+/// Git command with auth/LFS/SSH prompt suppression and `--no-optional-locks`, with NO folder-trust judgement and no
+/// working directory: test builds only. Production code uses the judged builders in [`repo_exec`]
+/// ([`git_command_in`] and friends), which take the directory the command runs in.
 ///
 /// Respects `GIT_BIN_PATH` for hermetic git in Bazel test sandboxes.
 ///
 /// `--no-optional-locks` skips *optional* maintenance locks only (for example
 /// `status` refreshing the index). Required locks for the requested operation
 /// are still taken. Prefer this for readers (`status`, `cat-file`, `rev-parse`).
+#[cfg(any(test, feature = "unjudged-repo-exec"))]
 pub fn git_command() -> std::process::Command {
+    git_command_reader_unjudged()
+}
+
+/// Like [`git_command`], but omits `--no-optional-locks` (test builds only; see [`git_command_locking_in`]).
+#[cfg(any(test, feature = "unjudged-repo-exec"))]
+pub fn git_command_locking() -> std::process::Command {
+    git_command_locking_unjudged()
+}
+
+/// Like [`git_command`], but runs the git at `program` (test builds only; see [`git_command_at_in`]).
+#[cfg(any(test, feature = "unjudged-repo-exec"))]
+pub fn git_command_at(program: &std::path::Path) -> std::process::Command {
+    git_command_at_unjudged(program)
+}
+
+/// The reader git command every builder starts from (`--no-optional-locks`); never handed out unjudged in production.
+pub(crate) fn git_command_reader_unjudged() -> std::process::Command {
     let mut cmd = git_command_base();
     cmd.arg("--no-optional-locks");
     cmd
 }
 
-/// Like [`git_command`], but omits `--no-optional-locks`.
-///
-/// Writers such as `fetch` may take optional maintenance locks (packed-refs
-/// refresh, etc.) in addition to required locks. Use this for mutating git
-/// that should not skip those optional locks under concurrent restore.
-pub fn git_command_locking() -> std::process::Command {
+/// The writer git command (optional maintenance locks allowed); never handed out unjudged in production.
+pub(crate) fn git_command_locking_unjudged() -> std::process::Command {
     git_command_base()
+}
+
+/// The git at `program` (an absolute path the caller vetted) instead of `GIT_BIN_PATH` or `git` on `PATH`.
+pub(crate) fn git_command_at_unjudged(program: &std::path::Path) -> std::process::Command {
+    // The same hermetic exec path as `git_command_base` when `program` is the `GIT_BIN_PATH` git.
+    let hermetic = std::env::var_os("GIT_BIN_PATH").is_some_and(|bin| std::path::Path::new(&bin) == program)
+        && program.file_name().is_some_and(|name| name == "git");
+    let exec_path = program.parent().filter(|_| hermetic).map(std::path::Path::to_path_buf);
+    let mut cmd = git_command_from(program.as_os_str(), exec_path);
+    cmd.arg("--no-optional-locks");
+    cmd
 }
 
 fn git_command_base() -> std::process::Command {
@@ -1200,7 +1236,14 @@ fn git_command_base() -> std::process::Command {
         }
         Err(_) => "git".to_string(),
     };
-    let mut cmd = std::process::Command::new(&git);
+    git_command_from(std::ffi::OsStr::new(&git), hermetic_exec_path)
+}
+
+fn git_command_from(
+    git: &std::ffi::OsStr,
+    hermetic_exec_path: Option<std::path::PathBuf>,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(git);
     remove_fuigo_owned_secrets(&mut cmd);
     detach_std_command(&mut cmd);
     cmd.stdin(std::process::Stdio::null());
@@ -1515,6 +1558,16 @@ mod tests {
     /// `cargo test` these must not interleave.
     #[cfg(target_os = "linux")]
     static OOM_SCORE_ADJ_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    #[cfg(unix)]
+    fn a_command_detached_twice_still_starts() {
+        // u35 t1: the judged git builders detach, and their runners detach again.
+        let mut cmd = std::process::Command::new("true");
+        detach_std_command(&mut cmd);
+        detach_std_command(&mut cmd);
+        assert!(cmd.status().expect("a twice-detached command starts").success());
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

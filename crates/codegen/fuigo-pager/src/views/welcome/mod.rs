@@ -876,12 +876,13 @@ pub fn render_welcome(
                     h_margin,
                     params.compact,
                 )
-            } else if let TrustState::Pending { workspace } = params.trust_state {
+            } else if let TrustState::Pending { workspace, upgrade } = params.trust_state {
                 render_welcome_trust(
                     content_area,
                     buf,
                     &theme,
                     workspace,
+                    *upgrade,
                     params.selected,
                     h_margin,
                     params.compact,
@@ -1035,37 +1036,39 @@ fn render_welcome_trust(
     buf: &mut Buffer,
     theme: &Theme,
     workspace: &std::path::Path,
+    upgrade: bool,
     selected: Option<usize>,
     h_margin: u16,
     compact: bool,
 ) -> WelcomeRenderResult {
-    let menu_items = [("y", "Yes, proceed"), ("n", "No, quit")];
-    let lines = vec![
-        Line::from(Span::styled(
-            "Do you trust the contents of this directory?",
-            Style::default().fg(theme.gray_bright),
-        ))
-        .alignment(Alignment::Center),
-        Line::from(Span::styled(
-            workspace.display().to_string(),
-            Style::default().fg(theme.accent_user),
-        ))
-        .alignment(Alignment::Center),
-        Line::default(),
-        // Two lines so the warning never clips at narrow / compact widths (a single ~78-char line would truncate "...posing security risks")
-        Line::from(Span::styled(
-            "Fuigo may run or modify contents in this directory,",
-            Style::default().fg(theme.gray),
-        ))
-        .alignment(Alignment::Center),
-        Line::from(Span::styled(
-            "posing security risks.",
-            Style::default().fg(theme.gray),
-        ))
-        .alignment(Alignment::Center),
-        // Spacer between the warning and the y/n menu.
-        Line::default(),
+    // u35 t1 (design d2 §5.1, §5.2): one question per folder (its repository), for its settings and its commands.
+    let menu_items = [
+        ("y", "Yes, trust this folder"),
+        ("n", "No: don't load its settings, ask before every command"),
+        ("q", "Quit"),
     ];
+    let centered = |text: &str, color| Line::from(Span::styled(text.to_owned(), Style::default().fg(color))).alignment(Alignment::Center);
+    let mut lines = Vec::new();
+    if upgrade {
+        // Two short lines each, so nothing clips at narrow or compact widths.
+        lines.push(centered("Fuigo's folder trust now also covers shell commands.", theme.gray));
+        lines.push(centered("You trusted this folder's settings before; trust now means its", theme.gray));
+        lines.push(centered("settings load AND commands run here without asking each time.", theme.gray));
+        lines.push(Line::default());
+    }
+    lines.push(centered("Do you trust the files in this folder?", theme.gray_bright));
+    lines.push(centered(&workspace.display().to_string(), theme.accent_user));
+    lines.push(centered("(one question per repository; covers its worktrees and submodules)", theme.gray));
+    lines.push(Line::default());
+    if !upgrade {
+        lines.push(centered("Trusting it lets Fuigo use this folder's own settings (MCP and LSP", theme.gray));
+        lines.push(centered("servers, hooks, .envrc, permission rules, instructions, skills) and", theme.gray));
+        lines.push(centered("run shell commands here without asking each time. A folder's files", theme.gray));
+        lines.push(centered("can make those run code, so trust only folders whose contents you", theme.gray));
+        lines.push(centered("would run yourself. Reading, searching and editing work either way.", theme.gray));
+    }
+    // Spacer between the text and the menu.
+    lines.push(Line::default());
 
     let msg_height = lines.len() as u16;
     let menu_height = menu_items.len() as u16;

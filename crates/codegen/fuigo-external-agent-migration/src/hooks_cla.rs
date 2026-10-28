@@ -22,7 +22,17 @@ use super::error::MigrationError;
 /// imported. An unreadable or unparseable file yields nothing.
 #[must_use]
 pub fn extract_hooks_from_settings_file(path: &Path) -> Vec<ImportableItem> {
-    let Ok(content) = std::fs::read_to_string(path) else {
+    extract_hooks_from_settings_file_in(path, None)
+}
+
+/// [`extract_hooks_from_settings_file`] for a project settings file: with `contain` set the file is read only if it
+/// resolves inside the pinned project root, so a `.claude` linked out of the repository imports nothing.
+#[must_use]
+pub fn extract_hooks_from_settings_file_in(
+    path: &Path,
+    contain: Option<&fuigo_dirs::contained::PinnedRoot>,
+) -> Vec<ImportableItem> {
+    let Ok(content) = fuigo_dirs::contained::read_scoped(path, contain) else {
         return Vec::new();
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {

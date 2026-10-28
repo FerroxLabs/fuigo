@@ -1879,8 +1879,9 @@ impl acp::Agent for MvpAgent {
                         Parent::Root,
                         async move {
                             let git_out = |args: &[&str]| -> Option<String> {
-                                fuigo_tty_utils::git_command()
-                                    .current_dir(&cwd_str)
+                                // Untrusted folder: no git runs, the metadata is absent.
+                                fuigo_tty_utils::git_command_in(std::path::Path::new(&cwd_str))
+                                    .ok()?
                                     .args(args)
                                     .output()
                                     .ok()
@@ -1972,11 +1973,10 @@ impl acp::Agent for MvpAgent {
                         turn: i32,
                         cwd: String,
                     ) {
-                        let repo_head_at_end = fuigo_tty_utils::git_command()
-                            .current_dir(&cwd)
-                            .args(["rev-parse", "HEAD"])
-                            .output()
+                        // Untrusted folder: no git runs, the head is absent.
+                        let repo_head_at_end = fuigo_tty_utils::git_command_in(std::path::Path::new(&cwd))
                             .ok()
+                            .and_then(|mut cmd| cmd.args(["rev-parse", "HEAD"]).output().ok())
                             .filter(|o| o.status.success())
                             .map(|o| {
                                 String::from_utf8_lossy(&o.stdout).trim().to_string()
@@ -2376,6 +2376,14 @@ impl acp::Agent for MvpAgent {
         tracing::info!("Received set session mode request {args:?}");
         let handle = self.session_handle_waiting_for_load(&args.session_id).await;
         self.ensure_session_owner(args.meta.as_ref(), "set_mode")?;
+        // Only Fuigo's own mode ids. Anything else used to reach agent discovery as an agent name.
+        if !fuigo_tools::types::is_supported_mode_id(args.mode_id.0.as_ref()) {
+            return Err(crate::acp_error::invalid_params(format!(
+                "unknown session mode id {:?}; expected {}",
+                args.mode_id.0.as_ref(),
+                fuigo_tools::types::SUPPORTED_MODE_IDS.join(", ")
+            )));
+        }
         let (tx, rx) = oneshot::channel();
         if let Some(handle) = handle {
             let _ = handle

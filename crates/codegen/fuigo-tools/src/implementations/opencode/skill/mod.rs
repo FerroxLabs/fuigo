@@ -121,8 +121,7 @@ fn find_skill<'a>(name: &str, skills: &'a [SkillInfo]) -> FindSkillResult<'a> {
 
 /// Load skill content from its SKILL.md file, stripping YAML frontmatter.
 async fn load_skill_content(skill: &SkillInfo) -> Result<String, String> {
-    let path = Path::new(&skill.path);
-    match tokio::fs::read_to_string(path).await {
+    match crate::implementations::skills::skill::read_skill_source(skill).await {
         Ok(content) => Ok(extract_skill_body(&content)),
         Err(e) => Err(format!("Failed to read skill file '{}': {}", skill.path, e)),
     }
@@ -363,6 +362,7 @@ mod tests {
             paths: None,
             enabled: true,
             body: None,
+            content_root: None,
         }
     }
 

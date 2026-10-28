@@ -744,8 +744,10 @@ pub enum Action {
     HideRawAuthUrl,
     /// User accepted the folder-trust question: persist the grant for the cwd's workspace and mark trust resolved.
     /// Replay any deferred session startup.
-    /// (Declining quits via [`Action::Quit`]; there is no decline action.)
     TrustFolder,
+    /// u35 t1: the user declined the folder-trust question: record the "no" and continue untrusted (no project
+    /// settings; every shell command asks unless the user's grant covers it).
+    DeclineTrustFolder,
     /// Replays any session startup deferred behind the notice.
     /// (Declining quits via [`Action::Quit`]; there is no decline action.)
     AcceptConsent,

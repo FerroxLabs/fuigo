@@ -577,6 +577,7 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | `ui.contextual_hints.word_select` | `boolean` | `yes` | `user` | After double-click with fold/nav selection, point at Word select in settings. |
 | `ui.cursor_blink` | `boolean` | `yes` | `user` | Force blinking (true) or steady (false) block cursor. Unset inherits the terminal. |
 | `ui.default_selected_permission` | `string` | `yes` | `user` | Preselected approval row on the first prompt of a session. Also FUIGO_DEFAULT_SELECTED_PERMISSION. |
+| `ui.disable_bypass_permissions_mode` | `boolean` | `pin` | — | Lock always-approve off for yourself (default false). Read only from your own `$FUIGO_HOME/config.toml`, on every OS: a project `.fuigo/config.toml`, `FUIGO_CONFIG` / `FUIGO_CONFIG_PATH` and managed config cannot set or clear it, and console sync does not touch it. Takes effect from the next session start (the hub that authorizes tool calls applies it from the next call); `true` in `requirements.toml` locks it for everyone. |
 | `ui.display_refresh.auto_cadence_enabled` | `boolean` | `yes` | `user` | Match stream/scroll cadence to display refresh rate. Also FUIGO_DISPLAY_REFRESH_AUTO_CADENCE. |
 | `ui.follow_up_behavior` | `queue / steer` | `yes` | `user` | Mid-turn follow-up routing. |
 | `ui.fork_secondary_model` | `string` | `yes` | `user` | Model for the secondary agent when forking. Defaults to the main default model. |
@@ -662,7 +663,6 @@ These keys exist only in `requirements.toml`:
 | --- | --- | --- | --- |
 | `fail_closed` | `boolean` | `false` | Refuse to start when signed requirements or version_overrides cannot be applied; default false. |
 | `features.image_edit` | `boolean` | — | Pin image_edit availability. Requirements only; a user-file entry is unrecognized and unset leaves the remotely configured default. |
-| `ui.disable_bypass_permissions_mode` | `boolean` | — | Lock always-approve off. The lock is enforced only from a requirements layer; true in user or managed files is ignored. |
 
 These top-level policy keys are read from `requirements.toml` and from `managed_config.toml` (and from the Claude `managed-settings.json`). Every file that sets one counts and the strictest wins; see [Plugins: restrict which MCP servers can run](09-plugins.md#set-the-same-policy-in-fuigos-own-files).
 

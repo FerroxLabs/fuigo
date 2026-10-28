@@ -296,7 +296,7 @@ fn project_max_mcp_output_bytes(cwd: &std::path::Path) -> Option<usize> {
     let mut value = None;
     // Repo root first, cwd last: later (deeper) files overwrite
     for config_path in crate::config::find_project_configs(cwd) {
-        if let Ok(toml_val) = fuigo_config::load_config_file(&config_path)
+        if let Ok(toml_val) = fuigo_config::load_project_config_file(&config_path)
             && let Some(v) = max_mcp_output_bytes_from_toml(&toml_val)
         {
             value = Some(v);

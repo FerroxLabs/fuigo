@@ -20,6 +20,7 @@ fuigo-config = { workspace = true }
 fuigo-hooks-plugins-types = { workspace = true }
 
 [dev-dependencies]
+fuigo-tty-utils = { workspace = true, features = ["unjudged-repo-exec"] }
 tempfile = { workspace = true }
 
 [lints]

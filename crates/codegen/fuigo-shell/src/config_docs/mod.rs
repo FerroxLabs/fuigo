@@ -22,6 +22,8 @@ const USER_ONLY_KEYS: &[&str] = &[
     "privacy.privacy_banner_acked",
     // P93: `agent::relay_opt_in` reads it from the user config file alone.
     "relay.trusted_origins",
+    // u35: `permission::resolution::user_config_lock` reads it from the user config file alone.
+    "ui.disable_bypass_permissions_mode",
 ];
 
 /// The nested FuigoComConfig, OAuth2, and OIDC leaf keys that enterprise deployments write today.
@@ -342,11 +344,7 @@ mod tests {
     fn requirements_only_keys_are_table_rows() {
         let (config, req, _) = page();
         let config_keys: BTreeSet<_> = config.iter().map(|r| r.key.as_str()).collect();
-        for key in [
-            "fail_closed",
-            "features.image_edit",
-            "ui.disable_bypass_permissions_mode",
-        ] {
+        for key in ["fail_closed", "features.image_edit"] {
             assert!(
                 req.iter().any(|r| r.key == key),
                 "missing requirements-only row {key}"
@@ -368,6 +366,7 @@ mod tests {
                     | "features.managed_config"
                     | "features.zdr_access_enabled"
                     | "features.image_edit"
+                    | "ui.disable_bypass_permissions_mode"
             ) {
                 assert!(
                     !row.details.contains("FUIGO_CONFIG"),

@@ -150,7 +150,7 @@ pub fn discover_plugins(
 /// Non-fatal errors are logged.
 pub fn load_project_config(root_cwd: &Path) -> Value {
     let config_path = root_cwd.join(".fuigo").join("config.toml");
-    match fuigo_config::load_config_file(&config_path) {
+    match fuigo_config::load_project_config_file(&config_path) {
         Ok(toml::Value::Table(ref t)) if t.is_empty() => {
             // The config loader returns an empty table when the file does not exist
             // Normalize to Null for callers

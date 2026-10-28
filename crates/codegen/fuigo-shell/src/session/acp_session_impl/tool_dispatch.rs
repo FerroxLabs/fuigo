@@ -67,6 +67,7 @@ pub(super) async fn dispatch_tool(
             prepared.parsed_args.clone(),
             &prepared.tool_call_id.0,
             Some(session_id),
+            prepared.approved_without_grant,
         )
         .await
 }

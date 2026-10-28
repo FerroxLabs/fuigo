@@ -226,13 +226,15 @@ impl SessionActor {
             BuiltinAction::HooksUntrust => {
                 let msg = match Self::do_hooks_untrust_project(&self.session_info.cwd) {
                     // Either way this session drops what the folder gate no longer admits, as the `/hooks` modal's Untrust does
-                    Ok((root, true)) => {
+                    Ok((root, was_trusted, note)) => {
                         let reload_msg = self.reload_hooks_impl().await;
-                        format!("Untrusted: {}.\n{reload_msg}", root.display())
-                    }
-                    Ok((root, false)) => {
-                        let reload_msg = self.reload_hooks_impl().await;
-                        format!("Not currently trusted: {}\n{reload_msg}", root.display())
+                        let note = note.map(|n| format!("{n}\n")).unwrap_or_default();
+                        let head = if was_trusted { "Untrusted" } else { "Not trusted (now declined)" };
+                        format!(
+                            "{head}: {}. Shell commands here ask unless your approval or grant covers them; project \
+                             MCP and LSP servers already running stop when the session restarts.\n{note}{reload_msg}",
+                            root.display()
+                        )
                     }
                     Err(e) => e,
                 };

@@ -388,6 +388,8 @@ fn judge(
         &HubPolicyContext {
             policy,
             prompt_policy,
+            base_policy: policy,
+            base_prompt_policy: prompt_policy,
             cwd,
             display_cwd: None,
             yolo: false,
@@ -777,6 +779,8 @@ fn default_config_decisions_are_pinned() {
         let ctx = HubPolicyContext {
             policy: None,
             prompt_policy: PromptPolicy::Ask,
+            base_policy: None,
+            base_prompt_policy: PromptPolicy::Ask,
             cwd: &cwd,
             display_cwd: None,
             yolo: false,

@@ -1149,6 +1149,11 @@ fn execute_standalone_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResul
 
     let start = std::time::Instant::now();
 
+    // u35 t3 (Astra r2 H3): an untrusted source gets no worktree; refuse before anything is created.
+    if !fuigo_tty_utils::repo_exec_allowed(&source_root) {
+        return Err(fuigo_tty_utils::RepoUntrusted { dir: source_root }.into());
+    }
+
     // Ensure parent and dest directories exist.
     if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).with_context(|| {
@@ -1160,6 +1165,16 @@ fn execute_standalone_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResul
     }
     std::fs::create_dir_all(&dest)
         .with_context(|| format!("failed to create dest directory: {}", dest.display()))?;
+
+    // u35 t3 (Astra r2 H3): the reset/clean/checkout below run git in `dest` before the worktree database records it,
+    // when the folder-trust judge still sees `dest` as a folder of its own. Creation authority (validated: a fresh,
+    // user-owned directory in Fuigo's worktree directory, built from this trusted source) covers git there until it is
+    // dropped at the end of this function, on success or failure.
+    let _creation = fuigo_tty_utils::begin_worktree_creation(
+        &source_root,
+        &dest,
+        &git::checkout::managed_root_for(&dest),
+    )?;
 
     // Run .git/ copy, modified-files scan, and working tree copy with maximum
     // parallelism. The three operations are independent:
@@ -1441,8 +1456,7 @@ fn execute_git_checkout_worktree(plan: WorktreePlan) -> Result<CreateWorktreeRes
     // Run `git -c checkout.workers=N worktree add --detach <dest> <ref>`.
     // checkout.workers enables parallel checkout so git populates the
     // working tree using multiple threads.
-    let output = git::checkout::git_command()
-        .current_dir(&source_root)
+    let output = git::checkout::git_command_judged(&source_root)?
         .arg("-c")
         .arg(format!("checkout.workers={workers}"))
         .args([

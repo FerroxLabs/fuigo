@@ -366,6 +366,13 @@ pub struct PluginInfo {
     /// Warning when this plugin shadowed another with the same name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<String>,
+    /// Skills, commands and agents not loaded because they link outside the plugin folder (0 from an older shell).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skipped_links: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// Response for `fuigo/plugins/list`.
@@ -827,6 +834,7 @@ mod tests {
             marketplace_source: None,
             origin: Some(PluginOrigin::UserFuigo),
             conflict: None,
+            skipped_links: 0,
         };
         let json = serde_json::to_string(&plugin).unwrap();
         assert!(json.contains("skillCount"));
@@ -834,8 +842,17 @@ mod tests {
         assert!(json.contains("hookStatus"));
         assert!(json.contains("mcpServerCount"));
         assert!(json.contains("mcpStatus"));
+        // m3: zero is omitted (an older pager reads the same JSON), a count travels as `skippedLinks`
+        assert!(!json.contains("skippedLinks"));
         let parsed: PluginInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(plugin, parsed);
+        let skipped = PluginInfo {
+            skipped_links: 2,
+            ..plugin
+        };
+        let json = serde_json::to_string(&skipped).unwrap();
+        assert!(json.contains("\"skippedLinks\":2"));
+        assert_eq!(serde_json::from_str::<PluginInfo>(&json).unwrap(), skipped);
     }
 
     #[test]

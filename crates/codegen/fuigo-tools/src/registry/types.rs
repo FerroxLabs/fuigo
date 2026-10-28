@@ -1795,17 +1795,48 @@ impl FinalizedToolset {
             cwd_override,
             cancellation,
             None,
+            None,
         )
+    }
+    /// [`Self::call`] for a call the permission check has approved: `approved_without_grant` rides on
+    /// this call only ([`crate::sandbox_launch::ApprovedWithoutGrant`]), so the shell runner judges
+    /// the environment of a call approved without a grant (u35 g9).
+    pub async fn call_approved(
+        self: &Arc<Self>,
+        tool_name: &str,
+        tool_args: serde_json::Value,
+        tool_call_id: &str,
+        approved_without_grant: bool,
+    ) -> Result<ToolRunResult, fuigo_tool_runtime::ToolError> {
+        use futures::StreamExt;
+        let mut stream = self.call_streaming_inner(
+            tool_name,
+            tool_args,
+            tool_call_id,
+            None,
+            None,
+            None,
+            Some(crate::sandbox_launch::ApprovedWithoutGrant(approved_without_grant)),
+        );
+        while let Some(item) = stream.next().await {
+            match item {
+                fuigo_tool_runtime::ToolStreamItem::Progress(_) => continue,
+                fuigo_tool_runtime::ToolStreamItem::Terminal(result) => return result,
+            }
+        }
+        Err(stream_no_terminal_error())
     }
     /// [`Self::call_streaming`] with Read-deny globs for this call only
     /// ([`CallDenyReadGlobs`](crate::types::resources::CallDenyReadGlobs)): the search tools exclude them in addition
-    /// to the toolset's own, and nothing shared is written (P173).
+    /// to the toolset's own, and nothing shared is written (P173). `approved_without_grant` is how the permission
+    /// check approved the call ([`crate::sandbox_launch::ApprovedWithoutGrant`], u35 g9).
     pub fn call_streaming_with_deny_read_globs(
         self: &Arc<Self>,
         tool_name: &str,
         tool_args: serde_json::Value,
         tool_call_id: &str,
         deny_read_globs: Vec<String>,
+        approved_without_grant: bool,
     ) -> fuigo_tool_runtime::ToolStream<ToolRunResult> {
         self.call_streaming_inner(
             tool_name,
@@ -1814,6 +1845,7 @@ impl FinalizedToolset {
             None,
             None,
             Some(crate::types::resources::CallDenyReadGlobs(deny_read_globs)),
+            Some(crate::sandbox_launch::ApprovedWithoutGrant(approved_without_grant)),
         )
     }
     fn call_streaming_inner(
@@ -1824,6 +1856,7 @@ impl FinalizedToolset {
         cwd_override: Option<std::path::PathBuf>,
         cancellation: Option<tokio_util::sync::CancellationToken>,
         call_deny_read_globs: Option<crate::types::resources::CallDenyReadGlobs>,
+        approval: Option<crate::sandbox_launch::ApprovedWithoutGrant>,
     ) -> fuigo_tool_runtime::ToolStream<ToolRunResult> {
         use futures::StreamExt;
         let this = Arc::clone(self);
@@ -1837,6 +1870,7 @@ impl FinalizedToolset {
                 cwd_override,
                 cancellation,
                 call_deny_read_globs,
+                approval,
             ) {
                 Ok(parts) => parts,
                 Err(e) => {
@@ -1888,6 +1922,7 @@ impl FinalizedToolset {
         cwd_override: Option<std::path::PathBuf>,
         cancellation: Option<tokio_util::sync::CancellationToken>,
         call_deny_read_globs: Option<crate::types::resources::CallDenyReadGlobs>,
+        approval: Option<crate::sandbox_launch::ApprovedWithoutGrant>,
     ) -> Result<DispatchParts, fuigo_tool_runtime::ToolError> {
         let (registry_id, output_converter, reverse_params) = {
             let tools = self.tools.read();
@@ -1933,6 +1968,9 @@ impl FinalizedToolset {
         }
         if let Some(globs) = call_deny_read_globs {
             ctx.extensions.insert(globs);
+        }
+        if let Some(approval) = approval {
+            ctx.extensions.insert(approval);
         }
         if let Some(ref version) = contract_version {
             ctx.extensions
@@ -5511,6 +5549,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("prepare_dispatch succeeds");
         let wvc = parts
@@ -5519,6 +5558,98 @@ mod tests {
             .get::<fuigo_tool_runtime::WorkspaceViewerContext>()
             .expect("WorkspaceViewerContext must be stamped on the ctx");
         assert!(wvc.stream_tool_progress);
+    }
+    /// u35 g9 (Fable r8 High): how the permission check approved a call rides on that call's context, where the
+    /// shell tools read it; a call dispatched without one carries none (and is judged as approved without a grant).
+    #[tokio::test]
+    async fn u35_g9_approval_rides_on_the_call_context() {
+        let (toolset, _tmp) = toolset_with_viewer_ctx(None);
+        for granted in [false, true] {
+            let parts = toolset
+                .prepare_dispatch(
+                    "read_file",
+                    serde_json::json!({"target_file": "noop"}),
+                    "test-call",
+                    None,
+                    None,
+                    None,
+                    Some(crate::sandbox_launch::ApprovedWithoutGrant(!granted)),
+                )
+                .expect("prepare_dispatch succeeds");
+            let flag = parts.ctx.extensions.get::<crate::sandbox_launch::ApprovedWithoutGrant>();
+            assert_eq!(crate::sandbox_launch::ApprovedWithoutGrant::of(flag.as_deref()), !granted);
+        }
+        let parts = toolset
+            .prepare_dispatch("read_file", serde_json::json!({"target_file": "noop"}), "c", None, None, None, None)
+            .expect("prepare_dispatch succeeds");
+        let flag = parts.ctx.extensions.get::<crate::sandbox_launch::ApprovedWithoutGrant>();
+        assert!(flag.is_none() && crate::sandbox_launch::ApprovedWithoutGrant::of(flag.as_deref()));
+    }
+    /// u35 g10 (Fable r9 Medium): the flag a call is dispatched with reaches the shell runner through each bash
+    /// tool, foreground and background: a call approved by a grant runs, the same call approved without one is
+    /// judged and refused while its environment steers.
+    #[tokio::test]
+    async fn u35_g10_the_flag_reaches_the_runner_through_each_bash_tool() {
+        crate::sandbox_launch::install_env_judge(crate::sandbox_launch::u35_test_child_judge);
+        let tmp = TempDir::new().unwrap();
+        let mut background = ToolConfig::from_id("FuigoBuild:run_terminal_cmd".to_string());
+        background.params = Some(serde_json::from_value(serde_json::json!({"enabled_background": true})).unwrap());
+        let config = ToolServerConfig {
+            tools: vec![
+                background,
+                ToolConfig::from_id("FuigoBuild:get_task_output".to_string()),
+                ToolConfig::from_id("FuigoBuild:kill_task".to_string()),
+                ToolConfig::from_id("OpenCode:bash".to_string()),
+            ],
+            behavior_preset: None,
+        };
+        let toolset = Arc::new(ToolRegistryBuilder::new().finalize(config, test_session_context(&tmp)).unwrap());
+        let calls = [
+            ("run_terminal_cmd", serde_json::json!({"command": "echo u35-g10-steer ran", "description": "u35"})),
+            (
+                "run_terminal_cmd",
+                serde_json::json!({"command": "echo u35-g10-steer ran", "description": "u35", "block_until_ms": 0}),
+            ),
+            ("bash", serde_json::json!({"command": "echo u35-g10-steer ran", "description": "u35"})),
+        ];
+        for (at, (tool, args)) in calls.iter().enumerate() {
+            let text = |result: Result<ToolRunResult, fuigo_tool_runtime::ToolError>| match result {
+                Ok(result) => format!("{:?}", result.output),
+                Err(error) => error.to_string(),
+            };
+            let granted = text(toolset.call_approved(tool, args.clone(), &format!("u35-g10-{at}-granted"), false).await);
+            assert!(
+                !granted.contains("approval") && !granted.contains("missing field"),
+                "{tool} #{at}: a granted call is never refused: {granted}"
+            );
+            assert!(at == 1 || granted.contains("u35-g10-steer ran"), "{tool} #{at}: {granted}");
+            let judged = text(toolset.call_approved(tool, args.clone(), &format!("u35-g10-{at}-judged"), true).await);
+            assert!(
+                judged.contains("U35_G10_STEER") && judged.contains("approval"),
+                "{tool} #{at}: a call approved without a grant is judged: {judged}"
+            );
+        }
+    }
+    /// u35 g11 (Fable r10 Low): the flag reaches the runner through the monitor tool too. Its task is labelled
+    /// `[monitor] DESCRIPTION`; the runner judges the command it runs, not the label.
+    #[tokio::test]
+    async fn u35_g11_monitor_flag_judges_the_command_not_its_label() {
+        crate::sandbox_launch::install_env_judge(crate::sandbox_launch::u35_test_child_judge);
+        let tmp = TempDir::new().unwrap();
+        let config = ToolServerConfig {
+            tools: vec![ToolConfig::from_id("FuigoBuild:monitor".to_string())],
+            behavior_preset: None,
+        };
+        let toolset = Arc::new(ToolRegistryBuilder::new().finalize(config, test_session_context(&tmp)).unwrap());
+        let args = serde_json::json!({"command": "echo u35-g10-steer ran", "description": "u35 watch"});
+        let text = |result: Result<ToolRunResult, fuigo_tool_runtime::ToolError>| match result {
+            Ok(result) => format!("{:?}", result.output),
+            Err(error) => error.to_string(),
+        };
+        let granted = text(toolset.call_approved("monitor", args.clone(), "u35-g11-monitor-granted", false).await);
+        assert!(!granted.contains("approval") && !granted.contains("missing field"), "{granted}");
+        let judged = text(toolset.call_approved("monitor", args, "u35-g11-monitor-judged", true).await);
+        assert!(judged.contains("U35_G10_STEER") && judged.contains("approval"), "judged: {judged}");
     }
     /// P173: per-call Read-deny globs ride on the call's context and never touch the shared resources, so one call
     /// cannot replace another's excludes.
@@ -5535,6 +5666,7 @@ mod tests {
                 Some(crate::types::resources::CallDenyReadGlobs(vec![
                     "**/secrets/**".to_owned(),
                 ])),
+                None,
             )
             .expect("prepare_dispatch succeeds");
         let globs = parts
@@ -5560,6 +5692,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("prepare_dispatch succeeds");
         assert!(
@@ -5579,6 +5712,7 @@ mod tests {
                 "read_file",
                 serde_json::json!({"target_file": "noop"}),
                 "test-call",
+                None,
                 None,
                 None,
                 None,

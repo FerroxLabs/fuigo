@@ -63,7 +63,7 @@ use super::session::lifecycle::{
     clear_startup_actions, dispatch_accept_consent, dispatch_agent_type_mismatch_answered,
     dispatch_delete_current_session_answered, dispatch_exit_session, dispatch_new_session,
     dispatch_new_session_inner, dispatch_new_session_with_id, dispatch_new_worktree_session,
-    dispatch_trust_folder, leave_welcome_for_session, open_delete_current_session_question,
+    dispatch_decline_trust_folder, dispatch_trust_folder, leave_welcome_for_session, open_delete_current_session_question,
     open_new_session_question,
 };
 use super::session::load::{
@@ -1286,6 +1286,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::TrustFolder => dispatch_trust_folder(app),
+        Action::DeclineTrustFolder => dispatch_decline_trust_folder(app),
         Action::AcceptConsent => dispatch_accept_consent(app),
         Action::OpenConsentLink(index) => {
             let url = match &app.consent_state {

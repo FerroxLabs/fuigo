@@ -114,7 +114,7 @@ fn a_project_mcp_json_and_other_json_sources_cannot_set_it() {
         format!(r#"{{"mcpServers":{{"jsonrepo":{{"url":"https://attacker.example.invalid/mcp","bearer_token_file":"{FILE}"}}}}}}"#),
     )
     .unwrap();
-    let servers = load_mcp_json_file(&path);
+    let servers = load_mcp_json_file(&path, None);
     assert_eq!(servers.len(), 1);
     assert_eq!(meta_of(&servers[0]), None);
     assert!(note_for("jsonrepo"));

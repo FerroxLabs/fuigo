@@ -936,6 +936,24 @@ pub(crate) fn source_repo_for_cwd(cwd: &str) -> Option<std::path::PathBuf> {
     worktree_record_for_cwd(cwd).map(|(_db, rec)| rec.source_repo)
 }
 
+/// u35 t1 (design d2 §2.1-4): the recorded source repository of the Fuigo-managed worktree whose path is EXACTLY
+/// `top` (a canonical work-tree root). Read only from the user's absolute Fuigo home (a relative `FUIGO_HOME` reads
+/// nothing), opened read-only, and only for a `top` inside that home's `worktrees` directory; a record counts only when
+/// its own path canonicalizes to `top` (no lexical ancestor walk: a plain directory under the worktree root, or a
+/// folder below a recorded worktree that is its own repository, gets its own key).
+pub(crate) fn managed_worktree_source_exact(top: &Path) -> Option<std::path::PathBuf> {
+    let home = fuigo_config::user_fuigo_home()?;
+    let root = dunce::canonicalize(home.join("worktrees")).ok()?;
+    if !top.starts_with(&root) || top == root {
+        return None;
+    }
+    let fuigo_fast_worktree::RegistryOpen::Opened { db, .. } = WorktreeDb::open_read_only(&home) else {
+        return None;
+    };
+    let record = db.get(&top.to_string_lossy()).ok()??;
+    (dunce::canonicalize(&record.path).ok()?.as_path() == top).then_some(record.source_repo)
+}
+
 /// Look up the worktree label for a cwd by querying the worktree DB.
 ///
 /// Resolves the containing worktree via [`worktree_record_for_cwd`], then extracts the `"label"` key from its metadata.

@@ -59,6 +59,14 @@ pub(crate) fn is_accepted_long_option_prefix(flag: &str, full: &str, min_len: us
         && flag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+/// u35 r1: whether the long option `word` (`--name` or `--name=value`) is `full` or a prefix of it at least one
+/// character past `--`. Getopt-style parsers accept a unique prefix; an ambiguous prefix of a floored flag is treated
+/// as that flag, so the check never under-reports.
+pub(crate) fn long_option_abbreviates(word: &str, full: &str) -> bool {
+    let flag = word.split_once('=').map_or(word, |(flag, _)| flag);
+    is_accepted_long_option_prefix(flag, full, 3)
+}
+
 fn normalized_program_name(words: &[String]) -> Option<String> {
     let raw = words.first()?;
     let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw.as_str());
@@ -77,6 +85,13 @@ fn normalized_program_name(words: &[String]) -> Option<String> {
 /// ordinals cannot drift.
 pub(crate) fn is_planned_git_segment(raw: &[String]) -> bool {
     matches!(normalize_for_exec_risk(raw), NormalizedArgv::Ready(inner) if normalized_program_name(inner).as_deref() == Some("git"))
+}
+
+/// u35 g14 (Grok r13 High): whether the ambient scan counts this raw segment as a `gh` command (canonical wrappers
+/// peeled, program name `gh`): `gh` runs git in its directory, so it is scanned like a git command
+/// ([`ambient_scan_plan_from_segments`]).
+pub(crate) fn is_planned_gh_segment(raw: &[String]) -> bool {
+    matches!(normalize_for_exec_risk(raw), NormalizedArgv::Ready(inner) if normalized_program_name(inner).as_deref() == Some("gh"))
 }
 
 fn is_git_program(words: &[String]) -> bool {
@@ -237,6 +252,9 @@ pub(crate) enum ConfigValue {
     NotNever,
     /// P166 r12 item 4: a repository URL; a value that is not an ordinary [`UrlRole::Source`] URL is a command.
     Url,
+    /// u35 g6 (Grok r5): a trace target (`trace2.eventTarget`): a boolean or a single-digit file descriptor writes to
+    /// stderr or that descriptor; anything else (a path, `af_unix:`) creates or appends to a file.
+    TraceTarget,
 }
 
 /// P166 r9: the ONE table of command-valued git config keys. Lower-case; `*` is a middle segment (a section's
@@ -303,6 +321,10 @@ pub(crate) const COMMAND_VALUED_CONFIG_KEYS: &[(&str, ConfigValue)] = &[
     ("remote.*.url", ConfigValue::Url),
     ("remote.*.pushurl", ConfigValue::Url),
     ("submodule.*.url", ConfigValue::Url),
+    // u35 g6 (Grok r5 Medium): a repository's trace target makes a read-only `git status` write a file.
+    ("trace2.normaltarget", ConfigValue::TraceTarget),
+    ("trace2.perftarget", ConfigValue::TraceTarget),
+    ("trace2.eventtarget", ConfigValue::TraceTarget),
 ];
 
 /// P166 r11 rule 3(b): the suffix fail-safe. A key whose LAST segment names a program, hook or command is
@@ -419,6 +441,9 @@ fn config_value_is_command(rule: ConfigValue, key: &str, value: Option<&str>) ->
         ConfigValue::PathLike => value.starts_with(['/', '.', '~']),
         ConfigValue::NotNever => !value.eq_ignore_ascii_case("never"),
         ConfigValue::Url => !url_is_ordinary(value, UrlRole::Source),
+        ConfigValue::TraceTarget => {
+            git2::Config::parse_bool(value).is_err() && !(value.len() == 1 && value.bytes().all(|b| b.is_ascii_digit()))
+        }
     }
 }
 
@@ -764,7 +789,8 @@ pub(crate) const SAFE_GIT_SUBCOMMANDS: &[&str] = &[
 
 /// Options that make an otherwise read-only git verb run repo-configured content drivers or write arbitrary paths.
 /// One table applied to EVERY [`SAFE_GIT_SUBCOMMANDS`] verb, so a new safe verb inherits the policy.
-/// `--filters`/`--textconv` run `filter.*.smudge` / `diff.*.textconv` (`filter.*.smudge` is outside the ambient local-config exec scan).
+/// `--filters`/`--textconv` run `filter.*.smudge` / `diff.*.textconv` (the ambient local-config exec scan also reads both
+/// keys; the option floor covers a value it cannot see, such as one from the user's or system config).
 /// `--ext-diff` runs the external diff driver; `--output` writes an arbitrary file; `--open-files-in-pager` executes a pager command.
 /// `git grep`'s short-attached `-O<cmd>` form is guarded in [`git_words_have_unsafe_query_option`].
 const GIT_QUERY_UNSAFE_OPTIONS: &[&str] = &[
@@ -813,16 +839,60 @@ fn git_safe_query_verb_index(words: &[String]) -> Option<usize> {
 
 /// True when a `git` invocation carries an option from [`GIT_QUERY_UNSAFE_OPTIONS`] or `git grep`'s short-attached `-O<cmd>`, whatever the verb.
 /// Used by [`git_words_are_read_only_query`] and on its own, so a session whitelist-prefix grant cannot override a driver/write flag.
+///
+/// u35 r3 (Astra r2 H6, Grok r2 H2): matched on the normalised program name (`/usr/bin/git`, `Git`), and the verb is
+/// found past every global option ([`git_subcommand`]), so a path-qualified git or an unmodelled global option
+/// (`--no-optional-locks`) does not hide `grep -O`. The read-only allow ([`git_words_are_read_only_query`]) still
+/// requires the literal name.
 pub(crate) fn git_words_have_unsafe_query_option(words: &[String]) -> bool {
-    if words.first().map(String::as_str) != Some("git") {
+    if !is_git_program(words) {
         return false;
     }
     if words.iter().skip(1).any(|w| git_query_option_is_unsafe(w)) {
         return true;
     }
     // `git grep -O<cmd>` / `-O <cmd>` executes <cmd>; the short-attached form is not a long-option abbreviation, so guard it verb-specifically
-    matches!(git_safe_query_verb_index(words), Some(i) if words[i] == "grep")
-        && words.iter().skip(1).any(|w| w.starts_with("-O"))
+    git_subcommand(words) == Some("grep") && words.iter().skip(1).any(|w| git_grep_word_opens_pager(w))
+}
+
+/// Git global options that take their value as the next word.
+const GIT_GLOBAL_VALUE_OPTIONS: &[&str] =
+    &["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", "--attr-source"];
+
+/// u35 r3: the subcommand of a git invocation (normalised program name `git`), past every global option: a value
+/// option in [`GIT_GLOBAL_VALUE_OPTIONS`] skips its value, any other option is a flag. Used by floors, which must see
+/// the verb whatever globals precede it (`git --no-pager push`). `None` when no verb follows.
+pub(crate) fn git_subcommand(words: &[String]) -> Option<&str> {
+    if !is_git_program(words) {
+        return None;
+    }
+    let mut i = 1;
+    while let Some(word) = words.get(i) {
+        if word == "--" {
+            return None;
+        }
+        if !word.starts_with('-') {
+            return Some(word.as_str());
+        }
+        i += if GIT_GLOBAL_VALUE_OPTIONS.contains(&word.as_str()) { 2 } else { 1 };
+    }
+    None
+}
+
+/// u35: whether one `git grep` argument carries `-O` (open in pager), alone or inside a short-option cluster
+/// (`-nO./payload`, `-iO`). Scanning stops at a short option whose value is the rest of the cluster (`-epattern`).
+fn git_grep_word_opens_pager(word: &str) -> bool {
+    let Some(cluster) = word.strip_prefix('-').filter(|c| !c.starts_with('-')) else {
+        return false;
+    };
+    for option in cluster.chars() {
+        match option {
+            'O' => return true,
+            'A' | 'B' | 'C' | 'e' | 'f' | 'm' => return false,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Single decision point for auto-approvable read-only `git` queries, shared by the manager safe lists and the auto-mode routine heuristic.
@@ -844,17 +914,59 @@ pub(crate) fn git_words_are_read_only_query(words: &[String]) -> bool {
     if !SAFE_GIT_SUBCOMMANDS.contains(&words[verb_idx].as_str()) {
         return false;
     }
-    !git_words_have_unsafe_query_option(words)
+    git_query_form_is_read_only(&words[verb_idx], &words[verb_idx + 1..]) && !git_words_have_unsafe_query_option(words)
+}
+
+/// u35 g3 (Astra r3): per-verb forms of the read-only verbs that are not queries. `branch` is read-only only in its
+/// listing forms ([`git_readonly_listing`]; `-d`/`-D`/`-f`/`-m`/`-c`, upstream changes, `--edit-description` and a new
+/// name are not). `diff --no-index`, and a `diff` operand outside the work tree (git then compares two plain files),
+/// print any file; so does `grep --no-index`. `blame --contents FILE` prints FILE, and `-S`/`--ignore-revs-file`
+/// quote a file in their errors.
+fn git_query_form_is_read_only(verb: &str, args: &[String]) -> bool {
+    let outside = |operand: &str| {
+        operand.starts_with(['/', '~'])
+            || operand.split('/').any(|part| part == "..")
+            || crate::permission::exec_surface::is_unresolved(operand)
+    };
+    match verb {
+        "branch" => git_readonly_listing("branch", args),
+        "diff" => {
+            let mut operands_only = false;
+            args.iter().all(|word| {
+                if !operands_only && word == "--" {
+                    operands_only = true;
+                    return true;
+                }
+                if !operands_only && word.starts_with('-') {
+                    return word != "--no-index";
+                }
+                !outside(word)
+            })
+        }
+        "grep" => !args.iter().any(|word| word == "--no-index"),
+        "blame" => !args.iter().take_while(|w| *w != "--").any(|word| {
+            is_accepted_long_option_prefix(word.split('=').next().unwrap_or(word), "--contents", 5)
+                || is_accepted_long_option_prefix(word.split('=').next().unwrap_or(word), "--ignore-revs-file", 13)
+                || (word.starts_with('-') && !word.starts_with("--") && word.contains('S'))
+        }),
+        _ => true,
+    }
 }
 
 pub(crate) fn local_git_config_entry_is_exec(name: &str, value: &str) -> bool {
     let name = name.to_ascii_lowercase();
     let value = value.trim();
-    if value.is_empty() {
+    // u35 g10: the repository's own hooks are judged per command ([`ambient_git_risk_from_plan`]), not as config.
+    if value.is_empty() || name == crate::git_content_filters::REPOSITORY_HOOK_KEY {
         return false;
     }
     // P166 r9: the shared command-valued key table (also read by the `git config` SET classifier).
     if command_valued_config(&name, Some(value)) {
+        return true;
+    }
+    // u35 g8 (Grok r7): `log.showsignature` makes the safe verbs `git log` / `git show` verify signatures, which runs
+    // the system `gpg` (and lets it write `~/.gnupg`). Any value git reads as true counts.
+    if name == "log.showsignature" && !matches!(value.to_ascii_lowercase().as_str(), "false" | "no" | "off" | "0") {
         return true;
     }
     // P166 r8B: a shell alias (`alias.<any> = !cmd`) runs a stored command on a later `git <alias>`; the alias name
@@ -870,6 +982,384 @@ pub(crate) fn local_repo_config_has_exec_risk(cwd: &Path) -> bool {
             .iter()
             .any(|(name, value)| local_git_config_entry_is_exec(name, value)),
     }
+}
+
+/// u35 g5b (Grok r4): git subcommands that are part of git itself. git runs a builtin (or a `git-<name>` program on
+/// its exec path) before it looks up an alias, so `alias.status = reset --hard` in a repository's config never changes
+/// what `git status` runs (probe: git 2.43, 2.50 Apple Git, 2.55; BUILD-LOG g5b). Only names that have been part of
+/// git for many releases are listed, so an older git cannot fall through to an alias for one of them.
+const GIT_LONGSTANDING_COMMANDS: &[&str] = &[
+    "add", "am", "apply", "archive", "bisect", "blame", "branch", "bundle", "cat-file", "check-attr", "check-ignore",
+    "checkout", "cherry", "cherry-pick", "clean", "clone", "commit", "config", "count-objects", "describe", "diff",
+    "fetch", "for-each-ref", "format-patch", "fsck", "gc", "grep", "help", "init", "log", "ls-files", "ls-remote",
+    "ls-tree", "merge", "merge-base", "mv", "name-rev", "notes", "pull", "push", "rebase", "reflog", "remote", "repack",
+    "replace", "reset", "rev-list", "rev-parse", "revert", "rm", "shortlog", "show", "show-ref", "stash", "status",
+    "submodule", "tag", "worktree",
+];
+
+/// u35 g5b (Grok r4): a subcommand that is not part of git and is defined as an alias in the repository's own config
+/// (`.git/config` and anything it includes) runs whatever that alias says: another verb (`reset --hard`), or global
+/// options that run a program (`-c core.fsmonitor=./x status`). Such a command always asks.
+pub(crate) fn repo_alias_runs_for(entries: &[(String, String)], verb: &str) -> bool {
+    let verb = verb.to_ascii_lowercase();
+    if GIT_LONGSTANDING_COMMANDS.contains(&verb.as_str()) {
+        return false;
+    }
+    entries
+        .iter()
+        .any(|(name, _)| name.to_ascii_lowercase().strip_prefix("alias.") == Some(verb.as_str()))
+}
+
+/// The environment a command inherits, as the classifier sees it: Fuigo's own process environment, or the environment
+/// the shell runner judges ([`with_env_view`]). Tests see only what they install with [`with_inherited_env`] (empty
+/// otherwise), so the real environment of the test process (cargo's `LD_LIBRARY_PATH`, the builder's `HOME`) never
+/// decides a test.
+fn inherited_env(name: &str) -> Option<String> {
+    if let Some(value) = ENV_VIEW.with(|view| view.borrow().as_ref().map(|map| map.get(name).cloned())) {
+        return value;
+    }
+    #[cfg(test)]
+    {
+        TEST_ENV.with(|env| env.borrow().as_ref().and_then(|map| map.get(name).cloned()))
+    }
+    #[cfg(not(test))]
+    {
+        std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())
+    }
+}
+
+/// The names of every inherited variable (for the `DYLD_*` family), seen the same way as [`inherited_env`].
+fn inherited_env_names() -> Vec<String> {
+    if let Some(names) = ENV_VIEW.with(|view| view.borrow().as_ref().map(|map| map.keys().cloned().collect())) {
+        return names;
+    }
+    #[cfg(test)]
+    {
+        TEST_ENV.with(|env| env.borrow().as_ref().map(|map| map.keys().cloned().collect()).unwrap_or_default())
+    }
+    #[cfg(not(test))]
+    {
+        std::env::vars_os().map(|(name, _)| name.to_string_lossy().into_owned()).collect()
+    }
+}
+
+/// The value of `name` a command runs under ([`inherited_env`]), as a list (empty when unset).
+fn inherited_env_values(name: &str) -> Vec<String> {
+    inherited_env(name).into_iter().collect()
+}
+
+thread_local! {
+    /// u35 g9: the environment the shell runner is judging, in place of Fuigo's own ([`with_env_view`]).
+    static ENV_VIEW: std::cell::RefCell<Option<std::collections::HashMap<String, String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_ENV: std::cell::RefCell<Option<std::collections::HashMap<String, String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// u35 g9: run `f` with `env` as the whole environment the classifier's rules read (this thread only): the shell
+/// runner judges the exact environment it builds for a call approved without a grant with the classifier's own rule
+/// (`manager::child_env_steers`).
+pub(crate) fn with_env_view<T>(env: &[(String, String)], f: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            ENV_VIEW.with(|view| *view.borrow_mut() = None);
+        }
+    }
+    ENV_VIEW.with(|view| *view.borrow_mut() = Some(env.iter().cloned().collect()));
+    let _reset = Reset;
+    f()
+}
+
+/// Run `f` with `vars` as the whole inherited environment the classifier sees (this thread only).
+#[cfg(test)]
+pub(crate) fn with_inherited_env<T>(vars: &[(&str, &str)], f: impl FnOnce() -> T) -> T {
+    // u35 g13 (Fable r12 Low): restore what was installed before (a live `TestInheritedEnv` guard included).
+    let map = vars.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+    let previous = TEST_ENV.with(|env| env.borrow_mut().replace(map));
+    let out = f();
+    TEST_ENV.with(|env| *env.borrow_mut() = previous);
+    out
+}
+
+/// u35 g12: until dropped, `vars` is the whole inherited environment the classifier sees on this thread (for a test
+/// that awaits a manager on a `LocalSet`, where [`with_inherited_env`]'s closure cannot hold the await).
+/// Dropping it restores the environment installed before it (u35 g13, Fable r12 Low).
+#[cfg(test)]
+pub(crate) struct TestInheritedEnv(Option<std::collections::HashMap<String, String>>);
+
+#[cfg(test)]
+impl TestInheritedEnv {
+    pub(crate) fn set(vars: &[(&str, &str)]) -> Self {
+        let map = vars.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+        Self(TEST_ENV.with(|env| env.borrow_mut().replace(map)))
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestInheritedEnv {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        TEST_ENV.with(|env| *env.borrow_mut() = previous);
+    }
+}
+
+/// The variables a test installed with [`with_inherited_env`], for a git child process the classifier runs.
+#[cfg(test)]
+pub(crate) fn test_inherited_env() -> Vec<(String, String)> {
+    TEST_ENV.with(|env| env.borrow().as_ref().map(|map| map.clone().into_iter().collect()).unwrap_or_default())
+}
+
+/// The top of the work tree that contains `dir` (the nearest ancestor holding `.git`), or `dir` itself.
+fn work_tree_root(dir: &Path) -> &Path {
+    dir.ancestors().find(|candidate| candidate.join(".git").exists()).unwrap_or(dir)
+}
+
+/// An absolute path inside `dir` or its work tree, compared as spelled and with symlinks resolved on both sides
+/// (`/tmp` and `/private/tmp` on macOS). A work tree (or, outside any repository, a `dir`) that is the user's home,
+/// holds it, or is the filesystem root is the user's own tree, not a checkout: no absolute path counts as inside it
+/// (so Fuigo started in `~` or `/` does not treat `~/.cargo/bin` or `/usr/bin` as the repository's).
+fn absolute_path_is_inside(candidate: &Path, dir: &Path) -> bool {
+    let root = dunce::canonicalize(work_tree_root(dir)).unwrap_or_else(|_| work_tree_root(dir).to_path_buf());
+    let holds_home = inherited_env("HOME").is_some_and(|home| {
+        let home = Path::new(home.trim());
+        home.is_absolute() && dunce::canonicalize(home).unwrap_or_else(|_| home.to_path_buf()).starts_with(&root)
+    });
+    if root.parent().is_none() || holds_home {
+        return false;
+    }
+    let inside = |file: &Path, dir: &Path| file.starts_with(dir) || file.starts_with(work_tree_root(dir));
+    let resolved_dir = dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let resolved_file = dunce::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+    inside(candidate, dir) || inside(&resolved_file, &resolved_dir)
+}
+
+/// The rustup proxies: each reads `RUSTUP_TOOLCHAIN` / `RUSTUP_HOME` to pick the toolchain it runs.
+const RUSTUP_PROXIES: &[&str] = &["cargo", "rustc", "rustfmt", "clippy", "clippy-driver", "cargo-clippy", "rustup"];
+
+/// u35 g7: inherited variables that steer which program runs, what it loads or which config it reads, by the
+/// programs they affect (`*`: every command, through the runner shell or the dynamic loader). Their value is never
+/// read: set and non-empty is enough ([`inherited_env_steers`]). Any `DYLD_*` variable counts for `*` too.
+pub(crate) const STEERING_ENV: &[(&[&str], &[&str])] = &[
+    (&["*"], &["LD_PRELOAD", "LD_AUDIT", "GCONV_PATH", "BASH_ENV", "ENV"]),
+    (
+        &["git"],
+        &[
+            "GIT_EXTERNAL_DIFF", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_PAGER", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR",
+            "GIT_ASKPASS", "SSH_ASKPASS", "GIT_PROXY_COMMAND", "GIT_EXEC_PATH", "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG", "GIT_DIR",
+            "GIT_COMMON_DIR", "GIT_TEMPLATE_DIR", "LESSCLOSE",
+        ],
+    ),
+    (&["rg"], &["RIPGREP_CONFIG_PATH"]),
+    (&["file"], &["MAGIC"]),
+    (&["gh"], &["GH_CONFIG_DIR", "GH_PAGER", "GH_BROWSER", "BROWSER", "GH_EDITOR"]),
+    (&["docker"], &["DOCKER_CONFIG"]),
+    (
+        &["npm", "npx", "pnpm"],
+        &[
+            "NPM_CONFIG_USERCONFIG", "npm_config_userconfig", "NPM_CONFIG_GLOBALCONFIG", "npm_config_globalconfig",
+            "NPM_CONFIG_SCRIPT_SHELL", "npm_config_script_shell",
+        ],
+    ),
+    (&["yarn"], &["YARN_RC_FILENAME"]),
+    (&["cargo"], &["RUSTC", "RUSTDOC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER"]),
+    (&["go"], &["GOENV", "GOFLAGS"]),
+    (&["go", "make", "cmake"], &["CC", "CXX"]),
+    (&["make"], &["MAKEFILES", "MAKEFLAGS", "GNUMAKEFLAGS"]),
+    (&["cmake"], &["CMAKE_TOOLCHAIN_FILE"]),
+    // u35 g9 (Grok r8): options an interpreter reads from the environment (`--require`, `-r`, `-M`) load code; a
+    // version query does not read them (probed), but no form of these interpreters is approved under them.
+    (&["node", "nodejs"], &["NODE_OPTIONS"]),
+    (&["ruby", "irb"], &["RUBYOPT"]),
+    (&["perl"], &["PERL5OPT"]),
+];
+
+/// u35 g7: how a commonly set variable of [`USER_PATH_ENV`] must look to be the user's own.
+#[derive(Clone, Copy)]
+enum UserValue {
+    /// One plain absolute path outside the work tree.
+    Path,
+    /// Plain absolute paths outside the work tree, split with the platform's path-list rules.
+    PathList,
+    /// A plain absolute path outside the work tree, or a plain bare name. A bare name is not looked up here: the
+    /// shell finds it on `PATH`, which [`inherited_env_steers`] has already required to be clean.
+    Program,
+}
+
+/// u35 g7: variables users commonly set, so presence alone does not decide: the value gets one simple check
+/// ([`UserValue`]); anything else steers the programs listed (`*`: every command).
+///
+/// u35 g8 (Astra r7): Fuigo's own selectors count too: `SHELL` / `FUIGO_SHELL` pick the shell that runs every
+/// command, `FUIGO_HOME` / `FUIGO_CONFIG_PATH` the configuration (and `FUIGO_HOME` the vendored search tools), and
+/// `FUIGO_TOOLS_UGREP_PATH` / `FUIGO_TOOLS_BFS_PATH` the programs Fuigo's `grep` / `find` shadows run.
+const USER_PATH_ENV: &[(&[&str], &[&str], UserValue)] = &[
+    (&["*"], &["ZDOTDIR", "FUIGO_HOME", "FUIGO_CONFIG_PATH"], UserValue::Path),
+    (&["*"], &["SHELL", "FUIGO_SHELL"], UserValue::Program),
+    // u35 g8 (release gate): library search paths are commonly set (CUDA, conda, Homebrew; cargo sets them for every
+    // test and `cargo run`): directories outside the project are the user's own. A preload stays presence-judged.
+    (&["*"], LIBRARY_PATH_ENV, UserValue::PathList),
+    (RUSTUP_PROXIES, &["RUSTUP_TOOLCHAIN"], UserValue::Program),
+    (&["grep"], &["FUIGO_TOOLS_UGREP_PATH"], UserValue::Path),
+    (&["find"], &["FUIGO_TOOLS_BFS_PATH"], UserValue::Path),
+    (&["git", "gh"], &["PAGER"], UserValue::Program),
+    (&["git"], &["LESSOPEN", "EDITOR", "VISUAL"], UserValue::Program),
+    (&["git", "go"], &["XDG_CONFIG_HOME"], UserValue::Path),
+    (&["kubectl"], &["KUBECONFIG"], UserValue::PathList),
+    (&["cargo"], &["CARGO_HOME"], UserValue::Path),
+    (RUSTUP_PROXIES, &["RUSTUP_HOME"], UserValue::Path),
+    (&["go"], &["GOROOT"], UserValue::Path),
+    (&[FUIGO_GREP_TOOL], &["RG_BIN_PATH", "RUNFILES_DIR"], UserValue::Path),
+];
+
+/// u35 g8 (Astra r7): Fuigo's own grep tool, as a program of [`USER_PATH_ENV`]: in a build without a bundled `rg` it
+/// runs `RG_BIN_PATH`, or an `rg` found under `RUNFILES_DIR`. No shell command has this name.
+pub(crate) const FUIGO_GREP_TOOL: &str = "fuigo:grep";
+
+/// u35 g8: whether the environment selects the program Fuigo's grep tool runs ([`FUIGO_GREP_TOOL`]): only its own
+/// rows, as the tool is spawned by Fuigo, not by the shell.
+pub(crate) fn grep_tool_env_steers(dir: &Path) -> Option<&'static str> {
+    user_value_rows_steer(|programs| programs.contains(&FUIGO_GREP_TOOL), dir)
+}
+
+/// The first [`USER_PATH_ENV`] variable, of the rows `affects` selects, with a value that is not the user's own.
+fn user_value_rows_steer(affects: impl Fn(&[&str]) -> bool, dir: &Path) -> Option<&'static str> {
+    USER_PATH_ENV.iter().filter(|(programs, ..)| affects(programs)).find_map(|(_, vars, kind)| {
+        vars.iter().copied().find(|var| {
+            inherited_env_values(var).iter().any(|value| !value.is_empty() && !user_value_is_own(*kind, value, dir))
+        })
+    })
+}
+
+/// u35 g8: the dynamic loader's search-path variables, judged entry by entry ([`UserValue::PathList`]); every other
+/// `DYLD_*` (`DYLD_INSERT_LIBRARIES`, ...) is judged by presence.
+const LIBRARY_PATH_ENV: &[&str] = &[
+    "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH",
+    "DYLD_FALLBACK_FRAMEWORK_PATH",
+];
+
+/// Letters, digits and `/._-+@,` (on Windows also `\` and `:`): no whitespace, quote or expansion.
+fn plain_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|c| c.is_alphanumeric() || "/._-+@,".contains(c) || (cfg!(windows) && "\\:".contains(c)))
+}
+
+/// An absolute path outside the work tree of `dir` ([`absolute_path_is_inside`]).
+fn outside_tree(entry: &Path, dir: &Path) -> bool {
+    entry.is_absolute() && !absolute_path_is_inside(entry, dir)
+}
+
+/// A `PATH` value whose every entry ([`std::env::split_paths`]) is non-empty, absolute and outside the work tree.
+fn path_list_is_clean(path: &str, dir: &Path) -> bool {
+    std::env::split_paths(path).all(|entry| !entry.to_string_lossy().contains('\u{FFFD}') && outside_tree(&entry, dir))
+}
+
+/// A non-empty value of a [`USER_PATH_ENV`] variable that passes its [`UserValue`] check.
+fn user_value_is_own(kind: UserValue, value: &str, dir: &Path) -> bool {
+    match kind {
+        UserValue::Path => plain_value(value) && outside_tree(Path::new(value), dir),
+        UserValue::PathList => {
+            std::env::split_paths(value).all(|e| plain_value(&e.to_string_lossy()) && outside_tree(&e, dir))
+        }
+        UserValue::Program => plain_value(value) && (!value.contains(['/', '\\']) || outside_tree(Path::new(value), dir)),
+    }
+}
+
+/// u35 g7 (r6 lead decision: stop parsing values). Whether the inherited environment can steer what `program` runs
+/// or loads in `dir`, so that no-grant auto-approval is off for it (grants still apply, with their floors). `None`
+/// checks only what steers every command. Returns the variable that decided, for the ask's text.
+///
+/// u35 g9: the shell runner applies the same rule to the exact environment it builds for a call approved without a
+/// grant ([`with_env_view`]).
+///
+/// - `PATH` must be clean: every entry ([`std::env::split_paths`]) non-empty, absolute and outside the work tree
+///   (a tree that is the home directory, holds it, or is `/` does not count). Otherwise every command steers. An
+///   unset `PATH` is clean: the shell then searches its built-in default (`/usr/bin:/bin` and the like), absolute
+///   and outside any checkout. (Git still asks then: [`trusted_git_program`] finds no git to scan with.)
+/// - [`STEERING_ENV`] and any `DYLD_*`: set and non-empty, whatever the value.
+/// - [`USER_PATH_ENV`]: the value must be plain ([`plain_value`]) and an absolute path outside the work tree, or for
+///   a program a bare name.
+pub(crate) fn inherited_env_steers(program: Option<&str>, dir: &Path) -> Option<&'static str> {
+    let affects = |programs: &[&str]| programs.iter().any(|p| *p == "*" || Some(*p) == program);
+    let set = |var: &str| inherited_env_values(var).iter().any(|value| !value.is_empty());
+    if inherited_env_values("PATH").iter().any(|path| !path_list_is_clean(path, dir)) {
+        return Some("PATH");
+    }
+    if inherited_env_names()
+        .iter()
+        .any(|name| name.starts_with("DYLD_") && !LIBRARY_PATH_ENV.contains(&name.as_str()) && set(name))
+    {
+        return Some("DYLD_*");
+    }
+    if let Some(var) = STEERING_ENV
+        .iter()
+        .filter(|(programs, _)| affects(programs))
+        .flat_map(|(_, vars)| vars.iter().copied())
+        .find(|var| set(var))
+    {
+        return Some(var);
+    }
+    user_value_rows_steer(affects, dir)
+}
+
+/// u35 g8: the inherited variables the ambient scan's `git config --list` runs without: the loader's (a preload or
+/// library path, any `DYLD_*`), the startup files a shell would read, git's exec path and every `GIT_TRACE*` (which
+/// write files). The configuration sources (`GIT_CONFIG_*`, `GIT_DIR`, `HOME`, `XDG_CONFIG_HOME`) stay, so the scan
+/// reads the configuration the command will.
+pub(crate) fn scan_env_removals() -> Vec<String> {
+    const FIXED: &[&str] =
+        &["LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "GCONV_PATH", "BASH_ENV", "ENV", "GIT_EXEC_PATH"];
+    let mut names: Vec<String> = FIXED.iter().map(|name| (*name).to_owned()).collect();
+    names.extend(inherited_env_names().into_iter().filter(|name| name.starts_with("DYLD_") || name.starts_with("GIT_TRACE")));
+    names
+}
+
+/// u35 g7: [`inherited_env_steers`] over a script: what steers every command in `dir` and in every directory a
+/// literal `cd` moves to, then each command's program in the directory it runs in.
+pub(crate) fn inherited_env_steers_script(segments: &[Vec<String>], dir: &Path) -> Option<&'static str> {
+    let mut cwd = dir.to_path_buf();
+    let mut found = inherited_env_steers(None, &cwd);
+    for words in segments {
+        let Some(name) = normalized_program_name(words) else {
+            continue;
+        };
+        if matches!(name.as_str(), "cd" | "pushd") {
+            if let Some(next) = apply_literal_chdir(&cwd, words) {
+                cwd = next;
+            }
+            continue;
+        }
+        found = found.or_else(|| inherited_env_steers(Some(name.as_str()), &cwd));
+    }
+    found
+}
+
+/// u35 g7 (Astra/Grok r6): the git the ambient scan may run: `GIT_BIN_PATH` when it is set, absolute and outside the
+/// work tree; else the first `git` on a `PATH` entry that is absolute and outside it. `None`: the scan does not run and
+/// git is not auto-approvable. (Tests that install no `PATH` find the host's git.)
+///
+/// u35 g8 (Astra r7): the git found must also resolve, links followed ([`dunce::canonicalize`]), to a file outside
+/// the work tree: an outside `PATH` entry can hold a `git` symlink into the repository. A git that does not resolve
+/// is not trusted.
+fn trusted_git_program(dir: &Path) -> Option<PathBuf> {
+    let locate = |name: &str| inherited_env(name).or_else(|| std::env::var(name).ok()).filter(|v| !v.is_empty());
+    let resolves_outside = |git: &Path| {
+        outside_tree(git, dir) && dunce::canonicalize(git).is_ok_and(|real| real.is_file() && outside_tree(&real, dir))
+    };
+    if let Some(bin) = locate("GIT_BIN_PATH") {
+        let bin = PathBuf::from(bin);
+        return resolves_outside(&bin).then_some(bin);
+    }
+    let exe = if cfg!(windows) { "git.exe" } else { "git" };
+    let git = std::env::split_paths(&locate("PATH")?)
+        .filter(|entry| outside_tree(entry, dir))
+        .map(|entry| entry.join(exe))
+        .find(|git| git.is_file())?;
+    resolves_outside(&git).then_some(git)
 }
 
 fn is_static_path_operand(p: &str) -> bool {
@@ -890,7 +1380,20 @@ fn join_cwd(base: &Path, operand: &str) -> PathBuf {
     }
 }
 
-fn apply_literal_chdir(cwd: &Path, words: &[String]) -> Option<PathBuf> {
+/// u35 r1: the word normaliser already turned an unquoted `~` / `~/x` into `$HOME`, so a word that still starts with `~`
+/// is either quoted (a literal directory) or a tilde form nobody can resolve (`~user`, `~-`, `~+`, kept as spelled).
+/// The two cannot be told apart here, so a directory change to it fails closed.
+fn tilde_free(path: &str) -> bool {
+    !path.starts_with('~')
+}
+
+/// u35 g14: `operand` as a directory relative to `cwd`, when it is a literal path (no expansion, no `~` form, not an
+/// option); `None` when the directory it names cannot be pinned.
+pub(crate) fn literal_dir(cwd: &Path, operand: &str) -> Option<PathBuf> {
+    (is_static_path_operand(operand) && tilde_free(operand)).then(|| join_cwd(cwd, operand))
+}
+
+pub(crate) fn apply_literal_chdir(cwd: &Path, words: &[String]) -> Option<PathBuf> {
     let mut args = words.iter().skip(1).map(String::as_str);
     let mut target = None;
     while let Some(tok) = args.next() {
@@ -907,7 +1410,7 @@ fn apply_literal_chdir(cwd: &Path, words: &[String]) -> Option<PathBuf> {
         target = Some(tok);
     }
     let target = target?;
-    if !is_static_path_operand(target) {
+    if !is_static_path_operand(target) || !tilde_free(target) {
         return None;
     }
     Some(join_cwd(cwd, target))
@@ -1023,7 +1526,7 @@ fn git_effective_cwd(words: &[String], start_cwd: &Path) -> Option<PathBuf> {
         }
         if tok == "-C" {
             let path = words.get(i + 1).map(String::as_str)?;
-            if !is_static_path_operand(path) {
+            if !is_static_path_operand(path) || !tilde_free(path) {
                 return None;
             }
             cwd = join_cwd(&cwd, path);
@@ -1054,7 +1557,9 @@ fn git_effective_cwd(words: &[String], start_cwd: &Path) -> Option<PathBuf> {
 #[derive(Debug, Clone)]
 pub(crate) enum AmbientScanPlan {
     FailClosed,
-    CheckDirs(Vec<PathBuf>),
+    /// Each git segment's effective directory, (same index) its subcommand, and (u35 g10) whether it is a read-only
+    /// query ([`git_words_are_read_only_query`]), which runs only the hooks a safe verb can fire.
+    CheckDirs(Vec<PathBuf>, Vec<Option<String>>, Vec<bool>),
 }
 
 /// Same normalization as [`segment_exec_facts`], then track cd/git cwd.
@@ -1064,6 +1569,8 @@ pub(crate) fn ambient_scan_plan_from_segments(
 ) -> AmbientScanPlan {
     let mut cwd = session_cwd.to_path_buf();
     let mut git_cwds = Vec::new();
+    let mut git_verbs = Vec::new();
+    let mut git_queries = Vec::new();
     for raw in raw_segments {
         let words = match normalize_for_exec_risk(raw) {
             NormalizedArgv::FailClosed => return AmbientScanPlan::FailClosed,
@@ -1075,8 +1582,20 @@ pub(crate) fn ambient_scan_plan_from_segments(
                 None => return AmbientScanPlan::FailClosed,
             },
             Some("popd") => return AmbientScanPlan::FailClosed,
+            // u35 g14 (Grok r13 High): `gh` runs git in the directory it runs in (`gh status`, `gh pr status`,
+            // `gh pr checkout`, ...), so the repository there is scanned as for a git command of unknown verb; a
+            // read-only `gh` form runs only read-only git queries, which fire no hook.
+            Some("gh") => {
+                git_cwds.push(cwd.clone());
+                git_verbs.push(None);
+                git_queries.push(crate::permission::auto_mode::gh_subcommand_is_read_only(words));
+            }
             Some("git") => match git_effective_cwd(words, &cwd) {
-                Some(effective) => git_cwds.push(effective),
+                Some(effective) => {
+                    git_cwds.push(effective);
+                    git_verbs.push(git_subcommand(words).map(str::to_owned));
+                    git_queries.push(git_words_are_read_only_query(words));
+                }
                 None => return AmbientScanPlan::FailClosed,
             },
             _ => {}
@@ -1085,7 +1604,7 @@ pub(crate) fn ambient_scan_plan_from_segments(
     if git_cwds.is_empty() {
         AmbientScanPlan::FailClosed
     } else {
-        AmbientScanPlan::CheckDirs(git_cwds)
+        AmbientScanPlan::CheckDirs(git_cwds, git_verbs, git_queries)
     }
 }
 
@@ -1399,11 +1918,71 @@ fn git_stash_untracked_scope(args: &[String]) -> Option<&'static str> {
     scope
 }
 
+#[cfg(test)]
 pub(crate) fn ambient_exec_risk_from_plan(plan: &AmbientScanPlan) -> bool {
+    ambient_git_risk_from_plan(plan).exec
+}
+
+/// u35 g10: what the ambient git scan found for one script.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AmbientGitRisk {
+    /// Repository config (or a safe-verb hook) runs a program for any git command there: `ExecOrAmbientGit`.
+    pub(crate) exec: bool,
+    /// (Astra r9 High) a git command that is not a read-only query runs in a repository with hooks of its own
+    /// (`pre-commit`, `post-checkout`, ...): `RepositoryHook`, which switches off approval without a grant.
+    pub(crate) hook: bool,
+}
+
+pub(crate) fn ambient_git_risk_from_plan(plan: &AmbientScanPlan) -> AmbientGitRisk {
+    ambient_git_risk_from_plan_in(plan, true)
+}
+
+/// [`ambient_git_risk_from_plan`]; `folder_trusted` false (u35 t1, design d2 §3.3-5): the command's folder is not
+/// trusted, so the scan reads the repositories with libgit2 alone and starts no git; whatever libgit2 cannot settle
+/// fails closed, so the grant floors keep working.
+pub(crate) fn ambient_git_risk_from_plan_in(plan: &AmbientScanPlan, folder_trusted: bool) -> AmbientGitRisk {
+    let mut risk = AmbientGitRisk::default();
     match plan {
-        AmbientScanPlan::FailClosed => true,
-        AmbientScanPlan::CheckDirs(dirs) => dirs.iter().any(|c| local_repo_config_has_exec_risk(c)),
+        AmbientScanPlan::FailClosed => risk.exec = true,
+        AmbientScanPlan::CheckDirs(dirs, verbs, queries) => {
+            for (at, dir) in dirs.iter().enumerate() {
+                let entries = if folder_trusted {
+                    // u35 g7 (Astra/Grok r6): only a trusted git runs. u35 g8: a steering environment no longer stops
+                    // the scan (that would floor the user's grants); the scan's git runs without the variables that
+                    // could make it run or load anything ([`scan_env_removals`]), and the environment's own finding
+                    // is separate.
+                    let Some(git) = trusted_git_program(dir) else {
+                        risk.exec = true;
+                        return risk;
+                    };
+                    crate::git_content_filters::read_local_git_config_entries_with(dir, Some(git.as_path()))
+                } else {
+                    crate::git_content_filters::read_local_git_config_entries_git2_only(dir)
+                };
+                let Some(entries) = entries
+                else {
+                    risk.exec = true;
+                    return risk;
+                };
+                if entries.iter().any(|(name, value)| local_git_config_entry_is_exec(name, value))
+                    || verbs
+                        .get(at)
+                        .and_then(Option::as_deref)
+                        .is_some_and(|verb| repo_alias_runs_for(&entries, verb))
+                {
+                    risk.exec = true;
+                    return risk;
+                }
+                // A command not known to be a read-only query runs whichever hooks its verb fires.
+                if !queries.get(at).copied().unwrap_or(false)
+                    && entries.iter().any(|(name, _)| name == crate::git_content_filters::REPOSITORY_HOOK_KEY)
+                {
+                    risk.hook = true;
+                }
+            }
+        }
     }
+    risk
 }
 
 #[cfg(test)]
@@ -1416,6 +1995,15 @@ pub(crate) fn ambient_scan_plan_from_cmd(cmd: &str, session_cwd: &Path) -> Optio
 
 /// Token probe for unparseable scripts. Bare `git` tokens fail closed (e.g. `echo git $(true)`).
 pub(crate) fn script_may_invoke_git(cmd: &str) -> bool {
+    script_names_program(cmd, "git")
+}
+
+/// u35 g14 (Grok r13 High): [`script_may_invoke_git`] for `gh`, which runs git.
+pub(crate) fn script_may_invoke_gh(cmd: &str) -> bool {
+    script_names_program(cmd, "gh")
+}
+
+fn script_names_program(cmd: &str, program: &str) -> bool {
     for token in cmd.split(|c: char| {
         c.is_whitespace() || matches!(c, '|' | '&' | ';' | '(' | ')' | '`' | '\n' | '<' | '>')
     }) {
@@ -1423,7 +2011,7 @@ pub(crate) fn script_may_invoke_git(cmd: &str) -> bool {
         if trimmed.is_empty() {
             continue;
         }
-        if normalized_token_basename(trimmed) == "git" {
+        if normalized_token_basename(trimmed) == program {
             return true;
         }
     }
@@ -1564,6 +2152,21 @@ mod tests {
         )));
     }
 
+    /// u35 g13 (Fable r12 Low): the closure helper and the guard each restore what was installed before them.
+    #[test]
+    fn u35_g13_inherited_env_helpers_restore_the_previous_environment() {
+        let outer = TestInheritedEnv::set(&[("PATH", "bin")]);
+        with_inherited_env(&[("PATH", "/usr/bin")], || {
+            assert_eq!(test_inherited_env(), vec![("PATH".to_owned(), "/usr/bin".to_owned())]);
+            let inner = TestInheritedEnv::set(&[("PATH", "/opt/bin")]);
+            drop(inner);
+            assert_eq!(test_inherited_env(), vec![("PATH".to_owned(), "/usr/bin".to_owned())]);
+        });
+        assert_eq!(test_inherited_env(), vec![("PATH".to_owned(), "bin".to_owned())]);
+        drop(outer);
+        assert!(test_inherited_env().is_empty());
+    }
+
     #[test]
     fn interleaved_wrapper_transparent_facts() {
         let f = segment_exec_facts(&words("command git status"));
@@ -1609,7 +2212,7 @@ mod tests {
             "timeout 1 command env git -C sub status",
         ] {
             match ambient_scan_plan_from_cmd(cmd, base).unwrap() {
-                AmbientScanPlan::CheckDirs(d) => assert_eq!(d, vec![base.join("sub")], "{cmd}"),
+                AmbientScanPlan::CheckDirs(d, ..) => assert_eq!(d, vec![base.join("sub")], "{cmd}"),
                 other => panic!("{cmd}: expected CheckDirs, got {other:?}"),
             }
         }
@@ -1629,19 +2232,19 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let base = root.path();
         match plan("git -C sub status", base) {
-            AmbientScanPlan::CheckDirs(d) => {
+            AmbientScanPlan::CheckDirs(d, ..) => {
                 assert_eq!(d, vec![base.join("sub")]);
             }
             other => panic!("expected CheckDirs, got {other:?}"),
         }
         match plan("git -C/abs/path status", base) {
-            AmbientScanPlan::CheckDirs(d) => {
+            AmbientScanPlan::CheckDirs(d, ..) => {
                 assert_eq!(d, vec![PathBuf::from("/abs/path")]);
             }
             other => panic!("expected CheckDirs, got {other:?}"),
         }
         match plan("git -C a -C b status", base) {
-            AmbientScanPlan::CheckDirs(d) => {
+            AmbientScanPlan::CheckDirs(d, ..) => {
                 assert_eq!(d, vec![base.join("a").join("b")]);
             }
             other => panic!("expected CheckDirs, got {other:?}"),

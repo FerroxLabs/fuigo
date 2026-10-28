@@ -25,7 +25,9 @@
 //! Inject is **always** non-empty on Unix callers: either install a shadow
 //! function (which tags itself with a `__fuigo_shadow_{name}` marker) or a
 //! marker-gated `unalias`+`unset -f` that drops *only* a prior harness shadow —
-//! never a user-defined `find`/`grep` function replayed from the snapshot.
+//! never a user-defined `find`/`grep` function replayed from the snapshot. (u35: `find` and `grep` are safe-listed
+//! program names, so the wrapper's `restore_guard` already drops a replayed user `find`/`grep` before this runs; the
+//! harness shadows installed here are the documented exceptions.)
 
 use super::SearchShadowConfig;
 use std::path::{Path, PathBuf};
