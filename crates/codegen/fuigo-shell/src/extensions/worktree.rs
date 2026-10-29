@@ -314,6 +314,18 @@ pub async fn handle(
         // Resume a session in a fresh worktree.
         "fuigo/git/worktree/resume_session" => {
             let req = super::parse_params_str::<ResumeSessionInWorktreeRequest>(args.params.get())?;
+            {
+                use fuigo_workspace::permission::launch_policy;
+                let claim = launch_policy::SessionPolicyClaim::from_meta(req.meta.as_ref())
+                    .map_err(launch_policy::PolicyError::into_acp_error)?;
+                if agent.leader_mode && !claim.is_empty() {
+                    return Err(launch_policy::route_refused(
+                        claim.path.as_deref().unwrap_or_default(),
+                        "a leader does not run sessions under a launch policy; use a --no-leader process",
+                    )
+                    .into_acp_error());
+                }
+            }
             log_effective_worktree_type(
                 "fuigo/git/worktree/resume_session",
                 req.worktree_type,

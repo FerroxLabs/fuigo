@@ -52,6 +52,10 @@ pub struct PlanModeTracker {
     /// A toggle-off withdraws it and rolls the activation back instead of deferring an exit the model never knew about.
     /// Not persisted: a restart loses the buffer, and the next turn's Active-state injection covers it.
     pending_activation: Option<PendingActivation>,
+    /// Browser mode (`set_mode("browser_use")`) is on: requests carry the browsing overlay on top of the session's own
+    /// prompt. Live session state only, like the Ask prompt mode: never in [`PlanModeSnapshot`], so a reloaded session
+    /// starts in its normal mode.
+    browser_use: bool,
     /// Lives inside the session directory:
     /// `~/.fuigo/sessions/<cwd>/<session_id>/plan.md`
     plan_file_path: PathBuf,
@@ -87,6 +91,7 @@ impl PlanModeTracker {
             pending_exit_reminder: false,
             awaiting_plan_approval: false,
             pending_activation: None,
+            browser_use: false,
             plan_file_path: session_dir.join("plan.md"),
         }
     }
@@ -111,8 +116,17 @@ impl PlanModeTracker {
             pending_exit_reminder: snapshot.pending_exit_reminder,
             awaiting_plan_approval: snapshot.awaiting_plan_approval,
             pending_activation: None,
+            browser_use: false,
             plan_file_path: session_dir.join("plan.md"),
         }
+    }
+    /// Whether browser mode is on (in memory only; see the field).
+    pub(crate) fn browser_use(&self) -> bool {
+        self.browser_use
+    }
+    /// Only an owner `set_mode` calls this: `browser_use` turns it on, `default`, `ask` and `plan` turn it off.
+    pub(crate) fn set_browser_use(&mut self, on: bool) {
+        self.browser_use = on;
     }
     /// Mark that the client is waiting on plan approval (`exit_plan_mode` parked).
     pub(crate) fn set_awaiting_plan_approval(&mut self, awaiting: bool) {

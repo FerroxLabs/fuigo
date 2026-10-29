@@ -389,6 +389,7 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
     restore_summary: Option<String>,
     restore_degree: Option<fuigo_workspace::session::git::RestoreDegree>,
     resume_session_id: Option<String>,
+    copy_notice: Option<String>,
 ) -> Vec<Effect> {
     let session_id_str = session_id.0.to_string();
     let pending_entry = std::mem::take(&mut app.deferred_startup.pending_chat);
@@ -427,6 +428,9 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
             "Worktree ready: {}",
             worktree_path.display()
         )));
+        if let Some(notice) = copy_notice {
+            agent.scrollback.push_block(RenderBlock::system(notice));
+        }
         match (code_restored, restore_summary.as_deref()) {
             (true, Some(s)) => {
                 agent

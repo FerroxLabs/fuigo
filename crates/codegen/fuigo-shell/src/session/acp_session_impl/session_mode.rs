@@ -1,5 +1,6 @@
 //! Session/plan-mode concern for `SessionActor` (`handle_session_mode`, plan-mode reminders and persistence, active-template detection).
 use super::*;
+use fuigo_tools::types::BROWSER_USE_MODE_ID;
 pub(super) fn prompt_mode_from_session_mode_id(session_mode_id: &acp::SessionModeId) -> PromptMode {
     use fuigo_tools::types::SessionMode;
     match SessionMode::from_id(session_mode_id.0.as_ref()) {
@@ -22,21 +23,34 @@ pub(super) fn session_mode_id_from_prompt_mode(prompt_mode: PromptMode) -> acp::
 /// The mode id a client is told the session is in (`session/new`, `session/load`, `session/resume` `modes.current`).
 ///
 /// One calculation for every advertiser: `plan` while the plan tracker is on (`Pending` or `Active`); `ExitPending` means
-/// the user already switched plan off mid-turn and a non-plan update went out, so it falls through. Otherwise `ask` for
-/// the Ask prompt mode, else `default`. `browser_use` runs in the Agent prompt mode, so it is reported as `default`.
+/// the user already switched plan off mid-turn and a non-plan update went out, so it falls through. Then `browser_use`
+/// while browser mode is on (the in-memory bit on the plan tracker; cold callers pass `false`), then `ask` for the Ask
+/// prompt mode, else `default`.
 pub(crate) fn advertised_mode_id(
     plan: crate::session::plan_mode::PlanModeState,
     prompt: PromptMode,
+    browser: bool,
 ) -> &'static str {
     use crate::session::plan_mode::PlanModeState;
     use fuigo_tools::types::SessionMode;
     if matches!(plan, PlanModeState::Pending | PlanModeState::Active) {
         return SessionMode::Plan.as_id();
     }
+    if browser {
+        return BROWSER_USE_MODE_ID;
+    }
     if prompt == PromptMode::Ask {
         return SessionMode::Ask.as_id();
     }
     SessionMode::Default.as_id()
+}
+/// The id a plan exit reports: `browser_use` while browser mode is on, else the prompt mode's own id.
+pub(super) fn plan_exit_mode_id(prompt_mode: PromptMode, browser: bool) -> acp::SessionModeId {
+    if browser {
+        acp::SessionModeId::new(BROWSER_USE_MODE_ID)
+    } else {
+        session_mode_id_from_prompt_mode(prompt_mode)
+    }
 }
 /// Pass-through twin: no toolset in this build carries a plan-gated tool.
 pub(super) fn filter_cursor_tools_by_plan_mode(
@@ -60,6 +74,15 @@ impl SessionActor {
     pub(super) fn is_cursor_harness(&self) -> bool {
         false
     }
+    /// Whether browser mode is on (the in-memory bit on the plan tracker).
+    pub(crate) fn browser_mode_on(&self) -> bool {
+        self.plan_mode.lock().browser_use()
+    }
+    /// Put the browsing overlay on an outgoing request that carries session history (the main turn and parent-cache
+    /// side calls). Writes nothing when browser mode is off.
+    pub(crate) fn apply_effective_head(&self, items: &mut Vec<ConversationItem>) {
+        crate::session::browser_mode::apply_browser_overlay(items, self.browser_mode_on());
+    }
     pub(super) async fn handle_session_mode(&self, session_mode_id: acp::SessionModeId) {
         use fuigo_tools::types::SessionMode;
         // The ACP edge refuses these; an id from persisted state or an internal sender is ignored the same way, leaving
@@ -75,8 +98,14 @@ impl SessionActor {
         let prompt_mode = prompt_mode_from_session_mode_id(&session_mode_id);
         *self.current_prompt_mode.lock() = prompt_mode;
         let mode = SessionMode::from_id(session_mode_id.0.as_ref());
+        let browser = session_mode_id.0.as_ref() == BROWSER_USE_MODE_ID;
         if mode.is_plan() {
-            let entered = self.plan_mode.lock().enter_pending();
+            // Picking Plan leaves browser mode, in the same lock scope as the transition.
+            let entered = {
+                let mut tracker = self.plan_mode.lock();
+                tracker.set_browser_use(false);
+                tracker.enter_pending()
+            };
             if entered {
                 self.persist_plan_mode_state();
                 self.enqueue_current_mode_update(acp::SessionModeId::new(
@@ -140,18 +169,26 @@ impl SessionActor {
             )
             .in_scope(|| {});
         }
-        // Every accepted non-plan switch is reported, as the id attach advertises (`browser_use` runs in Agent prompt
-        // mode, so it is reported as `default`).
-        self.enqueue_current_mode_update(acp::SessionModeId::new(advertised_mode_id(
-            crate::session::plan_mode::PlanModeState::Inactive,
-            prompt_mode,
-        )));
-        let agent_def = match session_mode_id.0.as_ref() {
-            "browser_use" => Some(AgentDefinition::browser_use()),
-            name => {
-                let cwd = self.tool_context.cwd.as_path();
-                fuigo_agent::discovery::by_name_in_cwd(name, cwd)
-            }
+        // Every accepted non-plan switch is reported, as the id attach advertises. The bit is set (`browser_use`) or
+        // cleared (`default`, `ask`) and the id read in one lock scope.
+        let mode_id = {
+            let mut tracker = self.plan_mode.lock();
+            tracker.set_browser_use(browser);
+            advertised_mode_id(
+                crate::session::plan_mode::PlanModeState::Inactive,
+                prompt_mode,
+                tracker.browser_use(),
+            )
+        };
+        self.enqueue_current_mode_update(acp::SessionModeId::new(mode_id));
+        // Browser mode writes no head and keeps the session's agent: requests carry the overlay while the bit is on
+        // (`crate::session::browser_mode`).
+        if browser {
+            return;
+        }
+        let agent_def = {
+            let cwd = self.tool_context.cwd.as_path();
+            fuigo_agent::discovery::by_name_in_cwd(session_mode_id.0.as_ref(), cwd)
         };
         if let Some(ref def) = agent_def {
             tracing::info!(
@@ -178,17 +215,36 @@ impl SessionActor {
                     std::sync::Arc::clone(agent.tool_bridge()),
                 )
             };
-            let new_prompt = ctx.render(&bridge).await.unwrap_or_default();
+            let Some(template) = ctx.render(&bridge).await else {
+                tracing::warn!(
+                    session_id = %self.session_info.id.0,
+                    agent_name = %def.name,
+                    "mode definition did not render; system prompt left as is"
+                );
+                return;
+            };
+            // The definition supplies only the template: the head is composed as every other rewrite composes it
+            // (client override, then `_meta.rules`), and the turn's memory block is kept.
             let mut conversation = self.chat_state_handle.get_conversation().await;
+            let mut changed = false;
             for item in conversation.iter_mut() {
                 if let ConversationItem::System(sys) = item {
-                    sys.content = std::sync::Arc::<str>::from(new_prompt);
+                    let head = crate::session::human_rules::keep_memory_tail(
+                        self.recompose_system_prompt(&template, Some(&sys.content)),
+                        &sys.content,
+                    );
+                    if *sys.content != *head {
+                        sys.content = std::sync::Arc::<str>::from(head);
+                        changed = true;
+                    }
                     break;
                 }
             }
-            self.chat_state_handle.replace_conversation(conversation);
-            self.note_history_not_rewritten("the new mode's instructions")
-                .await;
+            if changed {
+                self.chat_state_handle.replace_conversation(conversation);
+                self.note_history_not_rewritten("the new mode's instructions")
+                    .await;
+            }
         }
     }
     /// Settle the mode a turn runs in, applying the prompt's declaration when it made one.
@@ -234,9 +290,13 @@ impl SessionActor {
                     tracker.state() != PlanModeState::Inactive
                 };
                 if was_plan {
-                    self.plan_mode.lock().user_exit(false);
+                    let browser = {
+                        let mut tracker = self.plan_mode.lock();
+                        tracker.user_exit(false);
+                        tracker.browser_use()
+                    };
                     self.persist_plan_mode_state();
-                    self.enqueue_current_mode_update(session_mode_id_from_prompt_mode(prompt_mode));
+                    self.enqueue_current_mode_update(plan_exit_mode_id(prompt_mode, browser));
                 }
             }
         }

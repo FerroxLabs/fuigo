@@ -249,12 +249,7 @@ impl From<ConversationRequest> for ChatCompletionRequest {
         let tools: Option<Vec<ToolDefinition>> = if tools_is_empty {
             None
         } else {
-            Some(
-                req.tools
-                    .into_iter()
-                    .map(|t| ToolDefinition::function(t.name, t.description, t.parameters))
-                    .collect(),
-            )
+            Some(req.tools.into_iter().map(chat_tool_definition).collect())
         };
 
         // only set `tool_choice` when there are `tools` to avoid OpenAI client errors
@@ -304,4 +299,16 @@ impl From<ConversationRequest> for ChatCompletionRequest {
             trace: None,
         }
     }
+}
+
+/// The one place a client tool becomes a Chat Completions function definition. MCP schemas get the additive
+/// completion strict custom-model providers require; every other tool is passed through untouched. Shared by the
+/// turn request conversion and the compaction request so they cannot drift.
+pub fn chat_tool_definition(t: ToolSpec) -> ToolDefinition {
+    let parameters = if tool_schema::is_mcp_tool_name(&t.name) {
+        tool_schema::complete_mcp_tool_schema(&t.name, t.parameters)
+    } else {
+        t.parameters
+    };
+    ToolDefinition::function(t.name, t.description, parameters)
 }

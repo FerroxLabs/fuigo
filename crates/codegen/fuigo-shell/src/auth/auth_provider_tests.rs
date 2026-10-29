@@ -797,6 +797,9 @@ async fn provider_helper_env_scrubs_first_party_credentials() {
         "OTEL_EXPORTER_OTLP_HEADERS",
         "FUIGO_INTERNAL_OTLP_HEADERS",
         "FUIGO_AGENT_SECRET",
+        // 1.0.36 item a: the launch policy path and hash are stripped from every child (a child must not re-pin or name it).
+        "FUIGO_POLICY_PATH",
+        "FUIGO_POLICY_SHA256",
         "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
         "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
         "FUIGO_TELEMETRY_EVENTS_API_KEY",

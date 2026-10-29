@@ -731,7 +731,15 @@ impl SessionActor {
                         replay_result.conversation.first(),
                         Some(ConversationItem::System(_))
                     ) {
+                        let live_head = match conversation.first() {
+                            Some(ConversationItem::System(sys)) => Some(sys.content.to_string()),
+                            _ => None,
+                        };
                         conversation = replay_result.conversation;
+                        if let Some(live_head) = live_head {
+                            self.repair_legacy_browser_checkpoint_head(&mut conversation, &live_head)
+                                .await;
+                        }
                     } else {
                         // Keep System (index 0)
                         // Replace User(user_info) at index 1 with the original from the checkpoint if available, otherwise keep the current one
@@ -773,6 +781,47 @@ impl SessionActor {
             replay_compaction_marker,
             prompt_text,
         }))
+    }
+
+    /// A checkpoint saved by 1.0.35 while browsing holds the bare browsing body as its System item. Installing it would
+    /// bring that head back, so it is replaced with the live head, under the same predicate and guard as the load repair.
+    /// The guard checks the session's canonical head (its client override, else the agent's system prompt), never the
+    /// live head: a session whose own head is the browsing body keeps its checkpoint head whatever memory block either
+    /// carries.
+    pub(super) async fn repair_legacy_browser_checkpoint_head(
+        &self,
+        conversation: &mut Vec<ConversationItem>,
+        live_head: &str,
+    ) {
+        let Some(ConversationItem::System(sys)) = conversation.first() else {
+            return;
+        };
+        if !crate::session::browser_mode::is_legacy_browser_head(&sys.content) {
+            return;
+        }
+        let canonical = self
+            .system_prompt_override
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| self.agent.borrow().system_prompt().to_owned());
+        let allowed = crate::session::browser_mode::legacy_repair_allowed(
+            &canonical,
+            self.tool_context.cwd.as_path(),
+            |defs| {
+                let agent = self.agent.borrow();
+                (
+                    defs.iter().map(|def| agent.prompt_context_for_definition(def)).collect(),
+                    std::sync::Arc::clone(agent.tool_bridge()),
+                )
+            },
+        )
+        .await;
+        if allowed {
+            let _ = fuigo_chat_state::conversation_util::replace_or_insert_system_head(
+                conversation,
+                live_head,
+            );
+        }
     }
 
     /// The bookkeeping after the conversation was replaced by a rewind to `target_index`: compaction suppression, MCP

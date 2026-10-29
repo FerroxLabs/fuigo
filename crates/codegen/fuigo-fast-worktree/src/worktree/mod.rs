@@ -1736,4 +1736,95 @@ mod tests {
             }
         }
     }
+
+    /// A tracked file whose working-tree copy cannot be read. A unix socket
+    /// stands in for it: `open(2)` on a socket fails (ENXIO) for every user, root
+    /// included, which a permission bit would not.
+    #[cfg(unix)]
+    fn repo_with_tracked_file_replaced_by_socket(
+        temp: &TempDir,
+    ) -> (std::path::PathBuf, std::os::unix::net::UnixListener) {
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        std::fs::write(repo_path.join("ok.txt"), "ok").unwrap();
+        std::fs::write(repo_path.join("secret.txt"), "secret").unwrap();
+        git_commit_all(&repo_path, "initial");
+        std::fs::remove_file(repo_path.join("secret.txt")).unwrap();
+        let socket = std::os::unix::net::UnixListener::bind(repo_path.join("secret.txt")).unwrap();
+        (repo_path, socket)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_file_copy_failure_aborts_create_with_typed_error_and_reclaims_dest() {
+        fuigo_test_utils::require_git!();
+        for standalone in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let (repo_path, _socket) = repo_with_tracked_file_replaced_by_socket(&temp);
+            let dest = temp.path().join("wt");
+
+            let err = WorktreeBuilder::new(repo_path.clone(), dest.clone())
+                .standalone(standalone)
+                .create()
+                .expect_err("a tracked file that cannot be copied must abort the create");
+
+            let typed = err
+                .downcast_ref::<crate::TrackedCopyError>()
+                .unwrap_or_else(|| panic!("standalone={standalone}: untyped error: {err:#}"));
+            assert_eq!(typed.paths, vec![std::path::PathBuf::from("secret.txt")]);
+            let line = err.to_string();
+            assert!(line.contains("secret.txt"), "{line}");
+            assert!(!line.contains('\n'), "one line for the user: {line}");
+            assert!(
+                !dest.exists(),
+                "standalone={standalone}: partial dest must be reclaimed"
+            );
+            let registered = std::process::Command::new("git")
+                .args(["worktree", "list", "--porcelain"])
+                .current_dir(&repo_path)
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&registered.stdout)
+                    .matches("worktree ")
+                    .count(),
+                1,
+                "standalone={standalone}: no worktree registration may be left behind"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untracked_file_copy_failure_only_warns() {
+        fuigo_test_utils::require_git!();
+        for standalone in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let repo_path = temp.path().join("repo");
+            std::fs::create_dir(&repo_path).unwrap();
+            init_git_repo(&repo_path);
+            std::fs::write(repo_path.join("ok.txt"), "ok").unwrap();
+            git_commit_all(&repo_path, "initial");
+            let _socket =
+                std::os::unix::net::UnixListener::bind(repo_path.join("untracked.sock")).unwrap();
+            let dest = temp.path().join("wt");
+
+            let report = WorktreeBuilder::new(repo_path.clone(), dest.clone())
+                .standalone(standalone)
+                .create()
+                .unwrap_or_else(|e| panic!("standalone={standalone}: must only warn: {e:#}"));
+
+            assert!(report.worktree_path.join("ok.txt").exists());
+            assert!(
+                report
+                    .unignored_copy
+                    .issues
+                    .iter()
+                    .any(|i| i.contains("untracked.sock")),
+                "standalone={standalone}: the problem must reach the report: {:?}",
+                report.unignored_copy.issues
+            );
+        }
+    }
 }

@@ -201,6 +201,8 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub is_headless: bool,
     /// Sticky chat product kind for ACU / product skills sourcing.
     pub is_chat_kind: bool,
+    /// 1.0.36 item a: the session's launch policy (`_meta` path + sha256, verified and pinned); `None` when ungoverned.
+    pub launch_policy: Option<std::sync::Arc<fuigo_workspace::permission::launch_policy::LaunchPolicy>>,
 }
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
@@ -374,6 +376,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
         prompt_display_cwd: None,
         is_headless: false,
         is_chat_kind: true,
+        launch_policy: None,
     }
 }
 /// `_meta.noReplay` skips gateway replay (client already has the transcript).

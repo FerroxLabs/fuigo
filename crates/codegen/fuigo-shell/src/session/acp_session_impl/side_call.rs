@@ -101,7 +101,16 @@ pub(super) fn should_strip_side_call_reasoning(
 impl SessionActor {
     /// Request skeleton for an auxiliary call that replays the parent conversation under the parent's `prompt_cache_key`.
     /// Temperature stays unset: cli-chat-proxy may inject a `thinking` config, and the Messages API then requires temperature == 1.
+    /// Carries the session's effective head (the browsing overlay while browser mode is on), read now: for a single
+    /// attempt. A call that retries keeps [`Self::parent_cached_request_unoverlaid`] and applies the head per attempt.
     pub(crate) fn parent_cached_request(&self, call: AuxCall) -> ConversationRequest {
+        let mut request = self.parent_cached_request_unoverlaid(call);
+        self.apply_effective_head(&mut request.items);
+        request
+    }
+
+    /// [`Self::parent_cached_request`] without the effective head: the stored head as is.
+    pub(crate) fn parent_cached_request_unoverlaid(&self, call: AuxCall) -> ConversationRequest {
         let session_id = self.session_info.id.to_string();
         // Only the Responses mapping sends the cache key
         // On the other backends the conv id is what ties a call to its conversation, so it has to stay the parent session id
@@ -111,11 +120,12 @@ impl SessionActor {
         } else {
             session_id.clone()
         };
+        let items =
+            fuigo_chat_state::compaction_utils::ModelRequestHistory::from_raw(call.items).into_items();
         ConversationRequest {
             execution_admission: crate::session::execution_state::Execution::current(&session_id)
                 .map(|execution| execution as std::sync::Arc<dyn fuigo_sampling_types::ExecutionAdmission>),
-            items: fuigo_chat_state::compaction_utils::ModelRequestHistory::from_raw(call.items)
-                .into_items(),
+            items,
             tools: call.tools,
             hosted_tools: call.hosted_tools,
             model: Some(call.model),

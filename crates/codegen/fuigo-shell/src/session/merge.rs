@@ -491,6 +491,7 @@ mod tests {
             last_turn_summary: None,
             last_turn_summary_prompt_id: None,
             last_recap: None,
+            permission_policy: None,
         }
     }
 

@@ -7,8 +7,11 @@ mod chat_completions;
 mod messages;
 mod responses;
 pub mod responses_ptc;
+mod tool_schema;
 
-pub use chat_completions::{conversation_item_to_chat_message, conversation_to_chat_messages};
+pub use chat_completions::{
+    chat_tool_definition, conversation_item_to_chat_message, conversation_to_chat_messages,
+};
 pub use messages::{build_messages_request, messages_response_to_items};
 pub use responses::{
     custom_tool_call, extra_tool_entries, patch_reasoning_text_types, response_to_conversation_items, response_to_conversation_items_with_custom,

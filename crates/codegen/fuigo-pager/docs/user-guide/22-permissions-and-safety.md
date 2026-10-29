@@ -345,6 +345,7 @@ Rule syntax examples:
 - `Bash(npm run build)` — exact command (or prefix)
 - `Bash(git commit:*)` — the `cmd:*` suffix form, equivalent to prefix matching on `git commit`
 - `Read(src/**)` — read access under `src/`
+- `Read` — a Read rule covers file reads and listings (file reads, directory listings, grep, LSP, memory files), not the pure bookkeeping tools (`todo_write`, `ask_user_question`, `scheduler_list`, `search_tool`, `refuse_peer_message`); every other tool, including skills, memory search, plan mode, task output, `kill_task`, `update_goal`, peer listing and workflow dry runs, can touch files and is covered; only a rule with `tool = "any"` also reaches the bookkeeping tools
 - `Edit(**/*.rs)` — edit any Rust file
 - `Grep` — all grep operations
 - `MCPTool(my-server__*)` — MCP tools from a specific server
@@ -426,6 +427,32 @@ Supported `defaultMode` values include `default`, `auto`, `acceptEdits`, `bypass
 You can import existing Claude settings interactively with **Ctrl+I** ("Import Claude settings").
 
 ---
+
+### 4. Launch Policy (`FUIGO_POLICY_PATH`)
+
+A program that launches Fuigo can add a permission policy for that run:
+
+```sh
+FUIGO_POLICY_PATH=/abs/policy.toml FUIGO_POLICY_SHA256=<sha256 of the file> fuigo agent stdio
+```
+
+The file holds only `[permission]`, in `config.toml` syntax (`allow`, `deny`, `ask`, `rules`). Unknown keys, malformed
+rules, invalid patterns, a relative path, a symlink, a file over 256 KiB, and a missing or wrong hash are errors: Fuigo
+does not start, prints one JSON line on stderr (`{"policy_error":"<code>","path":...,"line":...,"message":...}`) and
+exits with code 78. `fuigo policy check <file> [--json]` tests a file the same way and prints its sha256.
+
+Its rules join yours (deny > ask > allow). An `ask` from the launch policy always goes to your client as a permission
+request, in every mode, always-approve included; remembered approvals don't answer it, and answering it remembers
+nothing. `ask = ["*"]` asks about everything; a pattern ask such as `Bash(rm *)` matches the commands Fuigo can see, and
+`ask = ["Bash"]` asks about every shell call. An `allow` acts like your own config: it can remove a default prompt, never
+a deny or an ask.
+
+The file is read once and pinned for the life of the process: to change it, start a new process. A client can add a
+per-session file with `_meta["fuigo/permissionPolicyPath"]` and `_meta["fuigo/permissionPolicySha256"]` on
+`session/new`, and must send both again on every load, resume and fork it wants governed; the response acknowledges the
+policy in `_meta["fuigo/permissionPolicy"]`. Across processes, a session is governed exactly when the client says so; the
+saved session only causes a refusal when the client forgets. With a launch policy Fuigo runs standalone (no leader), hub
+routing is refused, and the agent can't edit the policy file.
 
 ## Rule Matching Reference
 

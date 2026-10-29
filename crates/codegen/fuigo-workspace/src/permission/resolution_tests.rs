@@ -2415,6 +2415,7 @@ fn inputs_trusted(
         managed: DEFAULT_MANAGED.get_or_init(ManagedSettings::default),
         managed_config_rules: Vec::new(),
         project_trusted,
+        launch_rules: Vec::new(),
     }
 }
 
@@ -2428,6 +2429,7 @@ fn inputs_with_managed<'a>(
         managed,
         managed_config_rules: Vec::new(),
         project_trusted: true,
+        launch_rules: Vec::new(),
     }
 }
 
@@ -4223,4 +4225,56 @@ fn user_config_lock_warns_once_on_garbage() {
         1,
         "exactly one warning naming the file: {out}"
     );
+}
+
+/// 1.0.36 item a (design test 3): launch rules join the union (deny > ask > allow), fill `launch_rules` exactly, carry
+/// their source for `fuigo inspect`, and a pinned catch-all launch allow is dropped like any non-admin rule.
+#[tokio::test]
+async fn launch_policy_rules_merge_and_stay_isolated() {
+    use crate::permission::launch_policy::{LaunchPolicy, LaunchScope};
+    use crate::permission::policy::CompiledPolicy;
+    use crate::permission::types::{AccessKind, Decision};
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = isolated_home();
+    let tmp = tempfile::tempdir().unwrap();
+    // Every other tier carries `[permission]`: the launch sub-policy must hold the launch file's rules only.
+    std::fs::create_dir_all(tmp.path().join(".fuigo")).unwrap();
+    std::fs::write(tmp.path().join(".fuigo/config.toml"), "[permission]\nallow = [\"Bash\", \"Read\"]\ndeny = [\"Edit(/etc/**)\"]\n").unwrap();
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    std::fs::write(tmp.path().join(".claude/settings.json"), r#"{"permissions":{"allow":["WebFetch"],"ask":["Grep"]}}"#).unwrap();
+    let launch_rules = vec![
+        parse_permission_rule("Bash(rm *)", RuleAction::Ask).unwrap(),
+        parse_permission_rule("Edit", RuleAction::Allow).unwrap(),
+        parse_permission_rule("*", RuleAction::Allow).unwrap(),
+    ];
+    let policy = LaunchPolicy::for_test("/launch/policy.toml", launch_rules.clone());
+    let mut tagged = Vec::new();
+    tag_with_source(&mut tagged, policy.rules.clone(), policy.source(LaunchScope::Process));
+    let resolved = resolve_permissions_with_provenance_inner(
+        tmp.path(),
+        ResolveInputs { launch_rules: tagged.clone(), ..inputs(None) },
+    )
+    .await
+    .unwrap();
+    let launch_texts: Vec<String> = resolved.config.launch_rules.iter().map(|r| format!("{r:?}")).collect();
+    assert_eq!(launch_texts, launch_rules.iter().map(|r| format!("{r:?}")).collect::<Vec<_>>());
+    assert!(resolved.sources.iter().any(|s| s.to_string() == "/launch/policy.toml (launch policy)"));
+    let compiled = CompiledPolicy::new(resolved.config.clone());
+    assert!(compiled.has_launch_policy());
+    // Launch ask beats the owner's Bash allow; the owner's deny beats the launch allow.
+    assert_eq!(compiled.evaluate(&AccessKind::Bash("rm -rf x".into())), Some(Decision::Ask));
+    assert!(matches!(compiled.evaluate(&AccessKind::Edit("/etc/hosts".into())), Some(Decision::Reject(_))));
+    // A launch allow removes a default prompt.
+    assert_eq!(compiled.evaluate(&AccessKind::Edit(tmp.path().join("a").to_string_lossy().into_owned())), Some(Decision::Allow));
+    // Under the always-approve pin the catch-all launch allow is dropped (non-admin), the others stay.
+    let pinned = resolve_permissions_with_provenance_inner(tmp.path(), ResolveInputs { launch_rules: tagged, ..inputs(Some(PIN)) })
+        .await
+        .unwrap();
+    assert_eq!(pinned.config.launch_rules.len(), 2);
+    // Unset: no launch rules, no launch sub-policy.
+    let unset = resolve_permissions_with_provenance_inner(tmp.path(), inputs(None)).await.unwrap();
+    assert!(unset.config.launch_rules.is_empty());
+    assert!(!CompiledPolicy::new(unset.config).has_launch_policy());
 }

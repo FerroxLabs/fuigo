@@ -2991,3 +2991,73 @@ async fn initialize_advertises_interject_and_queue_flags() {
     assert!(init["result"]["_meta"]["fuigoShell"] == true, "init: {init}");
     assert!(!runtime_key_advert(&init).is_null(), "fuigo/capabilities still advertised: {init}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// 1.0.36 item a (design test 11): with no launch policy the wire is the v1.0.35 wire
+// ---------------------------------------------------------------------------------------------
+
+/// The keys of a JSON object, sorted (`[]` for anything else).
+fn sorted_keys(value: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = value.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+    keys.sort();
+    keys
+}
+
+/// What a client sees of the launch-policy surface with no policy set, under each of Murage's three argv:
+/// `initialize`'s whole `agentCapabilities._meta["fuigo/capabilities"]` and its `_meta` keys, and the `session/new`
+/// result's keys and `_meta` keys (values there are per-session).
+async fn u36_unset_wire() -> Value {
+    let mut wire = serde_json::Map::new();
+    for (name, leading) in [("default", GLOBAL_DEFAULT), ("bypassPermissions", GLOBAL_BYPASS), ("defaultTrust", GLOBAL_DEFAULT_TRUST)] {
+        let mut m = Murage::spawn(
+            AgentSpawnSpec { leading_args: leading, agent_args: AGENT_MURAGE, ..AgentSpawnSpec::default() },
+            |_| {},
+        )
+        .await;
+        let init = m.initialize().await;
+        let result = &init["result"];
+        let ws = m.workspace.clone();
+        let new = m.call("session/new", json!({ "cwd": ws, "mcpServers": [] }), refuse).await;
+        let new_result = &new["result"];
+        assert!(new_result.get("sessionId").is_some(), "{name}: session/new: {new}");
+        wire.insert(
+            name.to_owned(),
+            json!({
+                "capabilities": result["agentCapabilities"]["_meta"]["fuigo/capabilities"],
+                "agentCapabilitiesMetaKeys": sorted_keys(&result["agentCapabilities"]["_meta"]),
+                "initializeMetaKeys": sorted_keys(&result["_meta"]),
+                "sessionNewResultKeys": sorted_keys(new_result),
+                "sessionNewMetaKeys": sorted_keys(&new_result["_meta"]),
+            }),
+        );
+    }
+    Value::Object(wire)
+}
+
+/// Capture helper for `fixtures/u36_unset_wire_v1035.json`: run with `--ignored --nocapture` and `FUIGO_BINARY`
+/// pointing at the released v1.0.35 binary, and paste the `U36-GOLDEN` line under `"wire"`.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "capture helper for the u36 unset-wire golden, run by hand against v1.0.35"]
+async fn u36_unset_wire_capture() {
+    println!("U36-GOLDEN {}", u36_unset_wire().await);
+}
+
+/// Design test 11: with neither `FUIGO_POLICY_PATH` nor a session key, `initialize` and `session/new` put exactly the
+/// v1.0.35 surface on the wire under each of Murage's three argv (no `permissionPolicy` capability, no ack key).
+#[tokio::test(flavor = "current_thread")]
+async fn u36_unset_wire_matches_v1035() {
+    let golden: Value =
+        serde_json::from_str(include_str!("fixtures/u36_unset_wire_v1035.json")).expect("golden");
+    let live = u36_unset_wire().await;
+    for (name, entry) in live.as_object().expect("object") {
+        assert!(
+            entry["capabilities"].get("permissionPolicy").is_none(),
+            "{name}: permissionPolicy advertised with no policy: {entry}"
+        );
+        assert!(
+            !entry["sessionNewMetaKeys"].as_array().is_some_and(|k| k.contains(&json!("fuigo/permissionPolicy"))),
+            "{name}: ack key with no policy: {entry}"
+        );
+    }
+    assert_eq!(live, golden["wire"], "the unset wire drifted from v1.0.35.\nlive:   {live}\ngolden: {}", golden["wire"]);
+}

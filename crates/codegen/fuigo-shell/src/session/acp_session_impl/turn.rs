@@ -2724,7 +2724,9 @@ impl SessionActor {
         self.apply_supported_context_window_selection().await;
         {
             let span = tracing::Span::current();
-            if let Some(agent) = self.active_agent_type.lock().clone() {
+            if self.browser_mode_on() {
+                span.record("agent.name", "browser-use");
+            } else if let Some(agent) = self.active_agent_type.lock().clone() {
                 span.record("agent.name", agent.as_str());
             }
             if let Some(skill) = self.active_skill.lock().clone() {
@@ -3162,6 +3164,7 @@ impl SessionActor {
                 })),
             );
             let mut request = request;
+            self.apply_effective_head(&mut request.items);
             // This submission takes over every attempt the sampler abandoned on this turn:
             // a shell-level resubmit (transient retry, auth refresh, rate-limit wait) continues
             // the same logical call, so those attempts are finished work, not unresolved work.

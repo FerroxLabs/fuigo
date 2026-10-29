@@ -305,6 +305,7 @@ async fn t10_project_rules_apply_only_in_the_trusted_folder_and_drop_on_revoke()
                 cli_rules: Vec::new(),
                 mode_hint: None,
                 yolo_pin: None,
+                session_policy: None,
             });
             let ask = |cmd: String| PermissionRequest::new(AccessKind::Bash(cmd), tool_call());
             assert_eq!(outcome(&mgr.request(ask("make all".into())).await), 'R', "the project rule in its folder");
@@ -317,6 +318,7 @@ async fn t10_project_rules_apply_only_in_the_trusted_folder_and_drop_on_revoke()
                 cli_rules: Vec::new(),
                 mode_hint: None,
                 yolo_pin: None,
+                session_policy: None,
             });
             let resolution = in_u.request(ask("make all".into())).await;
             assert_eq!(outcome(&resolution), 'P', "make in U: not a trusted folder: {:?}", resolution.event);

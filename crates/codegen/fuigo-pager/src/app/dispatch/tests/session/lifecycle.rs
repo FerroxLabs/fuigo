@@ -306,6 +306,7 @@ fn worktree_session_created_sets_session_and_cwd() {
             session_cwd: session_cwd.clone(),
             models: None,
             scheduler_background_loops: None,
+            copy_notice: None,
         }),
         &mut app,
     );
@@ -342,6 +343,34 @@ fn worktree_session_created_sets_session_and_cwd() {
     assert!(app.agents[&id].session.state.is_idle());
 }
 #[test]
+fn worktree_session_created_with_copy_notice_adds_one_more_line() {
+    let mut app = test_app_git();
+    dispatch(
+        Action::NewWorktreeSession {
+            load_session_id: None,
+            label: None,
+            git_ref: None,
+        },
+        &mut app,
+    );
+    let id = AgentId(0);
+    let worktree_path = PathBuf::from("/tmp/fuigo-worktrees/pager-124");
+    dispatch(
+        Action::TaskComplete(TaskResult::WorktreeSessionCreated {
+            agent_id: id,
+            session_id: acp::SessionId::new("wt-session-2"),
+            worktree_path: worktree_path.clone(),
+            session_cwd: worktree_path,
+            models: None,
+            scheduler_background_loops: None,
+            copy_notice: Some("Worktree created, but 1 file had a copy problem".to_string()),
+        }),
+        &mut app,
+    );
+    // "Worktree ready" plus the copy notice; no copy problem adds nothing (see the test above).
+    assert_eq!(app.agents[&id].scrollback.len(), 2);
+}
+#[test]
 fn worktree_session_created_clears_sticky_branch_from_main_repo() {
     let mut app = test_app_git();
     dispatch(
@@ -369,6 +398,7 @@ fn worktree_session_created_clears_sticky_branch_from_main_repo() {
             session_cwd: session_cwd.clone(),
             models: None,
             scheduler_background_loops: None,
+            copy_notice: None,
         }),
         &mut app,
     );
@@ -406,6 +436,7 @@ fn worktree_session_preserves_subdirectory_offset() {
             session_cwd: session_cwd.clone(),
             models: None,
             scheduler_background_loops: None,
+            copy_notice: None,
         }),
         &mut app,
     );
@@ -535,6 +566,7 @@ fn worktree_session_created_drains_queued_prompts() {
             session_cwd: PathBuf::from("/tmp/fuigo-worktrees/pager-abc"),
             models: None,
             scheduler_background_loops: None,
+            copy_notice: None,
         }),
         &mut app,
     );
@@ -1120,6 +1152,7 @@ fn deferred_model_switch_applied_on_worktree_session_created() {
             session_cwd: PathBuf::from("/tmp/worktree"),
             models: None,
             scheduler_background_loops: None,
+            copy_notice: None,
         }),
         &mut app,
     );

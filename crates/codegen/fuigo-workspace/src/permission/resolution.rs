@@ -299,9 +299,26 @@ pub async fn resolve_permission_config_with_fallback(
     cwd: &Path,
     project_trusted: bool,
 ) -> Option<PermissionConfig> {
-    resolve_permissions_with_provenance(cwd, project_trusted)
-        .await
-        .map(|r| r.config)
+    resolve_permission_config_with_fallback_launch(cwd, project_trusted, None).await
+}
+
+/// [`resolve_permission_config_with_fallback`] with a session's launch policy file added beside the process one.
+pub async fn resolve_permission_config_with_fallback_launch(
+    cwd: &Path,
+    project_trusted: bool,
+    session_policy: Option<&crate::permission::launch_policy::LaunchPolicy>,
+) -> Option<PermissionConfig> {
+    let lock = yolo_policy_lock();
+    resolve_permissions_with_provenance_inner(
+        cwd,
+        ResolveInputs::live_with_session(
+            project_trusted,
+            lock.as_ref().map(|lock| lock.reason),
+            session_policy,
+        ),
+    )
+    .await
+    .map(|r| r.config)
 }
 
 /// u35 t1 (design d2 §3.4): what a session's permission policy is built from besides the folder's own layer: the
@@ -314,12 +331,19 @@ pub struct SessionPolicyInputs {
     pub cli_rules: Vec<crate::permission::types::PermissionRule>,
     pub mode_hint: Option<String>,
     pub yolo_pin: Option<&'static str>,
+    /// The session's launch policy file (`_meta` path + sha256), pinned; `None` for an ungoverned session.
+    pub session_policy: Option<std::sync::Arc<crate::permission::launch_policy::LaunchPolicy>>,
 }
 
 /// The session permission config: the layered resolution for `inputs.cwd` (its project tier only when
 /// `project_trusted`), the CLI rules first, then the mode hint.
 pub async fn resolve_session_policy(inputs: &SessionPolicyInputs, project_trusted: bool) -> Option<PermissionConfig> {
-    let mut config = resolve_permission_config_with_fallback(&inputs.cwd, project_trusted).await;
+    let mut config = resolve_permission_config_with_fallback_launch(
+        &inputs.cwd,
+        project_trusted,
+        inputs.session_policy.as_deref(),
+    )
+    .await;
     if !inputs.cli_rules.is_empty() {
         match &mut config {
             Some(config) => {
@@ -495,10 +519,20 @@ struct ResolveInputs<'a> {
     /// Folder-trust verdict for `cwd`.
     /// When false, project-tier `.claude/settings.json` / `.fuigo/config.toml` permission rules are dropped (global/user/admin tiers still load).
     project_trusted: bool,
+    /// Launch policy rules (process file, then the session's), tagged with their source. Empty without a launch policy.
+    launch_rules: Vec<Sourced<PermissionRule>>,
 }
 
 impl ResolveInputs<'static> {
     fn live(project_trusted: bool, policy_block: Option<&'static str>) -> Self {
+        Self::live_with_session(project_trusted, policy_block, None)
+    }
+
+    fn live_with_session(
+        project_trusted: bool,
+        policy_block: Option<&'static str>,
+        session_policy: Option<&crate::permission::launch_policy::LaunchPolicy>,
+    ) -> Self {
         Self {
             policy_block,
             managed: managed_settings(),
@@ -506,8 +540,30 @@ impl ResolveInputs<'static> {
                 &fuigo_config::managed_config_layers(),
             ),
             project_trusted,
+            launch_rules: launch_policy_rules(session_policy),
         }
     }
+}
+
+/// The process launch policy's rules, then the session's (a session naming the process file adds nothing twice).
+fn launch_policy_rules(
+    session_policy: Option<&crate::permission::launch_policy::LaunchPolicy>,
+) -> Vec<Sourced<PermissionRule>> {
+    use crate::permission::launch_policy::{LaunchScope, process};
+    let process = process();
+    if process.is_none() && session_policy.is_none() {
+        return Vec::new();
+    }
+    let mut rules = Vec::new();
+    if let Some(policy) = process {
+        tag_with_source(&mut rules, policy.rules.clone(), policy.source(LaunchScope::Process));
+    }
+    if let Some(policy) = session_policy
+        && process.is_none_or(|p| p.sha256 != policy.sha256 || p.path != policy.path)
+    {
+        tag_with_source(&mut rules, policy.rules.clone(), policy.source(LaunchScope::Session));
+    }
+    rules
 }
 
 /// Collect permission rules from every source, keeping each rule's origin.
@@ -558,6 +614,7 @@ async fn resolve_permissions_with_provenance_inner(
         managed,
         managed_config_rules,
         project_trusted,
+        launch_rules,
     } = inputs;
     let config_toml_rules = load_config_toml_permissions(cwd, project_trusted);
 
@@ -627,9 +684,16 @@ async fn resolve_permissions_with_provenance_inner(
         );
     }
 
+    all_rules.extend(launch_rules);
+
     // Must run while provenance is in scope (discarded by the unzip below)
     // CLI `--allow '*'` is filtered at its own merge site (acp_session)
     let all_rules = drop_untrusted_catchall_allows(all_rules, policy_block, &mut skipped);
+    let launch_rules: Vec<PermissionRule> = all_rules
+        .iter()
+        .filter(|s| matches!(s.source, RequirementSource::LaunchPolicy { .. }))
+        .map(|s| s.value.clone())
+        .collect();
 
     // Keep skip-only resolutions alive so the drop reaches `fuigo inspect`
     // Zero rules with Ask is a no-op for the evaluator, identical to the `None` arm
@@ -654,6 +718,7 @@ async fn resolve_permissions_with_provenance_inner(
             prompt_policy,
             default_mode_configured,
             resolved_base,
+            launch_rules,
         },
         sources,
         skipped,
@@ -803,6 +868,7 @@ fn resolve_claude_settings_inner(
             } else {
                 applied_mode.map_or(ResolvedBaseMode::Default, DefaultPermissionMode::resolved_base)
             },
+            launch_rules: Vec::new(),
         },
         all_skipped,
         source_path,

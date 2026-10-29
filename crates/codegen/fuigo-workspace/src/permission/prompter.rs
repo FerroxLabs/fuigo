@@ -295,6 +295,9 @@ pub struct AcpPrompter {
     hub_permission: Option<Arc<dyn crate::permission::PermissionHookTransport>>,
     /// When `false` (default, fail-safe), the per-tool "Always allow …" options are stripped (see [`REMEMBER_TOOL_APPROVALS_GATED_IDS`]).
     remember_tool_approvals: bool,
+    /// 1.0.36 item a: the current prompt answers a launch-policy ask, so only once-answers are offered (no always row,
+    /// no session edit grant, no enable-always-approve).
+    launch_ask: std::sync::atomic::AtomicBool,
 }
 
 /// Per-tool always-allow/always-reject option ids stripped when the gate is off.
@@ -488,6 +491,7 @@ impl AcpPrompter {
             // Fail-safe construction default, deliberately not the product default (which is on)
             // A caller that forgets to wire the gate via `with_remember_tool_approvals` gets no remember rows rather than un-resolved ones
             remember_tool_approvals: false,
+            launch_ask: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -515,16 +519,27 @@ impl AcpPrompter {
         self
     }
 
+    /// 1.0.36 item a: mark the next prompt as answering a launch-policy ask (or not).
+    pub(crate) fn set_launch_ask(&self, launch_ask: bool) {
+        self.launch_ask.store(launch_ask, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn build_options(
         &self,
         access: &AccessKind,
     ) -> IndexMap<acp::PermissionOptionId, acp::PermissionOption> {
         let mut base = self.build_options_inner(access);
+        let launch_ask = self.launch_ask.load(std::sync::atomic::Ordering::Relaxed);
         // Gate off: strip the granular always-allow rows (order-preserving).
-        if !self.remember_tool_approvals {
+        if !self.remember_tool_approvals || launch_ask {
             for id in REMEMBER_TOOL_APPROVALS_GATED_IDS {
                 base.shift_remove(&acp::PermissionOptionId::new(*id));
             }
+        }
+        // A launch-policy ask: answering it remembers nothing, so offer nothing that would.
+        if launch_ask {
+            base.shift_remove(&acp::PermissionOptionId::new(ALLOW_EDITS_SESSION_OPTION_ID));
+            return base;
         }
         // Prepend the "enable always-approve mode" option at position 0 for client types that wire the id through to their YOLO toggle
         // See `ENABLE_ALWAYS_APPROVE_OPTION_ID` for the full client/shell split
@@ -878,7 +893,7 @@ fn with_hook_ask_header(
 /// Single source of truth: the permission manager also calls this when deriving `(tool_name, access_kind, access_detail)`, so the two cannot drift.
 pub fn tool_name_for_access(access: &AccessKind) -> String {
     match access {
-        AccessKind::Read(_) => "read_file".to_owned(),
+        AccessKind::Read(_) | AccessKind::Session => "read_file".to_owned(),
         AccessKind::Grep { .. } => "grep".to_owned(),
         AccessKind::Edit(_) => "search_replace".to_owned(),
         AccessKind::Bash(_) => "run_terminal_command".to_owned(),

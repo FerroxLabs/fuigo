@@ -3886,7 +3886,7 @@ impl ShellWriteFacts {
         if peer_extended_set_active() && self.opaque_write {
             return Some(ProtectedEditReason::Sensitive);
         }
-        let direct = self.targets.iter().find_map(|target| {
+        let direct = strongest_protection(self.targets.iter().map(|target| {
             if is_safe_write_sink(&target.path) {
                 return None;
             }
@@ -3905,7 +3905,7 @@ impl ShellWriteFacts {
                 Ok(bases) => bases,
                 Err(reason) => return Some(reason),
             };
-            bases.iter().find_map(|base| {
+            strongest_protection(bases.iter().map(|base| {
                 let path = resolve(base, &spelled);
                 match target.destination {
                     None | Some(DestinationKind::TargetDirectory | DestinationKind::Watch) => {
@@ -3929,19 +3929,16 @@ impl ShellWriteFacts {
                         generated_names_protection(&path, target.path.ends_with('/'))
                     }
                 }
-            })
-        });
-        direct.or_else(|| {
-            self.nested.iter().find_map(|nested| {
-                let bases = match self.bases(real_cwd, nested.at, nested.scope, false, resolve) {
-                    Ok(bases) => bases,
-                    Err(reason) => return Some(reason),
-                };
-                bases
-                    .iter()
-                    .find_map(|base| nested.facts.protection_in(base, resolve))
-            })
-        })
+            }))
+        }));
+        // 1.0.36 item a: a pinned launch policy file among later targets outranks an earlier target's reason.
+        strongest_protection(std::iter::once(direct).chain(self.nested.iter().map(|nested| {
+            let bases = match self.bases(real_cwd, nested.at, nested.scope, false, resolve) {
+                Ok(bases) => bases,
+                Err(reason) => return Some(reason),
+            };
+            strongest_protection(bases.iter().map(|base| nested.facts.protection_in(base, resolve)))
+        })))
     }
 
     /// Whether every write of this script is a concrete path that `within` accepts, each resolved like the
@@ -4914,6 +4911,8 @@ pub enum ProtectedEditReason {
     McpConfig,
     /// Fail-closed / unclassified sensitive path; no user copy yet.
     Sensitive,
+    /// A pinned launch permission policy file (by identity): never editable by the agent, in any mode.
+    LaunchPolicy,
 }
 
 impl ProtectedEditReason {
@@ -4930,6 +4929,7 @@ impl ProtectedEditReason {
             Self::CursorHooks => "cursor_hooks",
             Self::McpConfig => "mcp_config",
             Self::Sensitive => "sensitive",
+            Self::LaunchPolicy => "launch_policy",
         }
     }
 
@@ -4966,6 +4966,9 @@ impl ProtectedEditReason {
                 "Note: This edit contains changes to MCP or language-server config, which can start new programs in later sessions without a separate execution approval.",
             ),
             Self::Sensitive => None,
+            Self::LaunchPolicy => Some(
+                "Note: This edit targets the launch permission policy file, which the agent may not change.",
+            ),
         }
     }
 }
@@ -4993,6 +4996,27 @@ impl ProtectedEditPermission {
 /// The caller uses the edit tools' shared model-path resolver first.
 /// This helper preserves its uncollapsed components for physical symlink and `..` resolution.
 /// It also checks a separate lexical normalization for traversal aliases.
+/// The reason for several targets: a pinned launch policy file ([`ProtectedEditReason::LaunchPolicy`], a hard refusal)
+/// dominates every other reason; otherwise the first target's reason, as before. With no policy file pinned this stops
+/// at the first protected target, so the unset path evaluates exactly what it did.
+pub(crate) fn strongest_protection(
+    reasons: impl IntoIterator<Item = Option<ProtectedEditReason>>,
+) -> Option<ProtectedEditReason> {
+    let mut first = None;
+    for reason in reasons.into_iter().flatten() {
+        if reason == ProtectedEditReason::LaunchPolicy {
+            return Some(reason);
+        }
+        if first.is_none() {
+            first = Some(reason);
+            if !crate::permission::launch_policy::any_pins() {
+                break;
+            }
+        }
+    }
+    first
+}
+
 pub(crate) fn edit_target_protection(path: &Path) -> Option<ProtectedEditReason> {
     edit_target_floor(path).or_else(|| {
         // Peer guard (S6.4): while a peer-influenced session's shell command is judged, the extended protected set
@@ -5050,6 +5074,10 @@ pub(crate) fn with_peer_extended_set<T>(f: impl FnOnce() -> T) -> T {
 fn edit_target_floor(path: &Path) -> Option<ProtectedEditReason> {
     if !path.is_absolute() {
         return Some(ProtectedEditReason::Sensitive);
+    }
+    // 1.0.36 item a: a pinned launch policy file, by path or identity (hard links and other names count).
+    if crate::permission::launch_policy::is_pinned_policy_file(path) {
+        return Some(ProtectedEditReason::LaunchPolicy);
     }
     let lexical = fuigo_paths::normalize_lexically(path);
     if let Some(reason) = protected_edit_reason(&lexical) {

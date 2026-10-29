@@ -440,6 +440,40 @@ impl Drop for BackgroundCopyGuard {
     }
 }
 
+/// The completion status for a background ignored-files copy. Every per-file
+/// problem the copy reported goes to the log; the status itself carries only a
+/// count and one notice line, and neither field is serialised when there were
+/// no problems.
+fn ignored_copy_complete_status(
+    session_id: String,
+    worktree_path: String,
+    report: &fuigo_fast_worktree::CopyReport,
+) -> WorktreeStatus {
+    for issue in &report.issues {
+        tracing::warn!(issue = %issue, worktree = %worktree_path, "background ignored-files copy problem");
+    }
+    let warning_count = report.issues.len() as u64;
+    let notice = report.issues.first().map(|first| {
+        let first: String = first.chars().take(100).collect();
+        match warning_count {
+            1 => format!(
+                "Ignored files copied, but 1 file had a copy problem: {first} (details in the log)"
+            ),
+            n => format!(
+                "Ignored files copied, but {n} files had copy problems, first: {first} (details in the log)"
+            ),
+        }
+    });
+    WorktreeStatus::IgnoredCopyComplete {
+        session_id,
+        worktree_path,
+        files_copied: report.files_copied,
+        dirs_created: report.dirs_created,
+        warning_count,
+        notice,
+    }
+}
+
 pub async fn run_background_ignored_copy<N: WorktreeNotificationSender>(
     context: BackgroundCopyContext,
     session_id: String,
@@ -511,12 +545,11 @@ pub async fn run_background_ignored_copy<N: WorktreeNotificationSender>(
                     .await;
             } else {
                 notifier
-                    .send_worktree_status(WorktreeStatus::IgnoredCopyComplete {
+                    .send_worktree_status(ignored_copy_complete_status(
                         session_id,
                         worktree_path,
-                        files_copied: report.files_copied,
-                        dirs_created: report.dirs_created,
-                    })
+                        &report,
+                    ))
                     .await;
             }
         }
@@ -569,6 +602,10 @@ fn default_copy_mode() -> WorktreeCopyMode {
 pub struct PrepareWorktreeResult {
     pub response: Result<CreateWorktreeResponse>,
     pub spawn_task: bool,
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -654,6 +691,12 @@ pub enum WorktreeStatus {
         files_copied: u64,
         #[serde(rename = "dirsCreated")]
         dirs_created: u64,
+        /// Per-file problems the copy hit (it still completed). Omitted when none.
+        #[serde(rename = "warningCount", skip_serializing_if = "is_zero_u64")]
+        warning_count: u64,
+        /// The one user-facing line for those problems. Omitted when none.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notice: Option<String>,
     },
 
     #[serde(rename = "ignoredCopyError")]
@@ -2664,6 +2707,9 @@ pub struct ResumeSessionInWorktreeRequest {
     /// When set, the worktree is a clean checkout of this ref (dirty overlay is ignored).
     #[serde(default)]
     pub git_ref: Option<String>,
+    /// The request's `_meta` (1.0.36 item a: the launch policy key and hash a governed source requires to fork).
+    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Response from `fuigo/git/worktree/resume_session`.
@@ -2690,6 +2736,13 @@ pub struct ResumeSessionInWorktreeResponse {
     /// Serialises as `"full"` / `"head_only"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore_degree: Option<crate::session::git::RestoreDegree>,
+    /// Per-file problems copying into the new worktree (it was still created, so untracked or
+    /// ignored files); shown to the user as one line, listed in the log.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copy_warnings: Vec<String>,
+    /// Response `_meta`: the launch policy ack for a governed fork (1.0.36 item a).
+    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
 }
 
 /// Request to rehydrate a session in a worktree, preserving the original session identity.
@@ -3799,6 +3852,82 @@ mod tests {
             !is_worktree_in_progress(&new_session_id).await,
             "fork prepare must not strand the in-progress marker (proxy wedge)"
         );
+    }
+
+    /// Keeps every status it is sent.
+    #[derive(Clone, Default)]
+    struct RecordingNotifier {
+        statuses: std::sync::Arc<std::sync::Mutex<Vec<WorktreeStatus>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl WorktreeNotificationSender for RecordingNotifier {
+        async fn send_worktree_status(&self, progress: WorktreeStatus) {
+            self.statuses.lock().unwrap().push(progress);
+        }
+    }
+
+    fn run_ignored_copy_with(block_dest_file: bool) -> Vec<WorktreeStatus> {
+        use fuigo_test_utils::git::{git_commit_all, init_git_repo};
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        let dest = temp.path().join("dest");
+        std::fs::create_dir_all(repo.join("cache")).unwrap();
+        std::fs::create_dir_all(dest.join("cache")).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join(".gitignore"), "cache/\n").unwrap();
+        std::fs::write(repo.join("tracked.txt"), "t").unwrap();
+        git_commit_all(&repo, "initial");
+        std::fs::write(repo.join("cache/ok.bin"), "1").unwrap();
+        std::fs::write(repo.join("cache/blocked.bin"), "2").unwrap();
+        if block_dest_file {
+            // A directory where the file must go makes that one copy fail.
+            std::fs::create_dir(dest.join("cache/blocked.bin")).unwrap();
+        }
+        let notifier = RecordingNotifier::default();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(run_background_ignored_copy(
+            BackgroundCopyContext::new(),
+            "s1".into(),
+            repo.to_string_lossy().into_owned(),
+            dest.to_string_lossy().into_owned(),
+            vec![],
+            notifier.clone(),
+        ));
+        notifier.statuses.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn background_ignored_copy_problem_reaches_the_completion_status_as_one_counted_notice() {
+        fuigo_test_utils::require_git!();
+        let statuses = run_ignored_copy_with(true);
+        let json = statuses
+            .iter()
+            .map(|s| serde_json::to_string(s).unwrap())
+            .find(|j| j.contains("ignoredCopyComplete"))
+            .expect("a completion status");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["warningCount"], 1, "{json}");
+        let notice = v["notice"].as_str().expect("notice");
+        assert!(notice.contains("1 file had a copy problem"), "{notice}");
+        assert!(notice.contains("blocked.bin"), "{notice}");
+        assert!(!notice.contains('\n'), "{notice}");
+    }
+
+    #[test]
+    fn background_ignored_copy_without_problems_omits_the_warning_fields() {
+        fuigo_test_utils::require_git!();
+        let statuses = run_ignored_copy_with(false);
+        let json = statuses
+            .iter()
+            .map(|s| serde_json::to_string(s).unwrap())
+            .find(|j| j.contains("ignoredCopyComplete"))
+            .expect("a completion status");
+        assert!(!json.contains("warningCount"), "{json}");
+        assert!(!json.contains("notice"), "{json}");
     }
 
     /// Counts terminal worktree statuses: one per creator that ran to completion.

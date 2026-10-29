@@ -5,8 +5,8 @@
 //! out of, so plan-mode state is driven by the closed set of variants
 //! instead of by ad-hoc string matching at each boundary.
 
-/// Wire id of the browser-use mode. Not a [`SessionMode`] variant: it selects the browser-use agent and runs in
-/// agent prompt mode.
+/// Wire id of the browser-use mode. Not a [`SessionMode`] variant: it adds browsing instructions to the session's own
+/// prompt while it is on and runs in agent prompt mode.
 pub const BROWSER_USE_MODE_ID: &str = "browser_use";
 
 /// Every mode id `session/set_mode` accepts. Anything else is refused at the protocol edge.

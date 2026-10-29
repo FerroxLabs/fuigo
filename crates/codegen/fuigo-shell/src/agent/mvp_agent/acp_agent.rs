@@ -49,6 +49,15 @@ pub(crate) fn fuigo_capabilities() -> serde_json::Value {
             .expect("capabilities is an object")
             .insert("peerMessaging".to_owned(), crate::extensions::peer::capability());
     }
+    // 1.0.36 item a: advertised only while a process launch policy is in force; unset, the object is unchanged.
+    if let Some(policy) = fuigo_workspace::permission::launch_policy::process() {
+        caps.as_object_mut()
+            .expect("capabilities is an object")
+            .insert(
+                "permissionPolicy".to_owned(),
+                serde_json::json!({ "version": 1, "sha256": policy.sha256 }),
+            );
+    }
     caps
 }
 /// P189: `_fuigo/session/park` / `_fuigo/session/unpark` (wire spec in `docs/strike/receipts/R189-p189.md`).

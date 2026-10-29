@@ -1057,6 +1057,23 @@ fn resumed_session_sandbox_profile_in_root(
     None
 }
 
+/// 1.0.36 item a: stamp the launch policy marker into the session's `summary.json` through the locked summary writer.
+/// Called only for a session a launch policy governs.
+pub(crate) async fn write_permission_policy_marker(
+    info: &Info,
+    binding: fuigo_workspace::permission::launch_policy::PolicyBinding,
+) -> std::io::Result<()> {
+    crate::session::storage::JsonlStorageAdapter::with_root(fuigo_home())
+        .apply_summary_patch(
+            info,
+            crate::session::storage::summary_write::SummaryPatch {
+                permission_policy: Some(binding),
+                ..Default::default()
+            },
+        )
+        .await
+}
+
 /// Owner-only and durable session dir for writers that bypass `init_session` (chat-kind, pre-init fork stamp).
 /// A later occupied `init_session` will not re-sync the encoded-cwd direntry.
 pub(crate) fn ensure_owner_only_session_dir(info: &Info) -> std::io::Result<PathBuf> {
@@ -1259,6 +1276,10 @@ pub struct Summary {
     /// Regenerated on demand by `/recap`; this holds the last committed value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_recap: Option<String>,
+    /// 1.0.36 item a: the launch policy `{path, sha256}` this session was created under. A fail-closed hint only: a load
+    /// of a marked session must carry the same `_meta` key and hash; the marker never supplies a hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_policy: Option<fuigo_workspace::permission::launch_policy::PolicyBinding>,
 }
 
 /// `Summary::session_kind` for sessions whose cwd is inside a fuigo-managed worktree.
@@ -1323,6 +1344,7 @@ impl Summary {
             last_turn_summary: None,
             last_turn_summary_prompt_id: None,
             last_recap: None,
+            permission_policy: None,
         };
         if let Some(identity) = crate::session::worktree::worktree_identity_for_cwd(&info.cwd) {
             summary.stamp_worktree_identity(&identity);

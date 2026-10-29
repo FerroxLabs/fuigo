@@ -3754,8 +3754,11 @@ impl MvpAgent {
             prompt_display_cwd,
             is_headless,
             is_chat_kind,
+            launch_policy,
         } = spec;
         let _timer = crate::instrumentation_timer!("session.spawn_and_register");
+        // 1.0.36 item a: the binding this actor runs under, checked against the id's binding when it registers.
+        let launch_binding = launch_policy.as_ref().map(|policy| policy.binding());
         reject_direct_hub_cloud_meta(session_meta)?;
         let spawn_remote_settings = self.cfg.borrow().remote_settings.clone();
         folder_trust::resolve_and_record(
@@ -4565,6 +4568,7 @@ impl MvpAgent {
                         let cfg = self.cfg.borrow();
                         cfg.cli_agent_overrides.effective_permission_rules()
                     },
+                    launch_policy,
                     todo_gate,
                     remote_settings_for_spawn,
                     laziness_debug_log_for_spawn,
@@ -4641,6 +4645,24 @@ impl MvpAgent {
                 }
             });
         }
+        // 1.0.36 item a: one registration step per session id. The id's launch policy binding must match this actor's
+        // (a governed id is never taken over by an overlapping ungoverned or differently governed request), and the step
+        // is held until the actor is resident, so no binding changes between the check and the install.
+        let registration = match fuigo_workspace::permission::launch_policy::begin_registration(
+            session_info.id.0.as_ref(),
+            launch_binding.as_ref(),
+        ) {
+            Ok(registration) => registration,
+            Err(error) => {
+                let _ = handle.cmd_tx.send(SessionCommand::Shutdown(
+                    crate::session::ShutdownKind::Graceful,
+                ));
+                if let Some(scope) = &handle.tool_context.process_scope {
+                    scope.kill_all();
+                }
+                return Err(error.into_acp_error());
+            }
+        };
         self.session_registry
             .set_permission_receiver(&session_info.id, permission_events_rx);
         if handle_display_cwd.is_some() {
@@ -4660,6 +4682,7 @@ impl MvpAgent {
             scope.kill_all();
             scope.release_session_cgroup();
         }
+        drop(registration);
         if is_headless {
             self.session_registry.mark_headless(&session_info.id);
         }

@@ -1224,6 +1224,7 @@ fn write_test_summary(
         last_turn_summary: None,
         last_turn_summary_prompt_id: None,
         last_recap: None,
+        permission_policy: None,
     };
     let json = serde_json::to_vec_pretty(&summary).unwrap();
     std::fs::write(session_dir.join("summary.json"), json).unwrap();

@@ -794,6 +794,9 @@ pub(crate) const FIRST_PARTY_CREDENTIAL_ENV_VARS: &[&str] = &[
     // P113 (Astra r1 #3): the rest of Fuigo's own secrets, which children are denied too
     // (`fuigo_tools::util::shell_env_policy::FUIGO_INTERNAL_CREDENTIAL_ENV_VARS`; a test keeps the two equal).
     "FUIGO_AGENT_SECRET",
+    // 1.0.36 item a: the launch permission policy path and hash are the launcher's, never a helper's.
+    "FUIGO_POLICY_PATH",
+    "FUIGO_POLICY_SHA256",
     "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
     "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
     "FUIGO_TELEMETRY_EVENTS_API_KEY",

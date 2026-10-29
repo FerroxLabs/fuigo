@@ -302,6 +302,7 @@ impl JsonlStorageAdapter {
     ) -> io::Result<CopySessionResult> {
         let source_summary = self.read_summary_sync(source_info)?;
         let chat_format_version = source_summary.chat_format_version;
+        let source_permission_policy = source_summary.permission_policy.clone();
 
         // The source may be live, so the copy takes ONE snapshot of it: the chat history's bytes and the transcript's length
         // are read together with the source's append locks held (both files, so no append lands between the two reads).
@@ -629,6 +630,7 @@ impl JsonlStorageAdapter {
             announcement_state_copied,
             compaction_segments_copied,
             compaction_checkpoints_copied,
+            source_permission_policy,
         })
     }
 }
@@ -1262,6 +1264,8 @@ fn fork_summary(
         } else {
             source.last_recap
         },
+        // 1.0.36 item a: a fork of a governed session stays governed by the same launch policy.
+        permission_policy: source.permission_policy,
     };
     if options.session_kind.is_none()
         && let Some(identity) = &target_worktree_identity

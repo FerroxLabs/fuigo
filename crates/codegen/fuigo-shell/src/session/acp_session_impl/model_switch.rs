@@ -144,8 +144,12 @@ impl SessionActor {
                     } else {
                         self.agent.borrow().system_prompt().to_owned()
                     };
+                    // The memory block is injected once per segment, so the rewrite must carry it over
                     sys.content = std::sync::Arc::<str>::from(
-                        self.recompose_system_prompt(&template, Some(&sys.content)),
+                        crate::session::human_rules::keep_memory_tail(
+                            self.recompose_system_prompt(&template, Some(&sys.content)),
+                            &sys.content,
+                        ),
                     );
                     break;
                 }
@@ -338,8 +342,12 @@ impl SessionActor {
                 ConversationItem::System(sys) => Some(sys.content.to_string()),
                 _ => None,
             });
-        let new_system_prompt =
+        let mut new_system_prompt =
             self.recompose_system_prompt(new_agent.system_prompt(), current_system.as_deref());
+        if let Some(current) = current_system.as_deref() {
+            new_system_prompt =
+                crate::session::human_rules::keep_memory_tail(new_system_prompt, current);
+        }
         let mut new_prompt_context = new_agent.prompt_context().clone();
         new_prompt_context.normalize_for_persistence();
         self.abort_and_clear_prefire().await;
@@ -368,13 +376,14 @@ impl SessionActor {
             self.is_cursor_harness(),
             std::sync::atomic::Ordering::Relaxed,
         );
-        if let Err(e) = self.workspace_ops.bind_local_session(
+        if let Err(e) = self.workspace_ops.bind_local_session_governed(
             &self.session_id_string(),
             self.tool_context.cwd.as_path().to_path_buf(),
             self.tool_context.hunk_tracker_handle.clone(),
             self.agent.borrow().tool_bridge().toolset(),
             None,
             self.tool_context.peer_influence.clone(),
+            self.permissions.has_launch_policy(),
         ) {
             tracing::warn!(error = %e, "failed to rebind local session toolset after agent rebuild");
         }

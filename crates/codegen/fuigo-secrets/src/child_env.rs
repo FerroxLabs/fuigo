@@ -58,6 +58,9 @@ pub mod provider_key_env_vars {
 pub const FUIGO_INTERNAL_CREDENTIAL_ENV_VARS: &[&str] = &[
     // The shared secret that authenticates an ACP connection to `fuigo agent serve` (`--secret`).
     "FUIGO_AGENT_SECRET",
+    // The launch permission policy (1.0.36 item a): the file and its hash are the launcher's, never a child's.
+    "FUIGO_POLICY_PATH",
+    "FUIGO_POLICY_SHA256",
     // The saved login as inline JSON (key, user id, e-mail, team ids), and the file that holds it.
     "FUIGO_AUTH",
     "FUIGO_AUTH_PATH",

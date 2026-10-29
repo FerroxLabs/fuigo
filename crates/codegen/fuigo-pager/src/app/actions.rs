@@ -2470,6 +2470,8 @@ pub enum TaskResult {
         models: Option<acp::SessionModelState>,
         /// See [`TaskResult::SessionCreated::scheduler_background_loops`].
         scheduler_background_loops: Option<bool>,
+        /// Per-file copy problems on a worktree that was still created, as one short line.
+        copy_notice: Option<String>,
     },
     /// Worktree created and session forked, but not yet loaded.
     /// The dispatch handler sets session_id eagerly, then emits LoadSession.
@@ -2484,6 +2486,8 @@ pub enum TaskResult {
         /// Resume/parent id this worktree was created from (`load_session_id`).
         /// Used to retarget the one-shot restore-code suppression onto the child.
         resume_session_id: Option<String>,
+        /// Per-file copy problems on a worktree that was still created, as one short line.
+        copy_notice: Option<String>,
     },
     /// Worktree session creation failed.
     WorktreeSessionFailed {

@@ -995,7 +995,7 @@ impl JsonlStorageAdapter {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         super::write_bytes_atomic(&summary_path, &bytes)
     }
-    fn read_summary_sync(&self, info: &Info) -> io::Result<Summary> {
+    pub(crate) fn read_summary_sync(&self, info: &Info) -> io::Result<Summary> {
         let path = self.summary_file(info);
         let bytes = std::fs::read(&path)?;
         if bytes.is_empty() {

@@ -728,6 +728,7 @@ pub(crate) mod acp_mcp;
 pub(crate) mod acp_session;
 pub(crate) mod agent_mcp;
 pub(crate) mod agent_rebuild;
+pub(crate) mod browser_mode;
 pub(crate) mod chat_persistence;
 pub(crate) mod events;
 pub mod export;

@@ -205,6 +205,9 @@ async fn cmd_create(
     out: &mut impl Write,
 ) -> Result<()> {
     let created = create_worktree(tx, source_cwd, spec, &new_worktree_id(None)).await?;
+    if let Some(notice) = &created.copy_notice {
+        fuigo_tty_utils::best_effort_stderr::eprint_line(notice);
+    }
     let dir = if created.session_cwd.is_dir() {
         &created.session_cwd
     } else {

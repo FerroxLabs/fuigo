@@ -41,11 +41,11 @@ async fn settle() {
     .await;
 }
 
-/// A mode switch rewrites the system prompt in memory and asks for the history file to be rewritten, which is refused
-/// while the backup is owed. The user is told once that the file was not rewritten and why; before, the refusal was only
-/// logged.
+/// A system-head rewrite asks for the history file to be rewritten, which is refused while the backup is owed. The user is
+/// told once that the file was not rewritten and why; before, the refusal was only logged. Browser mode writes no head
+/// (u36), so its switches owe no note at all.
 #[tokio::test(flavor = "current_thread")]
-async fn a_mode_switch_while_the_backup_is_owed_says_the_file_was_not_rewritten() {
+async fn a_head_rewrite_while_the_backup_is_owed_says_the_file_was_not_rewritten() {
     if fuigo_test_support::env::rerun_in_own_process() {
         return;
     }
@@ -68,8 +68,18 @@ async fn a_mode_switch_while_the_backup_is_owed_says_the_file_was_not_rewritten(
             let sent = drain_gateway_debug(&mut gateway_rx);
             assert_eq!(
                 sent.matches("could not be backed up").count(),
+                0,
+                "browser mode switches write no head, sent: {sent}"
+            );
+            for prompt in ["override one", "override two", "override three"] {
+                actor.handle_replace_system_prompt(prompt.to_string()).await;
+            }
+            settle().await;
+            let sent = drain_gateway_debug(&mut gateway_rx);
+            assert_eq!(
+                sent.matches("could not be backed up").count(),
                 1,
-                "one note for three switches while the backup is owed, sent: {sent}"
+                "one note for three head writes while the backup is owed, sent: {sent}"
             );
             assert!(sent.contains("not rewritten"), "the note says the file was not rewritten, sent: {sent}");
         })

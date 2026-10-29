@@ -3,7 +3,7 @@ use std::path::{Component, Path};
 use crate::sampling::{
     ApiBackend, ChatCompletionRequest, ChatRequestMessage,
     ConversationRequest, ConversationToolChoice, HostedTool, SamplingError, ToolChoice,
-    ToolDefinition, ToolSpec, conversation_to_chat_messages,
+    ToolSpec, chat_tool_definition, conversation_to_chat_messages,
 };
 use agent_client_protocol as acp;
 use async_openai::types::responses::ResponseStreamEvent;
@@ -648,7 +648,7 @@ pub(crate) async fn generate_session_compact(
                     .with_tools(
                         tools
                             .into_iter()
-                            .map(|t| ToolDefinition::function(t.name, t.description, t.parameters))
+                            .map(chat_tool_definition)
                             .collect(),
                     )
                     .with_tool_choice(wire_tool_choice);

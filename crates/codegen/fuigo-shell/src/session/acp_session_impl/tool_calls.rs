@@ -1785,10 +1785,17 @@ impl SessionActor {
             .await;
         let plan_file_auto_approve = match &access_kind {
             // S6.3: an influenced session never takes the bypass; its edit goes through `request()`, where the guard runs.
-            AccessKind::Edit(path) if hook_ask.is_none() && !self.permissions.is_peer_influenced() => self
+            // 1.0.36 item a: neither does a session under a launch policy, so its rules judge the plan-file edit too.
+            AccessKind::Edit(path)
+                if hook_ask.is_none()
+                    && !self.permissions.is_peer_influenced()
+                    && !self.permissions.has_launch_policy() =>
+            {
+                self
                 .plan_mode
                 .lock()
-                .should_auto_approve_edit(std::path::Path::new(path)),
+                .should_auto_approve_edit(std::path::Path::new(path))
+            }
             _ => false,
         };
         if plan_file_auto_approve {
@@ -1823,6 +1830,9 @@ impl SessionActor {
                     fuigo_telemetry::events::AccessKind::Read,
                     p.clone().unwrap_or_default(),
                 ),
+                fuigo_workspace::permission::AccessKind::Session => {
+                    (fuigo_telemetry::events::AccessKind::Read, String::new())
+                }
                 fuigo_workspace::permission::AccessKind::Edit(p) => {
                     (fuigo_telemetry::events::AccessKind::Edit, p.clone())
                 }
@@ -2243,16 +2253,20 @@ impl SessionActor {
             }),
         )
     }
-    /// Leave plan mode (approved/abandoned) and tell the client to show the Default mode.
-    /// Mirrors the mid-turn exit so the resume re-park drives the mode change through the same path.
-    fn leave_plan_mode_to_default(&self) {
-        let deactivated = self.plan_mode.lock().deactivate_approved();
+    /// Leave plan mode (approved/abandoned) and tell the client to show the Default mode (Browser while browser mode is
+    /// still on). Mirrors the mid-turn exit so the resume re-park drives the mode change through the same path.
+    pub(super) fn leave_plan_mode_to_default(&self) {
+        let (deactivated, browser) = {
+            let mut tracker = self.plan_mode.lock();
+            (tracker.deactivate_approved(), tracker.browser_use())
+        };
         if deactivated {
             *self.current_prompt_mode.lock() = PromptMode::Agent;
             *self.turn_prompt_mode.lock() = PromptMode::Agent;
             self.persist_plan_mode_state();
-            self.enqueue_current_mode_update(acp::SessionModeId::new(
-                fuigo_tools::types::SessionMode::Default.as_id(),
+            self.enqueue_current_mode_update(super::session_mode::plan_exit_mode_id(
+                PromptMode::Agent,
+                browser,
             ));
         }
     }

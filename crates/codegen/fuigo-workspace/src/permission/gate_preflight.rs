@@ -21,6 +21,9 @@ pub(crate) struct GatePreflight {
     /// In auto mode, a fail-closed gate Ask with no rule match lets the classifier run (Allow executes, Block denies within budget).
     /// A rule-match Ask never defers.
     defers_gate_ask: bool,
+    /// A launch-policy rule asks for this call (direct, bash command or shell-file arm; a launch fail-closed Ask only
+    /// when the merged preflight also forces a prompt). Always `false` without a launch policy.
+    launch_ask_match: bool,
 }
 
 /// One `apply_patch` target in every spelling that names the file the tool writes (P184).
@@ -87,13 +90,37 @@ impl GatePreflight {
         // WHY: a fail-closed Ask means analysis could not decompose the command to check rules, so the classifier arbitrates it
         // A rule-match Ask is an actual policy match that stays a prompt (never waived by a model)
         let defers_gate_ask = auto_mode && fail_closed_ask && !rule_match_ask;
-        Self {
+        let merged = Self {
             direct,
             bash_command,
             shell_file,
             native_symlink_fail_closed,
             defers_gate_ask,
+            launch_ask_match: false,
+        };
+        match policy.and_then(CompiledPolicy::launch) {
+            None => merged,
+            Some(launch) => {
+                let nested = Self::evaluate(Some(launch), access, cwd, auto_mode);
+                merged.with_launch(&nested)
+            }
         }
+    }
+
+    /// `self` with [`Self::launch_ask_match`] taken from `nested`, the same constructor run on the launch sub-policy.
+    fn with_launch(mut self, nested: &Self) -> Self {
+        let rule_match = matches!(nested.direct, Some(Decision::Ask))
+            || matches!(nested.bash_command, Some(GateDecision::AskRuleMatch))
+            || matches!(nested.shell_file, Some(GateDecision::AskRuleMatch));
+        let fail_closed = matches!(nested.bash_command, Some(GateDecision::AskFailClosed))
+            || matches!(nested.shell_file, Some(GateDecision::AskFailClosed));
+        self.launch_ask_match = rule_match || (fail_closed && self.policy_forced_prompt());
+        self
+    }
+
+    /// A launch-policy rule asks for this call: the answer must come from the client.
+    pub(crate) fn launch_ask_match(&self) -> bool {
+        self.launch_ask_match
     }
 
     /// One multi-file edit (`apply_patch`, P184) judged as an `Edit` of each target, the strictest result winning.
@@ -157,12 +184,20 @@ impl GatePreflight {
         let direct = deny
             .or(ask.then_some(Decision::Ask))
             .or(all_allow.then_some(Decision::Allow));
-        Self {
+        let merged = Self {
             direct,
             bash_command: None,
             shell_file: None,
             native_symlink_fail_closed,
             defers_gate_ask: false,
+            launch_ask_match: false,
+        };
+        match policy.and_then(CompiledPolicy::launch) {
+            None => merged,
+            Some(launch) => {
+                let nested = Self::evaluate_edit_targets(Some(launch), targets, cwd);
+                merged.with_launch(&nested)
+            }
         }
     }
 
@@ -221,7 +256,7 @@ impl GatePreflight {
                 _ => all_allow = false,
             }
         }
-        let is_read = matches!(access, AccessKind::Read(_));
+        let is_read = matches!(access, AccessKind::Read(_) | AccessKind::Session);
         let targets_decision = deny
             .or(ask.then_some(Decision::Ask))
             .or((is_read && all_allow).then_some(Decision::Allow));
@@ -230,10 +265,17 @@ impl GatePreflight {
             Some(Decision::Allow) if is_read => None,
             direct => direct,
         };
-        Self {
+        let merged = Self {
             direct: combine_decisions(base_direct, targets_decision),
             native_symlink_fail_closed,
             ..base
+        };
+        match policy.launch() {
+            None => merged,
+            Some(launch) => {
+                let nested = Self::evaluate_read_targets(Some(launch), access, targets, cwd, auto_mode);
+                merged.with_launch(&nested)
+            }
         }
     }
 

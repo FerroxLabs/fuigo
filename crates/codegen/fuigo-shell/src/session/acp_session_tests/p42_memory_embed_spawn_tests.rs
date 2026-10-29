@@ -253,6 +253,7 @@ async fn spawn_session(
         None,
         fuigo_workspace::WorkspaceOps::for_test(),
         vec![],
+        None,
         false,
         None,
         None,

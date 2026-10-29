@@ -378,6 +378,7 @@ pub(crate) async fn spawn_session_actor(
     hook_registry_override: Option<std::sync::Arc<fuigo_hooks::discovery::HookRegistry>>,
     workspace_ops: fuigo_workspace::WorkspaceOps,
     cli_permission_rules: Vec<fuigo_workspace::permission::types::PermissionRule>,
+    launch_policy: Option<Arc<fuigo_workspace::permission::launch_policy::LaunchPolicy>>,
     todo_gate: bool,
     remote_settings: Option<crate::util::config::RemoteSettings>,
     laziness_debug_log: Option<std::path::PathBuf>,
@@ -477,6 +478,7 @@ pub(crate) async fn spawn_session_actor(
             cli_rules: cli_permission_rules,
             mode_hint: startup_hints.permission_mode.clone(),
             yolo_pin,
+            session_policy: launch_policy.clone(),
         };
         let permission_config = fuigo_workspace::permission::resolution::resolve_session_policy(
             &policy_inputs,
@@ -487,7 +489,10 @@ pub(crate) async fn spawn_session_actor(
             .as_ref()
             .map(fuigo_workspace::permission::resolution::deny_read_globs_from_config)
             .unwrap_or_default();
-        let hub_permission = if fuigo_workspace::permission::hitl_permission_live_enabled() {
+        // 1.0.36 item a (§5): a launch policy means standalone; its asks never go to the hub transport.
+        let hub_permission = if fuigo_workspace::permission::launch_policy::governs(launch_policy.is_some()) {
+            None
+        } else if fuigo_workspace::permission::hitl_permission_live_enabled() {
             let server = match workspace_ops.workspace_handle() {
                 Some(handle) => handle.hub_server_blocking().await,
                 None => None,
@@ -528,6 +533,22 @@ pub(crate) async fn spawn_session_actor(
                 hub_permission,
             );
         permissions.set_session_policy_inputs(policy_inputs);
+        // 1.0.36 item a: the session's own launch policy rides on the handle (subagents and workflows read it back) and
+        // binds the id for this process, so a released session can't reload ungoverned. Binding here, before the actor is
+        // registered, also makes an overlapping ungoverned request for the same id fail its registration step. A different
+        // existing binding is never replaced; the registration step refuses this actor then.
+        let permissions = match launch_policy {
+            Some(policy) => {
+                if let Err(error) = fuigo_workspace::permission::launch_policy::bind_session(
+                    session_info.id.0.as_ref(),
+                    policy.binding(),
+                ) {
+                    tracing::warn!(session_id = %session_info.id.0, %error, "launch policy binding refused");
+                }
+                permissions.with_launch_policy(Some(policy))
+            }
+            None => permissions,
+        };
         // S6.1: the session's ONE peer-influenced flag is `tool_context.peer_influence` (a subagent's is the PARENT's, set from
         // its spawn context). It is handed to the permission handle below and to the hub session at `bind_local_session`;
         // no component creates a flag of its own.
@@ -1295,13 +1316,14 @@ pub(crate) async fn spawn_session_actor(
         res.get::<fuigo_tools::implementations::fuigo_build::scheduler::types::SchedulerHandle>()
             .cloned()
     };
-    if let Err(e) = workspace_ops.bind_local_session(
+    if let Err(e) = workspace_ops.bind_local_session_governed(
         &session_info.id.0,
         tool_context.cwd.as_path().to_path_buf(),
         tool_context.hunk_tracker_handle.clone(),
         agent.tool_bridge().toolset(),
         None,
         tool_context.peer_influence.clone(),
+        permissions.has_launch_policy(),
     ) {
         tracing::warn!(error = %e, "failed to bind local session toolset");
     }
@@ -1330,6 +1352,10 @@ pub(crate) async fn spawn_session_actor(
         startup_hints.preserve_inherited_system,
         &system_prompt,
     );
+    if !is_subagent_spawn {
+        repair_legacy_browser_head(&mut conversation, &session_info, &agent, &system_prompt, tool_context.cwd.as_path())
+            .await;
+    }
     if !startup_hints.preserve_inherited_system
         && !conversation_has_project_instructions(&conversation)
         && let Some(agents_md_reminder) = agent.agents_md_user_reminder()
@@ -2707,6 +2733,7 @@ pub(crate) async fn spawn_session_on_thread(
     hook_registry_override: Option<std::sync::Arc<fuigo_hooks::discovery::HookRegistry>>,
     workspace_ops: fuigo_workspace::WorkspaceOps,
     cli_permission_rules: Vec<fuigo_workspace::permission::types::PermissionRule>,
+    launch_policy: Option<Arc<fuigo_workspace::permission::launch_policy::LaunchPolicy>>,
     todo_gate: bool,
     remote_settings: Option<crate::util::config::RemoteSettings>,
     laziness_debug_log: Option<std::path::PathBuf>,
@@ -2913,6 +2940,7 @@ pub(crate) async fn spawn_session_on_thread(
                         hook_registry_override,
                         workspace_ops,
                         cli_permission_rules,
+                        launch_policy,
                         todo_gate,
                         remote_settings,
                         laziness_debug_log,
@@ -3181,5 +3209,37 @@ mod terminal_backend_select_tests {
             select_terminal_backend_kind(false, false, false, false, false),
             TerminalBackendKind::LocalNonPersistent
         );
+    }
+}
+
+/// One-time repair of a head 1.0.35 stored while browsing (the bare browsing body, see
+/// [`crate::session::browser_mode::is_legacy_browser_head`]): replaced by the session's canonical normal head (its
+/// restored client override, else the agent's system prompt) unless the collision guard skips it. Persisted by the
+/// spawn's ordinary history write; a repaired head no longer matches, so a later load changes nothing more.
+pub(super) async fn repair_legacy_browser_head(
+    conversation: &mut Vec<ConversationItem>,
+    session_info: &SessionInfo,
+    agent: &fuigo_agent::Agent,
+    system_prompt: &str,
+    cwd: &std::path::Path,
+) {
+    let Some(ConversationItem::System(sys)) = conversation.first() else {
+        return;
+    };
+    if !crate::session::browser_mode::is_legacy_browser_head(&sys.content) {
+        return;
+    }
+    let replacement = crate::session::acp_session::initial_system_prompt_override(session_info)
+        .unwrap_or_else(|| system_prompt.to_owned());
+    let allowed = crate::session::browser_mode::legacy_repair_allowed(&replacement, cwd, |defs| {
+        (
+            defs.iter().map(|def| agent.prompt_context_for_definition(def)).collect(),
+            std::sync::Arc::clone(agent.tool_bridge()),
+        )
+    })
+    .await;
+    if allowed {
+        let _ = fuigo_chat_state::conversation_util::replace_or_insert_system_head(conversation, &replacement);
+        tracing::info!(session_id = %session_info.id.0, "repaired a stored browser-mode system head from an earlier version");
     }
 }

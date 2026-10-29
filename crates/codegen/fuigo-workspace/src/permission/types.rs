@@ -122,7 +122,14 @@ impl ClientType {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum AccessKind {
+    /// A read of file content or a listing (a path-less one, such as an LSP workspace query, carries `None`).
+    /// A `Read` rule reaches it.
     Read(Option<String>),
+    /// Pure session bookkeeping: `todo_write`, opencode `todos`, `ask_user_question`, `scheduler_list`, `search_tool` and
+    /// `refuse_peer_message`. Adding a tool here requires its WHOLE call chain (handler, helpers, what it reads or captures) to be
+    /// file-free; everything else defaults to a path-less [`Self::Read`]. It is approved exactly like a path-less `Read`
+    /// (auto-allowed), but a `Read` rule does not reach it; only an `any` rule does.
+    Session,
     Grep {
         path: Option<String>,
         glob: Option<String>,
@@ -414,8 +421,8 @@ pub enum PermissionCommand {
     ResetState,
     Shutdown,
 }
-/// Classification is an allowlist of reads: a tool is `Read`/`Grep`/`WebSearch` (auto-allowed) only when it reads state or
-/// touches nothing but the session's own bookkeeping. Every other tool prompts as an edit, a command, an MCP call, a fetch,
+/// Classification is an allowlist of reads: a tool is `Read`/`Grep`/`WebSearch` (auto-allowed) only when it reads state, or
+/// `Session` (auto-allowed) when it touches nothing but the session's own bookkeeping and returns no path or file content. Every other tool prompts as an edit, a command, an MCP call, a fetch,
 /// an agent message, or a [`AccessKind::Tool`].
 /// The match is exhaustive with no catch-all on purpose: a new `ToolInput` variant does not compile until it is classified here,
 /// so it can never default to an auto-allowed read (P165, S1).
@@ -440,19 +447,24 @@ impl From<&fuigo_tools::types::ToolInput> for AccessKind {
                 path: g.path.clone(),
                 glob: g.include.clone(),
             },
-            // Reads of session state, or the session's own bookkeeping.
-            ToolInput::TodoWrite(_)
-            | ToolInput::TaskOutput(_)
-            | ToolInput::WaitTasks(_)
-            | ToolInput::KillTask(_)
-            | ToolInput::Skill(_)
+            // Handlers that open a path or return a path, listing or file bytes to the model stay path-less `Read`:
+            // the skill tool (reads SKILL.md, lists the directory), memory search (paths and snippets), plan mode (the plan
+            // file) and task output / wait (a swept task's log and its path).
+            ToolInput::Skill(_)
             | ToolInput::MemorySearch(_)
-            | ToolInput::SearchTool(_)
-            | ToolInput::SchedulerList(_)
             | ToolInput::EnterPlanMode(_)
             | ToolInput::ExitPlanMode(_)
-            | ToolInput::AskUserQuestion(_)
+            | ToolInput::TaskOutput(_)
+            | ToolInput::WaitTasks(_)
+            // These reach files in their call chain: an unknown id lists swept task logs, completion verification captures
+            // workspace changes.
+            | ToolInput::KillTask(_)
             | ToolInput::UpdateGoal(_) => AccessKind::Read(None),
+            // Pure bookkeeping: no file is opened and no path, listing or file bytes reach the model.
+            ToolInput::TodoWrite(_)
+            | ToolInput::SearchTool(_)
+            | ToolInput::SchedulerList(_)
+            | ToolInput::AskUserQuestion(_) => AccessKind::Session,
             ToolInput::Task(t) => AccessKind::Edit(format!("task:{}", t.subagent_type)),
             // Side effects outside the file/shell/web kinds: they always prompt.
             ToolInput::SchedulerCreate(_) => AccessKind::Tool("scheduler_create".to_owned()),
@@ -463,6 +475,10 @@ impl From<&fuigo_tools::types::ToolInput> for AccessKind {
             // peer guard and hooks; an MCP or plugin tool of the same name is a different `AccessKind` and does not inherit it.
             ToolInput::Peer(fuigo_tools::implementations::fuigo_build::peer_tools::PeerToolInput::SendMessage(_)) => {
                 AccessKind::Tool("send_message".to_owned())
+            }
+            // `list_agents` reads the peer locator from disk, so it is a path-less read; refusing touches no file.
+            ToolInput::Peer(fuigo_tools::implementations::fuigo_build::peer_tools::PeerToolInput::RefusePeerMessage(_)) => {
+                AccessKind::Session
             }
             ToolInput::Peer(_) => AccessKind::Read(None),
             ToolInput::ImageGen(_) => AccessKind::Tool("image_gen".to_owned()),
@@ -504,9 +520,10 @@ pub(crate) fn workflow_access(
 ) -> AccessKind {
     use fuigo_tools::implementations::fuigo_build::workflow::WorkflowSource;
     match (&input.source, input.validate_only) {
-        (WorkflowSource::Name { .. } | WorkflowSource::Script { .. }, true) => {
-            AccessKind::Read(None)
-        }
+        // By name, the registry scans and reads `.rhai` files: a path-less read.
+        (WorkflowSource::Name { .. }, true) => AccessKind::Read(None),
+        // The shell scans the workflow registry before it picks the source, so an inline dry run touches files too.
+        (WorkflowSource::Script { .. }, true) => AccessKind::Read(None),
         (WorkflowSource::ScriptPath { script_path }, true) => {
             AccessKind::Read(Some(script_path.clone()))
         }
@@ -576,7 +593,11 @@ fn access_kind_from_dynamic(value: &serde_json::Value) -> AccessKind {
         return AccessKind::Read(dynamic_string_field(value, &["path"]));
     }
     // opencode `todowrite` {todos} and `skill` {name}
-    if dynamic_shape_is(value, "todos", &["todos"]) || dynamic_shape_is(value, "name", &["name"]) {
+    if dynamic_shape_is(value, "todos", &["todos"]) {
+        return AccessKind::Session;
+    }
+    // `skill` reads SKILL.md, lists its directory and returns paths: a path-less read
+    if dynamic_shape_is(value, "name", &["name"]) {
         return AccessKind::Read(None);
     }
     AccessKind::Tool(UNCLASSIFIED_TOOL_ID.to_owned())
@@ -593,6 +614,10 @@ pub struct PermissionConfig {
     /// [`EffectivePermissionMode`]; it adds no rule and changes no decision.
     #[serde(skip)]
     pub resolved_base: ResolvedBaseMode,
+    /// The rules that came from a launch policy (`FUIGO_POLICY_PATH` or a session's policy file), also present in
+    /// `rules`. Filled by the resolver only; empty without a launch policy. Their asks always reach the client.
+    #[serde(skip)]
+    pub launch_rules: Vec<PermissionRule>,
 }
 impl PermissionConfig {
     pub fn new(rules: Vec<PermissionRule>) -> Self {
@@ -601,6 +626,7 @@ impl PermissionConfig {
             prompt_policy: PromptPolicy::Ask,
             default_mode_configured: false,
             resolved_base: ResolvedBaseMode::Default,
+            launch_rules: Vec::new(),
         }
     }
 
@@ -816,6 +842,12 @@ pub enum RequirementSource {
     ManagedConfig { path: std::path::PathBuf },
     Config { path: std::path::PathBuf },
     Settings { path: std::path::PathBuf },
+    /// A launch policy file (`FUIGO_POLICY_PATH`, or a session's `_meta` policy file).
+    LaunchPolicy {
+        path: std::path::PathBuf,
+        sha256: String,
+        scope: crate::permission::launch_policy::LaunchScope,
+    },
 }
 impl std::fmt::Display for RequirementSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -833,6 +865,7 @@ impl std::fmt::Display for RequirementSource {
             }
             Self::Config { path } => write!(f, "{} (config)", path.display()),
             Self::Settings { path } => write!(f, "{} (settings)", path.display()),
+            Self::LaunchPolicy { path, .. } => write!(f, "{} (launch policy)", path.display()),
         }
     }
 }
@@ -1334,7 +1367,10 @@ pub(crate) mod tests {
             assert!(
                 !matches!(
                     access,
-                    AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_)
+                    AccessKind::Read(_)
+                        | AccessKind::Session
+                        | AccessKind::Grep { .. }
+                        | AccessKind::WebSearch(_)
                 ),
                 "{name} must not map to an auto-allowed access kind, got {access:?}"
             );
@@ -1359,7 +1395,7 @@ pub(crate) mod tests {
                 serde_json::json!({"variant": "Workflow", "source": source.clone(), "validate_only": true}),
             );
             assert!(
-                matches!(validate, AccessKind::Read(None)),
+                matches!(validate, AccessKind::Read(None) | AccessKind::Session),
                 "{source}: got {validate:?}"
             );
             let launch =
@@ -1405,7 +1441,10 @@ pub(crate) mod tests {
             assert!(
                 !matches!(
                     access,
-                    AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_)
+                    AccessKind::Read(_)
+                        | AccessKind::Session
+                        | AccessKind::Grep { .. }
+                        | AccessKind::WebSearch(_)
                 ),
                 "unknown dynamic shape {unknown} must not be auto-allowed, got {access:?}"
             );
@@ -1418,7 +1457,7 @@ pub(crate) mod tests {
         ] {
             let access = AccessKind::from(&ToolInput::Dynamic(read_only.clone()));
             assert!(
-                matches!(access, AccessKind::Read(_) | AccessKind::Grep { .. }),
+                matches!(access, AccessKind::Read(_) | AccessKind::Session | AccessKind::Grep { .. }),
                 "read-only opencode shape {read_only} must stay a read, got {access:?}"
             );
         }

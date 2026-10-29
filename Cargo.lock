@@ -4868,6 +4868,7 @@ dependencies = [
  "fuigo-compaction",
  "fuigo-secrets",
  "fuigo-tools",
+ "fuigo-workspace-types",
  "indexmap",
  "reqwest 0.12.24",
  "schemars 1.0.4",
@@ -5595,7 +5596,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.35"
+version = "1.0.36"
 dependencies = [
  "semver",
 ]

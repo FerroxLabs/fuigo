@@ -31,6 +31,9 @@ pub struct ForkSessionRequest {
     /// The original workspace directory this worktree session was spawned from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_workspace_dir: Option<String>,
+    /// The request's `_meta` (1.0.36 item a: the launch policy key and hash a governed source requires).
+    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -45,6 +48,61 @@ pub struct ForkSessionResponse {
     /// The model ID of the forked session (may differ from source if overridden)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_model_id: Option<String>,
+    /// Response `_meta`: set only for a fork a launch policy governs (1.0.36 item a ack).
+    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+    /// The source summary's launch policy marker, read with the copy (never serialized).
+    #[serde(skip)]
+    pub source_permission_policy: Option<fuigo_workspace::permission::launch_policy::PolicyBinding>,
+    /// 1.0.36 item a: the launch policy the fork runs under (its id is bound to it before the copy); never serialized.
+    #[serde(skip)]
+    pub launch_policy: Option<std::sync::Arc<fuigo_workspace::permission::launch_policy::LaunchPolicy>>,
+}
+
+/// The [`PolicyError`](fuigo_workspace::permission::launch_policy::PolicyError) a fork was refused with, if that is why
+/// [`fork_session`] failed.
+pub fn fork_policy_error(
+    err: &io::Error,
+) -> Option<&fuigo_workspace::permission::launch_policy::PolicyError> {
+    err.get_ref()?.downcast_ref()
+}
+
+/// 1.0.36 item a, before anything is copied: a source bound in this process or carrying the stored marker forks only with
+/// a claim naming that policy, and the new id is bound to it first. A refusal leaves no copy.
+fn resolve_fork_policy(
+    storage: &JsonlStorageAdapter,
+    source_info: &Info,
+    new_session_id: &str,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> io::Result<Option<std::sync::Arc<fuigo_workspace::permission::launch_policy::LaunchPolicy>>> {
+    use fuigo_workspace::permission::launch_policy;
+    let claim = launch_policy::SessionPolicyClaim::from_meta(meta).map_err(io::Error::other)?;
+    // A source whose summary cannot be read is left to the copy, which reports it.
+    let marker = storage.read_summary_sync(source_info).ok().and_then(|summary| summary.permission_policy);
+    let policy = launch_policy::resolve_session_claim(&claim, Some(source_info.id.0.as_ref()), marker.as_ref())
+        .map_err(io::Error::other)?;
+    if let Some(policy) = &policy {
+        launch_policy::bind_session(new_session_id, policy.binding()).map_err(io::Error::other)?;
+    }
+    Ok(policy)
+}
+
+/// 1.0.36 item a, after a fork: store the policy marker on the new id when the copied summary does not already carry this
+/// binding, and return the response's `_meta` ack (`None` for an ungoverned fork with no process policy).
+pub async fn finish_fork_policy(response: &ForkSessionResponse) -> io::Result<Option<serde_json::Value>> {
+    use fuigo_workspace::permission::launch_policy;
+    if let Some(policy) = &response.launch_policy {
+        let binding = policy.binding();
+        if response.source_permission_policy.as_ref() != Some(&binding) {
+            let info = Info {
+                id: acp::SessionId::new(response.new_session_id.clone()),
+                cwd: response.new_cwd.clone(),
+            };
+            crate::session::persistence::write_permission_policy_marker(&info, binding).await?;
+        }
+    }
+    Ok(launch_policy::session_ack(response.launch_policy.as_ref().map(|p| p.sha256.as_str()))
+        .map(|ack| serde_json::json!({ launch_policy::META_ACK: ack })))
 }
 
 /// Uses a plain UUIDv7 with no prefix or source embedding, so IDs stay a constant 36 chars no matter how many fork rounds occur.
@@ -93,8 +151,13 @@ pub async fn fork_session(
         ..Default::default()
     };
 
-    let result = tokio::task::spawn_blocking(move || {
-        storage.copy_session_data_sync(&source_info, &target_info, options)
+    let meta = request.meta.clone();
+    let (result, launch_policy) = tokio::task::spawn_blocking(move || {
+        let launch_policy =
+            resolve_fork_policy(&storage, &source_info, &target_info.id.0, meta.as_ref())?;
+        storage
+            .copy_session_data_sync(&source_info, &target_info, options)
+            .map(|result| (result, launch_policy))
     })
     .await
     .map_err(|e| io::Error::other(format!("spawn_blocking panicked: {e}")))??;
@@ -145,6 +208,9 @@ pub async fn fork_session(
         new_cwd: request.new_cwd,
         parent_session_id: request.source_session_id,
         new_model_id: request.new_model_id,
+        meta: None,
+        source_permission_policy: result.source_permission_policy,
+        launch_policy,
     })
 }
 
@@ -273,6 +339,9 @@ mod tests {
             new_cwd: "/new/project".to_string(),
             parent_session_id: "abc123".to_string(),
             new_model_id: Some("grok-3".to_string()),
+            meta: None,
+            source_permission_policy: None,
+            launch_policy: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -297,6 +366,9 @@ mod tests {
             new_cwd: "/new/project".to_string(),
             parent_session_id: "abc123".to_string(),
             new_model_id: None,
+            meta: None,
+            source_permission_policy: None,
+            launch_policy: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -358,5 +430,62 @@ mod tests {
                 "wire sessionKind={wire:?}"
             );
         }
+    }
+
+    /// Grok r1 #1: a governed source (stored marker, or bound in this process) forks only with a claim naming its
+    /// policy; a refusal comes before the copy, and an accepted fork binds the new id first.
+    #[tokio::test]
+    async fn a_governed_source_forks_only_with_its_claim_and_binds_the_new_id() {
+        use crate::session::persistence::default_model_id;
+        use crate::session::storage::StorageAdapter;
+        use fuigo_workspace::permission::launch_policy;
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let adapter = JsonlStorageAdapter::with_root(tmp.path().join("home"));
+        let text = "[permission]\nask = [\"Bash\"]\n";
+        let policy_file = tmp.path().join("fork-policy.toml");
+        std::fs::write(&policy_file, text).unwrap();
+        let policy_path = policy_file.to_string_lossy().into_owned();
+        let sha = launch_policy::sha256_hex(text.as_bytes());
+        let binding = launch_policy::PolicyBinding { path: policy_path.clone(), sha256: sha.clone() };
+        let source = Info { id: acp::SessionId::new("u36-fork-marked"), cwd: "/src".to_string() };
+        adapter.init_session(&source, default_model_id()).await.unwrap();
+        adapter
+            .apply_summary_patch(
+                &source,
+                crate::session::storage::summary_write::SummaryPatch {
+                    permission_policy: Some(binding.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // No claim: refused with the policy error (machine-readable), and nothing bound.
+        let err = resolve_fork_policy(&adapter, &source, "u36-fork-child-none", None).unwrap_err();
+        assert_eq!(fork_policy_error(&err).map(|e| e.code), Some("session_policy_missing"));
+        assert!(launch_policy::session_binding("u36-fork-child-none").is_none());
+        // A non-string claim value: bad_claim.
+        let bad: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({ launch_policy::META_PATH: null })).unwrap();
+        let err = resolve_fork_policy(&adapter, &source, "u36-fork-child-bad", Some(&bad)).unwrap_err();
+        assert_eq!(fork_policy_error(&err).map(|e| e.code), Some("bad_claim"));
+        // The matching claim: accepted, and the new id is bound before anything is copied.
+        let claim: serde_json::Map<String, serde_json::Value> = serde_json::from_value(
+            serde_json::json!({ launch_policy::META_PATH: policy_path, launch_policy::META_SHA256: sha }),
+        )
+        .unwrap();
+        let policy = resolve_fork_policy(&adapter, &source, "u36-fork-child", Some(&claim)).unwrap().unwrap();
+        assert_eq!(policy.binding(), binding);
+        assert_eq!(launch_policy::session_binding("u36-fork-child"), Some(binding.clone()));
+        // A source bound only in this process (its marker gone) is still governed.
+        let unmarked = Info { id: acp::SessionId::new("u36-fork-bound"), cwd: "/src".to_string() };
+        adapter.init_session(&unmarked, default_model_id()).await.unwrap();
+        launch_policy::bind_session("u36-fork-bound", binding).unwrap();
+        let err = resolve_fork_policy(&adapter, &unmarked, "u36-fork-child-2", None).unwrap_err();
+        assert_eq!(fork_policy_error(&err).map(|e| e.code), Some("session_policy_missing"));
+        // An ungoverned source forks as before.
+        let plain = Info { id: acp::SessionId::new("u36-fork-plain"), cwd: "/src".to_string() };
+        adapter.init_session(&plain, default_model_id()).await.unwrap();
+        assert!(resolve_fork_policy(&adapter, &plain, "u36-fork-child-3", None).unwrap().is_none());
     }
 }
