@@ -972,10 +972,29 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
 async fn handle_session_fork(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     use crate::session::fork::{ForkSessionRequest, fork_session};
 
-    let request: ForkSessionRequest = parse_params(args)?;
+    use fuigo_workspace::permission::launch_policy;
 
+    let request: ForkSessionRequest = parse_params(args)?;
+    // 1.0.36 item a: a fork of a governed source must carry the source's launch policy key and hash.
+    let claim = launch_policy::SessionPolicyClaim::from_meta(request.meta.as_ref())
+        .map_err(launch_policy::PolicyError::into_acp_error)?;
+    if agent.leader_mode && !claim.is_empty() {
+        return Err(launch_policy::route_refused(
+            claim.path.as_deref().unwrap_or_default(),
+            "a leader does not run sessions under a launch policy; use a --no-leader process",
+        )
+        .into_acp_error());
+    }
+    // `fork_session` checks the claim against the source's binding and stored marker and binds the new id before it
+    // copies anything; a refusal leaves no copy.
     let agent_id = agent_id();
-    let response = fork_session(request, &agent_id, Some(agent.auth_manager.clone()))
+    let mut response = fork_session(request, &agent_id, Some(agent.auth_manager.clone()))
+        .await
+        .map_err(|e| match crate::session::fork::fork_policy_error(&e) {
+            Some(policy_error) => policy_error.clone().into_acp_error(),
+            None => crate::acp_error::internal_error(e.to_string()),
+        })?;
+    response.meta = crate::session::fork::finish_fork_policy(&response)
         .await
         .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
 

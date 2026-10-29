@@ -478,6 +478,56 @@ pub fn resolve_leader_mode<'p>(
     eligible: bool,
     requested_confinement: Option<&'p str>,
 ) -> LeaderMode<'p> {
+    resolve_leader_mode_inner(
+        leader_flag,
+        no_leader_flag,
+        raw_config,
+        _remote_settings,
+        eligible,
+        requested_confinement,
+        fuigo_workspace::permission::launch_policy::has_process_policy(),
+    )
+}
+
+/// [`resolve_leader_mode`] with the launch-policy state given (1.0.36 item a, R2): a process launch policy means
+/// standalone. Leader use is vetoed whatever the CLI, config or remote said, like the confinement veto (no leftover-leader
+/// reclaim); an explicit `--leader` is a conflict the caller turns into exit 78.
+pub(crate) fn resolve_leader_mode_inner<'p>(
+    leader_flag: bool,
+    no_leader_flag: bool,
+    raw_config: &toml::Value,
+    _remote_settings: Option<&fuigo_shell::util::config::RemoteSettings>,
+    eligible: bool,
+    requested_confinement: Option<&'p str>,
+    launch_policy: bool,
+) -> LeaderMode<'p> {
+    let resolved = resolve_leader_mode_policy(
+        leader_flag,
+        no_leader_flag,
+        raw_config,
+        _remote_settings,
+        eligible,
+        requested_confinement,
+    );
+    if !launch_policy {
+        return resolved;
+    }
+    LeaderMode {
+        use_leader: false,
+        disabled_by_launch_policy: resolved.use_leader,
+        launch_policy_conflict: leader_flag && !no_leader_flag,
+        ..resolved
+    }
+}
+
+fn resolve_leader_mode_policy<'p>(
+    leader_flag: bool,
+    no_leader_flag: bool,
+    raw_config: &toml::Value,
+    _remote_settings: Option<&fuigo_shell::util::config::RemoteSettings>,
+    eligible: bool,
+    requested_confinement: Option<&'p str>,
+) -> LeaderMode<'p> {
     let (use_leader, policy_disable_reason) = 'policy: {
         if no_leader_flag {
             break 'policy (false, None);
@@ -502,12 +552,16 @@ pub fn resolve_leader_mode<'p>(
             use_leader: false,
             policy_disable_reason,
             disabled_by_confinement: use_leader.then_some(profile),
+            disabled_by_launch_policy: false,
+            launch_policy_conflict: false,
         };
     }
     LeaderMode {
         use_leader,
         policy_disable_reason,
         disabled_by_confinement: None,
+        disabled_by_launch_policy: false,
+        launch_policy_conflict: false,
     }
 }
 /// Leader mode as resolved, plus the sandbox profile that overrode it.
@@ -518,6 +572,32 @@ pub struct LeaderMode<'p> {
     pub policy_disable_reason: Option<&'static str>,
     /// The profile that turned leader mode off, set only when leader mode was otherwise on (the case worth telling the user about).
     pub disabled_by_confinement: Option<&'p str>,
+    /// 1.0.36 item a: leader mode was otherwise on and a process launch policy turned it off (one warn line).
+    pub disabled_by_launch_policy: bool,
+    /// 1.0.36 item a: `--leader` was given under a process launch policy; the caller exits 78 (`leader_conflict`).
+    pub launch_policy_conflict: bool,
+}
+
+/// 1.0.36 item a: the warn line for leader mode turned off by a launch policy.
+pub fn warn_leader_disabled_by_launch_policy() {
+    fuigo_shell::util::with_locked_stderr(|stderr| {
+        let _ = std::io::Write::write_all(
+            stderr,
+            b"fuigo: leader mode is off: a launch permission policy (FUIGO_POLICY_PATH) runs this process standalone\n",
+        );
+    });
+}
+
+/// 1.0.36 item a: `--leader`, `agent leader` or `fuigo workspace` under a process launch policy: the JSON line, exit 78.
+pub fn exit_leader_conflict() -> ! {
+    use fuigo_workspace::permission::launch_policy::{PolicyError, process};
+    let path = process().map(|p| p.path.to_string_lossy().into_owned()).unwrap_or_default();
+    PolicyError::new(
+        "leader_conflict",
+        path,
+        "a launch permission policy runs Fuigo standalone; leader mode cannot be used with it",
+    )
+    .exit()
 }
 /// The leader-mode decision alone, for callers with nothing to report.
 ///
@@ -732,6 +812,8 @@ pub async fn run(
         use_leader,
         policy_disable_reason,
         disabled_by_confinement,
+        disabled_by_launch_policy,
+        launch_policy_conflict,
     } = resolve_leader_mode(
         args.leader,
         args.no_leader,
@@ -751,6 +833,12 @@ pub async fn run(
     );
     if let Some(profile) = disabled_by_confinement {
         warn_leader_disabled_by_sandbox(profile);
+    }
+    if launch_policy_conflict {
+        exit_leader_conflict();
+    }
+    if disabled_by_launch_policy {
+        warn_leader_disabled_by_launch_policy();
     }
     if session_startup::chat_mode_conflicts_with_leader(args.chat(), use_leader) {
         anyhow::bail!("{}", session_startup::CHAT_MODE_LEADER_CONFLICT);
@@ -1904,6 +1992,35 @@ mod tests {
             resolve_use_leader(false, false, &empty_config(), None, true, None);
         assert!(!use_leader);
         assert_eq!(reason, None);
+    }
+    /// 1.0.36 item a (design test 9): a process launch policy vetoes leader mode from the CLI, config and remote alike,
+    /// keeps the policy reason (no leftover-leader reclaim), and an explicit `--leader` is a conflict.
+    #[test]
+    fn launch_policy_vetoes_leader_mode_from_every_source() {
+        let on = config_with_leader(true);
+        let off = config_with_leader(false);
+        for (label, leader_flag, no_leader, cfg) in [
+            ("--leader", true, false, &empty_config()),
+            ("config on", false, false, &on),
+            ("config off", false, false, &off),
+            ("--no-leader", false, true, &on),
+            ("default", false, false, &empty_config()),
+        ] {
+            let resolved = resolve_leader_mode_inner(leader_flag, no_leader, cfg, None, true, None, true);
+            let unset = resolve_leader_mode_inner(leader_flag, no_leader, cfg, None, true, None, false);
+            assert!(!resolved.use_leader, "{label}: a launch policy means standalone");
+            assert_eq!(resolved.policy_disable_reason, unset.policy_disable_reason, "{label}");
+            assert_eq!(resolved.disabled_by_launch_policy, unset.use_leader, "{label}");
+            assert_eq!(resolved.launch_policy_conflict, leader_flag, "{label}");
+            assert!(!unset.disabled_by_launch_policy && !unset.launch_policy_conflict, "{label}: unset is unchanged");
+            assert_eq!(unset, resolve_leader_mode(leader_flag, no_leader, cfg, None, true, None), "{label}");
+        }
+        #[cfg(feature = "release-dist")]
+        {
+            let rs = fuigo_shell::util::config::RemoteSettings { leader_mode: Some(true), ..Default::default() };
+            let resolved = resolve_leader_mode_inner(false, false, &empty_config(), Some(&rs), true, None, true);
+            assert!(!resolved.use_leader && resolved.disabled_by_launch_policy && !resolved.launch_policy_conflict);
+        }
     }
     #[test]
     fn cli_flag_overrides_config() {

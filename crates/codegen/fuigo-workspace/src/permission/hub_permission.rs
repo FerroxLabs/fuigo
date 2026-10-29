@@ -130,6 +130,7 @@ fn scope_for_access(access: &AccessKind) -> &'static str {
         | AccessKind::AgentMessage { .. }
         | AccessKind::Tool(_) => "write",
         AccessKind::Read(_)
+        | AccessKind::Session
         | AccessKind::Grep { .. }
         | AccessKind::WebFetch(_)
         | AccessKind::WebSearch(_) => "read",
@@ -143,6 +144,7 @@ fn describe_access(access: &AccessKind) -> String {
         AccessKind::WebFetch(url) => format!("Fetch {url}"),
         AccessKind::WebSearch(query) => format!("Search the web for {query}"),
         AccessKind::Read(_) => "Read a file".to_owned(),
+        AccessKind::Session => "Update session state".to_owned(),
         AccessKind::Grep { .. } => "Search file contents".to_owned(),
         AccessKind::AgentMessage { subagent_id } => {
             format!("Send a message to subagent {subagent_id}")
@@ -296,7 +298,7 @@ fn access_kind_for_hub_tool_name(tool_name: &str, args: &Value) -> Option<Access
             Ok(input)
                 if matches!(
                     crate::permission::types::workflow_access(&input),
-                    AccessKind::Read(_)
+                    AccessKind::Read(_) | AccessKind::Session
                 ) =>
             {
                 None
@@ -1293,6 +1295,7 @@ mod tests {
                     !matches!(
                         access,
                         None | Some(AccessKind::Read(_))
+                            | Some(AccessKind::Session)
                             | Some(AccessKind::Grep { .. })
                             | Some(AccessKind::WebSearch(_))
                     ),
@@ -1762,6 +1765,24 @@ mod tests {
             hub_policy_verdict(&AccessKind::Bash("ls".into()), &ctx(Some(&broad), cwd, false, true)),
             HubPolicyVerdict::Allow
         );
+    }
+
+    /// Bookkeeping tools under an any-tool ask rule must not be described as file reads on the hub card.
+    #[test]
+    fn describe_access_labels_session_bookkeeping_not_as_a_file_read() {
+        assert_eq!(describe_access(&AccessKind::Session), "Update session state");
+        assert_eq!(describe_access(&AccessKind::Read(None)), "Read a file");
+    }
+
+    /// u36 item c, hub side: `ask = ["Read"]` asks for a path-less read (skill, memory search, plan mode, named workflow dry run)
+    /// but leaves session bookkeeping (`todo_write`) allowed.
+    #[test]
+    fn hub_ask_read_rule_reaches_pathless_reads_not_session_bookkeeping() {
+        let dir = tempfile::tempdir().unwrap();
+        let ask_read = compiled("[permission]\nask = [\"Read\"]\n");
+        let c = ctx(Some(&ask_read), dir.path(), false, false);
+        assert_eq!(hub_policy_verdict(&AccessKind::Session, &c), HubPolicyVerdict::Allow);
+        assert!(matches!(hub_policy_verdict(&AccessKind::Read(None), &c), HubPolicyVerdict::Ask(_)));
     }
 
     /// Astra r2 C: `git status` in a repository whose config runs a program is not a safe command for the hub either.

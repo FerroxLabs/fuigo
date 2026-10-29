@@ -8,6 +8,7 @@ use super::reasoning_effort::{
 use super::sampler_prewarm::spawn_sampler_transport_prewarm;
 use super::*;
 use crate::agent::session_metrics::SessionStartKind;
+use fuigo_workspace::permission::launch_policy;
 /// Refusals resume must give verbatim, so a test cannot mistake some other `invalid_params` for the guard it is pinning.
 pub(super) const RESUME_REFUSES_CHAT: &str =
     "session/resume is not supported for chat sessions; use session/load";
@@ -295,8 +296,8 @@ impl MvpAgent {
     /// `modes` for a session response: the four supported ids plus the mode the session is in now.
     ///
     /// A resident session answers from its live plan tracker and prompt mode (shared Arcs on the handle, so a session
-    /// that is mid-turn is never waited on). With no resident session, the persisted plan state decides (prompt mode is
-    /// not persisted), else `default`.
+    /// that is mid-turn is never waited on). With no resident session, the persisted plan state decides (prompt mode and
+    /// browser mode are not persisted), else `default`.
     pub(super) fn advertised_session_modes(
         &self,
         session_id: &acp::SessionId,
@@ -306,13 +307,18 @@ impl MvpAgent {
         use crate::session::plan_mode::{PlanModeState, PromptMode};
         let current = match self.resident_handle(session_id) {
             Some(handle) => {
-                let plan = handle.plan_mode.lock().state();
+                let (plan, browser) = {
+                    let tracker = handle.plan_mode.lock();
+                    (tracker.state(), tracker.browser_use())
+                };
                 let prompt = *handle.current_prompt_mode.lock();
-                advertised_mode_id(plan, prompt)
+                advertised_mode_id(plan, prompt, browser)
             }
+            // Browser mode is live state only: a cold session is never in it.
             None => advertised_mode_id(
                 persisted_plan.unwrap_or(PlanModeState::Inactive),
                 PromptMode::Agent,
+                false,
             ),
         };
         acp::SessionModeState::new(current, advertised_available_modes())
@@ -445,6 +451,17 @@ impl MvpAgent {
             "this session is driven by another client; only the driving client can change it",
         ))
     }
+    /// 1.0.36 item a (§5): a leader never runs a session under a launch policy; a request carrying the key is refused.
+    fn refuse_policy_claim_on_leader(&self, claim: &launch_policy::SessionPolicyClaim) -> Result<(), acp::Error> {
+        if self.leader_mode && !claim.is_empty() {
+            return Err(launch_policy::route_refused(
+                claim.path.as_deref().unwrap_or_default(),
+                "a leader does not run sessions under a launch policy; use a --no-leader process",
+            )
+            .into_acp_error());
+        }
+        Ok(())
+    }
     async fn new_session_in_scope(
         &self,
         arguments: acp::NewSessionRequest,
@@ -452,6 +469,9 @@ impl MvpAgent {
     ) -> Result<acp::NewSessionResponse, acp::Error> {
         let session_started_at = std::time::Instant::now();
         reject_chat_kind_without_feature(arguments.meta.as_ref())?;
+        let policy_claim = launch_policy::SessionPolicyClaim::from_meta(arguments.meta.as_ref())
+            .map_err(launch_policy::PolicyError::into_acp_error)?;
+        self.refuse_policy_claim_on_leader(&policy_claim)?;
         // P70: metadata only. The ACP request's derived `Debug` prints every MCP server's headers and env values,
         // which routinely carry credentials (and `_meta` is client-defined).
         tracing::debug!(
@@ -517,6 +537,10 @@ impl MvpAgent {
             }
             None => acp::SessionId::new(uuid::Uuid::now_v7().to_string()),
         };
+        // 1.0.36 item a: the client's launch policy file, verified against its hash and pinned (`None`: ungoverned).
+        let session_policy =
+            launch_policy::resolve_session_claim(&policy_claim, Some(session_id.0.as_ref()), None)
+                .map_err(launch_policy::PolicyError::into_acp_error)?;
         // P148: until its startup notes are announced (or this setup ends), a sibling's trust grant leaves this
         // session's notes to that announcement.
         let _announcing = SessionAnnouncing::enter(&self.sessions_announcing, &session_id, notice_scope);
@@ -686,6 +710,11 @@ impl MvpAgent {
             .await
             .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?
         };
+        if !is_chat_kind && let Some(policy) = &session_policy {
+            crate::session::persistence::write_permission_policy_marker(&session_info, policy.binding())
+                .await
+                .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?;
+        }
         self.set_turn_number(&session_id, 0u64);
         let chat_history = vec![];
         let ClientCaps {
@@ -698,14 +727,17 @@ impl MvpAgent {
             let mut timer = crate::instrumentation_timer!("session.spawn_session_actor");
             timer.with_field("session_id", session_id.0.as_ref());
             let spawn_opts = if is_chat_kind {
-                chat_session_spawn_options(
-                    session_info.clone(),
-                    cwd.clone(),
-                    arguments.meta.as_ref(),
-                    model_agent_type.as_deref(),
-                    session_model_id,
-                    session_yolo_mode,
-                )
+                SessionSpawnOptions {
+                    launch_policy: session_policy.clone(),
+                    ..chat_session_spawn_options(
+                        session_info.clone(),
+                        cwd.clone(),
+                        arguments.meta.as_ref(),
+                        model_agent_type.as_deref(),
+                        session_model_id,
+                        session_yolo_mode,
+                    )
+                }
             } else {
                 SessionSpawnOptions {
                     session_info: session_info.clone(),
@@ -738,6 +770,7 @@ impl MvpAgent {
                     prompt_display_cwd: None,
                     is_headless,
                     is_chat_kind: false,
+                    launch_policy: session_policy.clone(),
                 }
             };
             let mut spawn_timer = crate::instrumentation_timer!("session.spawn");
@@ -898,6 +931,11 @@ impl MvpAgent {
                 &models,
             );
             insert_applied_tool_overrides(obj, applied_tool_overrides.as_ref());
+            if let Some(ack) =
+                launch_policy::session_ack(session_policy.as_ref().map(|p| p.sha256.as_str()))
+            {
+                obj.insert(launch_policy::META_ACK.to_owned(), ack);
+            }
         }
         self.attach_status_line(&session_id, arguments.meta.as_ref(), init);
         self.attach_user_message_echo(&session_id, arguments.meta.as_ref(), init);
@@ -1087,6 +1125,9 @@ impl MvpAgent {
         let attach_started_at = std::time::Instant::now();
         let _load_guard = self.begin_session_load(&arguments.session_id);
         reject_chat_kind_without_feature(arguments.meta.as_ref())?;
+        let policy_claim = launch_policy::SessionPolicyClaim::from_meta(arguments.meta.as_ref())
+            .map_err(launch_policy::PolicyError::into_acp_error)?;
+        self.refuse_policy_claim_on_leader(&policy_claim)?;
         self.sweep_dead_sessions();
         if !self.is_resident(&arguments.session_id) {
             self.drain_old_session_thread(&arguments.session_id).await;
@@ -1144,6 +1185,14 @@ impl MvpAgent {
         let _writer_lock = acquire_session_writer_lock(&session_info).await?;
         let _live_mark = spawn_session_sweep(&session_info).await?;
         let session_exists = self.is_resident(&session_id);
+        // 1.0.36 item a: a resident session keeps its installed launch policy; the request must name exactly that one.
+        if session_exists {
+            launch_policy::check_resident_claim(
+                &policy_claim,
+                launch_policy::session_binding(session_id.0.as_ref()).as_ref(),
+            )
+            .map_err(launch_policy::PolicyError::into_acp_error)?;
+        }
         let no_replay = policy.no_replay;
         if session_exists {
             tracing::info!(
@@ -1232,6 +1281,25 @@ impl MvpAgent {
             workflow_runs: persisted_workflow_runs,
             history_repair_notice,
         } = persistence_info;
+        // 1.0.36 item a: a cold load is governed by the client's claim; a session bound in this process or carrying the
+        // stored marker must name the same key and hash.
+        let cold_policy = if session_exists {
+            None
+        } else {
+            launch_policy::resolve_session_claim(
+                &policy_claim,
+                Some(session_id.0.as_ref()),
+                summary.permission_policy.as_ref(),
+            )
+            .map_err(launch_policy::PolicyError::into_acp_error)?
+        };
+        if let Some(policy) = &cold_policy
+            && summary.permission_policy.is_none()
+        {
+            crate::session::persistence::write_permission_policy_marker(&session_info, policy.binding())
+                .await
+                .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?;
+        }
         let persisted_base_url = self
             .resolve_sampling_config_for_model(&summary.current_model_id, origin_client.clone())
             .base_url;
@@ -1415,6 +1483,7 @@ impl MvpAgent {
                     prompt_display_cwd,
                     is_headless: summary.is_headless(),
                     is_chat_kind: false,
+                    launch_policy: cold_policy,
                 },
             )
             .await?;
@@ -1443,6 +1512,14 @@ impl MvpAgent {
                 mcp_server_count = mcp_servers.len(),
                 "load_session: reconnecting to existing session, updating MCP servers"
             );
+            // Became resident while this load ran: the installed launch policy must match this request's too.
+            if !session_exists {
+                launch_policy::check_resident_claim(
+                    &policy_claim,
+                    launch_policy::session_binding(session_id.0.as_ref()).as_ref(),
+                )
+                .map_err(launch_policy::PolicyError::into_acp_error)?;
+            }
             // Became resident while recovery ran (a concurrent load of the same session registered first).
             if let Some(deferred) = deferred_recovery {
                 // The model is told now, before the load returns and so before any prompt can reach the actor: the
@@ -1503,9 +1580,22 @@ impl MvpAgent {
                 .and_then(|init| init.meta.as_ref());
             self.apply_attach_prompt_and_hooks(&session_id, request_meta.as_ref(), init_meta, foreign_attach);
         }
-        let (model_state, response_meta) = self
+        let (model_state, mut response_meta) = self
             .build_attach_response_meta(&session_id, &summary, persist_data, code_restore_info)
             .await;
+        // 1.0.36 item a: the ack, only for a governed session (its binding in this process, else the process policy).
+        if let Some(ack) = launch_policy::session_ack(
+            launch_policy::session_binding(session_id.0.as_ref())
+                .as_ref()
+                .map(|b| b.sha256.as_str()),
+        ) {
+            match response_meta.as_object_mut() {
+                Some(obj) => {
+                    obj.insert(launch_policy::META_ACK.to_owned(), ack);
+                }
+                None => response_meta = serde_json::json!({ launch_policy::META_ACK: ack }),
+            }
+        }
         fuigo_telemetry::unified_log::info("session loaded", Some(session_id.0.as_ref()), None);
         let config_options = self.acp_config_options(Some(&session_id), &model_state);
         let modes = self.advertised_session_modes(&session_id, persisted_plan_state);

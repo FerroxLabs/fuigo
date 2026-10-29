@@ -6,11 +6,14 @@ pub(crate) mod gitdir;
 pub(crate) mod shard;
 pub(crate) mod skip;
 pub(crate) mod standalone;
+pub(crate) mod tracked;
 pub(crate) mod types;
 pub(crate) mod worker;
 
 pub(crate) use engine::copy_parallel;
 pub(crate) use skip::collect_unignored_paths;
+pub use tracked::TrackedCopyError;
+pub use types::CopyFailure;
 pub use types::CopyStats;
 pub use types::DirtyFilesReport;
 pub(crate) use types::ParallelCopyConfig;

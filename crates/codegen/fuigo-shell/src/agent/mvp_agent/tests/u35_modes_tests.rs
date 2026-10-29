@@ -162,7 +162,18 @@ fn advertised_mode_id_table() {
         (PlanModeState::Inactive, PromptMode::Agent, "default"),
     ];
     for (plan, prompt, want) in cases {
-        assert_eq!(advertised_mode_id(plan, prompt), want, "{plan:?} + {prompt:?}");
+        assert_eq!(advertised_mode_id(plan, prompt, false), want, "{plan:?} + {prompt:?}");
+    }
+    // u36: plan (Pending/Active) > browser_use > ask > default.
+    let browser = [
+        (PlanModeState::Pending, PromptMode::Agent, "plan"),
+        (PlanModeState::Active, PromptMode::Ask, "plan"),
+        (PlanModeState::ExitPending, PromptMode::Agent, "browser_use"),
+        (PlanModeState::Inactive, PromptMode::Ask, "browser_use"),
+        (PlanModeState::Inactive, PromptMode::Agent, "browser_use"),
+    ];
+    for (plan, prompt, want) in browser {
+        assert_eq!(advertised_mode_id(plan, prompt, true), want, "browser + {plan:?} + {prompt:?}");
     }
 }
 
@@ -681,7 +692,11 @@ fn session_responses_advertise_modes() {
             .await
             .expect("set browser_use");
         let loaded = agent.load_session(load(created.session_id.clone())).await.expect("load");
-        assert_eq!(loaded.modes.unwrap().current_mode_id.0.as_ref(), "default", "browser_use is reported as default");
+        assert_eq!(
+            loaded.modes.unwrap().current_mode_id.0.as_ref(),
+            "browser_use",
+            "a resident browser session reports browser_use"
+        );
 
         agent
             .set_session_mode(acp::SetSessionModeRequest::new(created.session_id.clone(), "plan"))

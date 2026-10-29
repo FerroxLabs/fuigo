@@ -258,3 +258,125 @@ async fn create_test_actor_plain() -> SessionActor {
     let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await
 }
+
+// ---- u36: a model switch keeps the trailing memory-context block ----
+
+fn memory_block() -> String {
+    format!(
+        "{}\nremembered fact\n{}",
+        fuigo_chat_state::memory_context_open_tag(crate::session::helpers::memory_context::memory_context_nonce()),
+        fuigo_chat_state::memory_context_close_tag(crate::session::helpers::memory_context::memory_context_nonce())
+    )
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn set_model_keeps_the_memory_block() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            for use_concise in [false, true] {
+                let actor = actor_with_rules(true).await;
+                let mut conv = actor.chat_state_handle.get_conversation().await;
+                let head = head_text(&conv).unwrap();
+                conv[0] = ConversationItem::system(format!("{head}\n\n{}", memory_block()));
+                actor.chat_state_handle.replace_conversation(conv);
+                switch_model(&actor, use_concise).await;
+                let switched = head_text(&actor.chat_state_handle.get_conversation().await).unwrap();
+                // A never-switched control composed for the new model, with the same turn's memory block
+                let template = if use_concise {
+                    fuigo_agent::prompt::template::COMPACT_SYSTEM_PROMPT.to_owned()
+                } else {
+                    actor.agent.borrow().system_prompt().to_owned()
+                };
+                let mut control = template;
+                crate::session::human_rules::append_human_rules(&mut control, CANARY);
+                let control = format!("{}\n\n{}", control.trim_end_matches('\n'), memory_block());
+                assert_eq!(switched, control, "concise={use_concise}");
+                assert_eq!(switched.matches(crate::session::helpers::memory_context::memory_context_nonce()).count(), 2);
+            }
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn set_model_without_a_memory_block_is_unchanged() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = actor_with_rules(true).await;
+            switch_model(&actor, false).await;
+            let switched = head_text(&actor.chat_state_handle.get_conversation().await).unwrap();
+            let mut control = actor.agent.borrow().system_prompt().to_owned();
+            crate::session::human_rules::append_human_rules(&mut control, CANARY);
+            assert_eq!(switched, control);
+        })
+        .await;
+}
+
+fn installation_block(body: &str) -> String {
+    let nonce = crate::session::helpers::memory_context::memory_context_nonce();
+    format!(
+        "{}\n{body}\n{}",
+        fuigo_chat_state::memory_context_open_tag(nonce),
+        fuigo_chat_state::memory_context_close_tag(nonce)
+    )
+}
+
+/// A client override ending in a complete block with a foreign nonce is override text, not memory: set_mode and a model
+/// switch leave it exactly once, and only the installation block the turn appended is carried.
+#[tokio::test(flavor = "current_thread")]
+async fn an_override_ending_in_a_foreign_nonce_block_is_not_duplicated() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            for use_concise in [false, true] {
+                let actor = actor_with_rules(false).await;
+                let foreign = format!(
+                    "{}\nforeign\n{}",
+                    fuigo_chat_state::memory_context_open_tag("x"),
+                    fuigo_chat_state::memory_context_close_tag("x")
+                );
+                let override_prompt = format!("client override\n\n{foreign}");
+                *actor.system_prompt_override.borrow_mut() = Some(override_prompt.clone());
+                let mut conv = actor.chat_state_handle.get_conversation().await;
+                let stored = format!("{override_prompt}\n\n{}", installation_block("fact"));
+                conv[0] = ConversationItem::system(stored.clone());
+                actor.chat_state_handle.replace_conversation(conv);
+                actor
+                    .handle_session_mode(agent_client_protocol::SessionModeId::new("default"))
+                    .await;
+                switch_model(&actor, use_concise).await;
+                let head = head_text(&actor.chat_state_handle.get_conversation().await).unwrap();
+                assert_eq!(head, stored, "concise={use_concise}");
+                assert_eq!(head.matches("foreign").count(), 1);
+            }
+        })
+        .await;
+}
+
+/// A zero-turn harness rebuild keeps rules and the installation memory block, equal to a never-switched control head
+/// composed on the new template.
+#[tokio::test(flavor = "current_thread")]
+async fn harness_rebuild_keeps_rules_and_memory_like_the_control() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = actor_with_rules(true).await;
+            let block = installation_block("fact");
+            let mut conv = actor.chat_state_handle.get_conversation().await;
+            let head = head_text(&conv).unwrap();
+            conv[0] = ConversationItem::system(format!("{head}\n\n{block}"));
+            actor.chat_state_handle.replace_conversation(conv);
+            actor
+                .handle_rebuild_agent_for_definition(fuigo_agent::AgentDefinition::default_fuigo_build())
+                .await
+                .expect("rebuild");
+            let rebuilt = head_text(&actor.chat_state_handle.get_conversation().await).unwrap();
+            let mut control = actor.agent.borrow().system_prompt().to_owned();
+            crate::session::human_rules::append_human_rules(&mut control, CANARY);
+            let control = format!("{}\n\n{block}", control.trim_end_matches('\n'));
+            assert_eq!(rebuilt, control);
+            assert_eq!(rebuilt.matches("<memory-context").count(), 1);
+        })
+        .await;
+}

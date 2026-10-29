@@ -620,3 +620,50 @@ fn tool_guidance_description_reaches_chat_completions_wire() {
         "stock text\n\nGUIDE-WIRE"
     );
 }
+
+fn gappy_mcp_schema() -> serde_json::Value {
+    // What an MCP server may publish: no root type, an object without properties, an array without items.
+    serde_json::json!({
+        "properties": {
+            "opts": {"type": "object"},
+            "ids": {"type": "array"},
+            "target": {"$ref": "#/$defs/Target"},
+            "note": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+        },
+        "$defs": {"Target": {"type": "object"}}
+    })
+}
+
+#[test]
+fn mcp_tool_schema_gaps_are_filled_on_chat_completions_only() {
+    let gappy = gappy_mcp_schema();
+    let spec = |name: &str| ToolSpec {
+        name: name.to_string(),
+        description: None,
+        parameters: gappy.clone(),
+        freeform: None,
+    };
+    let req = ConversationRequest::from_items(vec![ConversationItem::user("go")])
+        .with_tools(vec![spec("srv__lookup"), spec("builtin_tool")]);
+
+    let chat_req: ChatCompletionRequest = req.clone().into();
+    let tools = chat_req.tools.unwrap();
+    // Before this pass the chat request carried `gappy` verbatim for the MCP tool, which strict validators reject.
+    let mcp = &tools[0].function.parameters;
+    assert_eq!(mcp["type"], "object");
+    assert_eq!(mcp["properties"]["opts"], serde_json::json!({"type": "object", "properties": {}}));
+    assert_eq!(mcp["properties"]["ids"], serde_json::json!({"type": "array", "items": {}}));
+    // Nothing is resolved or rewritten.
+    assert_eq!(mcp["properties"]["target"], gappy["properties"]["target"]);
+    assert_eq!(mcp["properties"]["note"], gappy["properties"]["note"]);
+    assert_eq!(mcp["$defs"]["Target"], serde_json::json!({"type": "object", "properties": {}}));
+    // Built-in tools are passed through byte-identical.
+    assert_eq!(tools[1].function.parameters, gappy);
+
+    // Other API paths keep the published schema.
+    let responses = serde_json::to_string(&crate::rs::CreateResponse::from(&req)).unwrap();
+    let published = serde_json::to_string(&gappy["properties"]["ids"]).unwrap();
+    assert!(responses.contains(&published));
+    let messages = serde_json::to_string(&build_messages_request(&req)).unwrap();
+    assert!(messages.contains(&published));
+}

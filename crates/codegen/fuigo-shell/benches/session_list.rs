@@ -529,6 +529,7 @@ fn write_summary(
         last_turn_summary: None,
         last_turn_summary_prompt_id: None,
         last_recap: None,
+        permission_policy: None,
     };
     let summary_path = session_dir.join("summary.json");
     let bytes = serde_json::to_vec_pretty(&summary).expect("serialize summary");

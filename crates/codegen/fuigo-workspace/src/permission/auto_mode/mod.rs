@@ -467,7 +467,7 @@ impl HeuristicPermissionClassifier {
             | AccessKind::MCPTool { .. }
             | AccessKind::AgentMessage { .. }
             | AccessKind::Tool(_) => ClassifierVerdict::Block,
-            AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_) => {
+            AccessKind::Read(_) | AccessKind::Session | AccessKind::Grep { .. } | AccessKind::WebSearch(_) => {
                 ClassifierVerdict::Allow
             }
         }
@@ -1144,7 +1144,7 @@ pub type SharedClassifier = Arc<dyn PermissionClassifier>;
 pub fn is_auto_mode_allowlisted_access(access: &AccessKind) -> bool {
     matches!(
         access,
-        AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_)
+        AccessKind::Read(_) | AccessKind::Session | AccessKind::Grep { .. } | AccessKind::WebSearch(_)
     )
 }
 
@@ -1381,7 +1381,7 @@ pub fn build_classifier_messages(
     let tool_name = neutralize_headings(tool_name);
     let detail = neutralize_headings(access_detail.unwrap_or("(none)"));
     let access_kind = match access {
-        AccessKind::Read(_) => "read",
+        AccessKind::Read(_) | AccessKind::Session => "read",
         AccessKind::Grep { .. } => "grep",
         AccessKind::Edit(_) => "edit",
         AccessKind::Bash(_) => "bash",

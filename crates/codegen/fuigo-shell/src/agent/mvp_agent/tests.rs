@@ -3147,6 +3147,8 @@ mod session_rename_tests;
 mod session_resume_close_tests;
 mod p30_leader_tests;
 mod u35_modes_tests;
+mod u36_browser_mode_acp_tests;
+mod u36_launch_policy_tests;
 mod p30_direct_lock_tests;
 mod subagent_spawn_context_tests;
 /// With no load in flight and no session the wait returns immediately (the caller then surfaces "unknown session id" exactly as before).

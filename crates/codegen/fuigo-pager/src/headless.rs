@@ -1480,8 +1480,12 @@ async fn open_session_in_new_worktree(
         worktree = %created.worktree_root.display(),
         session_cwd = %created.session_cwd.display(),
         copy_mode = ?spec.copy_mode(),
+        copy_notice = ?created.copy_notice,
         "headless: worktree created"
     );
+    if let Some(notice) = &created.copy_notice {
+        fuigo_tty_utils::best_effort_stderr::eprint_line(notice);
+    }
     let opened = match session_id {
         Some(sid) => open_session_with_id(acp_tx, &created.session_cwd, sid, deadline).await,
         None => open_session(acp_tx, &created.session_cwd, None, None, deadline).await,
@@ -1525,6 +1529,9 @@ async fn resume_session_in_new_worktree(
         code_restored = resumed.code_restored,
         "headless: session resumed into worktree"
     );
+    if let Some(notice) = &resumed.copy_notice {
+        fuigo_tty_utils::best_effort_stderr::eprint_line(notice);
+    }
     // resume_session already restored code; asking again on load would redo it.
     open_session(
         acp_tx,

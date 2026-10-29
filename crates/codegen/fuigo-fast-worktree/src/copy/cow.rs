@@ -13,13 +13,25 @@ use anyhow::Result;
 /// this creates a reflink which shares data blocks until modified.
 /// On other filesystems, it performs a regular copy.
 pub(crate) fn clone_file(src: &Path, dest: &Path) -> Result<()> {
+    match clone_file_keeping_on_mode_error(src, dest)? {
+        None => Ok(()),
+        Some(mode_error) => Err(mode_error.into()),
+    }
+}
+
+/// [`clone_file`], except that failing to apply the source mode to a file whose
+/// contents were copied is returned as `Ok(Some(_))` instead of an error, so the
+/// caller can report the lost mode rather than treat a copied file as missing.
+pub(crate) fn clone_file_keeping_on_mode_error(
+    src: &Path,
+    dest: &Path,
+) -> Result<Option<std::io::Error>> {
     reflink_copy::reflink_or_copy(src, dest)?;
     // reflink (FICLONE) only clones data blocks, creating the dest with
     // default umask permissions. Explicitly propagate the source mode so the
     // executable bit etc. survive on reflink-capable filesystems.
     let perms = std::fs::metadata(src)?.permissions();
-    std::fs::set_permissions(dest, perms)?;
-    Ok(())
+    Ok(std::fs::set_permissions(dest, perms).err())
 }
 
 /// Recreate `dst` as a symlink pointing at `target`, replacing any existing

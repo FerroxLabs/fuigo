@@ -79,6 +79,9 @@ pub(crate) struct CreatedWorktree {
     pub worktree_root: PathBuf,
     /// Where the session opens: the launch cwd's offset inside the source, replayed under the root.
     pub session_cwd: PathBuf,
+    /// One short line when some files could not be copied into the worktree (it was still
+    /// created, so they were untracked or ignored files); the details are in the log.
+    pub copy_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,6 +93,8 @@ pub(crate) struct ResumedWorktree {
     pub code_restored: bool,
     pub restore_summary: Option<String>,
     pub restore_degree: Option<RestoreDegree>,
+    /// See [`CreatedWorktree::copy_notice`].
+    pub copy_notice: Option<String>,
 }
 
 pub(crate) fn create_worktree_params(
@@ -193,9 +198,36 @@ pub(crate) fn parse_create_response(
         result.get("sourceGitRoot").and_then(|v| v.as_str()),
         source_cwd,
     );
+    let copy_notice = copy_warnings_notice(&copy_warnings(&result));
     Ok(CreatedWorktree {
         worktree_root,
         session_cwd,
+        copy_notice,
+    })
+}
+
+/// Per-file copy problems the agent reported for a worktree it did create.
+fn copy_warnings(result: &serde_json::Value) -> Vec<String> {
+    result
+        .get("copiedChanges")
+        .and_then(|c| c.get("warnings"))
+        .and_then(|w| w.as_array())
+        .map(|w| w.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default()
+}
+
+/// The one-line notice for `warnings`: a count and the first problem. Every line goes to the log.
+fn copy_warnings_notice(warnings: &[String]) -> Option<String> {
+    let first = warnings.first()?;
+    for w in warnings {
+        tracing::warn!(warning = %w, "worktree copy problem");
+    }
+    let first: String = first.chars().take(100).collect();
+    Some(match warnings.len() {
+        1 => format!("Worktree created, but 1 file had a copy problem: {first} (details in the log)"),
+        n => format!(
+            "Worktree created, but {n} files had copy problems, first: {first} (details in the log)"
+        ),
     })
 }
 
@@ -216,6 +248,11 @@ pub(crate) fn parse_resume_response(
         .unwrap_or(requested_session_id)
         .to_owned();
     let (code_restored, restore_summary, restore_degree) = parse_worktree_restore_payload(&result);
+    let warnings: Vec<String> = result
+        .get("copyWarnings")
+        .and_then(|w| w.as_array())
+        .map(|w| w.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default();
     Ok(ResumedWorktree {
         session_id,
         worktree_root,
@@ -223,6 +260,7 @@ pub(crate) fn parse_resume_response(
         code_restored,
         restore_summary,
         restore_degree,
+        copy_notice: copy_warnings_notice(&warnings),
     })
 }
 
@@ -383,6 +421,34 @@ mod tests {
         let bare = r#"{"worktreePath":"/wt/y"}"#;
         let created = parse_create_response(bare, Path::new("/repo")).unwrap();
         assert_eq!(created.session_cwd, PathBuf::from("/wt/y"));
+    }
+
+    #[test]
+    fn create_response_carries_copy_warnings_as_one_line() {
+        let none = r#"{"result":{"worktreePath":"/wt/x","copiedChanges":{"warnings":[]}}}"#;
+        assert_eq!(parse_create_response(none, Path::new("/repo")).unwrap().copy_notice, None);
+        let absent = r#"{"result":{"worktreePath":"/wt/x"}}"#;
+        assert_eq!(parse_create_response(absent, Path::new("/repo")).unwrap().copy_notice, None);
+
+        let one = r#"{"result":{"worktreePath":"/wt/x","copiedChanges":{"warnings":["copy a.sock: No such device or address (os error 6)"]}}}"#;
+        let note = parse_create_response(one, Path::new("/repo")).unwrap().copy_notice.unwrap();
+        assert!(note.contains("1 file had a copy problem"), "{note}");
+        assert!(note.contains("copy a.sock"), "{note}");
+        assert!(!note.contains('\n'), "{note}");
+
+        let many = r#"{"result":{"worktreePath":"/wt/x","copiedChanges":{"warnings":["copy a: e","copy b: e","mode not preserved for c: e"]}}}"#;
+        let note = parse_create_response(many, Path::new("/repo")).unwrap().copy_notice.unwrap();
+        assert!(note.contains("3 files had copy problems"), "{note}");
+        assert!(note.contains("first: copy a: e"), "{note}");
+    }
+
+    #[test]
+    fn resume_response_carries_copy_warnings_as_one_line() {
+        let raw = r#"{"result":{"worktreePath":"/wt/z","copyWarnings":["copy a: e","copy b: e"]}}"#;
+        let note = parse_resume_response(raw, "orig").unwrap().copy_notice.unwrap();
+        assert!(note.contains("2 files had copy problems"), "{note}");
+        let none = parse_resume_response(r#"{"worktreePath":"/wt/z"}"#, "orig").unwrap();
+        assert_eq!(none.copy_notice, None);
     }
 
     #[test]

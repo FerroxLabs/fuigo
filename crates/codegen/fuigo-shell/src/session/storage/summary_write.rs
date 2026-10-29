@@ -103,6 +103,8 @@ pub(crate) struct SummaryPatch {
     /// Stamp `session_kind` only when the summary has none yet.
     /// Used by the session/new headless stamp; a kind already on disk (crash-recovered dir, concurrent writer) is never overwritten.
     pub session_kind_if_absent: Option<String>,
+    /// 1.0.36 item a: stamp the launch policy marker (set, never cleared).
+    pub permission_policy: Option<fuigo_workspace::permission::launch_policy::PolicyBinding>,
 }
 
 impl Summary {
@@ -180,6 +182,9 @@ impl Summary {
             && self.session_kind.is_none()
         {
             self.session_kind = Some(kind.clone());
+        }
+        if let Some(binding) = &patch.permission_policy {
+            self.permission_policy = Some(binding.clone());
         }
         let mut absent_title_applied = false;
         if patch.reset_title_to_auto {

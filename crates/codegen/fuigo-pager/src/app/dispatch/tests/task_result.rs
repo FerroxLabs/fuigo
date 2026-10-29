@@ -1607,6 +1607,7 @@ fn session_success_arms_finish_startup_obligation() {
             session_cwd: std::path::PathBuf::from("/tmp/wt"),
             models: None,
             scheduler_background_loops: None,
+            copy_notice: None,
         },
         TaskResult::WorktreeForked {
             agent_id: id,
@@ -1617,6 +1618,7 @@ fn session_success_arms_finish_startup_obligation() {
             restore_summary: None,
             restore_degree: None,
             resume_session_id: None,
+            copy_notice: None,
         },
     ];
 

@@ -1295,6 +1295,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
     session_cwd: std::path::PathBuf,
     new_models: Option<acp::SessionModelState>,
     scheduler_background_loops: Option<bool>,
+    copy_notice: Option<String>,
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.session.finish_command();
@@ -1317,6 +1318,9 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
             "Worktree ready: {}",
             worktree_path.display()
         )));
+        if let Some(notice) = copy_notice {
+            agent.scrollback.push_block(RenderBlock::system(notice));
+        }
         let deferred = apply_deferred_model_switch(agent, app.cli_effort_token.as_deref());
         let deferred_mode = agent.deferred_session_mode.take();
         let cwd = agent.session.cwd.clone();

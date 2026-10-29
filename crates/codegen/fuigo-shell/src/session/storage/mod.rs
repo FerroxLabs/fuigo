@@ -1177,6 +1177,8 @@ pub struct CopySessionResult {
     /// Number of `compaction_checkpoints/{uuid}.json` files copied for the checkpoint records retained in the copied updates.
     /// `0` when no records survive the copy or their files are missing from the source.
     pub compaction_checkpoints_copied: usize,
+    /// 1.0.36 item a: the source summary's launch policy marker (read with the copy, no extra I/O).
+    pub source_permission_policy: Option<fuigo_workspace::permission::launch_policy::PolicyBinding>,
 }
 
 /// Options for copying session data during fork

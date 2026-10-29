@@ -1362,6 +1362,8 @@ pub(crate) async fn run_shell_child(
         ctx.hook_registry.clone(),
         ctx.workspace_ops.clone(),
         vec![],
+        // 1.0.36 item a: a child that builds its own actor keeps the parent's launch policy.
+        ctx.permission_handle.as_ref().and_then(|h| h.launch_policy()),
         ctx.todo_gate,
         std::mem::take(&mut ctx.remote_settings),
         std::mem::take(&mut ctx.laziness_debug_log),

@@ -13,7 +13,8 @@ use tokio_util::sync::CancellationToken;
 use crate::copy::shard::shard_for_path;
 use crate::copy::skip::build_skip_matcher;
 use crate::copy::types::{
-    CopyEntry, CopyEntryKind, CopyStats, ParallelCopyConfig, ParallelCopyResult,
+    CopyEntry, CopyEntryKind, CopyFailure, CopyStats, ParallelCopyConfig, ParallelCopyResult,
+    is_storage_full,
 };
 use crate::copy::worker::{WorkerCtx, run_worker};
 
@@ -59,6 +60,9 @@ pub(crate) fn copy_parallel(
     let symlinks_copied = Arc::new(AtomicU64::new(0));
     let files_skipped = Arc::new(AtomicU64::new(0));
     let issues: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let failed: Arc<std::sync::Mutex<Vec<CopyFailure>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let unscoped: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
 
     // Track successfully copied paths for deduplication.
     let copied_paths: Arc<DashSet<std::path::PathBuf>> = Arc::new(DashSet::new());
@@ -79,6 +83,7 @@ pub(crate) fn copy_parallel(
                 dirs_created: Arc::clone(&dirs_created),
                 symlinks_copied: Arc::clone(&symlinks_copied),
                 issues: Arc::clone(&issues),
+                failed: Arc::clone(&failed),
                 copied_paths: Arc::clone(&copied_paths),
                 file_metadata: Arc::clone(&file_metadata),
             };
@@ -120,6 +125,9 @@ pub(crate) fn copy_parallel(
     let skip_files = config.skip_files.clone();
     let files_skipped_walker = Arc::clone(&files_skipped);
     let skip_matcher = skip_matcher.map(Arc::new);
+    let issues_walker = Arc::clone(&issues);
+    let failed_walker = Arc::clone(&failed);
+    let unscoped_walker = Arc::clone(&unscoped);
 
     // Run the parallel walker.
     walker.run(|| {
@@ -129,6 +137,9 @@ pub(crate) fn copy_parallel(
         let skip_files = skip_files.clone();
         let files_skipped = Arc::clone(&files_skipped_walker);
         let skip_matcher = skip_matcher.clone();
+        let issues = Arc::clone(&issues_walker);
+        let failed = Arc::clone(&failed_walker);
+        let unscoped = Arc::clone(&unscoped_walker);
         let cancellation_token = cancellation_token.clone();
 
         Box::new(move |entry_result| {
@@ -139,7 +150,10 @@ pub(crate) fn copy_parallel(
 
             let entry = match entry_result {
                 Ok(e) => e,
-                Err(_) => return WalkState::Continue,
+                Err(err) => {
+                    record_walk_error(&source, &err, &issues, &failed, &unscoped);
+                    return WalkState::Continue;
+                }
             };
 
             // Get relative path.
@@ -204,10 +218,20 @@ pub(crate) fn copy_parallel(
     }
 
     // Collect issues.
+    drop(issues_walker);
+    drop(failed_walker);
+    drop(unscoped_walker);
     let issues = match Arc::try_unwrap(issues) {
         Ok(mutex) => mutex.into_inner().unwrap_or_default(),
         Err(arc) => arc.lock().unwrap().clone(),
     };
+
+    let failed = match Arc::try_unwrap(failed) {
+        Ok(mutex) => mutex.into_inner().unwrap_or_default(),
+        Err(arc) => arc.lock().unwrap().clone(),
+    };
+
+    let unscoped_walk_error = unscoped.lock().unwrap().take();
 
     let copied_paths = match Arc::try_unwrap(copied_paths) {
         Ok(set) => set,
@@ -236,10 +260,95 @@ pub(crate) fn copy_parallel(
             symlinks_copied: symlinks_copied.load(Ordering::Relaxed),
             files_skipped: files_skipped.load(Ordering::Relaxed),
             issues,
+            failed,
+            unscoped_walk_error,
         },
         copied_paths,
         file_metadata,
     })
+}
+
+/// The path an `ignore` walker error is about, if it carries one.
+fn walk_error_path(err: &ignore::Error) -> Option<&Path> {
+    match err {
+        ignore::Error::WithPath { path, .. } => Some(path),
+        ignore::Error::WithLineNumber { err, .. } | ignore::Error::WithDepth { err, .. } => {
+            walk_error_path(err)
+        }
+        ignore::Error::Loop { child, .. } => Some(child),
+        _ => None,
+    }
+}
+
+/// Whether the walker error means entries could not be visited (an unreadable
+/// directory, a symlink loop) rather than a bad ignore-file line, which only
+/// loses a pattern.
+fn walk_error_is_unvisited(err: &ignore::Error) -> bool {
+    match err {
+        ignore::Error::Partial(_)
+        | ignore::Error::Glob { .. }
+        | ignore::Error::UnrecognizedFileType(_)
+        | ignore::Error::InvalidDefinition => false,
+        ignore::Error::WithPath { err, .. }
+        | ignore::Error::WithLineNumber { err, .. }
+        | ignore::Error::WithDepth { err, .. } => walk_error_is_unvisited(err),
+        _ => true,
+    }
+}
+
+/// Whether a walker error is a full disk. `ignore::Error` has no `source()`
+/// chain, so unwrap its wrappers and hand the inner `io::Error` to the shared
+/// classifier.
+fn walk_error_storage_full(err: &ignore::Error) -> bool {
+    match err {
+        ignore::Error::Io(e) => is_storage_full(e),
+        ignore::Error::WithPath { err, .. }
+        | ignore::Error::WithLineNumber { err, .. }
+        | ignore::Error::WithDepth { err, .. } => walk_error_storage_full(err),
+        ignore::Error::Partial(errs) => errs.iter().any(walk_error_storage_full),
+        _ => false,
+    }
+}
+
+/// Report a walker error instead of dropping it: it is an issue, and when it
+/// loses entries it is also a failure. A named path is a failure of that path
+/// (and everything beneath it); an error that loses entries without naming a
+/// path (a directory read failing mid-way, the root) sets `unscoped`, so the
+/// caller checks every tracked file against the destination rather than assume
+/// the lost entries were untracked. A full disk is always a failure.
+fn record_walk_error(
+    source: &Path,
+    err: &ignore::Error,
+    issues: &std::sync::Mutex<Vec<String>>,
+    failed: &std::sync::Mutex<Vec<CopyFailure>>,
+    unscoped: &std::sync::Mutex<Option<String>>,
+) {
+    let rel = walk_error_path(err)
+        .and_then(|p| p.strip_prefix(source).ok())
+        .filter(|rel| !rel.as_os_str().is_empty());
+    let message = match rel {
+        Some(rel) => format!("walk {}: {}", rel.display(), err),
+        None => format!("walk: {err}"),
+    };
+    issues.lock().unwrap().push(message.clone());
+    let storage_full = walk_error_storage_full(err);
+    if storage_full || walk_error_is_unvisited(err) {
+        match rel {
+            Some(rel) => failed.lock().unwrap().push(CopyFailure {
+                rel_path: rel.to_path_buf(),
+                message,
+                storage_full,
+            }),
+            None if storage_full => failed.lock().unwrap().push(CopyFailure {
+                rel_path: std::path::PathBuf::new(),
+                message,
+                storage_full,
+            }),
+            None => {
+                unscoped.lock().unwrap().get_or_insert(message);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -438,5 +547,128 @@ mod tests {
             std::fs::read_link(dest.path().join("link.txt")).unwrap(),
             PathBuf::from("target.txt")
         );
+    }
+
+    #[test]
+    fn copy_failure_is_reported_with_its_path_and_the_rest_still_copies() {
+        let src = TempDir::new().unwrap();
+        let dest = TempDir::new().unwrap();
+        std::fs::write(src.path().join("blocked.txt"), "x").unwrap();
+        std::fs::write(src.path().join("fine.txt"), "y").unwrap();
+        // A directory where the file must go makes that one copy fail.
+        std::fs::create_dir(dest.path().join("blocked.txt")).unwrap();
+
+        let config = ParallelCopyConfig {
+            num_workers: 2,
+            channel_buffer: 64,
+            respect_gitignore: false,
+            ..Default::default()
+        };
+        let result =
+            copy_parallel(src.path(), dest.path(), config, CancellationToken::new()).unwrap();
+
+        assert_eq!(result.stats.failed.len(), 1, "{:?}", result.stats.failed);
+        assert_eq!(result.stats.failed[0].rel_path, PathBuf::from("blocked.txt"));
+        assert!(!result.stats.failed[0].storage_full);
+        assert_eq!(result.stats.issues.len(), 1);
+        assert!(result.stats.issues[0].starts_with("copy blocked.txt:"));
+        assert!(!result.copied_paths.contains(&PathBuf::from("blocked.txt")));
+        assert!(dest.path().join("fine.txt").exists());
+    }
+
+    #[test]
+    fn walker_error_is_an_issue_and_an_unvisited_failure() {
+        let issues = std::sync::Mutex::new(Vec::new());
+        let failed = std::sync::Mutex::new(Vec::new());
+        let unscoped = std::sync::Mutex::new(None);
+        let err = ignore::Error::WithPath {
+            path: PathBuf::from("/src/locked"),
+            err: Box::new(ignore::Error::Io(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied,
+            ))),
+        };
+        record_walk_error(Path::new("/src"), &err, &issues, &failed, &unscoped);
+
+        let issues = issues.into_inner().unwrap();
+        let failed = failed.into_inner().unwrap();
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].starts_with("walk locked:"), "{issues:?}");
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].rel_path, PathBuf::from("locked"));
+    }
+
+    #[test]
+    fn ignore_file_syntax_error_warns_but_is_not_an_unvisited_failure() {
+        let issues = std::sync::Mutex::new(Vec::new());
+        let failed = std::sync::Mutex::new(Vec::new());
+        let unscoped = std::sync::Mutex::new(None);
+        let err = ignore::Error::WithPath {
+            path: PathBuf::from("/src/.gitignore"),
+            err: Box::new(ignore::Error::Partial(vec![ignore::Error::Glob {
+                glob: Some("[".into()),
+                err: "unclosed".into(),
+            }])),
+        };
+        record_walk_error(Path::new("/src"), &err, &issues, &failed, &unscoped);
+
+        assert_eq!(issues.into_inner().unwrap().len(), 1);
+        assert!(failed.into_inner().unwrap().is_empty());
+    }
+
+    fn record(err: &ignore::Error) -> (Vec<CopyFailure>, Option<String>) {
+        let issues = std::sync::Mutex::new(Vec::new());
+        let failed = std::sync::Mutex::new(Vec::new());
+        let unscoped = std::sync::Mutex::new(None);
+        record_walk_error(Path::new("/src"), err, &issues, &failed, &unscoped);
+        assert_eq!(issues.into_inner().unwrap().len(), 1);
+        (failed.into_inner().unwrap(), unscoped.into_inner().unwrap())
+    }
+
+    #[test]
+    fn pathless_walker_io_error_is_unscoped_not_dropped() {
+        // What `ignore` reports for a read_dir failure part-way through a directory.
+        let err = ignore::Error::WithDepth {
+            depth: 2,
+            err: Box::new(ignore::Error::Io(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied,
+            ))),
+        };
+        let (failed, unscoped) = record(&err);
+        assert!(failed.is_empty());
+        assert!(unscoped.expect("unscoped").starts_with("walk:"));
+    }
+
+    #[test]
+    fn root_walker_error_is_unscoped() {
+        let err = ignore::Error::WithPath {
+            path: PathBuf::from("/src"),
+            err: Box::new(ignore::Error::Io(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied,
+            ))),
+        };
+        let (failed, unscoped) = record(&err);
+        assert!(failed.is_empty());
+        assert!(unscoped.is_some());
+    }
+
+    #[test]
+    fn walker_storage_full_is_a_storage_full_failure_with_or_without_a_path() {
+        let full = || ignore::Error::Io(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let (failed, unscoped) = record(&ignore::Error::WithPath {
+            path: PathBuf::from("/src/dir"),
+            err: Box::new(full()),
+        });
+        assert!(unscoped.is_none());
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].storage_full);
+        assert_eq!(failed[0].rel_path, PathBuf::from("dir"));
+
+        let (failed, unscoped) = record(&ignore::Error::WithDepth {
+            depth: 1,
+            err: Box::new(full()),
+        });
+        assert!(unscoped.is_none());
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].storage_full);
     }
 }

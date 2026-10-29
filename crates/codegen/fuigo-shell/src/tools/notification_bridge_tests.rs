@@ -1195,7 +1195,7 @@ async fn task_completed_persisted_line_is_stamped() {
 async fn current_mode_update_persisted_line_is_stamped() {
     let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
 
-    emit_current_mode_update(&config, fuigo_tools::types::SessionMode::Plan).await;
+    emit_current_mode_update(&config, fuigo_tools::types::SessionMode::Plan.as_id()).await;
 
     match persistence_rx.try_recv().expect("must persist") {
         PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(notif)) => {
@@ -2024,4 +2024,43 @@ async fn scheduled_task_inject_notification_carries_a_redeemable_fire_ticket() {
     ))];
     assert!(crate::session::cron_fire_tickets::redeem(&session, &id, &framed));
     assert!(!crate::session::cron_fire_tickets::redeem(&session, &id, &framed), "single use");
+}
+
+/// u36: plan entered by the tool while browser mode is on keeps the bit, so the approved exit reports `browser_use`
+/// (read from the tracker in the transition's lock scope); with the bit off the exit still reports `default`.
+#[tokio::test]
+async fn u36_plan_tool_round_trip_returns_to_browser_mode() {
+    for (browser, want_exit) in [(true, "browser_use"), (false, "default")] {
+        let (config, mut gateway_rx, _persistence_rx, _cmd_rx) = make_test_config_full();
+        config.plan_mode.lock().set_browser_use(browser);
+        let mut offsets = HashMap::new();
+        handle_notification(
+            &config,
+            ToolNotification::PlanModeEntered(fuigo_tools::notification::types::PlanModeEntered {
+                tool_call_id: "tc-enter-u36".into(),
+            }),
+            &mut offsets,
+        )
+        .await;
+        handle_notification(
+            &config,
+            ToolNotification::PlanModeExited(fuigo_tools::notification::types::PlanModeExited {
+                tool_call_id: "tc-exit-u36".into(),
+                plan_content: Some("- step".into()),
+                plan_file_path: "/tmp/test-session/plan.md".into(),
+            }),
+            &mut offsets,
+        )
+        .await;
+        let mut gateway_modes = Vec::new();
+        while let Ok(msg) = gateway_rx.try_recv() {
+            if let fuigo_acp_lib::AcpClientMessage::SessionNotification(args) = msg
+                && let Some(id) = extract_current_mode_id(&args.request)
+            {
+                gateway_modes.push(id.to_string());
+            }
+        }
+        assert_eq!(gateway_modes, ["plan", want_exit], "browser = {browser}");
+        assert_eq!(config.plan_mode.lock().browser_use(), browser, "plan tools never change the bit");
+    }
 }

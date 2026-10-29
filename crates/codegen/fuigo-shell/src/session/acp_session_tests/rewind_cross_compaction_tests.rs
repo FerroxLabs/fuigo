@@ -52,6 +52,11 @@ fn checkpoint_update(id: &str, prompt_index_at_compaction: usize) -> SessionUpda
 /// Writes the shared cross-compaction fixture into `session_dir`: a checkpoint file with compacted `[SYS, SUMMARY]` at prompt 5.
 /// It also writes an `updates.jsonl` with prompts P0..P6 and the checkpoint record between P4 and P5.
 fn write_compacted_session_fixture(session_dir: &std::path::Path, ckpt_id: &str) {
+    write_compacted_session_fixture_with_head(session_dir, ckpt_id, "SYS");
+}
+
+/// [`write_compacted_session_fixture`] with `head` as the checkpoint's System item.
+pub(crate) fn write_compacted_session_fixture_with_head(session_dir: &std::path::Path, ckpt_id: &str, head: &str) {
     std::fs::create_dir_all(session_dir.join("compaction_checkpoints")).unwrap();
 
     let ckpt_file = CompactionCheckpointFile {
@@ -59,7 +64,7 @@ fn write_compacted_session_fixture(session_dir: &std::path::Path, ckpt_id: &str)
         checkpoint_id: ckpt_id.to_string(),
         prompt_index_at_compaction: 5,
         compacted_history: vec![
-            ConversationItem::system("SYS"),
+            ConversationItem::system(head),
             ConversationItem::user("SUMMARY"),
         ],
         schema_version: 1,

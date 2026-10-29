@@ -145,6 +145,9 @@ pub struct ModeView {
     pub peer_influence: PeerInfluence,
     /// Where a relative model path resolves when a request carries no path context (the session cwd at spawn).
     pub fallback_cwd: Option<std::path::PathBuf>,
+    /// 1.0.36 item a: the session's own launch policy file (pinned), carried so subagents and workflows that build their
+    /// own actor get the same snapshot. `None` for an ungoverned session.
+    pub launch_policy: Option<Arc<crate::permission::launch_policy::LaunchPolicy>>,
 }
 
 const PAIR_YOLO: u8 = 0b01;
@@ -178,6 +181,7 @@ impl Default for ModeView {
             mode_pair: Arc::new(AtomicU8::new(0)),
             peer_influence: PeerInfluence::new(),
             fallback_cwd: None,
+            launch_policy: None,
         }
     }
 }
@@ -768,6 +772,58 @@ impl TrustPolicies {
     fn prompt_policy_for(&self, untrusted: bool) -> PromptPolicy {
         if untrusted { self.base_prompt } else { self.project_prompt }
     }
+
+    /// 1.0.36 item a: whether a launch policy contributed rules (to either policy).
+    fn has_launch_policy(&self) -> bool {
+        [&self.project, &self.base]
+            .into_iter()
+            .any(|policy| policy.as_ref().is_some_and(CompiledPolicy::has_launch_policy))
+    }
+}
+
+/// 1.0.36 item a (R3): a request's answer held back so the launch-ask clamp can replace it before it is sent: the
+/// resolution, the real reply channel and the folder-trust flag [`FinalShellSend`] checks.
+type HeldAnswer = (PermissionResolution, tokio::sync::oneshot::Sender<PermissionResolution>, bool);
+
+/// What the launch-ask clamp needs to ask the client itself (captured when the preflight finds a launch ask).
+struct LaunchClamp {
+    access: AccessKind,
+    prompt_update: acp::ToolCallUpdate,
+    protected_edit: Option<crate::permission::ProtectedEditReason>,
+    hook_ask: Option<crate::permission::types::HookAsk>,
+}
+
+/// An answer to a launch-policy ask, an agent message or a side-effecting tool applies to this one call: every
+/// "always" answer becomes its once form, so nothing is remembered.
+fn once_only(outcome: PromptOutcome) -> PromptOutcome {
+    match outcome {
+        PromptOutcome::AllowOnce
+        | PromptOutcome::AllowAlways
+        | PromptOutcome::AllowEditsForSession
+        | PromptOutcome::AllowAlwaysBashCommand(_)
+        | PromptOutcome::AllowAlwaysBashGlob(_)
+        | PromptOutcome::AllowAlwaysDomain(_)
+        | PromptOutcome::AllowAlwaysMcpTool(_)
+        | PromptOutcome::AllowAlwaysMcpServer(_) => PromptOutcome::AllowOnce,
+        PromptOutcome::RejectOnce
+        | PromptOutcome::RejectAlwaysBashCommand(_)
+        | PromptOutcome::RejectAlwaysMcpTool(_)
+        | PromptOutcome::RejectAlwaysDomain(_) => PromptOutcome::RejectOnce,
+        other => other,
+    }
+}
+
+/// Whether the clamp replaces this answer: an Allow the client did not give, or the dontAsk refusal. A deny or a guard
+/// refusal stands.
+fn launch_clamp_applies(resolution: &PermissionResolution) -> bool {
+    let event = resolution.event.as_ref();
+    match &resolution.decision {
+        Decision::Allow => !event.is_some_and(|e| e.user_prompted),
+        Decision::PolicyDeny(_) => {
+            event.and_then(|e| e.decision_reason.as_deref()) == Some(reasons::PROMPT_DENY)
+        }
+        _ => false,
+    }
 }
 
 /// u35 t1 (design d2 §3.3 step 7): the actor's answer to a request, checked before it is sent: a shell command
@@ -776,6 +832,8 @@ impl TrustPolicies {
 struct FinalShellSend {
     inner: tokio::sync::oneshot::Sender<PermissionResolution>,
     untrusted: bool,
+    /// 1.0.36 item a: under a launch policy the answer is held here for the launch-ask clamp instead of being sent.
+    held: Option<std::rc::Rc<std::cell::RefCell<Option<HeldAnswer>>>>,
 }
 
 impl FinalShellSend {
@@ -790,6 +848,10 @@ impl FinalShellSend {
     // The same signature as the oneshot sender it wraps.
     #[allow(clippy::result_large_err)]
     fn send(self, mut resolution: PermissionResolution) -> Result<(), PermissionResolution> {
+        if let Some(held) = self.held {
+            *held.borrow_mut() = Some((resolution, self.inner, self.untrusted));
+            return Ok(());
+        }
         let without_grant = resolution.event.as_ref().and_then(|event| event.approved_without_grant);
         if let Some(refusal) = final_shell_check(self.untrusted, &resolution.decision, without_grant) {
             resolution.decision = refusal;
@@ -1805,7 +1867,7 @@ pub(crate) fn hub_default_prompt(
     match access {
         // u35 g8 (Astra r7): the program Fuigo's grep tool runs is chosen by the environment
         AccessKind::Grep { .. } if crate::permission::exec_risk::grep_tool_env_steers(cwd).is_some() => plain(true),
-        AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_) => plain(false),
+        AccessKind::Read(_) | AccessKind::Session | AccessKind::Grep { .. } | AccessKind::WebSearch(_) => plain(false),
         AccessKind::Tool(name) if is_auto_allowed_tool(name) => plain(false),
         AccessKind::Bash(cmd) => {
             let mut evaluation = evaluate_bash(cmd, &PermissionState::default(), true);
@@ -2182,6 +2244,30 @@ impl PermissionHandle {
 
     /// Grep Read-deny globs; empty for `AllowAll`.
     /// Subagents inherit these via the shared handle.
+    /// 1.0.36 item a: attach the session's launch policy file (the one its config was resolved with).
+    pub fn with_launch_policy(
+        mut self,
+        policy: Option<Arc<crate::permission::launch_policy::LaunchPolicy>>,
+    ) -> Self {
+        if let PermissionHandle::Actor { mode_view, .. } = &mut self {
+            mode_view.launch_policy = policy;
+        }
+        self
+    }
+
+    /// 1.0.36 item a: the session's own launch policy file, for a subagent or workflow that builds its own actor.
+    pub fn launch_policy(&self) -> Option<Arc<crate::permission::launch_policy::LaunchPolicy>> {
+        match self {
+            PermissionHandle::AllowAll(_) => None,
+            PermissionHandle::Actor { mode_view, .. } => mode_view.launch_policy.clone(),
+        }
+    }
+
+    /// 1.0.36 item a: whether a launch policy governs this session (the process's or its own).
+    pub fn has_launch_policy(&self) -> bool {
+        crate::permission::launch_policy::has_process_policy() || self.launch_policy().is_some()
+    }
+
     pub fn deny_read_globs(&self) -> Vec<String> {
         match self {
             PermissionHandle::AllowAll(_) => Vec::new(),
@@ -2707,6 +2793,7 @@ fn session_grant_pre_decision(
         ),
         // A side-effecting tool has no session grant: an edit grant or an "always" answer never pre-approves it (P165).
         AccessKind::Read(_)
+        | AccessKind::Session
         | AccessKind::Grep { .. }
         | AccessKind::WebSearch(_)
         | AccessKind::Edit(_)
@@ -2932,6 +3019,7 @@ fn spawn_permission_manager_with_pin(
         )),
         peer_influence: PeerInfluence::new(),
         fallback_cwd: Some(cwd.as_path().to_path_buf()),
+        launch_policy: None,
     };
     let edit_grant_actor = mode_view.session_edit_grant.clone();
     let mode_pair_actor = mode_view.mode_pair.clone();
@@ -3055,8 +3143,29 @@ fn spawn_permission_manager_with_pin(
                         "Permission state reset to defaults (including session edit allow)"
                     );
                 }
-                PermissionCommand::Request {
-                    request:
+                PermissionCommand::Request { request, respond_to } => {
+                    // 1.0.36 item a (R3): under a launch policy the body's answer is held, and its events buffered, so
+                    // the launch-ask clamp below can replace an answer the client did not give. Without one, nothing
+                    // is held and the body runs exactly as before.
+                    let launch_hold: Option<std::rc::Rc<std::cell::RefCell<Option<HeldAnswer>>>> =
+                        policies.has_launch_policy().then(Default::default);
+                    let mut launch_events: Option<mpsc::UnboundedReceiver<PermissionEvent>> = None;
+                    let event_tx_actor = &event_tx;
+                    let launch_event_tx;
+                    let event_tx: &mpsc::UnboundedSender<PermissionEvent> = if launch_hold.is_some() {
+                        let (tx, rx) = mpsc::unbounded_channel();
+                        launch_events = Some(rx);
+                        launch_event_tx = tx;
+                        prompter.set_launch_ask(false);
+                        &launch_event_tx
+                    } else {
+                        &event_tx
+                    };
+                    let mut launch_clamp: Option<LaunchClamp> = None;
+                    // The request body below runs once; its early exits (`continue`) end it, and the clamp runs after.
+                    let mut pending = Some((request, respond_to));
+                    loop {
+                    let Some((
                         PermissionRequest {
                             access,
                             tool_call_update,
@@ -3070,10 +3179,13 @@ fn spawn_permission_manager_with_pin(
                             peer_note,
                             exec_cwd,
                         },
-                    respond_to,
-                } => {
+                        respond_to,
+                    )) = pending.take()
+                    else {
+                        break;
+                    };
                     let request_received = std::time::Instant::now();
-                    let mut respond_to = FinalShellSend { inner: respond_to, untrusted: false };
+                    let mut respond_to = FinalShellSend { inner: respond_to, untrusted: false, held: launch_hold.clone() };
                     // u35 t1 (design d2 §3.4): folder trust changed since the policy was built (a grant, a decline,
                     // `/untrust`, another process's answer): rebuild it.
                     if let Some(inputs) = &session_inputs
@@ -3127,7 +3239,7 @@ fn spawn_permission_manager_with_pin(
                     let tool_id = tool_call_update.tool_call_id.to_string();
                     let tool_name = crate::permission::prompter::tool_name_for_access(&access);
                     let (access_kind_str, access_detail) = match &access {
-                        AccessKind::Read(_) => ("read".to_string(), None),
+                        AccessKind::Read(_) | AccessKind::Session => ("read".to_string(), None),
                         AccessKind::Grep { path, glob: _ } => ("grep".to_string(), path.clone()),
                         AccessKind::Edit(path) => ("edit".to_string(), Some(path.clone())),
                         AccessKind::Bash(cmd) => ("bash".to_string(), Some(cmd.clone())),
@@ -3333,12 +3445,15 @@ fn spawn_permission_manager_with_pin(
                                 .map(|path| EditTargetSpellings::new(request_cwd, path))
                                 .collect()
                         });
-                    // P184: a multi-file edit is protected when any target is (the first one names the reason).
+                    // P184: a multi-file edit is protected when any target is (the first one names the reason, except that
+                    // a pinned launch policy file outranks every other reason: 1.0.36 item a).
                     // P173: every other access goes through the floor the hub path shares (`protected_target`).
                     let protected_edit = match (&patch_spellings, path_context.as_ref()) {
-                        (Some(targets), _) => targets
-                            .iter()
-                            .find_map(|target| edit_target_protection(Path::new(&target.written))),
+                        (Some(targets), _) => crate::permission::shell_access::strongest_protection(
+                            targets
+                                .iter()
+                                .map(|target| edit_target_protection(Path::new(&target.written))),
+                        ),
                         (None, Some(context)) => protected_target(
                             &access,
                             bash_evaluation.as_ref(),
@@ -3385,6 +3500,22 @@ fn spawn_permission_manager_with_pin(
                         ),
                     };
                     let policy_decision = preflight.policy_decision();
+                    // 1.0.36 item a (R3): a launch-policy ask; the clamp after this block makes sure the client answers it.
+                    if preflight.launch_ask_match() {
+                        prompter.set_launch_ask(true);
+                        launch_clamp = Some(LaunchClamp {
+                            access: access.clone(),
+                            prompt_update: match &access {
+                                AccessKind::Bash(_) => with_env_steering_note(
+                                    &tool_call_update,
+                                    bash_evaluation.as_ref().and_then(|e| e.env_steering),
+                                ),
+                                _ => tool_call_update.clone(),
+                            },
+                            protected_edit,
+                            hook_ask: hook_ask.clone(),
+                        });
+                    }
                     if let (AccessKind::Bash(cmd), Some(evaluation)) = (&access, bash_evaluation.as_ref()) {
                         no_grant.set(NoGrantFacts::of(
                             cmd,
@@ -3409,6 +3540,20 @@ fn spawn_permission_manager_with_pin(
                             "permission policy: deny rule matched (enforced before YOLO)"
                         );
                         let decision = Decision::PolicyDeny(reason);
+                        let event =
+                            emit_event(&decision, false, false, None, Some(reasons::POLICY_DENY));
+                        let _ = respond_to.send(PermissionResolution {
+                            decision,
+                            event: Some(event),
+                        });
+                        continue;
+                    }
+
+                    // 1.0.36 item a: a pinned launch policy file is never the agent's to edit, in any mode.
+                    if matches!(protected_edit, Some(crate::permission::ProtectedEditReason::LaunchPolicy)) {
+                        let decision = Decision::PolicyDeny(
+                            "the launch permission policy file cannot be edited".to_owned(),
+                        );
                         let event =
                             emit_event(&decision, false, false, None, Some(reasons::POLICY_DENY));
                         let _ = respond_to.send(PermissionResolution {
@@ -3850,10 +3995,10 @@ fn spawn_permission_manager_with_pin(
                     }
 
                     let mut pre_decision: Option<(Decision, &'static str)> = match &access {
-                        AccessKind::Read(_) | AccessKind::Grep { .. } if policy_forced_prompt => {
+                        AccessKind::Read(_) | AccessKind::Session | AccessKind::Grep { .. } if policy_forced_prompt => {
                             None
                         }
-                        AccessKind::Read(_) => Some((Decision::Allow, reasons::SAFE_COMMAND)),
+                        AccessKind::Read(_) | AccessKind::Session => Some((Decision::Allow, reasons::SAFE_COMMAND)),
                         // An ask rule binds over the built-in safe-listing, as it does for reads
                         AccessKind::WebSearch(_) if policy_forced_prompt => None,
                         AccessKind::WebSearch(_) => Some((Decision::Allow, reasons::SAFE_COMMAND)),
@@ -4094,6 +4239,12 @@ fn spawn_permission_manager_with_pin(
                                 outcome = prompter.request(&access, &prompt_update, protected_edit, hook_ask.as_ref()) => outcome,
                                 _ = respond_to.closed() => PromptOutcome::Cancelled,
                             };
+                            // 1.0.36 item a: answering a launch-policy ask remembers nothing.
+                            let prompt_outcome = if launch_clamp.is_some() {
+                                once_only(prompt_outcome)
+                            } else {
+                                prompt_outcome
+                            };
 
                             let mut effective_kind = prompt_outcome.kind();
                             let decision = match prompt_outcome {
@@ -4162,29 +4313,13 @@ fn spawn_permission_manager_with_pin(
                             };
                             // One call only: an "always" answer for an agent message or a side-effecting tool is an allow-once
                             // (no grant exists for them), and must never flip the session edit grant.
+                            // 1.0.36 item a: so is an answer to a launch-policy ask.
                             let prompt_outcome = if matches!(
                                 &access,
                                 AccessKind::AgentMessage { .. } | AccessKind::Tool(_)
-                            ) {
-                                match prompt_outcome {
-                                    PromptOutcome::AllowOnce
-                                    | PromptOutcome::AllowAlways
-                                    | PromptOutcome::AllowEditsForSession
-                                    | PromptOutcome::AllowAlwaysBashCommand(_)
-                                    | PromptOutcome::AllowAlwaysBashGlob(_)
-                                    | PromptOutcome::AllowAlwaysDomain(_)
-                                    | PromptOutcome::AllowAlwaysMcpTool(_)
-                                    | PromptOutcome::AllowAlwaysMcpServer(_) => {
-                                        PromptOutcome::AllowOnce
-                                    }
-                                    PromptOutcome::RejectOnce
-                                    | PromptOutcome::RejectAlwaysBashCommand(_)
-                                    | PromptOutcome::RejectAlwaysMcpTool(_)
-                                    | PromptOutcome::RejectAlwaysDomain(_) => {
-                                        PromptOutcome::RejectOnce
-                                    }
-                                    other => other,
-                                }
+                            ) || launch_clamp.is_some()
+                            {
+                                once_only(prompt_outcome)
                             } else {
                                 prompt_outcome
                             };
@@ -4381,6 +4516,85 @@ fn spawn_permission_manager_with_pin(
                         decision,
                         event: Some(event),
                     });
+                    }
+                    // 1.0.36 item a (R3): the one terminal clamp. A launch-policy ask the client did not answer (an
+                    // Allow from any fast path, or the dontAsk refusal) is asked of the client now; its answer is
+                    // the decision and remembers nothing. A deny or guard refusal stands.
+                    if let Some(held) = launch_hold {
+                        let mut events: Vec<PermissionEvent> = Vec::new();
+                        if let Some(rx) = launch_events.as_mut() {
+                            while let Ok(event) = rx.try_recv() {
+                                events.push(event);
+                            }
+                        }
+                        let held = held.borrow_mut().take();
+                        if let Some((mut resolution, mut inner, untrusted)) = held {
+                            if let Some(clamp) = launch_clamp.take()
+                                && launch_clamp_applies(&resolution)
+                            {
+                                {
+                                    let slot = user_prompt_notify_actor.lock();
+                                    if let Some(tx) = slot.as_ref() {
+                                        let _ = tx.send(());
+                                    }
+                                }
+                                let outcome = tokio::select! {
+                                    outcome = prompter.request(&clamp.access, &clamp.prompt_update, clamp.protected_edit, clamp.hook_ask.as_ref()) => outcome,
+                                    _ = inner.closed() => PromptOutcome::Cancelled,
+                                };
+                                let outcome = once_only(outcome);
+                                let kind = outcome.kind();
+                                let decision = match outcome {
+                                    PromptOutcome::AllowOnce => Decision::Allow,
+                                    PromptOutcome::Cancelled => Decision::Cancelled,
+                                    PromptOutcome::FollowupMessage(msg) => Decision::FollowupMessage(msg),
+                                    PromptOutcome::Error(e) => Decision::Reject(format!(
+                                        "Failed to request permission from user: {e}"
+                                    )),
+                                    _ => Decision::Reject("User rejected the execution".to_owned()),
+                                };
+                                tracing::info!(
+                                    tool = %crate::permission::prompter::tool_name_for_access(&clamp.access),
+                                    "launch permission policy ask: answered by the client"
+                                );
+                                let event = resolution.event.take().map(|mut event| {
+                                    let (decision_str, reject_reason) = match &decision {
+                                        Decision::Allow => ("allow", None),
+                                        Decision::Ask => ("ask", None),
+                                        Decision::Reject(reason) | Decision::PolicyDeny(reason) => {
+                                            ("reject", Some(reason.clone()))
+                                        }
+                                        Decision::FollowupMessage(_) => ("followup", None),
+                                        Decision::Cancelled => ("cancelled", None),
+                                    };
+                                    event.auto_approved = false;
+                                    event.user_prompted = true;
+                                    event.decision = decision_str.to_owned();
+                                    event.reject_reason = reject_reason;
+                                    event.prompt_outcome = Some(kind.wire_str().to_owned());
+                                    event.decision_reason = Some(reasons::POLICY_ASK.to_owned());
+                                    event.approved_without_grant =
+                                        Some(!matches!(decision, Decision::Allow));
+                                    event
+                                });
+                                // The held answer's own event is replaced by the client's.
+                                if let Some(new_event) = &event
+                                    && let Some(last) = events.last_mut()
+                                {
+                                    *last = new_event.clone();
+                                }
+                                resolution = PermissionResolution { decision, event };
+                            }
+                            for event in events {
+                                let _ = event_tx_actor.send(event);
+                            }
+                            let _ = FinalShellSend { inner, untrusted, held: None }.send(resolution);
+                        } else {
+                            for event in events {
+                                let _ = event_tx_actor.send(event);
+                            }
+                        }
+                    }
                 }
 
                 PermissionCommand::Shutdown => break,
@@ -4415,6 +4629,9 @@ mod tests {
 
     #[path = "t1_trust_tests.rs"]
     mod t1_trust_tests;
+
+    #[path = "launch_policy_tests.rs"]
+    mod launch_policy_tests;
 
     async fn decide(
         handle: &PermissionHandle,
@@ -5864,6 +6081,43 @@ mod tests {
                 let (mgr, _e) = test_manager_with_config(&cwd, config(PromptPolicy::Allow, rules), false);
                 let d = decide(&mgr, fetch(), tool_call()).await;
                 assert!(matches!(d, Decision::Reject(_) | Decision::PolicyDeny(_)), "a deny rule binds under allow: {d:?}");
+            })
+            .await;
+    }
+
+    /// u36 item c: with `ask = ["Read"]` in default mode, pure bookkeeping (`todo_write`) still auto-allows, while the tools that open
+    /// a path or return paths or file content (`skill`, `read_file`) reach the user prompt. The recording client rejects, so a
+    /// prompt shows as `Reject` and a silent auto-allow as `Allow`.
+    #[tokio::test]
+    async fn ask_read_rule_prompts_for_file_reads_and_skill_not_for_todo_write() {
+        use crate::permission::rules::parse_permission_rule;
+        use crate::permission::types::{PermissionConfig, RuleAction};
+        use fuigo_tools::types::ToolInput;
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let input = |wire: serde_json::Value| -> AccessKind {
+                    let input: ToolInput = serde_json::from_value(wire).expect("fixture parses");
+                    AccessKind::from(&input)
+                };
+                let todo = input(serde_json::json!({"variant": "TodoWrite", "todos": []}));
+                let skill = input(serde_json::json!({"variant": "Skill", "skill": "create-workflow"}));
+                let read = input(serde_json::json!({"variant": "ReadFile", "target_file": "src/a.rs"}));
+                let config = PermissionConfig::new(vec![parse_permission_rule("Read", RuleAction::Ask).unwrap()]);
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, _events) = manager_with_recording_client(&cwd, Some(config), client, ClientType::Generic);
+                let d = decide(&mgr, todo, tool_call()).await;
+                assert!(matches!(d, Decision::Allow), "todo_write must auto-allow under ask = [Read]: {d:?}");
+                assert!(prompts.borrow().is_empty(), "todo_write must not prompt");
+                for (label, access) in [("skill", skill), ("read_file", read)] {
+                    let before = prompts.borrow().len();
+                    let d = decide(&mgr, access, tool_call()).await;
+                    assert!(matches!(d, Decision::Reject(_)), "{label} must reach the prompt (client rejects): {d:?}");
+                    assert_eq!(prompts.borrow().len(), before + 1, "{label} must prompt exactly once");
+                }
             })
             .await;
     }

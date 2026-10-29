@@ -36,6 +36,27 @@ impl LoginTarget {
     }
 }
 
+/// `fuigo policy`.
+#[derive(Debug, Clone, clap::Args)]
+pub struct PolicyArgs {
+    #[command(subcommand)]
+    pub command: PolicyCommand,
+}
+
+/// `fuigo policy` subcommands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum PolicyCommand {
+    /// Check a launch policy file the way `FUIGO_POLICY_PATH` loads it: exit 0 with its rule counts and sha256, else 78
+    /// with the error as one JSON line on stderr
+    Check {
+        /// Absolute path of the policy file.
+        file: String,
+        /// Print the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// Top-level commands for the pager binary.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
@@ -190,6 +211,8 @@ See ~/.fuigo/README.md for more information.
     /// Show what the fuigo home (~/.fuigo) uses on disk
     #[command(name = "du", visible_alias = "disk-usage")]
     DiskUsage(crate::disk_usage_cmd::DiskUsageArgs),
+    /// Launch permission policies (`FUIGO_POLICY_PATH`)
+    Policy(PolicyArgs),
     /// Expose this workspace to the Computer Hub (via the leader).
     ///
     /// Disabled by default and enabled server-side per account; set `FUIGO_WORKSPACE_COMMAND=1` to enable it locally for testing.

@@ -1901,6 +1901,9 @@ mod plan_mode_midturn_tests;
 #[path = "acp_session_tests/u35_session_mode_tests.rs"]
 mod u35_session_mode_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/u36_mode_lookup_tests.rs"]
+mod u36_mode_lookup_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/pre_tool_use_decision_tests.rs"]
 mod pre_tool_use_decision_tests;
 /// Tests for [`conversation_has_project_instructions`], the idempotence helper that gates the spawn-time AGENTS.md / CLAUDE.md injector.

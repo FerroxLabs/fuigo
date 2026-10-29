@@ -182,6 +182,8 @@ pub struct WorkspaceSession {
     pub(crate) viewer_ctx: Option<WorkspaceViewerContext>,
     /// Auto-approve (YOLO) state. Seeded from `session.bind` metadata, refreshed by each before-turn hook.
     pub(crate) yolo_mode: std::sync::atomic::AtomicBool,
+    /// 1.0.36 item a: a launch policy governs this session, so hub routing refuses its tool calls. Set, never cleared.
+    pub(crate) launch_policy: std::sync::atomic::AtomicBool,
     /// Peer-influenced (S6.1): the hub-routed path denies protected edits while this holds (S6.3).
     pub(crate) peer_influence: parking_lot::RwLock<crate::permission::PeerInfluence>,
     /// Session-lifetime terminal backend (background-task registry and persistent shell).
@@ -346,6 +348,7 @@ impl WorkspaceSession {
             mcp_native_tool_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
             viewer_ctx,
             yolo_mode: std::sync::atomic::AtomicBool::new(false),
+            launch_policy: std::sync::atomic::AtomicBool::new(false),
             peer_influence: parking_lot::RwLock::new(crate::permission::PeerInfluence::new()),
             system_notifications,
             system_notify_handle,
@@ -486,6 +489,14 @@ impl WorkspaceSession {
         if previous.is_set() {
             shared.set(true);
         }
+    }
+    /// 1.0.36 item a: mark this session governed by a launch policy (never cleared).
+    pub fn set_launch_policy_governed(&self) {
+        self.launch_policy.store(true, std::sync::atomic::Ordering::Release);
+    }
+    /// Whether a launch policy governs this session (its own flag; the process policy is checked by `governs`).
+    pub fn launch_policy_governed(&self) -> bool {
+        self.launch_policy.load(std::sync::atomic::Ordering::Acquire)
     }
     pub fn set_yolo_mode(&self, enabled: bool) {
         self.yolo_mode

@@ -79,7 +79,7 @@ async fn handle_session_mode_ignores_an_unsupported_id() {
         .await;
 }
 
-/// Every accepted switch is reported; browser_use is reported as `default`, matching what attach advertises.
+/// Every accepted switch is reported, as the id attach advertises (u36: `browser_use` is reported truthfully).
 #[tokio::test(flavor = "current_thread")]
 async fn every_accepted_switch_emits_the_advertised_mode() {
     tokio::task::LocalSet::new()
@@ -89,7 +89,7 @@ async fn every_accepted_switch_emits_the_advertised_mode() {
             actor.handle_session_mode(acp::SessionModeId::new("ask")).await;
             assert_eq!(mode_updates(&mut events), ["ask"]);
             actor.handle_session_mode(acp::SessionModeId::new("browser_use")).await;
-            assert_eq!(mode_updates(&mut events), ["default"]);
+            assert_eq!(mode_updates(&mut events), ["browser_use"]);
             assert_eq!(*actor.current_prompt_mode.lock(), PromptMode::Agent);
             actor.handle_session_mode(acp::SessionModeId::new("default")).await;
             assert_eq!(mode_updates(&mut events), ["default"]);

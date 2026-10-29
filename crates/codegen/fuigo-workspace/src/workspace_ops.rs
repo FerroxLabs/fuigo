@@ -1529,6 +1529,21 @@ impl WorkspaceOps {
         viewer_ctx: Option<fuigo_tool_runtime::WorkspaceViewerContext>,
         peer_influence: crate::permission::PeerInfluence,
     ) -> WorkspaceResult<()> {
+        self.bind_local_session_governed(session_id, cwd, hunk_tracker, toolset, viewer_ctx, peer_influence, false)
+    }
+    /// [`Self::bind_local_session`] for a session a launch policy may govern (1.0.36 item a): when `launch_policy`, the
+    /// hub session is marked governed before the toolset is bound, so no hub call reaches it first.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind_local_session_governed(
+        &self,
+        session_id: &str,
+        cwd: std::path::PathBuf,
+        hunk_tracker: fuigo_hunk_tracker::HunkTrackerHandle,
+        toolset: Arc<fuigo_tools::registry::types::FinalizedToolset>,
+        viewer_ctx: Option<fuigo_tool_runtime::WorkspaceViewerContext>,
+        peer_influence: crate::permission::PeerInfluence,
+        launch_policy: bool,
+    ) -> WorkspaceResult<()> {
         let Self::Local { handle } = self else {
             proxy_note_peer_influence(session_id, &peer_influence);
             return Ok(());
@@ -1550,6 +1565,9 @@ impl WorkspaceOps {
         // S6.1: the hub session adopts the session's ONE peer-influenced flag (created before anything that needs it), so the
         // hub-routed guard (`enforce_hub_policy`) and the permission handle read the same atomic whatever the creation order.
         session.bind_peer_influence(peer_influence);
+        if launch_policy {
+            session.set_launch_policy_governed();
+        }
         session.replace(session.effective_tool_config(), toolset);
         Ok(())
     }

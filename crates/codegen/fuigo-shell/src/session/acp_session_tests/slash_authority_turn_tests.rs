@@ -1836,3 +1836,6 @@ fn human_file_mention_still_expands_and_verified_fire_slash_stays_inert() {
 
 #[path = "peer_auto_refuse_tests.rs"]
 mod peer_auto_refuse_tests;
+/// u36 item b: browser mode as an in-memory overlay; legacy head repair.
+#[path = "u36_browser_mode_tests.rs"]
+mod u36_browser_mode_tests;

@@ -180,6 +180,7 @@ pub(crate) mod hydrate {
             last_turn_summary: None,
             last_turn_summary_prompt_id: None,
             last_recap: None,
+            permission_policy: None,
         };
         if let Some(identity) = crate::session::worktree::worktree_identity_for_cwd(&info.cwd) {
             summary.stamp_worktree_identity(&identity);

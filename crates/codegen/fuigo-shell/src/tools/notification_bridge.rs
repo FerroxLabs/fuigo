@@ -214,14 +214,12 @@ pub(crate) fn spawn_notification_bridge(
     handle
 }
 /// The update is persisted to `updates.jsonl` so session replay re-applies the mode, and forwarded to the gateway so the pager updates live.
-async fn emit_current_mode_update(
-    config: &NotificationBridgeConfig,
-    mode: fuigo_tools::types::SessionMode,
-) {
+/// Takes a mode id rather than a `SessionMode`: `browser_use` is reported but is not a `SessionMode` variant.
+async fn emit_current_mode_update(config: &NotificationBridgeConfig, mode_id: &'static str) {
     let mut notification = acp::SessionNotification::new(
         config.session_id.clone(),
         acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
-            acp::SessionModeId::new(mode.as_id()),
+            acp::SessionModeId::new(mode_id),
         )),
     );
     stamp_event_id(config, &mut notification.meta);
@@ -622,7 +620,7 @@ async fn handle_notification(
                     .persistence
                     .tx
                     .send(PersistenceMsg::PlanModeState(snapshot));
-                emit_current_mode_update(config, fuigo_tools::types::SessionMode::Plan).await;
+                emit_current_mode_update(config, fuigo_tools::types::SessionMode::Plan.as_id()).await;
             }
             tracing::info!(
                 tool_call_id = %entered.tool_call_id,
@@ -631,7 +629,9 @@ async fn handle_notification(
             );
         }
         ToolNotification::PlanModeExited(exited) => {
-            let deactivated = {
+            // The exit lands in browser mode when it is still on (plan was entered by the tool or the prompt); the id is
+            // read in the same lock scope as the transition.
+            let (deactivated, exit_mode_id) = {
                 let mut tracker = config.plan_mode.lock();
                 let deactivated = tracker.deactivate_approved();
                 if deactivated
@@ -641,7 +641,12 @@ async fn handle_notification(
                 {
                     tracker.queue_exit_reminder();
                 }
-                deactivated
+                let exit_mode_id = crate::session::acp_session::advertised_mode_id(
+                    crate::session::plan_mode::PlanModeState::Inactive,
+                    crate::session::plan_mode::PromptMode::Agent,
+                    tracker.browser_use(),
+                );
+                (deactivated, exit_mode_id)
             };
             if deactivated {
                 *config.current_prompt_mode.lock() = crate::session::plan_mode::PromptMode::Agent;
@@ -651,7 +656,7 @@ async fn handle_notification(
                     .persistence
                     .tx
                     .send(PersistenceMsg::PlanModeState(snapshot));
-                emit_current_mode_update(config, fuigo_tools::types::SessionMode::Default).await;
+                emit_current_mode_update(config, exit_mode_id).await;
             }
             tracing::info!(
                 tool_call_id = %exited.tool_call_id,

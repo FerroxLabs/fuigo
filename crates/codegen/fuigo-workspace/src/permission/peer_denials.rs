@@ -328,6 +328,7 @@ fn keys_impl(
             }
             "read".to_owned()
         }
+        AccessKind::Session => "read".to_owned(),
         AccessKind::Grep { path, glob } => {
             let glob = glob.as_deref().unwrap_or_default();
             match path {
@@ -465,7 +466,7 @@ pub fn denial_key(request: &PermissionRequest) -> DenialKey {
     denial_keys(request).into_iter().next().unwrap_or_else(|| DenialKey {
         kind: match &request.access {
             AccessKind::Bash(_) => "bash".to_owned(),
-            AccessKind::Read(_) => "read".to_owned(),
+            AccessKind::Read(_) | AccessKind::Session => "read".to_owned(),
             AccessKind::Grep { .. } => "grep".to_owned(),
             AccessKind::Edit(_) => "edit".to_owned(),
             AccessKind::WebFetch(_) => "web_fetch".to_owned(),

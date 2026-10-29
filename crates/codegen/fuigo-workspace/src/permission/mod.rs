@@ -10,6 +10,7 @@ pub(crate) mod exec_risk;
 mod exec_surface;
 mod gate_preflight;
 mod hub_permission;
+pub mod launch_policy;
 mod manager;
 pub mod peer_denials;
 pub mod peer_guard;

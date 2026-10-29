@@ -40,6 +40,7 @@ fn worktree_forked_sets_session_id_eagerly_and_emits_load() {
             restore_summary: None,
             restore_degree: None,
             resume_session_id: Some("orig-sess".into()),
+            copy_notice: None,
         }),
         &mut app,
     );
@@ -60,6 +61,32 @@ fn worktree_forked_sets_session_id_eagerly_and_emits_load() {
                 if session_id == "forked-sess-1"));
     // Scrollback has the "Worktree ready" message.
     assert!(!app.agents[&id].scrollback.is_empty());
+}
+
+#[test]
+fn worktree_forked_with_copy_notice_adds_one_more_line() {
+    let forked = |notice: Option<String>| {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        dispatch(
+            Action::TaskComplete(TaskResult::WorktreeForked {
+                agent_id: id,
+                session_id: acp::SessionId::new("forked-sess-notice"),
+                worktree_path: PathBuf::from("/tmp/fuigo-worktrees/pager-fork-notice"),
+                session_cwd: PathBuf::from("/tmp/fuigo-worktrees/pager-fork-notice"),
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                resume_session_id: Some("orig-sess".into()),
+                copy_notice: notice,
+            }),
+            &mut app,
+        );
+        app.agents[&id].scrollback.len()
+    };
+    let without = forked(None);
+    let with = forked(Some("Worktree created, but 1 file had a copy problem".to_string()));
+    assert_eq!(with, without + 1);
 }
 
 #[test]
@@ -118,6 +145,7 @@ fn worktree_forked_clears_sticky_branch_from_main_repo() {
             restore_summary: None,
             restore_degree: None,
             resume_session_id: Some("orig-sess".into()),
+            copy_notice: None,
         }),
         &mut app,
     );
@@ -160,6 +188,7 @@ fn worktree_forked_with_restore_shows_summary_in_scrollback() {
             ),
             restore_degree: Some(fuigo_workspace::session::git::RestoreDegree::Full),
             resume_session_id: Some("orig-sess".into()),
+            copy_notice: None,
         }),
         &mut app,
     );
@@ -213,6 +242,7 @@ fn worktree_forked_with_restore_failure_shows_warning_banner() {
             ),
             restore_degree: None,
             resume_session_id: Some("orig-fail".into()),
+            copy_notice: None,
         }),
         &mut app,
     );
@@ -1279,6 +1309,7 @@ fn worktree_forked_retargets_suppress_to_child() {
             restore_summary: None,
             restore_degree: None,
             resume_session_id: Some("orig-sess".into()),
+            copy_notice: None,
         }),
         &mut app,
     );
@@ -1313,6 +1344,7 @@ fn worktree_forked_does_not_retarget_unrelated_suppress() {
             restore_summary: None,
             restore_degree: None,
             resume_session_id: Some("orig-sess".into()),
+            copy_notice: None,
         }),
         &mut app,
     );

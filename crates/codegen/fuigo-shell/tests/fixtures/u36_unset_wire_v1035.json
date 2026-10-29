@@ -1,0 +1,288 @@
+{
+  "name": "u36_unset_wire_v1035",
+  "description": "1.0.36 item a, design test 11: the unset launch-policy surface (initialize agentCapabilities._meta[\"fuigo/capabilities\"] and _meta keys, session/new result and _meta keys) under Murage's three argv. Captured (not hand-written) by the #[ignore] helper u36_unset_wire_capture in murage_conformance_acp.rs, run with --ignored --nocapture on hetzner-dsm lane u36-policy with FUIGO_BINARY = the released fuigo 1.0.35 linux-x86_64 binary (fuigo 1.0.35 (2ecf122d71cc), sha256 87c3cf42b2308abfaf2089ed4cdc6040f8b1b989589a0fd21ca12349b039376e per the release SHA256SUMS).",
+  "wire": {
+    "default": {
+      "capabilities": {
+        "toolOverrides": {
+          "x_keyword_search": true,
+          "x_semantic_search": true,
+          "x_user_search": false,
+          "x_thread_fetch": false
+        },
+        "authenticateApiKey": {
+          "metaKey": "fuigo/apiKey",
+          "persistOptIn": true
+        },
+        "sessionPark": {
+          "version": 1,
+          "methods": [
+            "_fuigo/session/park",
+            "_fuigo/session/unpark"
+          ],
+          "modes": [
+            "hold"
+          ],
+          "defaultMode": "hold",
+          "defaultTimeoutMs": 30000,
+          "maxTimeoutMs": 600000,
+          "errorCode": -32010,
+          "promptWhileParked": "implicitUnpark",
+          "loadWhileParked": "staysParked",
+          "loadReplyMcpReady": true,
+          "releasedMetaKey": "fuigo/released",
+          "unparkedUpdate": "unparked"
+        },
+        "retryDiscard": {
+          "version": 1
+        },
+        "interject": {
+          "version": 1
+        },
+        "queue": {
+          "version": 1,
+          "methods": [
+            "_fuigo/queue/remove",
+            "_fuigo/queue/reorder",
+            "_fuigo/queue/clear",
+            "_fuigo/queue/edit",
+            "_fuigo/queue/interject",
+            "_fuigo/queue/hold_edit",
+            "_fuigo/queue/release_edit"
+          ]
+        }
+      },
+      "agentCapabilitiesMetaKeys": [
+        "fuigo/capabilities",
+        "fuigo/fs_notify",
+        "fuigo/hooks"
+      ],
+      "initializeMetaKeys": [
+        "agentId",
+        "agentInstanceId",
+        "agentVersion",
+        "availableCommands",
+        "cancelRewind",
+        "currentWorkingDirectory",
+        "defaultAuthMethodId",
+        "feedbackTraceOffer",
+        "fuigo/mcp/sdk",
+        "fuigo/pluginDirs",
+        "fuigoShell",
+        "hostname",
+        "mcpApps",
+        "mcpServers",
+        "metadata",
+        "modelState",
+        "sessionRecap",
+        "voiceMode"
+      ],
+      "sessionNewResultKeys": [
+        "_meta",
+        "configOptions",
+        "models",
+        "modes",
+        "sessionId"
+      ],
+      "sessionNewMetaKeys": [
+        "codebaseIndexed",
+        "currentWorkingDirectory",
+        "feedbackEnabled",
+        "fuigo/schedulerBackgroundLoops",
+        "fuigo/sessionConfig",
+        "fuigo/sessionDetail",
+        "gitRoot",
+        "isGitRepo",
+        "showNonGitWarning"
+      ]
+    },
+    "bypassPermissions": {
+      "capabilities": {
+        "toolOverrides": {
+          "x_keyword_search": true,
+          "x_semantic_search": true,
+          "x_user_search": false,
+          "x_thread_fetch": false
+        },
+        "authenticateApiKey": {
+          "metaKey": "fuigo/apiKey",
+          "persistOptIn": true
+        },
+        "sessionPark": {
+          "version": 1,
+          "methods": [
+            "_fuigo/session/park",
+            "_fuigo/session/unpark"
+          ],
+          "modes": [
+            "hold"
+          ],
+          "defaultMode": "hold",
+          "defaultTimeoutMs": 30000,
+          "maxTimeoutMs": 600000,
+          "errorCode": -32010,
+          "promptWhileParked": "implicitUnpark",
+          "loadWhileParked": "staysParked",
+          "loadReplyMcpReady": true,
+          "releasedMetaKey": "fuigo/released",
+          "unparkedUpdate": "unparked"
+        },
+        "retryDiscard": {
+          "version": 1
+        },
+        "interject": {
+          "version": 1
+        },
+        "queue": {
+          "version": 1,
+          "methods": [
+            "_fuigo/queue/remove",
+            "_fuigo/queue/reorder",
+            "_fuigo/queue/clear",
+            "_fuigo/queue/edit",
+            "_fuigo/queue/interject",
+            "_fuigo/queue/hold_edit",
+            "_fuigo/queue/release_edit"
+          ]
+        }
+      },
+      "agentCapabilitiesMetaKeys": [
+        "fuigo/capabilities",
+        "fuigo/fs_notify",
+        "fuigo/hooks"
+      ],
+      "initializeMetaKeys": [
+        "agentId",
+        "agentInstanceId",
+        "agentVersion",
+        "availableCommands",
+        "cancelRewind",
+        "currentWorkingDirectory",
+        "defaultAuthMethodId",
+        "feedbackTraceOffer",
+        "fuigo/mcp/sdk",
+        "fuigo/pluginDirs",
+        "fuigoShell",
+        "hostname",
+        "mcpApps",
+        "mcpServers",
+        "metadata",
+        "modelState",
+        "sessionRecap",
+        "voiceMode"
+      ],
+      "sessionNewResultKeys": [
+        "_meta",
+        "configOptions",
+        "models",
+        "modes",
+        "sessionId"
+      ],
+      "sessionNewMetaKeys": [
+        "codebaseIndexed",
+        "currentWorkingDirectory",
+        "feedbackEnabled",
+        "fuigo/schedulerBackgroundLoops",
+        "fuigo/sessionConfig",
+        "fuigo/sessionDetail",
+        "gitRoot",
+        "isGitRepo",
+        "showNonGitWarning"
+      ]
+    },
+    "defaultTrust": {
+      "capabilities": {
+        "toolOverrides": {
+          "x_keyword_search": true,
+          "x_semantic_search": true,
+          "x_user_search": false,
+          "x_thread_fetch": false
+        },
+        "authenticateApiKey": {
+          "metaKey": "fuigo/apiKey",
+          "persistOptIn": true
+        },
+        "sessionPark": {
+          "version": 1,
+          "methods": [
+            "_fuigo/session/park",
+            "_fuigo/session/unpark"
+          ],
+          "modes": [
+            "hold"
+          ],
+          "defaultMode": "hold",
+          "defaultTimeoutMs": 30000,
+          "maxTimeoutMs": 600000,
+          "errorCode": -32010,
+          "promptWhileParked": "implicitUnpark",
+          "loadWhileParked": "staysParked",
+          "loadReplyMcpReady": true,
+          "releasedMetaKey": "fuigo/released",
+          "unparkedUpdate": "unparked"
+        },
+        "retryDiscard": {
+          "version": 1
+        },
+        "interject": {
+          "version": 1
+        },
+        "queue": {
+          "version": 1,
+          "methods": [
+            "_fuigo/queue/remove",
+            "_fuigo/queue/reorder",
+            "_fuigo/queue/clear",
+            "_fuigo/queue/edit",
+            "_fuigo/queue/interject",
+            "_fuigo/queue/hold_edit",
+            "_fuigo/queue/release_edit"
+          ]
+        }
+      },
+      "agentCapabilitiesMetaKeys": [
+        "fuigo/capabilities",
+        "fuigo/fs_notify",
+        "fuigo/hooks"
+      ],
+      "initializeMetaKeys": [
+        "agentId",
+        "agentInstanceId",
+        "agentVersion",
+        "availableCommands",
+        "cancelRewind",
+        "currentWorkingDirectory",
+        "defaultAuthMethodId",
+        "feedbackTraceOffer",
+        "fuigo/mcp/sdk",
+        "fuigo/pluginDirs",
+        "fuigoShell",
+        "hostname",
+        "mcpApps",
+        "mcpServers",
+        "metadata",
+        "modelState",
+        "sessionRecap",
+        "voiceMode"
+      ],
+      "sessionNewResultKeys": [
+        "_meta",
+        "configOptions",
+        "models",
+        "modes",
+        "sessionId"
+      ],
+      "sessionNewMetaKeys": [
+        "codebaseIndexed",
+        "currentWorkingDirectory",
+        "feedbackEnabled",
+        "fuigo/schedulerBackgroundLoops",
+        "fuigo/sessionConfig",
+        "fuigo/sessionDetail",
+        "gitRoot",
+        "isGitRepo",
+        "showNonGitWarning"
+      ]
+    }
+  }
+}

@@ -343,6 +343,7 @@ pub(crate) fn execute(
                                 restore_summary: resumed.restore_summary,
                                 restore_degree: resumed.restore_degree,
                                 resume_session_id: Some(sid),
+                                copy_notice: resumed.copy_notice,
                             },
                             Err(e) => TaskResult::WorktreeSessionFailed {
                                 agent_id,
@@ -362,6 +363,7 @@ pub(crate) fn execute(
                     };
                     let worktree_root = created.worktree_root;
                     let session_cwd = created.session_cwd;
+                    let copy_notice = created.copy_notice;
                     if let Some(ref sid) = preferred_session_id {
                         let session_cwd_str = session_cwd.to_string_lossy();
                         if let Err(e) = crate::app::session_startup::ensure_session_id_available(
@@ -395,6 +397,7 @@ pub(crate) fn execute(
                                 scheduler_background_loops: parse_session_scheduler_background_loops(
                                     resp.meta.as_ref(),
                                 ),
+                                copy_notice,
                             }
                         }
                         Err(e) => {

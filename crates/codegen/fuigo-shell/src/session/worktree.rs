@@ -255,6 +255,11 @@ async fn restore_remote_session_into_worktree(
     let worktree_root = std::path::Path::new(&wt_resp.worktree_path);
     let source_path = std::path::Path::new(&req.source_cwd);
     let source_git_root = wt_resp.source_git_root.as_deref().map(std::path::Path::new);
+    let wt_copy_warnings = wt_resp
+        .copied_changes
+        .as_ref()
+        .map(|c| c.warnings.clone())
+        .unwrap_or_default();
     let effective_cwd = effective_worktree_path(worktree_root, source_path, source_git_root)
         .to_string_lossy()
         .to_string();
@@ -279,6 +284,8 @@ async fn restore_remote_session_into_worktree(
         code_restored: codebase_ok,
         restore_summary,
         restore_degree,
+        copy_warnings: wt_copy_warnings,
+        meta: None,
     })
 }
 /// Local-session resume: create worktree from source, fork session into it.
@@ -380,6 +387,11 @@ async fn resume_local_session_in_worktree(
     let worktree_root = std::path::Path::new(&wt_resp.worktree_path);
     let source_path = std::path::Path::new(resolved_source_cwd);
     let source_git_root = wt_resp.source_git_root.as_deref().map(std::path::Path::new);
+    let wt_copy_warnings = wt_resp
+        .copied_changes
+        .as_ref()
+        .map(|c| c.warnings.clone())
+        .unwrap_or_default();
     let effective_cwd = effective_worktree_path(worktree_root, source_path, source_git_root)
         .to_string_lossy()
         .to_string();
@@ -389,6 +401,9 @@ async fn resume_local_session_in_worktree(
         new_cwd: effective_cwd.clone(),
         session_kind: Some("worktree".to_string()),
         source_workspace_dir: Some(resolved_source_cwd.to_owned()),
+        // 1.0.36 item a: the client's launch policy claim; `fork_session` refuses a governed source without a matching
+        // one before anything is copied, and binds the new id when it matches.
+        meta: req.meta.clone(),
         ..Default::default()
     };
     let fork_resp = match fork_session(fork_req, agent_id, auth_manager).await {
@@ -396,6 +411,13 @@ async fn resume_local_session_in_worktree(
         Err(e) => {
             cleanup_worktree_on_failure(resolved_source_cwd, &wt_resp.worktree_path).await;
             return Err(anyhow::anyhow!("Failed to fork session into worktree: {e}"));
+        }
+    };
+    let policy_meta = match crate::session::fork::finish_fork_policy(&fork_resp).await {
+        Ok(meta) => meta,
+        Err(e) => {
+            cleanup_worktree_on_failure(resolved_source_cwd, &wt_resp.worktree_path).await;
+            return Err(anyhow::anyhow!("Failed to store the fork's launch policy marker: {e}"));
         }
     };
     Ok(ResumeSessionInWorktreeResponse {
@@ -409,6 +431,8 @@ async fn resume_local_session_in_worktree(
         code_restored,
         restore_summary,
         restore_degree,
+        copy_warnings: wt_copy_warnings,
+        meta: policy_meta,
     })
 }
 /// Run session rehydration: recreate the git worktree at the exact path and restore all session state using the original session ID.
@@ -555,6 +579,8 @@ mod tests {
     #[test]
     fn resume_response_round_trips() {
         let resp = ResumeSessionInWorktreeResponse {
+            copy_warnings: vec![],
+            meta: None,
             session_id: "forked-id".into(),
             worktree_path: "/wt/root".into(),
             effective_cwd: "/wt/root/sub".into(),
@@ -625,6 +651,8 @@ mod tests {
     #[test]
     fn resume_response_serializes_degree_when_set() {
         let resp = ResumeSessionInWorktreeResponse {
+            copy_warnings: vec![],
+            meta: None,
             session_id: "s".into(),
             worktree_path: "w".into(),
             effective_cwd: "e".into(),
@@ -665,6 +693,8 @@ mod tests {
     #[test]
     fn resume_response_camel_case_keys() {
         let resp = ResumeSessionInWorktreeResponse {
+            copy_warnings: vec![],
+            meta: None,
             session_id: "s".into(),
             worktree_path: "w".into(),
             effective_cwd: "e".into(),
@@ -687,6 +717,7 @@ mod tests {
         assert!(json.contains("codeRestored"));
         assert!(!json.contains("restoreSummary"));
         assert!(!json.contains("restoreDegree"));
+        assert!(!json.contains("copyWarnings"));
         assert!(!json.contains("session_id"));
         assert!(!json.contains("worktree_path"));
     }
@@ -906,6 +937,7 @@ mod tests {
             worktree_type: None,
             restore_code: Some(true),
             git_ref: None,
+            meta: None,
         };
         let ops = fuigo_workspace::WorkspaceOps::for_test();
         let result = resume_session_in_worktree(

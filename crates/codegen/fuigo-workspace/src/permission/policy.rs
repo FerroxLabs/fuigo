@@ -94,10 +94,15 @@ pub struct CompiledPolicy {
     /// `None` for allow rules, non-absolute patterns and patterns with no literal directory part, so a policy without
     /// absolute deny/ask rules never touches the filesystem for this.
     alias_prefix: Vec<Option<(String, String)>>,
+    /// The launch-policy rules alone (`config.launch_rules`), compiled; `None` without a launch policy. Used only to tell
+    /// whether an Ask came from a launch policy (that ask always reaches the client).
+    launch: Option<Box<CompiledPolicy>>,
 }
 
 impl CompiledPolicy {
     pub fn new(config: PermissionConfig) -> Self {
+        let launch = (!config.launch_rules.is_empty())
+            .then(|| Box::new(CompiledPolicy::new(PermissionConfig::new(config.launch_rules.clone()))));
         let matchers = config
             .rules
             .iter()
@@ -142,7 +147,18 @@ impl CompiledPolicy {
             has_bash_allow_rules,
             catchall,
             alias_prefix,
+            launch,
         }
+    }
+
+    /// The launch-policy sub-policy, when a launch policy contributed rules.
+    pub(crate) fn launch(&self) -> Option<&CompiledPolicy> {
+        self.launch.as_deref()
+    }
+
+    /// Whether a launch policy contributed rules to this policy.
+    pub fn has_launch_policy(&self) -> bool {
+        self.launch.is_some()
     }
 
     /// P175c: the rule's pattern with its literal directory prefix replaced by that prefix's physical form, when the
@@ -795,6 +811,7 @@ fn tool_filter_matches(access: &AccessKind, filter: &ToolFilter) -> bool {
         // A Read rule also governs the Grep tool: grep reads file contents, so a managed `Read` deny/ask on a path must block grepping it
         // Otherwise grep is a read-bypass
         // Grep-specific rules still use `Grep`
+        // It never reaches session bookkeeping (`Session`: to-dos, questions, the goal), which opens no file and returns no path; only `any` does
         ToolFilter::Read => matches!(access, AccessKind::Read(_) | AccessKind::Grep { .. }),
         ToolFilter::Grep => matches!(access, AccessKind::Grep { .. }),
         ToolFilter::Mcp => matches!(access, AccessKind::MCPTool { .. }),
@@ -966,6 +983,7 @@ fn pattern_matches(
             Some(p) => path_context_matches(p, cr, base),
             None => false,
         },
+        AccessKind::Session => false,
         AccessKind::Grep { path, .. } => match path {
             Some(p) => path_context_matches(p, cr, base),
             None => false,
@@ -3012,6 +3030,10 @@ mod symlink_cwd_tests;
 #[cfg(all(test, unix))]
 #[path = "policy_alias_rule_tests.rs"]
 mod alias_rule_tests;
+
+#[cfg(test)]
+#[path = "policy_read_rule_scope_tests.rs"]
+mod read_rule_scope_tests;
 
 /// Windows and WSL spellings are untouched by the physical-cwd forms (P156): a cwd that does not resolve to a
 /// different absolute path adds nothing, so these paths match exactly as before.

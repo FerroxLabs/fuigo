@@ -972,13 +972,22 @@ fn execute_copy_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResult> {
     let copy_config = ParallelCopyConfig {
         num_workers: effective_parallelism,
         channel_buffer,
-        skip_files: modified_files_for_skip,
+        skip_files: modified_files_for_skip.clone(),
         respect_gitignore: true,
         skip_patterns: vec![],
     };
 
     let copy_result =
         copy::copy_parallel(&source_root, &dest, copy_config, cancellation_token.clone())?;
+
+    // A tracked file that did not copy aborts the create (the guard reclaims
+    // `dest`); untracked problems stay warnings in `copy_result.stats.issues`.
+    copy::tracked::check_copy_failures(
+        &source_root,
+        &dest,
+        modified_files_for_skip.as_deref(),
+        &copy_result.stats,
+    )?;
 
     tracing::debug!(
         elapsed = ?copy_start.elapsed(),
@@ -1020,6 +1029,7 @@ fn execute_copy_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResult> {
             };
 
             let stats = copy::copy_parallel(&source_root, &dest, copy_config, cancellation_token)?;
+            copy::tracked::check_copy_failures(&source_root, &dest, None, &stats.stats)?;
 
             tracing::debug!(
                 elapsed = ?ignored_start.elapsed(),
@@ -1305,6 +1315,15 @@ fn execute_standalone_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResul
     // it on any finalize/checkout/commit failure.
     let guard = PartialWorktreeGuard::new(&dest);
 
+    // A tracked file that did not copy aborts the create (the guard reclaims
+    // `dest`); untracked problems stay warnings in `copy_result.stats.issues`.
+    copy::tracked::check_copy_failures(
+        &source_root,
+        &dest,
+        modified_files_for_skip.as_deref(),
+        &copy_result.stats,
+    )?;
+
     // Destructure before the finalize match consumes file_metadata.
     let copy_stats = copy_result.stats;
     let copied_paths = copy_result.copied_paths;
@@ -1373,6 +1392,7 @@ fn execute_standalone_worktree(plan: WorktreePlan) -> Result<CreateWorktreeResul
             };
 
             let stats = copy::copy_parallel(&source_root, &dest, copy_config, cancellation_token)?;
+            copy::tracked::check_copy_failures(&source_root, &dest, None, &stats.stats)?;
 
             tracing::debug!(
                 elapsed = ?ignored_start.elapsed(),

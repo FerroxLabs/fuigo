@@ -312,6 +312,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             session_cwd,
             models: new_models,
             scheduler_background_loops,
+            copy_notice,
         } => handle_worktree_session_created(
             app,
             agent_id,
@@ -320,6 +321,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             session_cwd,
             new_models,
             scheduler_background_loops,
+            copy_notice,
         ),
         TaskResult::WorktreeForked {
             agent_id,
@@ -330,6 +332,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_summary,
             restore_degree,
             resume_session_id,
+            copy_notice,
         } => handle_worktree_forked(
             app,
             agent_id,
@@ -340,6 +343,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_summary,
             restore_degree,
             resume_session_id,
+            copy_notice,
         ),
         TaskResult::WorktreeSessionFailed { agent_id, error } => {
             handle_worktree_session_failed(app, agent_id, error)

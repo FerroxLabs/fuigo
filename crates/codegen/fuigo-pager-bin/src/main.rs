@@ -84,6 +84,7 @@ fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<P
             | Command::Completions { .. }
             | Command::Worktree(_)
             | Command::DiskUsage(_)
+            | Command::Policy(_)
             | Command::Workspace(_),
         ) => (Entrypoint::Cli, Interactivity::Unattended),
         None if is_interactive => return None,
@@ -123,6 +124,7 @@ fn command_needs_pre_sandbox_policy_heal(command: Option<&Command>) -> bool {
             | Command::Version { .. }
             | Command::Completions { .. }
             | Command::DiskUsage(_)
+            | Command::Policy(_)
             | Command::Workspace(_),
         ) => false,
     }
@@ -725,6 +727,10 @@ async fn workspace_start(
         true,
         fuigo_sandbox::requested_confinement_profile(),
     );
+    // 1.0.36 item a: a launch policy runs Fuigo standalone, so the leader-only workspace command cannot run.
+    if fuigo_workspace::permission::launch_policy::has_process_policy() {
+        fuigo_pager::app::exit_leader_conflict();
+    }
     if !use_leader {
         anyhow::bail!(
             "`fuigo workspace` requires leader mode (the workspace is shared via the leader).\n\
@@ -906,11 +912,28 @@ const CACHED_METHODS: &[&str] = &[
     "\"_fuigo/session/close\"",
 ];
 fn cache_outgoing_acp_state(msg: &str, state: &std::sync::Mutex<StdioReplayState>) {
+    cache_outgoing_acp_state_parsed(msg, None, state);
+}
+
+/// [`cache_outgoing_acp_state`] reusing a parse the bridge already made of `msg` (`parsed`), if any.
+fn cache_outgoing_acp_state_parsed(
+    msg: &str,
+    parsed: Option<&serde_json::Value>,
+    state: &std::sync::Mutex<StdioReplayState>,
+) {
     if !CACHED_METHODS.iter().any(|m| msg.contains(m)) {
         return;
     }
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(msg) else {
-        return;
+    let owned;
+    let json = match parsed {
+        Some(json) => json,
+        None => {
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(msg) else {
+                return;
+            };
+            owned = json;
+            &owned
+        }
     };
     let method = json
         .get("method")
@@ -1308,7 +1331,18 @@ async fn forward_stdio_line_to_leader(
     if trimmed.is_empty() {
         return;
     }
-    cache_outgoing_acp_state(&trimmed, replay_state);
+    // 1.0.36 item a (R2): a session that names a launch policy never goes to a leader (an older running leader would
+    // drop the key and run the session ungoverned): answered here with `route_refused`, never forwarded.
+    // The decision is made on the decoded JSON (a key spelled with escapes is the same key); the one parse is shared
+    // with the replay cache.
+    let parsed = bridge_parse_for_policy(&trimmed);
+    if let Some(refusal) = parsed.as_ref().and_then(bridge_policy_refusal) {
+        let mut out = std::io::stdout().lock();
+        let _ = std::io::Write::write_all(&mut out, format!("{refusal}\n").as_bytes());
+        let _ = std::io::Write::flush(&mut out);
+        return;
+    }
+    cache_outgoing_acp_state_parsed(&trimmed, parsed.as_ref(), replay_state);
     let send_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
     loop {
         {
@@ -1326,6 +1360,40 @@ async fn forward_stdio_line_to_leader(
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
+}
+/// 1.0.36 item a: the client line decoded when it could name a launch policy key. A key (or `_meta`, or the method)
+/// spelled with JSON escapes needs a backslash in the raw line, so a line with neither key written out literally and no
+/// backslash cannot carry one and is not parsed here. `None`: nothing to refuse.
+fn bridge_parse_for_policy(line: &str) -> Option<serde_json::Value> {
+    use fuigo_workspace::permission::launch_policy::{META_PATH, META_SHA256};
+    if !line.contains(META_PATH) && !line.contains(META_SHA256) && !line.contains('\\') {
+        return None;
+    }
+    serde_json::from_str(line).ok()
+}
+/// 1.0.36 item a: the JSON-RPC error for a client line the stdio bridge must not forward to a leader: a `session/new`,
+/// `session/load`, `session/resume` or `fuigo/session/fork` whose `_meta` names a launch policy. `None` otherwise (a
+/// decision on the decoded line, see [`bridge_parse_for_policy`]).
+fn bridge_policy_refusal(value: &serde_json::Value) -> Option<String> {
+    use fuigo_workspace::permission::launch_policy::{META_PATH, meta_has_policy_key, route_refused};
+    let method = value.get("method")?.as_str()?;
+    if !matches!(method, "session/new" | "session/load" | "session/resume" | "fuigo/session/fork") {
+        return None;
+    }
+    let meta = value.get("params").and_then(|p| p.get("_meta")).and_then(serde_json::Value::as_object);
+    if !meta_has_policy_key(meta) {
+        return None;
+    }
+    let path = meta.and_then(|m| m.get(META_PATH)).and_then(serde_json::Value::as_str).unwrap_or_default();
+    let error = route_refused(path, "a session with a launch permission policy cannot run in a leader; start Fuigo with --no-leader");
+    Some(
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": value.get("id").cloned().unwrap_or(serde_json::Value::Null),
+            "error": { "code": -32602, "message": error.message, "data": error.to_json() },
+        })
+        .to_string(),
+    )
 }
 /// Emitted by both leader guards (server mode and leader-connect) so the two sites can't drift.
 const PLUGIN_DIR_LEADER_WARNING: &str = "fuigo: --plugin-dir is ignored in leader mode; run with --no-leader to \
@@ -1391,6 +1459,10 @@ async fn run_agent_command(
     fuigo_shell::agent::mvp_agent::warm_async_http_client();
     let is_stdio = matches!(agent_args.mode, Some(AgentCmd::Stdio));
     let is_leader = matches!(agent_args.mode, Some(AgentCmd::Leader(_)));
+    // 1.0.36 item a (R2): `agent leader` under a launch policy is a conflict (exit 78).
+    if is_leader && fuigo_workspace::permission::launch_policy::has_process_policy() {
+        fuigo_pager::app::exit_leader_conflict();
+    }
     if !is_stdio && !is_leader {
         fuigo_tty_utils::cli_eprintln!(
             "Fuigo (pager) - v{}",
@@ -1478,6 +1550,8 @@ async fn run_agent_command(
         use_leader,
         policy_disable_reason,
         disabled_by_confinement,
+        disabled_by_launch_policy,
+        launch_policy_conflict,
     } = resolve_leader_mode(
         agent_args.leader,
         agent_args.no_leader,
@@ -1495,6 +1569,13 @@ async fn run_agent_command(
     );
     if let Some(profile) = disabled_by_confinement {
         warn_leader_disabled_by_sandbox(profile);
+    }
+    // 1.0.36 item a (R2): a process launch policy means standalone; an explicit `--leader` is exit 78.
+    if launch_policy_conflict {
+        fuigo_pager::app::exit_leader_conflict();
+    }
+    if disabled_by_launch_policy {
+        fuigo_pager::app::warn_leader_disabled_by_launch_policy();
     }
     use fuigo_telemetry::process_info::LeaderMode::{Attached, Standalone};
     set_identity(ProcessIdentity {
@@ -2141,6 +2222,32 @@ fn dispatch_version_if_requested(args: &PagerArgs) -> bool {
     }
     true
 }
+/// `fuigo policy check <file> [--json]` (1.0.36 item a): the same loader as `FUIGO_POLICY_PATH`, no hash, no pin.
+/// Exit 0 with the counts and sha256; else exit 78 with the error as one JSON line on stderr.
+fn dispatch_policy_if_requested(args: &PagerArgs) -> bool {
+    let Some(Command::Policy(policy_args)) = &args.command else {
+        return false;
+    };
+    let fuigo_pager::app::cli::PolicyCommand::Check { file, json } = &policy_args.command;
+    use fuigo_workspace::permission::launch_policy::check_file;
+    match check_file(file) {
+        Ok((rules, sha256)) => {
+            let count = |action| rules.iter().filter(|r| r.action == action).count();
+            use fuigo_workspace::permission::types::RuleAction;
+            let (deny, ask, allow) = (count(RuleAction::Deny), count(RuleAction::Ask), count(RuleAction::Allow));
+            if *json {
+                fuigo_tty_utils::cli_println!(
+                    "{}",
+                    serde_json::json!({ "ok": true, "path": file, "sha256": sha256, "deny": deny, "ask": ask, "allow": allow })
+                );
+            } else {
+                fuigo_tty_utils::cli_println!("ok: {} rules (deny {deny}, ask {ask}, allow {allow}) sha256 {sha256}", rules.len());
+            }
+            true
+        }
+        Err(error) => error.exit(),
+    }
+}
 fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
     let Some(Command::Doctor(doctor_args)) = &args.command else {
         return false;
@@ -2252,9 +2359,17 @@ fn main() {
         fuigo_update::channel_name().unwrap_or_default(),
     ));
     let args = PagerArgs::parse_cli();
-    if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
+    if dispatch_version_if_requested(&args)
+        || dispatch_doctor_if_requested(&args)
+        || dispatch_policy_if_requested(&args)
+    {
         exit_nonzero_if_stdout_failed();
         return;
+    }
+    // 1.0.36 item a: the launch permission policy, read once, verified against the launcher's hash and pinned before any
+    // subcommand runs (a bad file is exit 78 with one JSON line on stderr). Unset: one environment read, nothing else.
+    if let Err(error) = fuigo_workspace::permission::launch_policy::init_process_from_env() {
+        error.exit();
     }
     // Create the Fuigo home (mode 0700 whatever the umask) before anything else can create it implicitly.
     let _ = fuigo_config::fuigo_home();
@@ -2590,6 +2705,9 @@ async fn async_main(args: PagerArgs) -> Result<HeadlessOutcome> {
             }
             Command::Doctor(_) => {
                 unreachable!("doctor was consumed before runtime startup")
+            }
+            Command::Policy(_) => {
+                unreachable!("policy was consumed before runtime startup")
             }
             Command::Inspect { json } => {
                 let cwd = std::env::current_dir().unwrap_or_default();
@@ -4702,6 +4820,36 @@ mod trust_record_sink_wiring {
         assert!(refuse < dispatch, "refuse before the subscription path (which validates)");
         assert!(refuse < validate, "refuse before main's requirements gate");
         assert_eq!(body.matches("refuse_start_if_open_file_limit_too_low();").count(), 1, "one refusal in main");
+    }
+
+    /// 1.0.36 item a (design test 9): the bridge answers a session request naming a launch policy itself.
+    #[test]
+    fn bridge_refuses_session_requests_with_a_launch_policy() {
+        let line = r#"{"jsonrpc":"2.0","id":7,"method":"session/new","params":{"cwd":"/x","mcpServers":[],"_meta":{"fuigo/permissionPolicyPath":"/p.toml","fuigo/permissionPolicySha256":"ab"}}}"#;
+        let refuse = |line: &str| crate::bridge_parse_for_policy(line).as_ref().and_then(crate::bridge_policy_refusal);
+        let refusal: serde_json::Value = serde_json::from_str(&refuse(line).expect("refused")).unwrap();
+        assert_eq!(refusal["id"], 7);
+        assert_eq!(refusal["error"]["code"], -32602);
+        assert_eq!(refusal["error"]["data"]["policy_error"], "route_refused");
+        // Astra r1 #2: keys (and `_meta`, and the method) spelled with JSON escapes are the same keys once decoded.
+        for escaped in [
+            r#"{"jsonrpc":"2.0","id":8,"method":"session/new","params":{"cwd":"/x","mcpServers":[],"_meta":{"fuigo\/permissionPolicyPath":"/p.toml","fuigo\/permissionPolicySha256":"ab"}}}"#,
+            r#"{"jsonrpc":"2.0","id":9,"method":"session/load","params":{"sessionId":"s","_meta":{"fuigo\u002fpermissionPolicySha256":"ab"}}}"#,
+            r#"{"jsonrpc":"2.0","id":10,"method":"session\/new","params":{"\u005fmeta":{"fuigo\/permissionPolicyPath":"/p.toml"}}}"#,
+        ] {
+            let refusal: serde_json::Value = serde_json::from_str(&refuse(escaped).expect(escaped)).unwrap();
+            assert_eq!(refusal["error"]["data"]["policy_error"], "route_refused", "{escaped}");
+        }
+        for other in [
+            r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/x","mcpServers":[]}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"_meta":{"fuigo/permissionPolicyPath":"/p"}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"a\nb"}]}}"#,
+            "not json fuigo/permissionPolicyPath",
+        ] {
+            assert!(refuse(other).is_none(), "{other}");
+        }
+        // No key written out and no backslash: not parsed at all.
+        assert!(crate::bridge_parse_for_policy(r#"{"jsonrpc":"2.0","id":4,"method":"session/new","params":{}}"#).is_none());
     }
 
     /// `main` must install the trust-record sink before anything can write the

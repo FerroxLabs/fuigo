@@ -74,6 +74,7 @@ pub use discovery::{
     managed_worktree_roots, path_under_managed_worktree_roots, path_under_worktree_roots,
     rebuild_worktree_db, rebuild_worktree_db_with_grove_data,
 };
+pub use copy::TrackedCopyError;
 pub use git::operand::{
     parse_git_ref_arg, parse_worktree_name_arg, validate_git_operand, validate_git_ref, validate_worktree_name,
 };

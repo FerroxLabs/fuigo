@@ -656,6 +656,23 @@ async fn enforce_hub_policy_inner(
     facts: HubCallFacts,
 ) -> Result<HubCleared, HubRefusal> {
     use crate::permission::{DenialCause, HubPolicyContext, hub_policy_verdict_all};
+    // 1.0.36 item a (R2): a session governed by a launch policy runs standalone; hub routing never handles its calls,
+    // whatever the accesses or always-approve say.
+    if crate::permission::launch_policy::governs(session.launch_policy_governed()) {
+        tracing::info!(
+            tool = %tool_name,
+            session = %session_id,
+            call_id = %call_id,
+            "hub tool call refused: a launch permission policy governs this session"
+        );
+        return Err((
+            ToolError::new(
+                ToolErrorKind::PermissionDenied,
+                "tool call refused: a launch permission policy governs this session, so hub routing is refused (route_refused)",
+            ),
+            DenialCause::Policy,
+        ));
+    }
     // P184: a patch that does not parse, or writes nothing, is refused in every mode before anything is judged.
     let patch_targets = match facts.patch_targets {
         Some(Err(message)) => {
