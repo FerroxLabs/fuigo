@@ -3658,6 +3658,8 @@ fn spawn_shell_command(
         layer_request_env(&mut cmd, env, active_policy);
         cmd.envs(crate::util::pager_env());
         crate::util::apply_fuigo_agent_marker(&mut cmd);
+        // u37: the child never sees an empty `PATH` segment, and the judge sees what the child gets.
+        crate::sandbox_launch::normalize_child_path(&mut cmd);
         judge_spawn_env(&cmd, Vec::new, sandbox.env_check).map_err(std::io::Error::from)?;
         crate::sandbox_launch::prepare(
             sandbox.hook,

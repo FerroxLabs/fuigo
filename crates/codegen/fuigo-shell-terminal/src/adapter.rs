@@ -153,10 +153,20 @@ fn wrap_command(command: &str) -> Result<String, ComputerError> {
     }
 }
 
-fn to_env(env: HashMap<String, String>) -> Vec<acp::EnvVariable> {
-    env.into_iter()
+/// The `terminal/create` env: the request's own variables, plus (u37, Windows only) the `PATH` the classifier
+/// judged when Fuigo's own would carry an empty segment into the client's shell. For a call approved without a
+/// grant, that environment is first judged as the local runner judges its own child, and the call is refused when it
+/// steers (`checked_client_terminal_env`), so the client runs only what was judged.
+fn to_env(request: &TerminalRunRequest) -> Result<Vec<acp::EnvVariable>, ComputerError> {
+    let check = request.approved_without_grant.then(|| fuigo_tools::sandbox_launch::ClientTerminalCheck {
+        command: &request.command,
+        dir: &request.working_directory,
+        request_cwd: request.request_cwd.as_deref(),
+    });
+    Ok(fuigo_tools::sandbox_launch::checked_client_terminal_env(request.env.clone(), check)?
+        .into_iter()
         .map(|(name, value)| acp::EnvVariable::new(name, value))
-        .collect()
+        .collect())
 }
 
 pub(super) fn parse_exit(
@@ -192,11 +202,12 @@ impl AcpTerminalAdapter {
         command: String,
         request: &TerminalRunRequest,
     ) -> Result<acp::CreateTerminalResponse, ComputerError> {
+        let env = to_env(request)?;
         self.gateway
             .send(
                 acp::CreateTerminalRequest::new(self.session_id.clone(), command)
                     .args(vec![])
-                    .env(to_env(request.env.clone()))
+                    .env(env)
                     .cwd(Some(request.working_directory.clone()))
                     .output_byte_limit(Some(request.output_byte_limit as u64)),
             )

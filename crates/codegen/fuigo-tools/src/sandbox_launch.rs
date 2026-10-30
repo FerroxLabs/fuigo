@@ -430,6 +430,170 @@ pub fn is_fuigo_own_env(name: &str, value: &str) -> bool {
     crate::util::pager_env().get(name).is_some_and(|own| own == value)
 }
 
+/// u37: a Windows `PATH` value without its empty segments (a trailing `;`, or `;;`). Windows gives an empty
+/// segment no meaning, but a shell that reads the list the POSIX way (Git Bash turns `;` into `:`) takes it as the
+/// current directory. Quoting is read as [`std::env::split_paths`] reads it on Windows: a `;` between `"` does not
+/// separate, and a segment of only quotes is empty. Every other segment is kept exactly as written, in order.
+/// (`fuigo_config::shell::windows_path_entries` splits by the same rule; the tests cross-check the two.) Git Bash
+/// reads the result differently where a quoted run holds a `;` ([`windows_path_entries_as_git_bash_reads`]), so the
+/// classifier judges it by both readings. Platform-independent, so its rule runs under the Linux tests too.
+pub fn windows_path_without_empty_segments(value: &str) -> std::borrow::Cow<'_, str> {
+    let mut out = String::with_capacity(value.len());
+    let mut push = |segment: &str| {
+        if segment.chars().any(|c| c != '"') {
+            if !out.is_empty() {
+                out.push(';');
+            }
+            out.push_str(segment);
+        }
+    };
+    let (mut start, mut quoted) = (0, false);
+    for (i, c) in value.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            ';' if !quoted => {
+                push(&value[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    push(&value[start..]);
+    if out == value { std::borrow::Cow::Borrowed(value) } else { std::borrow::Cow::Owned(out) }
+}
+
+/// u37 (round 3): the entries of a Windows `PATH` as Git Bash reads it (MSYS2 `conv_path_list`): split at every `;`,
+/// quoted or not, then each piece without its `"`. [`std::env::split_paths`] lets a quoted run hold a `;`, so one
+/// value can read clean that way and hold `.` or an empty entry this way (`C:\a;"C:\b;.;"C:\b`). The classifier
+/// judges a Windows `PATH` by both readings. Platform-independent, so its rule runs under the Linux tests too.
+pub fn windows_path_entries_as_git_bash_reads(value: &str) -> impl Iterator<Item = String> + '_ {
+    value.split(';').map(|piece| piece.replace('"', ""))
+}
+
+/// u37: the `PATH` value a shell command runs under, given the value it would otherwise get: on Windows without its
+/// empty segments ([`windows_path_without_empty_segments`]); unchanged on Unix, where an empty entry means the
+/// current directory. The shell runner sets this value on the child ([`normalize_child_path`]) and the permission
+/// classifier judges this value, so the value judged is the value that runs.
+pub fn child_path_value(value: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(windows) { windows_path_without_empty_segments(value) } else { std::borrow::Cow::Borrowed(value) }
+}
+
+/// u37: set on `cmd` the `PATH` its child will run under ([`child_path_value`]), once its environment is built and
+/// before it is judged ([`check_child_env`]) or spawned. On Windows the variable is found in any spelling (`Path`,
+/// `PATH`), as [`child_env`] sees it. Unix is untouched.
+pub fn normalize_child_path(cmd: &mut tokio::process::Command) {
+    normalize_child_path_for(cmd, std::env::vars_os(), crate::util::shell_env_policy::EnvPlatform::host());
+}
+
+/// The platform-parameterised core of [`normalize_child_path`], over `inherited` in place of the process's own.
+pub(crate) fn normalize_child_path_for(
+    cmd: &mut tokio::process::Command,
+    inherited: impl IntoIterator<Item = (OsString, OsString)>,
+    platform: crate::util::shell_env_policy::EnvPlatform,
+) {
+    let edits: Vec<(OsString, Option<OsString>)> = cmd
+        .as_std()
+        .get_envs()
+        .map(|(name, value)| (name.to_os_string(), value.map(std::ffi::OsStr::to_os_string)))
+        .collect();
+    if let Some((name, normalized)) = normalized_path_for(inherited, edits, platform) {
+        cmd.env(name, normalized);
+    }
+}
+
+/// u37: the environment to send with a command a client spawns for Fuigo (ACP `terminal/create`): `env` (the
+/// request's own variables) plus, on Windows, `PATH` without its empty segments when the `PATH` this process
+/// would hand the child (inherited, or set in `env`, in any spelling) has one, so the client runs the value the
+/// classifier judged ([`child_path_value`]). The same rule as the local runner's [`normalize_child_path`]. When
+/// the value is already clean, and always on Unix, `env` comes back unchanged. A tool call goes through
+/// [`checked_client_terminal_env`]; this one serves a command the user typed, which the local runner does not judge.
+pub fn client_terminal_env(env: impl IntoIterator<Item = (String, String)>) -> Vec<(String, String)> {
+    client_terminal_env_for(env, std::env::vars_os(), crate::util::shell_env_policy::EnvPlatform::host())
+}
+
+/// u37: what a client terminal judges for a call approved without a grant, as the local runner's `env_check`: the
+/// command, the directory it runs in, and the directory the permission check judged it in when that differs.
+#[derive(Clone, Copy, Debug)]
+pub struct ClientTerminalCheck<'a> {
+    pub command: &'a str,
+    pub dir: &'a std::path::Path,
+    pub request_cwd: Option<&'a std::path::Path>,
+}
+
+/// u37 (round 2): [`client_terminal_env`], checked as the local runner checks its own child ([`check_child_env`]):
+/// for a call approved without a grant (`check` is `Some`), the environment the client is sent (this process's, with
+/// the sent variables over it) is judged by the same rule before anything is sent, and the call is refused when it
+/// steers. The value judged is the value returned, so what is judged is what is sent. A call approved by a grant, an
+/// answer or an override (`check` is `None`) is sent unjudged, as the local runner runs it.
+///
+/// # Errors
+/// As [`check_child_env`]: the command must not be sent.
+pub fn checked_client_terminal_env(
+    env: impl IntoIterator<Item = (String, String)>,
+    check: Option<ClientTerminalCheck<'_>>,
+) -> Result<Vec<(String, String)>, SandboxLaunchError> {
+    checked_client_terminal_env_with(
+        env,
+        std::env::vars_os(),
+        crate::util::shell_env_policy::EnvPlatform::host(),
+        check,
+        env_judge(),
+    )
+}
+
+/// The platform-parameterised core of [`checked_client_terminal_env`], over `inherited` and `judge`.
+pub(crate) fn checked_client_terminal_env_with(
+    env: impl IntoIterator<Item = (String, String)>,
+    inherited: impl IntoIterator<Item = (OsString, OsString)>,
+    platform: crate::util::shell_env_policy::EnvPlatform,
+    check: Option<ClientTerminalCheck<'_>>,
+    judge: Option<EnvJudge>,
+) -> Result<Vec<(String, String)>, SandboxLaunchError> {
+    let inherited: Vec<(OsString, OsString)> = inherited.into_iter().collect();
+    let sent = client_terminal_env_for(env, inherited.iter().cloned(), platform);
+    if let Some(check) = check {
+        let edits = sent.iter().map(|(name, value)| (OsString::from(name), Some(OsString::from(value))));
+        let child = child_env_for(inherited, edits, std::iter::empty(), platform);
+        check_spawn_env_with(&child, check.command, check.dir, check.request_cwd, platform, judge)?;
+    }
+    Ok(sent)
+}
+
+/// The platform-parameterised core of [`client_terminal_env`], over `inherited` in place of the process's own.
+pub(crate) fn client_terminal_env_for(
+    env: impl IntoIterator<Item = (String, String)>,
+    inherited: impl IntoIterator<Item = (OsString, OsString)>,
+    platform: crate::util::shell_env_policy::EnvPlatform,
+) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = env.into_iter().collect();
+    let edits = env.iter().map(|(name, value)| (OsString::from(name), Some(OsString::from(value))));
+    if let Some((name, normalized)) = normalized_path_for(inherited, edits, platform) {
+        env.retain(|(other, _)| !platform.same_name(other, "PATH"));
+        env.push((name.to_string_lossy().into_owned(), normalized));
+    }
+    env
+}
+
+/// u37: the one rule behind [`normalize_child_path_for`] and [`client_terminal_env_for`]: on Windows, the name and
+/// the normalized value ([`windows_path_without_empty_segments`]) of the `PATH` a child with `edits` over
+/// `inherited` would get ([`child_env_for`]), when normalizing changes it. `None` when it is already clean, when
+/// there is no `PATH`, and on Unix. A value that is not Unicode is left as it is (and judged as it is: it asks).
+fn normalized_path_for(
+    inherited: impl IntoIterator<Item = (OsString, OsString)>,
+    edits: impl IntoIterator<Item = (OsString, Option<OsString>)>,
+    platform: crate::util::shell_env_policy::EnvPlatform,
+) -> Option<(OsString, String)> {
+    if platform != crate::util::shell_env_policy::EnvPlatform::Windows {
+        return None;
+    }
+    let env = child_env_for(inherited, edits, std::iter::empty(), platform);
+    let (name, value) = env.into_iter().find(|(name, _)| platform.same_os_name(name, "PATH".as_ref()))?;
+    match windows_path_without_empty_segments(value.to_str()?) {
+        std::borrow::Cow::Owned(normalized) => Some((name, normalized)),
+        std::borrow::Cow::Borrowed(_) => None,
+    }
+}
+
 /// u35 g9: the variable of `env` (a command's whole environment) that steers what `command` runs
 /// in `dir`, by `judge`. A missing or empty `PATH` steers: the shell then searches its built-in
 /// default, which for bash includes the current directory. Fuigo's own constants
@@ -440,11 +604,23 @@ pub fn judge_child_env(
     dir: &std::path::Path,
     judge: EnvJudge,
 ) -> Option<String> {
+    judge_child_env_for(env, command, dir, judge, crate::util::shell_env_policy::EnvPlatform::host())
+}
+
+/// The platform-parameterised core of [`judge_child_env`].
+pub(crate) fn judge_child_env_for(
+    env: &[(OsString, OsString)],
+    command: &str,
+    dir: &std::path::Path,
+    judge: EnvJudge,
+    platform: crate::util::shell_env_policy::EnvPlatform,
+) -> Option<String> {
+    let windows = platform == crate::util::shell_env_policy::EnvPlatform::Windows;
     let env: Vec<(String, String)> = env
         .iter()
         .map(|(name, value)| {
             let name = name.to_string_lossy();
-            let name = if cfg!(windows) { name.to_ascii_uppercase() } else { name.into_owned() };
+            let name = if windows { name.to_ascii_uppercase() } else { name.into_owned() };
             (name, value.to_string_lossy().into_owned())
         })
         .filter(|(name, value)| !is_fuigo_own_env(name, value))
@@ -473,14 +649,35 @@ pub fn check_child_env(
     if !approved_without_grant {
         return Ok(());
     }
-    // u35 t1 (design d2 §3.6): the folder-trust check runs first.
-    check_runner_trust(command, &original_argv(cmd).cwd, request_cwd, cfg!(not(test)))?;
+    let env = child_env(cmd, restored.iter().cloned());
+    check_spawn_env_with(
+        &env,
+        command,
+        &original_argv(cmd).cwd,
+        request_cwd,
+        crate::util::shell_env_policy::EnvPlatform::host(),
+        env_judge(),
+    )
+}
+
+/// u37 (round 2): the one check of a call approved without a grant, over `env`, the whole environment its command
+/// runs under in `dir`: the local runner's ([`check_child_env`]) and a client terminal's
+/// ([`checked_client_terminal_env`]). Folder trust first (u35 t1, design d2 §3.6), then the runner's shell, then
+/// `judge` ([`judge_child_env_for`]).
+fn check_spawn_env_with(
+    env: &[(OsString, OsString)],
+    command: &str,
+    dir: &std::path::Path,
+    request_cwd: Option<&std::path::Path>,
+    platform: crate::util::shell_env_policy::EnvPlatform,
+    judge: Option<EnvJudge>,
+) -> Result<(), SandboxLaunchError> {
+    check_runner_trust(command, dir, request_cwd, cfg!(not(test)))?;
     check_runner_shell(runner_shell_family())?;
-    let Some(judge) = env_judge() else {
+    let Some(judge) = judge else {
         return missing_env_judge(cfg!(not(test)));
     };
-    let env = child_env(cmd, restored.iter().cloned());
-    match judge_child_env(&env, command, &original_argv(cmd).cwd, judge) {
+    match judge_child_env_for(env, command, dir, judge, platform) {
         Some(name) => {
             tracing::warn!(%name, "a command approved without a grant would run under a steering environment; refused");
             Err(SandboxLaunchError::new(ChildEnvSteers { name }))

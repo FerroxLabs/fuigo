@@ -72,9 +72,10 @@ fn is_inside(path: &str, dir: &str) -> bool {
 }
 
 /// `PATH` split the way Windows reads it: `;`-separated, a double-quoted run may hold a `;`, the
-/// quotes themselves dropped.
-#[cfg_attr(unix, allow(dead_code))]
-fn windows_path_entries(path_var: &str) -> Vec<String> {
+/// quotes themselves dropped, as [`std::env::split_paths`] reads it on Windows. Public so
+/// `fuigo_tools::sandbox_launch::windows_path_without_empty_segments` (u37) is tested against it.
+#[doc(hidden)]
+pub fn windows_path_entries(path_var: &str) -> Vec<String> {
     let mut entries = vec![String::new()];
     let mut quoted = false;
     for c in path_var.chars() {

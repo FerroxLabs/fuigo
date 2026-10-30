@@ -973,3 +973,136 @@ async fn get_task_with_a_log_that_never_answers_is_bounded() {
     // Let the blocked `open` finish so the runtime can shut down.
     let _unblock = std::fs::OpenOptions::new().read(true).write(true).open(&fifo).unwrap();
 }
+
+/// The env of every `terminal/create` a [`recording_gateway`] received, in order.
+#[cfg(unix)]
+type CreatedEnvs = Arc<Mutex<Vec<Vec<(String, String)>>>>;
+
+/// A client that records the env of every `terminal/create` and runs each command to exit 0 at once.
+#[cfg(unix)]
+fn recording_gateway(creates: CreatedEnvs) -> GatewaySender {
+    use fuigo_acp_lib::AcpClientMessage;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                AcpClientMessage::CreateTerminal(args) => {
+                    let env = args.env.iter().map(|v| (v.name.clone(), v.value.clone())).collect();
+                    creates.lock().unwrap().push(env);
+                    let _ = args.response_tx.send(Ok(acp::CreateTerminalResponse::new("term-1")));
+                }
+                AcpClientMessage::WaitForTerminalExit(args) => {
+                    let exit = acp::TerminalExitStatus::new().exit_code(Some(0));
+                    let _ = args.response_tx.send(Ok(acp::WaitForTerminalExitResponse::new(exit)));
+                }
+                AcpClientMessage::TerminalOutput(args) => {
+                    let exit = acp::TerminalExitStatus::new().exit_code(Some(0));
+                    let response = acp::TerminalOutputResponse::new(String::new(), false).exit_status(Some(exit));
+                    let _ = args.response_tx.send(Ok(response));
+                }
+                AcpClientMessage::ReleaseTerminal(args) => {
+                    let _ = args.response_tx.send(Ok(acp::ReleaseTerminalResponse::new()));
+                }
+                _ => {}
+            }
+        }
+    });
+    GatewaySender::new(tx)
+}
+
+/// The `PATH` rule installed for this crate's tests (process-wide): an empty or relative entry, or one inside the
+/// directory the command runs in, steers.
+#[cfg(unix)]
+fn u37_path_judge(_command: &str, env: &[(String, String)], dir: &std::path::Path) -> Option<String> {
+    let path = &env.iter().find(|(name, _)| name.eq_ignore_ascii_case("PATH"))?.1;
+    std::env::split_paths(path)
+        .any(|entry| !entry.is_absolute() || entry.starts_with(dir))
+        .then(|| "PATH".to_owned())
+}
+
+#[cfg(unix)]
+fn sorted(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
+    env.sort();
+    env
+}
+
+/// u37 (round 2): an editor terminal gets the local runner's environment check, on the env `terminal/create` sends.
+/// For a call approved without a grant, a session `PATH` that puts `.` or a folder of the workspace first is refused
+/// before anything is sent, with the local runner's error; a grant sends it as it is; with no override (or a clean
+/// one) the request env is sent unchanged. `run` and `run_background` both. Unix only: on Windows the runner shell is
+/// detected from the host (pwsh first), which this crate's tests cannot pin; the shared check is proved there by
+/// `fuigo_tools::sandbox_launch` `u37_client_terminal_env_is_judged_as_sent` with the shell pinned.
+#[cfg(unix)]
+#[tokio::test]
+async fn u37_client_terminal_create_is_judged_as_the_local_runner_judges() {
+    fuigo_tools::sandbox_launch::install_trust_judge(|_, _| true);
+    fuigo_tools::sandbox_launch::install_env_judge(u37_path_judge);
+    let dir = tempfile::tempdir().unwrap();
+    let workdir = dir.path().to_path_buf();
+    let inherited = std::env::var_os("PATH").expect("the test process has a PATH");
+    assert_eq!(
+        u37_path_judge("ls", &[("PATH".into(), inherited.to_string_lossy().into_owned())], &workdir),
+        None,
+        "precondition: the test process's own PATH is clean"
+    );
+    let prepend = |first: PathBuf| {
+        let paths = std::iter::once(first).chain(std::env::split_paths(&inherited));
+        std::env::join_paths(paths).unwrap().to_string_lossy().into_owned()
+    };
+    let creates = Arc::new(Mutex::new(Vec::new()));
+    let adapter = AcpTerminalAdapter::new(recording_gateway(Arc::clone(&creates)), acp::SessionId::new("s"));
+    let request = |path: Option<&str>, approved_without_grant: bool| {
+        let mut request = background_request(workdir.join("out.log"));
+        request.command = "ls".into();
+        request.working_directory = workdir.clone();
+        request.approved_without_grant = approved_without_grant;
+        request.env = HashMap::from([("FOO".to_owned(), "1".to_owned())]);
+        if let Some(path) = path {
+            request.env.insert("PATH".to_owned(), path.to_owned());
+        }
+        request
+    };
+    let last_create = || creates.lock().unwrap().last().cloned().map(sorted);
+    let expected = |request: &TerminalRunRequest| {
+        sorted(fuigo_tools::sandbox_launch::client_terminal_env(request.env.clone()))
+    };
+
+    // No override: allowed, and the request's own variables go out unchanged (nothing added on Unix).
+    let clean = request(None, true);
+    let want = expected(&clean);
+    #[cfg(unix)]
+    assert_eq!(want, vec![("FOO".to_owned(), "1".to_owned())]);
+    adapter.run(clean).await.expect("a clean environment runs");
+    assert_eq!(last_create(), Some(want));
+
+    // A clean session PATH: allowed, sent as it is.
+    let same = inherited.to_string_lossy().into_owned();
+    let clean = request(Some(&same), true);
+    let want = expected(&clean);
+    adapter.run(clean).await.expect("a clean session PATH runs");
+    assert_eq!(last_create(), Some(want));
+
+    for path in [prepend(PathBuf::from(".")), prepend(workdir.join("bin"))] {
+        let sent = creates.lock().unwrap().len();
+        let Err(err) = adapter.run(request(Some(&path), true)).await else {
+            panic!("{path}: a steering session PATH must be refused");
+        };
+        let local = std::io::Error::from(fuigo_tools::sandbox_launch::SandboxLaunchError::new(
+            fuigo_tools::sandbox_launch::ChildEnvSteers { name: "PATH".to_owned() },
+        ));
+        let local = ComputerError::from(local).to_string();
+        assert_eq!(err.to_string(), local, "{path}");
+        assert_eq!(creates.lock().unwrap().len(), sent, "{path}: nothing reaches the client");
+        let Err(err) = adapter.run_background(request(Some(&path), true)).await else {
+            panic!("{path}: a steering session PATH must be refused in the background too");
+        };
+        assert_eq!(err.to_string(), local, "{path}: background");
+        assert_eq!(creates.lock().unwrap().len(), sent, "{path}: nothing reaches the client from the background");
+
+        // A grant approved it: not judged, sent as it is.
+        let granted = request(Some(&path), false);
+        let want = expected(&granted);
+        adapter.run(granted).await.expect("a granted call runs");
+        assert_eq!(last_create(), Some(want), "{path}");
+    }
+}

@@ -27,9 +27,10 @@ impl AsyncTerminalRunner for AcpTerminalRunner {
             .send(
                 acp::CreateTerminalRequest::new(session_id.clone(), command)
                     .args(vec![])
+                    // u37: on Windows, the `PATH` the classifier judged (see `client_terminal_env`). A command the
+                    // user typed (bash mode) is not judged, as the local runner's counterpart does not judge it.
                     .env(
-                        request
-                            .env
+                        fuigo_tools::sandbox_launch::client_terminal_env(request.env)
                             .into_iter()
                             .map(|(name, value)| acp::EnvVariable::new(name, value))
                             .collect::<Vec<_>>(),
