@@ -2863,3 +2863,50 @@ fn u35_g12_hub_on_powershell_or_cmd_asks_without_a_grant() {
     let _shell = TestRunnerShell::set(None);
     assert!(!hub_needs_default_prompt(&access, None, false, cwd.path()), "a Unix hub approves `ls -la`");
 }
+
+/// u37: on Windows an empty `PATH` segment (a trailing `;`, as stock user `PATH`s end, or `;;`) names nothing and the
+/// child never sees it, so it does not make every command ask; a relative entry, `.` or an entry inside the work tree
+/// still does. (POSIX `/usr/bin:` still asks: [`u35_unclean_path_asks_for_every_command`].)
+#[cfg(windows)]
+#[test]
+fn u37_windows_path_empty_segments_do_not_steer() {
+    use crate::permission::exec_risk::with_inherited_env;
+    let _shell = TestRunnerShell::set(Some(fuigo_config::shell::WindowsShellFamily::GitBash));
+    let repo = repo_with_included_config("");
+    let dir = repo.path();
+    let steering = |path: &str, cmd: &str| with_inherited_env(&[("PATH", path)], || env_steering_of(cmd, dir));
+    let stock = r"C:\Windows\system32;C:\Users\u\AppData\Local\Microsoft\WindowsApps;";
+    for path in [stock, r"C:\Windows\system32;;C:\Windows", r";C:\Windows\system32"] {
+        for cmd in ["ls -la", "git status"] {
+            assert_eq!(steering(path, cmd), None, "{path:?} {cmd}: an empty segment does not steer");
+        }
+    }
+    assert!(
+        with_inherited_env(&[("PATH", stock)], || approves(Path::Ask, "ls -la", dir)),
+        "a stock Windows PATH keeps read-only `ls` approved"
+    );
+    let inside = format!(r"{};C:\Windows\system32", dir.join("bin").display());
+    for path in [r"bin;C:\Windows\system32;", r".;C:\Windows\system32", inside.as_str(), ";"] {
+        assert_eq!(steering(path, "ls -la"), Some("PATH"), "{path:?}: still asks");
+    }
+}
+
+/// u37 (round 3, Astra #1): on Windows a `PATH` is also judged as Git Bash reads it (every `;` separates, `"` dropped
+/// from each piece), so a `;` inside quotes cannot hide `.`, an empty or a work-tree entry from the classifier. A
+/// quoted entry with no `;` inside, and a trailing `;`, stay clean.
+#[cfg(windows)]
+#[test]
+fn u37_windows_path_quoted_semicolons_are_judged_as_git_bash_reads() {
+    use crate::permission::exec_risk::with_inherited_env;
+    let _shell = TestRunnerShell::set(Some(fuigo_config::shell::WindowsShellFamily::GitBash));
+    let repo = repo_with_included_config("");
+    let dir = repo.path();
+    let steering = |path: &str| with_inherited_env(&[("PATH", path)], || env_steering_of("ls -la", dir));
+    let inside = format!(r#"C:\Windows\system32;"C:\safe;{};"C:\safe"#, dir.join("bin").display());
+    for path in [r#"C:\Windows\System32;"C:\safe;.;"C:\safe;"#, r#""C:\a;;b""#, inside.as_str()] {
+        assert_eq!(steering(path), Some("PATH"), "{path:?}: Git Bash reads an entry the split_paths reading hides");
+    }
+    for path in [r#"C:\Windows\System32;"C:\Program Files\x";"#, r"C:\Windows\System32;C:\Windows;"] {
+        assert_eq!(steering(path), None, "{path:?}: still clean");
+    }
+}

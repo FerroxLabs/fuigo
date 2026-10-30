@@ -18,6 +18,20 @@ fn foreign_hold(dir: &Path) -> std::fs::File {
     file
 }
 
+/// A hold this test has dropped can outlive the drop for a moment: a process another test is starting at that instant
+/// shares every open file until it execs (close-on-exec), and the OS lock belongs to the open file. Wait that moment out
+/// instead of asserting at once.
+fn eventually(mut done: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !done() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
 fn foreign_could_take(dir: &Path) -> bool {
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -46,13 +60,13 @@ fn a_session_held_elsewhere_is_refused_and_free_once_released() {
     let error = HeldElsewhere.into_acp_error();
     assert!(format!("{error:?}").contains(HELD_ELSEWHERE), "{error:?}");
     drop(other);
-    assert!(!dir_open_elsewhere(dir.path()));
+    assert!(eventually(|| !dir_open_elsewhere(dir.path())));
     let lock = rt().block_on(acquire(dir.path())).expect("free").expect("locked");
     assert!(!foreign_could_take(dir.path()));
     // This process's own hold is not "elsewhere".
     assert!(!dir_open_elsewhere(dir.path()));
     drop(lock);
-    assert!(foreign_could_take(dir.path()));
+    assert!(eventually(|| foreign_could_take(dir.path())));
 }
 
 #[test]
@@ -64,7 +78,7 @@ fn holds_in_one_process_are_counted_and_the_last_one_releases() {
     drop(first);
     assert!(!foreign_could_take(dir.path()), "released while another hold in this process is live");
     drop(second);
-    assert!(foreign_could_take(dir.path()));
+    assert!(eventually(|| foreign_could_take(dir.path())));
     let again = rt().block_on(acquire(dir.path())).expect("again").expect("locked");
     drop(again);
 }

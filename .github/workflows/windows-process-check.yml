@@ -32,6 +32,12 @@ on:
       - 'crates/codegen/fuigo-secrets/src/child_env.rs'
       - 'crates/codegen/fuigo-shell-terminal/src/pty_session.rs'
       - 'crates/codegen/fuigo-tools/src/util/spawn.rs'
+      # 1.0.37: the Windows PATH normalizer, the child-env check shared by Fuigo's shell and
+      # editor terminals, and the classifier's Windows PATH rule (the u37_ step below).
+      - 'crates/codegen/fuigo-tools/src/sandbox_launch.rs'
+      - 'crates/codegen/fuigo-tools/src/sandbox_launch_tests.rs'
+      - 'crates/codegen/fuigo-workspace/src/permission/exec_risk.rs'
+      - 'crates/codegen/fuigo-workspace/src/permission/manager/u35_classify_tests.rs'
       - '.github/workflows/windows-process-check.yml'
   pull_request:
     paths:
@@ -61,6 +67,12 @@ on:
       - 'crates/codegen/fuigo-secrets/src/child_env.rs'
       - 'crates/codegen/fuigo-shell-terminal/src/pty_session.rs'
       - 'crates/codegen/fuigo-tools/src/util/spawn.rs'
+      # 1.0.37: the Windows PATH normalizer, the child-env check shared by Fuigo's shell and
+      # editor terminals, and the classifier's Windows PATH rule (the u37_ step below).
+      - 'crates/codegen/fuigo-tools/src/sandbox_launch.rs'
+      - 'crates/codegen/fuigo-tools/src/sandbox_launch_tests.rs'
+      - 'crates/codegen/fuigo-workspace/src/permission/exec_risk.rs'
+      - 'crates/codegen/fuigo-workspace/src/permission/manager/u35_classify_tests.rs'
       - '.github/workflows/windows-process-check.yml'
   workflow_dispatch:
 permissions:
@@ -74,8 +86,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     # A cold fuigo-shell debug test build dominates (~40 min observed on a cold
     # cache); the tty-utils suite runs first so its own failures are not hidden
-    # behind that build.
-    timeout-minutes: 60
+    # behind that build. 1.0.37: the u37 step adds two more lib test builds, and
+    # windows-11-arm ran past 60 min in its cache-save step with every step green.
+    timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: never
       CARGO_INCREMENTAL: 0
@@ -166,6 +179,23 @@ jobs:
           # A failed PTY spawn reports the Windows error code (portable-pty returns it only as text).
           cargo test --locked -p fuigo-shell-terminal --lib pty_session::tests::failed_pty_spawn_reports_the_os_error_code 2>&1 | tee process-receipts/fuigo-shell-terminal-pty-spawn.log
           grep -F 'pty_session::tests::failed_pty_spawn_reports_the_os_error_code ... ok' process-receipts/fuigo-shell-terminal-pty-spawn.log
+      # 1.0.37: empty Windows PATH segments. The classifier's real PATH rule on Windows and the
+      # cross-check of both PATH parsers against std::env::split_paths are cfg(windows) and run
+      # only here; Linux runs the platform-parameterised rest.
+      - name: fuigo-tools and fuigo-workspace u37 Windows PATH tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p process-receipts
+          cargo test --locked -p fuigo-tools --lib u37_ 2>&1 | tee process-receipts/fuigo-tools-u37.log
+          grep -E '^test result: ok\. [1-9][0-9]* passed; 0 failed' process-receipts/fuigo-tools-u37.log
+          grep -F 'u37_windows_path_drops_only_empty_segments ... ok' process-receipts/fuigo-tools-u37.log
+          grep -F 'u37_client_terminal_env_is_judged_as_sent ... ok' process-receipts/fuigo-tools-u37.log
+          grep -F 'u37_git_bash_reads_every_semicolon ... ok' process-receipts/fuigo-tools-u37.log
+          cargo test --locked -p fuigo-workspace --lib u37_ 2>&1 | tee process-receipts/fuigo-workspace-u37.log
+          grep -E '^test result: ok\. [1-9][0-9]* passed; 0 failed' process-receipts/fuigo-workspace-u37.log
+          grep -F 'u37_windows_path_empty_segments_do_not_steer ... ok' process-receipts/fuigo-workspace-u37.log
+          grep -F 'u37_windows_path_quoted_semicolons_are_judged_as_git_bash_reads ... ok' process-receipts/fuigo-workspace-u37.log
       # The FluxRouter cache opt-out, proved on Windows. Added at release-branch
       # level for 1.0.18: it belongs to no cluster, and until now the ONLY run of
       # this file was the release gate in release.yml, i.e. after the tag. The

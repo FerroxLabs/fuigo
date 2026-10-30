@@ -1254,8 +1254,21 @@ fn outside_tree(entry: &Path, dir: &Path) -> bool {
 }
 
 /// A `PATH` value whose every entry ([`std::env::split_paths`]) is non-empty, absolute and outside the work tree.
+///
+/// u37: judged as the shell runner sets it on the child ([`fuigo_tools::sandbox_launch::child_path_value`]): on
+/// Windows without its empty segments (a trailing `;`), which the child never sees; on Unix as it is.
+///
+/// u37 (round 3): on Windows every entry must pass by both readings of the list: `split_paths`'s, where a quoted run
+/// may hold a `;`, and Git Bash's, where every `;` separates
+/// ([`fuigo_tools::sandbox_launch::windows_path_entries_as_git_bash_reads`]). A quoted `;` cannot hide `.` or an
+/// empty entry from the check. Unix has one reading and is judged as before.
 fn path_list_is_clean(path: &str, dir: &Path) -> bool {
-    std::env::split_paths(path).all(|entry| !entry.to_string_lossy().contains('\u{FFFD}') && outside_tree(&entry, dir))
+    let path = fuigo_tools::sandbox_launch::child_path_value(path);
+    let clean = |entry: &Path| !entry.to_string_lossy().contains('\u{FFFD}') && outside_tree(entry, dir);
+    std::env::split_paths(path.as_ref()).all(|entry| clean(&entry))
+        && (!cfg!(windows)
+            || fuigo_tools::sandbox_launch::windows_path_entries_as_git_bash_reads(&path)
+                .all(|entry| clean(Path::new(&entry))))
 }
 
 /// A non-empty value of a [`USER_PATH_ENV`] variable that passes its [`UserValue`] check.

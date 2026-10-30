@@ -577,3 +577,258 @@ fn u35_t1_runner_refuses_an_ungranted_command_outside_a_trusted_folder() {
     assert!(no_rule.to_string().contains("no rule to check the folder"), "{no_rule}");
     assert!(super::check_runner_trust_with(None, "ls", trusted.path(), None, false).is_ok());
 }
+
+/// u37: Windows `PATH` vectors, as (inherited value, value the child runs under). Shared by every u37 test here.
+const U37_PATH_VECTORS: &[(&str, &str)] = &[
+    (
+        r"C:\Windows\system32;C:\Users\u\AppData\Local\Microsoft\WindowsApps;",
+        r"C:\Windows\system32;C:\Users\u\AppData\Local\Microsoft\WindowsApps",
+    ),
+    (r"C:\a;;C:\b", r"C:\a;C:\b"),
+    (r";C:\a;;;C:\b;;", r"C:\a;C:\b"),
+    // A segment of only quotes is empty.
+    (r#"C:\a;"";C:\b"#, r"C:\a;C:\b"),
+    (r#"C:\a;"""";C:\b;"#, r"C:\a;C:\b"),
+    // A `;` inside quotes does not separate; an unbalanced quote runs to the end, as Windows reads it.
+    (r#""C:\x;;y";C:\b;"#, r#""C:\x;;y";C:\b"#),
+    (r#"C:\a;"C:\b;"#, r#"C:\a;"C:\b;"#),
+    (r#"C:\a;"C:\b;;"#, r#"C:\a;"C:\b;;"#),
+    (";;", ""),
+    // Relative, `.` and other entries are kept: the classifier judges them (and asks).
+    (r"bin;.;C:\a", r"bin;.;C:\a"),
+    (r"C:\a;C:\b", r"C:\a;C:\b"),
+];
+
+/// The entries of a Windows `PATH` as [`std::env::split_paths`] yields them on Windows
+/// ([`fuigo_config::shell::windows_path_entries`]; on a Windows host also checked against `split_paths` itself).
+fn u37_entries(value: &str) -> Vec<String> {
+    let entries = fuigo_config::shell::windows_path_entries(value);
+    #[cfg(windows)]
+    assert_eq!(
+        entries,
+        std::env::split_paths(value).map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+        "{value:?}"
+    );
+    entries
+}
+
+/// u37: a Windows `PATH` loses only its empty segments (a trailing `;`, `;;`, a segment of only quotes); every other
+/// entry is kept as written, in order, read by the `split_paths` rule; a clean value comes back borrowed.
+#[test]
+fn u37_windows_path_drops_only_empty_segments() {
+    use super::windows_path_without_empty_segments as clean;
+    for &(value, want) in U37_PATH_VECTORS {
+        let got = clean(value);
+        assert_eq!(got, want, "{value:?}");
+        let kept: Vec<String> = u37_entries(value).into_iter().filter(|e| !e.is_empty()).collect();
+        assert_eq!(u37_entries(&got), if got.is_empty() { vec![String::new()] } else { kept }, "{value:?}");
+        assert_eq!(matches!(got, std::borrow::Cow::Borrowed(_)), value == want, "{value:?}");
+    }
+}
+
+/// u37 (round 3): Git Bash reads a Windows `PATH` split at every `;`, quoted or not, each piece without its `"`; it
+/// reads the same entries as `split_paths` unless a quoted run holds a `;`.
+#[test]
+fn u37_git_bash_reads_every_semicolon() {
+    let read = |value: &str| super::windows_path_entries_as_git_bash_reads(value).collect::<Vec<_>>();
+    let hidden = r#"C:\Windows\System32;"C:\safe;.;"C:\safe"#;
+    assert_eq!(read(hidden), [r"C:\Windows\System32", r"C:\safe", ".", r"C:\safe"]);
+    assert_eq!(u37_entries(hidden), [r"C:\Windows\System32", r"C:\safe;.;C:\safe"]);
+    assert_eq!(read(r#""C:\a;;b""#), [r"C:\a", "", "b"]);
+    for plain in [r#"C:\a;"C:\Program Files\x""#, r"C:\a;C:\b", r"C:\a;"] {
+        assert_eq!(read(plain), u37_entries(plain), "{plain:?}");
+    }
+}
+
+fn u37_os(s: &str) -> OsString {
+    OsString::from(s)
+}
+
+/// The `PATH` (any spelling) of a whole environment, one entry expected.
+fn u37_path_of(env: &[(OsString, OsString)]) -> OsString {
+    let paths: Vec<&OsString> =
+        env.iter().filter(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case("PATH")).map(|(_, v)| v).collect();
+    assert_eq!(paths.len(), 1, "one PATH in {env:?}");
+    paths[0].clone()
+}
+
+fn u37_edits_of(cmd: &tokio::process::Command) -> Vec<(OsString, Option<OsString>)> {
+    cmd.as_std().get_envs().map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string()))).collect()
+}
+
+/// u37: on Windows the child's `PATH`, in whichever spelling it is inherited or set, has no empty segment once the
+/// runner normalizes it, and the environment the judge reads ([`super::child_env_for`]) holds that same value; a
+/// clean value adds no edit. Unix is untouched: there an empty entry is the current directory, and the classifier
+/// still asks for it.
+#[test]
+fn u37_child_path_has_no_empty_segment_on_windows() {
+    use crate::util::shell_env_policy::EnvPlatform;
+    for &(value, want) in U37_PATH_VECTORS {
+        for (inherited, edit) in [
+            (vec![(u37_os("Path"), u37_os(value))], None),
+            (vec![(u37_os("PATH"), u37_os(value))], None),
+            (vec![(u37_os("Path"), u37_os(r"C:\old"))], Some((u37_os("PATH"), u37_os(value)))),
+        ] {
+            let mut cmd = tokio::process::Command::new("cmd");
+            if let Some((name, value)) = &edit {
+                cmd.env(name, value);
+            }
+            let before = u37_edits_of(&cmd);
+            super::normalize_child_path_for(&mut cmd, inherited.clone(), EnvPlatform::Windows);
+            if value == want {
+                assert_eq!(u37_edits_of(&cmd), before, "{value:?}: a clean PATH adds no edit");
+            }
+            let env = super::child_env_for(inherited, u37_edits_of(&cmd), std::iter::empty(), EnvPlatform::Windows);
+            assert_eq!(u37_path_of(&env), u37_os(want), "{value:?}");
+        }
+    }
+    let mut cmd = tokio::process::Command::new("sh");
+    super::normalize_child_path_for(&mut cmd, vec![(u37_os("PATH"), u37_os("/usr/bin:"))], EnvPlatform::Unix);
+    super::normalize_child_path_for(&mut cmd, vec![(u37_os("PATH"), u37_os(r"C:\a;"))], EnvPlatform::Unix);
+    assert!(u37_edits_of(&cmd).is_empty(), "Unix PATH is left as it is");
+    #[cfg(unix)]
+    assert_eq!(super::child_path_value("/usr/bin:"), "/usr/bin:");
+}
+
+/// u37: a `PATH` that is not Unicode is left as it is on Windows (no edit), and the judge still reads it lossily,
+/// so the classifier (`U+FFFD` is never clean) asks.
+#[cfg(unix)]
+#[test]
+fn u37_non_unicode_path_is_left_as_it_is() {
+    use crate::util::shell_env_policy::EnvPlatform;
+    use std::os::unix::ffi::OsStringExt;
+    let raw = OsString::from_vec(b"C:\\a;\xff;".to_vec());
+    let mut cmd = tokio::process::Command::new("cmd");
+    super::normalize_child_path_for(&mut cmd, vec![(u37_os("Path"), raw.clone())], EnvPlatform::Windows);
+    assert!(u37_edits_of(&cmd).is_empty());
+    let env = super::client_terminal_env_for(Vec::new(), vec![(u37_os("Path"), raw.clone())], EnvPlatform::Windows);
+    assert!(env.is_empty(), "{env:?}");
+    let env = super::child_env_for(vec![(u37_os("Path"), raw)], Vec::new(), std::iter::empty(), EnvPlatform::Windows);
+    let judged = super::judge_child_env_for(&env, "ls", Path::new("C:\\w"), u37_judge, EnvPlatform::Windows);
+    assert_eq!(judged.as_deref(), Some("PATH"));
+}
+
+/// u37: the `terminal/create` env an ACP client gets. On Windows, a `PATH` (inherited or in the request, any
+/// spelling) with an empty segment is sent normalized, as one `PATH` entry; a clean one adds nothing and leaves the
+/// request's own variables as they are. Unix never adds anything.
+#[test]
+fn u37_client_terminal_env_carries_the_judged_path() {
+    use super::client_terminal_env_for as client_env;
+    use crate::util::shell_env_policy::EnvPlatform;
+    let own = || vec![("FOO".to_owned(), "1".to_owned())];
+    for &(value, want) in U37_PATH_VECTORS {
+        let inherited = vec![(u37_os("Path"), u37_os(value)), (u37_os("HOME"), u37_os(r"C:\u"))];
+        let env = client_env(own(), inherited.clone(), EnvPlatform::Windows);
+        if value == want {
+            assert_eq!(env, own(), "{value:?}: a clean PATH adds nothing");
+        } else {
+            assert_eq!(env, vec![("FOO".to_owned(), "1".to_owned()), ("Path".to_owned(), want.to_owned())], "{value:?}");
+        }
+        for name in ["PATH", "path"] {
+            let request = vec![(name.to_owned(), value.to_owned())];
+            let env = client_env(request.clone(), inherited.clone(), EnvPlatform::Windows);
+            let paths: Vec<&(String, String)> = env.iter().filter(|(k, _)| k.eq_ignore_ascii_case("PATH")).collect();
+            assert_eq!(paths.len(), 1, "{value:?}: {env:?}");
+            assert_eq!(paths[0].1, want, "{value:?}");
+            if value == want {
+                assert_eq!(env, request, "{value:?}: unchanged");
+            }
+        }
+        assert_eq!(client_env(own(), inherited, EnvPlatform::Unix), own(), "{value:?}: Unix adds nothing");
+    }
+    assert_eq!(client_env(own(), Vec::new(), EnvPlatform::Windows), own(), "no PATH: nothing added");
+}
+
+/// A stand-in for the classifier's `PATH` rule (`fuigo_workspace::permission::exec_risk::path_list_is_clean`, which
+/// on Windows runs the same normalizer first): any empty entry, or a lossy `U+FFFD`, steers.
+fn u37_judge(_command: &str, env: &[(String, String)], _dir: &Path) -> Option<String> {
+    let path = &env.iter().find(|(name, _)| name == "PATH")?.1;
+    u37_entries(path).iter().any(|e| e.is_empty() || e.contains('\u{FFFD}')).then(|| "PATH".to_owned())
+}
+
+/// u37: the local runner normalizes and then judges ([`super::normalize_child_path`] before `judge_spawn_env`), so
+/// a stock Windows `PATH` ending in `;` is accepted by a judge that refuses an empty entry, which would refuse the
+/// same environment judged before normalizing. A `PATH` of only separators (`;;`) normalizes to empty, and an empty
+/// `PATH` still steers.
+#[test]
+fn u37_runner_normalizes_then_judges() {
+    use crate::util::shell_env_policy::EnvPlatform;
+    let dir = Path::new(r"C:\w");
+    for &(value, want) in U37_PATH_VECTORS {
+        if value == want {
+            continue;
+        }
+        let expected = if want.is_empty() { Some("PATH") } else { None };
+        let inherited = vec![(u37_os("Path"), u37_os(value))];
+        let mut cmd = tokio::process::Command::new("cmd");
+        let raw = super::child_env_for(inherited.clone(), u37_edits_of(&cmd), std::iter::empty(), EnvPlatform::Windows);
+        assert_eq!(super::judge_child_env_for(&raw, "ls", dir, u37_judge, EnvPlatform::Windows).as_deref(), Some("PATH"));
+        super::normalize_child_path_for(&mut cmd, inherited.clone(), EnvPlatform::Windows);
+        let env = super::child_env_for(inherited, u37_edits_of(&cmd), std::iter::empty(), EnvPlatform::Windows);
+        assert_eq!(
+            super::judge_child_env_for(&env, "ls", dir, u37_judge, EnvPlatform::Windows).as_deref(),
+            expected,
+            "{value:?}"
+        );
+    }
+}
+
+/// A stand-in for the classifier's whole `PATH` rule on either platform: an empty or relative entry, or one inside
+/// the directory the command runs in, steers.
+fn u37_steer_judge(_command: &str, env: &[(String, String)], dir: &Path) -> Option<String> {
+    let path = &env.iter().find(|(name, _)| name == "PATH")?.1;
+    let windows = path.contains('\\');
+    let entries: Vec<String> =
+        if windows { u37_entries(path) } else { path.split(':').map(str::to_owned).collect() };
+    let dir = dir.to_string_lossy();
+    let absolute = |e: &str| {
+        if windows { e.get(1..3) == Some(":\\") } else { e.starts_with('/') }
+    };
+    entries.iter().any(|e| !absolute(e) || e.starts_with(dir.as_ref())).then(|| "PATH".to_owned())
+}
+
+/// u37 (round 2): a client terminal (ACP `terminal/create`) gets the local runner's check, on the environment it is
+/// sent: a session `PATH` that puts `.` or a folder of the workspace in front is refused for a call approved without
+/// a grant, and sent as it is for one a grant approved; with no override nothing is added (Unix) or only the
+/// normalized `PATH` is (Windows), and the call is allowed.
+#[test]
+fn u37_client_terminal_env_is_judged_as_sent() {
+    use super::{ClientTerminalCheck, checked_client_terminal_env_with as checked};
+    // The runner shell is pinned: on a Windows host it would otherwise be detected (pwsh first) and refuse first.
+    let _shell = super::TestRunnerShell::set(Some(fuigo_config::shell::WindowsShellFamily::GitBash));
+    use crate::util::shell_env_policy::EnvPlatform;
+    let steers = |result: Result<Vec<(String, String)>, super::SandboxLaunchError>| {
+        let err = result.expect_err("a steering PATH must be refused");
+        assert_eq!(err.downcast_ref::<super::ChildEnvSteers>().map(|e| e.name.as_str()), Some("PATH"), "{err}");
+    };
+    let own = || vec![("FOO".to_owned(), "1".to_owned())];
+    let with_path = |path: &str| vec![("FOO".to_owned(), "1".to_owned()), ("PATH".to_owned(), path.to_owned())];
+    let cases = [
+        (EnvPlatform::Windows, r"C:\repo", r"C:\Windows\System32;", r"C:\Windows\System32", [r".;C:\Windows\System32;", r"C:\repo\bin;C:\Windows\System32"]),
+        (EnvPlatform::Unix, "/repo", "/usr/bin:/bin", "/usr/bin:/bin", [".:/usr/bin", "/repo/bin:/usr/bin"]),
+    ];
+    for (platform, dir, inherited_path, sent_path, overrides) in cases {
+        let dir = Path::new(dir);
+        let check = Some(ClientTerminalCheck { command: "ls", dir, request_cwd: None });
+        let inherited = || vec![(u37_os("PATH"), u37_os(inherited_path)), (u37_os("HOME"), u37_os("h"))];
+        // No override: allowed; Unix sends the request's variables byte for byte, Windows adds only the normalized PATH.
+        let sent = checked(own(), inherited(), platform, check, Some(u37_steer_judge)).expect("a clean PATH is allowed");
+        let want = if inherited_path == sent_path { own() } else { with_path(sent_path) };
+        assert_eq!(sent, want, "{platform:?}");
+        // A clean session PATH: allowed, sent unchanged.
+        let sent = checked(with_path(sent_path), inherited(), platform, check, Some(u37_steer_judge));
+        assert_eq!(sent.expect("a clean session PATH is allowed"), with_path(sent_path), "{platform:?}");
+        for path in overrides {
+            // The judge passes Fuigo's own environment: only the override steers.
+            steers(checked(with_path(path), inherited(), platform, check, Some(u37_steer_judge)));
+            // A grant approved the call: nothing is judged, the request is sent (normalized on Windows).
+            let sent = checked(with_path(path), inherited(), platform, None, Some(u37_steer_judge)).expect("granted");
+            let path = if platform == EnvPlatform::Windows {
+                super::windows_path_without_empty_segments(path).into_owned()
+            } else {
+                path.to_owned()
+            };
+            assert_eq!(sent, with_path(&path), "{platform:?}");
+        }
+    }
+}
