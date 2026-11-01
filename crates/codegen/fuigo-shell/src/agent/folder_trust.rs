@@ -37,10 +37,55 @@ pub(crate) fn revoke_folder_trust(cwd: &Path) -> fuigo_workspace::folder_trust::
     fuigo_workspace::folder_trust::revoke_folder_trust_store(cwd)
 }
 
+/// How long a session's first turn waits for a trust reply already in flight.
+pub(crate) const TRUST_REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Trust requests in flight, by workspace key, in this process.
+static TRUST_REQUESTS_IN_FLIGHT: std::sync::LazyLock<
+    tokio::sync::watch::Sender<std::collections::HashMap<std::path::PathBuf, usize>>,
+> = std::sync::LazyLock::new(|| tokio::sync::watch::channel(Default::default()).0);
+
+/// One trust request in flight for a workspace, from before the session is handed back until the reply is settled.
+/// Dropped on every exit of the request task, and after the grant is stored on the grant path.
+#[must_use]
+pub(crate) struct TrustRequestInFlight(std::path::PathBuf);
+
+impl TrustRequestInFlight {
+    pub(crate) fn new(key: std::path::PathBuf) -> Self {
+        TRUST_REQUESTS_IN_FLIGHT.send_modify(|requests| *requests.entry(key.clone()).or_default() += 1);
+        Self(key)
+    }
+}
+
+impl Drop for TrustRequestInFlight {
+    fn drop(&mut self) {
+        TRUST_REQUESTS_IN_FLIGHT.send_modify(|requests| {
+            if let Some(count) = requests.get_mut(&self.0) {
+                *count -= 1;
+                if *count == 0 {
+                    requests.remove(&self.0);
+                }
+            }
+        });
+    }
+}
+
+/// Wait until no trust request is in flight for `cwd`'s workspace, up to `limit`. A timeout just continues.
+pub(crate) async fn wait_for_trust_reply(cwd: &Path, limit: std::time::Duration) {
+    let key = workspace_key(cwd);
+    let mut requests = TRUST_REQUESTS_IN_FLIGHT.subscribe();
+    let settled = tokio::time::timeout(limit, async {
+        requests.wait_for(|requests| !requests.contains_key(&key)).await.map(|_| ())
+    });
+    let _ = settled.await;
+}
+
 /// Whether `cwd`'s project settings (MCP/LSP servers, hooks, workflows, plugins, `.envrc`, permission rules,
 /// instructions, skills) may load: the folder is Trusted ([`fuigo_workspace::folder_trust::decide`], not
 /// interactive). Fail closed: an undecided, Legacy, declined or key-less folder is not.
 pub(crate) fn project_scope_allowed(cwd: &Path) -> bool {
+    #[cfg(test)]
+    VERDICT_READS.with(|reads| reads.set(reads.get() + 1));
     #[cfg(test)]
     if let Some(forced) = test_override(cwd) {
         return forced;
@@ -98,6 +143,12 @@ pub(crate) fn agent_hooks_allowed(trusted: impl FnOnce() -> bool) -> bool {
 #[cfg(test)]
 static TEST_OVERRIDES: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<std::path::PathBuf, bool>>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+thread_local! {
+    /// Reads of [`project_scope_allowed`] on this thread.
+    pub(crate) static VERDICT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 fn test_override(cwd: &Path) -> Option<bool> {

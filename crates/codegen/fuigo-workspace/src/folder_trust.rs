@@ -13,14 +13,15 @@
 //! 3. A relative `FUIGO_HOME`, no home, or an unreadable store → Untrusted.
 //! 4. A "no" from this process ([`decline_folder_trust_key`], `/untrust`) → Untrusted, whatever the store says.
 //! 5. A stored "no" covering the key → Untrusted (it beats the config list, so `/untrust` always revokes).
-//! 6. `[folder_trust] trusted_folders` in the user's own config (or managed config) covering the key → Trusted.
-//! 7. A stored "yes" at the current consent ([`crate::trust::CONSENT_V`]) → Trusted.
-//! 8. A stored "yes" from before 1.0.35 (Legacy) → asked once more (`Prompt(Upgrade)`), else Untrusted; no record →
+//! 6. A grant for this process only ([`grant_folder_trust_key_for_process`]) → Trusted. Never saved.
+//! 7. `[folder_trust] trusted_folders` in the user's own config (or managed config) covering the key → Trusted.
+//! 8. A stored "yes" at the current consent ([`crate::trust::CONSENT_V`]) → Trusted.
+//! 9. A stored "yes" from before 1.0.35 (Legacy) → asked once more (`Prompt(Upgrade)`), else Untrusted; no record →
 //!    `Prompt(New)`, else Untrusted. While a question is pending the folder is Untrusted.
 //!
 //! [`dir_trust`] caches the command-side verdict per canonical directory, validated by a fingerprint of the trust
-//! inputs (store, user and managed config, worktree registry, the switch, this process's declines); errors and
-//! pending questions are never cached.
+//! inputs (store, user and managed config, worktree registry, the switch, this process's declines and grants); errors
+//! and pending questions are never cached.
 
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
@@ -353,13 +354,16 @@ fn warn_disabled_once() {
     WARNED.call_once(|| tracing::warn!("{DISABLED_WARNING}"));
 }
 
-// ── This process's declines ───────────────────────────────────────────────────────────────────────
+// ── This process's declines and grants ────────────────────────────────────────────────────────────
 
 /// Keys the user declined in this process (`n`, `/untrust`). A decline beats the store and the config list for this
-/// process even when it could not be saved (Grok d2 M6). There is no process-local grant: a "yes" that could not be
-/// saved leaves the folder untrusted.
+/// process even when it could not be saved (Grok d2 M6). A "yes" that could not be saved leaves the folder untrusted:
+/// it never falls back to [`PROCESS_GRANTS`].
 static PROCESS_DECLINES: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 static DECLINE_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Keys a GUI client trusted for this process only (`"duration":"process"`). Held only here, and a "no" from this
+/// process or the store beats it.
+static PROCESS_GRANTS: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 fn set_process_decline(key: &Path, declined: bool) {
     let changed = if declined {
@@ -372,13 +376,25 @@ fn set_process_decline(key: &Path, declined: bool) {
     }
 }
 
+fn set_process_grant(key: &Path, granted: bool) {
+    let changed = if granted {
+        PROCESS_GRANTS.lock().insert(key.to_path_buf())
+    } else {
+        PROCESS_GRANTS.lock().remove(key)
+    };
+    if changed {
+        DECLINE_GENERATION.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 /// A trust change this process made (or saw): every cached verdict is re-derived on its next use.
 pub fn note_trust_changed() {
     DECLINE_GENERATION.fetch_add(1, Ordering::AcqRel);
 }
 
 /// The current trust-input fingerprint generation, for callers that cache something derived from trust (the
-/// permission manager's compiled project policy): changes whenever any trust input or this process's declines change.
+/// permission manager's compiled project policy): changes whenever any trust input or this process's declines or grants
+/// change.
 pub fn trust_generation() -> u64 {
     use std::hash::{Hash, Hasher};
     let fp = fingerprint();
@@ -439,6 +455,9 @@ fn decide_with(path: &Path, key: &Path, interactive: bool, inputs: &TrustInputs)
     let coverage = store.coverage(path, key);
     if coverage == Coverage::Declined {
         return TrustDecision::Untrusted(UntrustedReason::Declined(key_buf()));
+    }
+    if PROCESS_GRANTS.lock().contains(key) {
+        return TrustDecision::Trusted;
     }
     if inputs.config_keys.iter().any(|k| k == key) {
         return TrustDecision::Trusted;
@@ -632,8 +651,10 @@ pub enum PersistStatus {
     /// Written to `trusted_folders.toml`.
     Durable,
     /// The store was read (or is missing) but the lock or write failed (e.g. `--sandbox` denies writes under the
-    /// home). Nothing was published, and the folder stays untrusted (there is no process-local grant).
+    /// home). Nothing was published, and the folder stays untrusted (it never falls back to a process grant).
     NotSaved { error: std::io::Error },
+    /// The client asked for this process only ([`grant_folder_trust_key_for_process`]): nothing was written.
+    ProcessOnly,
 }
 
 /// Result of an explicit grant (`--trust`, the trust question, `/trust`).
@@ -659,6 +680,10 @@ impl std::fmt::Display for GrantOutcome {
                  Check that your Fuigo home ($FUIGO_HOME, default ~/.fuigo) is writable, \
                  then run `fuigo --trust` in this folder."
             ),
+            Self::Granted {
+                persist: PersistStatus::ProcessOnly,
+                ..
+            } => write!(f, "folder trust holds for this process only"),
             Self::Refused { reason } => write!(f, "{reason}"),
             Self::Granted { .. } | Self::AlreadyDurable { .. } => write!(f, "folder trust was saved"),
         }
@@ -670,9 +695,9 @@ impl std::error::Error for GrantOutcome {}
 /// How a gate should treat a [`GrantOutcome`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrantResolution {
-    /// Durable, already durable, or auto-trusted (inert build): the folder is trusted.
+    /// Durable, already durable, held for this process, or auto-trusted (inert build): the folder is trusted.
     Trusted,
-    /// Nothing durable was recorded: the folder is not trusted.
+    /// Nothing was recorded: the folder is not trusted.
     Unrecorded,
 }
 
@@ -681,7 +706,7 @@ impl GrantOutcome {
     pub fn resolution(&self) -> GrantResolution {
         match self {
             Self::Granted {
-                persist: PersistStatus::Durable,
+                persist: PersistStatus::Durable | PersistStatus::ProcessOnly,
                 ..
             }
             | Self::AlreadyDurable { .. }
@@ -696,7 +721,7 @@ impl GrantOutcome {
         }
     }
 
-    /// True only when the grant answers the gate durably (or the build is inert).
+    /// True only when the grant answers the gate: durably, for this process, or because the build is inert.
     #[must_use]
     pub fn dismisses_gate(&self) -> bool {
         matches!(self.resolution(), GrantResolution::Trusted)
@@ -735,6 +760,32 @@ pub fn grant_folder_trust(cwd: &Path) -> GrantOutcome {
 /// re-derive [`trust_key`].
 pub fn grant_folder_trust_key(key: &Path) -> GrantOutcome {
     checked_grant(TrustStore::default_path(), key)
+}
+
+/// Trust exactly the key the user was shown for this process only, when the client asks for that
+/// (`"duration":"process"`). Nothing is written. It passes the same checks as a durable grant, and it is refused where
+/// the decision would not honour it (an unread store or no store home leaves every folder untrusted). A "no" from this
+/// process or the store beats it in [`decide`]; [`decline_folder_trust_key`] removes it.
+pub fn grant_folder_trust_key_for_process(key: &Path) -> GrantOutcome {
+    if let Some(refused) = precheck_grant(key) {
+        return refused;
+    }
+    let store = TrustStore::load();
+    if !store.disk_readable() {
+        return GrantOutcome::Refused {
+            reason: GrantRefuse::Unreadable,
+        };
+    }
+    if !store.has_store_path() {
+        return GrantOutcome::Refused {
+            reason: GrantRefuse::NoHome,
+        };
+    }
+    set_process_grant(key, true);
+    GrantOutcome::Granted {
+        key: key.to_path_buf(),
+        persist: PersistStatus::ProcessOnly,
+    }
 }
 
 /// [`grant_folder_trust_key`] against the store at `store_home.join(TRUST_FILE_NAME)` (tests, and callers with an
@@ -855,6 +906,7 @@ pub fn persist_trust(store: &mut TrustStore, key: &Path) -> GrantOutcome {
 /// save error when the "no" could not be saved (the caller tells the user: untrusted here, not saved).
 pub fn decline_folder_trust_key(key: &Path) -> Result<(), std::io::Error> {
     set_process_decline(key, true);
+    set_process_grant(key, false);
     if folder_trust_inert() {
         return Ok(());
     }

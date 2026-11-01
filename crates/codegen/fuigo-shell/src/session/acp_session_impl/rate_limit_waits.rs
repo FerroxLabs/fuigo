@@ -116,6 +116,7 @@ impl RateLimitWaitBudget {
         self.state.is_some()
     }
 
+    #[cfg(test)]
     pub(crate) fn attempts_used(&self) -> u32 {
         self.state.as_ref().map_or(0, |state| state.attempts)
     }

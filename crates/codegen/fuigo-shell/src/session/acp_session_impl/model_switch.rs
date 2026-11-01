@@ -351,7 +351,11 @@ impl SessionActor {
         let mut new_prompt_context = new_agent.prompt_context().clone();
         new_prompt_context.normalize_for_persistence();
         self.abort_and_clear_prefire().await;
+        let list_was_withheld = !self.instructions_built_trusted.get();
+        let rebuilt_trusted = new_agent.built_project_trusted();
         *self.agent.borrow_mut() = new_agent;
+        self.instructions_built_trusted.set(rebuilt_trusted);
+        self.withheld_pending.set(!rebuilt_trusted);
         // The agent's own inline hooks belong to the definition: swap them with it, and tell an open hooks view
         self.replace_agent_inline_hooks();
         {
@@ -465,12 +469,34 @@ impl SessionActor {
         {
             let mut conversation = self.chat_state_handle.get_conversation().await;
             let _ = replace_or_insert_system_head(&mut conversation, &new_system_prompt);
+            // A head built without project files is rebuilt whole: at zero turns no user text exists, and the insert below
+            // adds this agent's full set, or its prefix holds it. A trusted head keeps today's bytes.
+            let head_withheld = list_was_withheld
+                || conversation
+                    .iter()
+                    .any(ConversationItem::project_files_withheld);
+            if head_withheld && self.startup_hints.inherited_prefix_len.is_none() {
+                conversation.retain(|item| !is_project_instructions(item));
+            }
             let drop_startup_skill_reminder = false;
             Self::rewrite_zero_turn_prefix(
                 &mut conversation,
                 new_user_prefix,
                 drop_startup_skill_reminder,
             );
+            // A pin keeps its items, so a reminder agent's pinned user-level item stops the insert below: the rewritten head
+            // keeps the bit and delivery fills that item in place. A prefix agent's rewritten head already holds its rules,
+            // unless it was rendered from an empty workspace set: then the rules are still owed.
+            let pinned_reminder_agent = self.startup_hints.inherited_prefix_len.is_some()
+                && self.agent.borrow().agents_md_user_reminder().is_some();
+            if (!rebuilt_trusted
+                || (head_withheld
+                    && (pinned_reminder_agent
+                        || self.withheld_instructions().workspace_rules.is_empty())))
+                && let Some(prefix) = conversation.get_mut(1)
+            {
+                prefix.mark_project_files_withheld();
+            }
             if !conversation_has_project_instructions(&conversation)
                 && let Some(agents_md_reminder) = self.agent.borrow().agents_md_user_reminder()
             {
@@ -481,12 +507,19 @@ impl SessionActor {
                 );
             }
             self.inject_baseline_skill_reminder(&mut conversation).await;
+            if rebuilt_trusted {
+                self.head_holder_owed.set(false);
+            }
+            let list_current = rebuilt_trusted
+                && !conversation.iter().any(ConversationItem::project_files_withheld);
+            self.instructions_built_trusted.set(list_current);
+            self.withheld_pending.set(!list_current);
             self.chat_state_handle.replace_conversation(conversation);
         }
-        save_prompt_context(&self.session_info, &new_prompt_context);
-        save_system_prompt(&self.session_info, &new_system_prompt);
         let snapshot = self.chat_state_handle.get_conversation().await;
         persist_chat_history_jsonl_sync(&self.session_info, &snapshot);
+        save_prompt_context(&self.session_info, &new_prompt_context);
+        save_system_prompt(&self.session_info, &new_system_prompt);
         self.note_history_not_rewritten("the new agent's instructions")
             .await;
         self.mcp_reminder_dirty

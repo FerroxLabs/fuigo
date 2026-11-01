@@ -450,8 +450,10 @@ impl SuppressReason {
 }
 /// Splice the preserved prefix (`conversation[0..prefix_len]`) onto the compacted suffix, dropping the suffix's leading System.
 /// If the prefix already has an AGENTS.md item, drop the suffix's re-injected AGENTS.md too (else the model sees it twice).
+/// A tagged item outside the prefix is a folder-trust delivery, which holds more than the prefix does, so it keeps the
+/// fresh copy. While a head is withheld only the tag counts: a user message can carry the legacy text.
 /// Returns `Err(compacted_history)` unchanged when `prefix_len` is 0 or out of range.
-fn preserve_inherited_prefix(
+pub(super) fn preserve_inherited_prefix(
     conversation: &[ConversationItem],
     compacted_history: Vec<ConversationItem>,
     prefix_len: usize,
@@ -460,7 +462,16 @@ fn preserve_inherited_prefix(
         return Err(compacted_history);
     }
     let inherited = &conversation[..prefix_len];
-    let drop_reinjected_agents_md = inherited.iter().any(is_project_instructions);
+    let tagged = |item: &ConversationItem| {
+        matches!(item, ConversationItem::User(user)
+            if user.synthetic_reason == Some(fuigo_sampling_types::SyntheticReason::ProjectInstructions))
+    };
+    let prefix_holds_reminder = if conversation.iter().any(ConversationItem::project_files_withheld) {
+        inherited.iter().any(tagged)
+    } else {
+        inherited.iter().any(is_project_instructions)
+    };
+    let drop_reinjected_agents_md = prefix_holds_reminder && !conversation[prefix_len..].iter().any(tagged);
     let mut preserved = inherited.to_vec();
     let child_items = compacted_history
         .into_iter()
@@ -1821,6 +1832,15 @@ impl SessionActor {
                 summary_count,
             })
         };
+        let mut compacted_history = compacted_history;
+        if !self.instructions_built_trusted.get()
+            && let Some(prefix) = compacted_history
+                .iter_mut()
+                .find(|item| matches!(item, ConversationItem::User(_)))
+        {
+            prefix.mark_project_files_withheld();
+            self.withheld_pending.set(true);
+        }
         let post_compaction_ms = apply_start.elapsed().as_millis() as u64;
         let original_user_info = self
             .chat_state_handle
@@ -1871,6 +1891,7 @@ impl SessionActor {
             prompt_index_at_compaction,
             auto_continue,
             original_user_info,
+            conversation.iter().any(ConversationItem::project_files_withheld),
             cancel.clone(),
             if prefix_released { 0 } else { prefix_len },
         ).await?;
@@ -2424,6 +2445,7 @@ impl SessionActor {
         prompt_index_at_compaction: usize,
         auto_continue: Option<crate::extensions::notification::AutoContinueInfo>,
         original_user_info: Option<String>,
+        original_head_withheld: bool,
         cancel: tokio_util::sync::CancellationToken,
         inherited_prefix_len: usize,
     ) -> Result<(), acp::Error> {
@@ -2441,6 +2463,7 @@ impl SessionActor {
             schema_version: 1,
             created_at: created_at.clone(),
             original_user_info,
+            original_head_withheld,
             reread_file_paths: vec![],
         };
         let info = CompactionCheckpointInfo {

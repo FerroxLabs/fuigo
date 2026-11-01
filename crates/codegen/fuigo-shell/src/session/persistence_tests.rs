@@ -2445,6 +2445,7 @@ async fn commit_compaction(actor: &ActorGuard, info: &Info, id: &str, projection
         schema_version: 1,
         created_at: "2026-01-01T00:00:00Z".to_string(),
         original_user_info: None,
+        original_head_withheld: false,
         reread_file_paths: vec![],
     };
     let activation = SessionUpdate::Fuigo(Box::new(FuigoSessionNotification {

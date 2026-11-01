@@ -506,9 +506,10 @@ async fn exhausted_subagent_budget_notifies_exhausted_with_the_attempts_taken() 
             let (attempts, is_rate_limited) = exhausted[0];
             assert_eq!(
                 attempts,
-                RateLimitWaitConfig::DEFAULT_MAX_ATTEMPTS,
-                "the client must see the paced attempts, not a first-try zero"
+                RateLimitWaitConfig::DEFAULT_MAX_ATTEMPTS + 1,
+                "the client must see the attempts made (the first plus each paced resend), not a first-try zero"
             );
+            assert_eq!(attempts, server.request_count(), "every attempt reached the wire");
             assert!(is_rate_limited, "the terminal must be flagged rate-limited");
         })
         .await;

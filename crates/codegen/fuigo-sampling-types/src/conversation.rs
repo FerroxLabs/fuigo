@@ -119,7 +119,8 @@ pub enum SyntheticReason {
     /// Distinct from [`Self::SystemReminder`] so report assembly joins segments around exactly this reminder and no other.
     LengthContinue,
     /// Project-level instruction message (AGENTS.md / CLAUDE.md) injected at session spawn.
-    /// Invariant: once placed, never replaced (replacing it would bust the KV-cache prefix).
+    /// Invariant: once placed, replaced at most once, on the folder-trust grant path that delivers withheld project files
+    /// (see [`UserItem::project_files_withheld`]). Replacing it anywhere else would bust the KV-cache prefix.
     ProjectInstructions,
     /// Injected by the auto-continue logic after compaction so the agent keeps working.
     AutoContinue,
@@ -278,6 +279,12 @@ pub struct UserItem {
     /// Markers stamped before and after a restart may disagree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_index: Option<usize>,
+    /// Set on the conversation's prefix item when that prefix was rendered while project files were withheld (the folder
+    /// was untrusted when the agent's instruction list was built). Only code sets it; it is never sent to a model.
+    /// It lives in the conversation, so it moves with every fork, copy and resume, and is cleared by the one write that
+    /// delivers the files. A trusted session never has it, so its history is byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub project_files_withheld: bool,
 }
 
 /// Assistant response with tool calls.
@@ -1265,6 +1272,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1278,7 +1286,20 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
+    }
+
+    /// Whether this is the item recording that project files were withheld (see [`UserItem::project_files_withheld`]).
+    pub fn project_files_withheld(&self) -> bool {
+        matches!(self, Self::User(user) if user.project_files_withheld)
+    }
+
+    /// Record on this `User` item that project files were withheld. Any other item is left alone.
+    pub fn mark_project_files_withheld(&mut self) {
+        if let Self::User(user) = self {
+            user.project_files_withheld = true;
+        }
     }
 
     /// Create a synthetic user message for metadata injection.
@@ -1294,6 +1315,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1310,6 +1332,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1323,6 +1346,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1341,7 +1365,7 @@ impl ConversationItem {
 
     /// User message containing project instructions (AGENTS.md / CLAUDE.md).
     /// Tagged [`SyntheticReason::ProjectInstructions`] for spawn-time idempotence.
-    /// Once in the conversation, it MUST NOT be replaced or re-inserted; see the variant docstring.
+    /// Once in the conversation, it is replaced at most once (on the folder-trust grant path) and never re-inserted; see the variant docstring.
     pub fn project_instructions(content: impl Into<String>) -> Self {
         Self::User(UserItem {
             content: vec![ContentPart::Text {
@@ -1351,6 +1375,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1364,6 +1389,7 @@ impl ConversationItem {
             cwd_generation: Some(cwd_generation),
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1377,6 +1403,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1394,6 +1421,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1405,6 +1433,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1444,6 +1473,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1479,6 +1509,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1495,6 +1526,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1511,6 +1543,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1528,6 +1561,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1541,6 +1575,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1554,6 +1589,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1567,6 +1603,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1580,6 +1617,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1595,6 +1633,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1608,6 +1647,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -1621,6 +1661,7 @@ impl ConversationItem {
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
+            project_files_withheld: false,
         })
     }
 
@@ -5782,5 +5823,24 @@ mod tests {
         assert_eq!(history_peer_carried(&[carried.clone(), cleared.clone(), carried.clone()]), st);
         assert!(history_peer_carried(&[carried.clone(), cleared.clone()]).is_empty());
         assert_eq!(history_peer_carried(&[cleared.clone(), carried.clone(), ConversationItem::peer_message("x")]), st);
+    }
+}
+
+#[cfg(test)]
+mod project_files_withheld_tests {
+    use super::*;
+
+    #[test]
+    fn the_bit_is_absent_from_a_trusted_history_line_and_round_trips() {
+        let plain = serde_json::to_string(&ConversationItem::user("prefix")).unwrap();
+        assert!(!plain.contains("project_files_withheld"), "a trusted history is byte-identical");
+
+        let mut marked = ConversationItem::user("prefix");
+        marked.mark_project_files_withheld();
+        let line = serde_json::to_string(&marked).unwrap();
+        let back: ConversationItem = serde_json::from_str(&line).unwrap();
+        assert!(back.project_files_withheld());
+        let old: ConversationItem = serde_json::from_str(&plain).unwrap();
+        assert!(!old.project_files_withheld(), "an older line reads as not withheld");
     }
 }

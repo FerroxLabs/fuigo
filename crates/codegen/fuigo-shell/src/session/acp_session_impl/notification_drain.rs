@@ -136,6 +136,7 @@ impl SessionActor {
         }
         // Fast path under the lock: nothing to promote.
         let may_combine;
+        let reservation;
         {
             let state = self.state.lock().await;
             if state.running_task.is_some() || state.finalization_gate.is_active() {
@@ -168,6 +169,11 @@ impl SessionActor {
             if state.pending_inputs.is_empty() {
                 return;
             }
+            // Re-entered at the await gap below: the holder starts the front of the queue.
+            if self.start_reserved.get() {
+                return;
+            }
+            reservation = StartReservation::take(&self.start_reserved);
             // A merge needs at least two queued prompts; sample here so the common single-prompt promote skips the config disk read below
             may_combine = state.pending_inputs.len() >= 2;
         }
@@ -179,6 +185,11 @@ impl SessionActor {
                 .ui
                 .combine_queued_prompts
                 .unwrap_or(false);
+
+        if self.withheld_pending.get() {
+            self.apply_folder_trust_grant().await;
+        }
+        drop(reservation);
 
         let mut state = self.state.lock().await;
         // Re-check after the await gap.

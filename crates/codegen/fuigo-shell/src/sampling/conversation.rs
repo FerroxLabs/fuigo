@@ -25,7 +25,11 @@ pub struct ConversationRequestTrace {
 /// A turn is complete when the Assistant's tool calls are all answered; Reasoning and BackendToolCall items are transparent to the scan.
 ///
 /// Keep the "complete turn" definition in sync with `count_complete_turns` in `fuigo-subagent-resolution/src/context.rs`.
+///
+/// The withheld-files bit is a property of the conversation, so it survives on the first surviving `User` item: the
+/// `retain` below drops a compacted prefix. A conversation without it stays byte-identical.
 pub(crate) fn fork_filter_chat(items: &mut Vec<ConversationItem>) {
+    let project_files_withheld = items.iter().any(ConversationItem::project_files_withheld);
     items.retain(|item| match item {
         ConversationItem::User(u) => u.synthetic_reason.is_none(),
         _ => true,
@@ -73,4 +77,10 @@ pub(crate) fn fork_filter_chat(items: &mut Vec<ConversationItem>) {
     }
 
     items.truncate(last_complete_end);
+
+    if project_files_withheld
+        && let Some(first_user) = items.iter_mut().find(|item| matches!(item, ConversationItem::User(_)))
+    {
+        first_user.mark_project_files_withheld();
+    }
 }

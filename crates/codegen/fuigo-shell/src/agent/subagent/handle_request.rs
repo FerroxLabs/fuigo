@@ -1245,6 +1245,7 @@ pub(crate) async fn run_shell_child(
         initial_child_tokens,
         crate::session::StartupHints {
             execution_parent_grant,
+            fresh_child: context_source == InitialContextSource::New,
             inherited_prefix_len: Some(inherited_prefix_len),
             is_subagent: true,
             non_interactive: ctx.parent_non_interactive,

@@ -990,6 +990,81 @@ async fn configured_rate_limit_threshold_controls_total_wire_attempts() {
     );
 }
 
+/// u38 F6: a rate-limit resend announces the ceiling that actually stops it, not the general retry budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn u38_f6_rate_limit_resend_announces_the_rate_limit_ceiling() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || async move {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("retry-after", "0")],
+                json!({ "error": { "message": "slow down" } }).to_string(),
+            )
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    cfg.max_retries = Some(6);
+    cfg.rate_limit_retry_threshold = Some(4);
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    handle.submit(RequestId::from("req-429-announce"), user_request("hi"));
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(60)).await;
+    server.shutdown();
+    let announced: Vec<(u32, u32)> = events
+        .iter()
+        .filter_map(|event| match event {
+            SamplingEvent::Retrying { attempt, max_retries, .. } => Some((*attempt, *max_retries)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(announced, vec![(1, 4), (2, 4), (3, 4)]);
+}
+
+/// u38 F6: the retry ceiling is unchanged: the display never adds or removes a wire call, and the count that comes back
+/// with the failure is every call made, the resends of other kinds included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn u38_f6_a_failed_request_reports_every_wire_attempt() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                let status = if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                } else {
+                    StatusCode::TOO_MANY_REQUESTS
+                };
+                (
+                    status,
+                    [("retry-after", "0")],
+                    json!({ "error": { "message": "slow down" } }).to_string(),
+                )
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    cfg.max_retries = Some(6);
+    cfg.rate_limit_retry_threshold = Some(3);
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    let collected = handle
+        .submit_and_collect_with_metadata(RequestId::from("req-429-attempts"), user_request("hi"))
+        .await;
+    server.shutdown();
+
+    assert!(collected.result.is_err());
+    assert_eq!(counter.load(Ordering::SeqCst), 3, "the ceiling still stops at three calls");
+    assert_eq!(collected.attempts, 3);
+}
+
 // ---------------------------------------------------------------------------
 // Auth error -> EmitToSession (immediate)
 // ---------------------------------------------------------------------------

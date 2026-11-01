@@ -37,7 +37,10 @@ const FORK_NOISE_TAGS: &[&str] = &[
 ///
 /// Returns `(normalized_items, inherited_prefix_len)`.
 /// `inherited_prefix_len` is the number of items the child should treat as pre-existing context (typically 2 for `[System, BackgroundContext]`).
+///
+/// The withheld-files bit moves to the background item. A conversation without it stays byte-identical.
 pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<ConversationItem>, usize) {
+    let project_files_withheld = items.iter().any(ConversationItem::project_files_withheld);
     // Extract the system prompt (position 0), kept as a placeholder for spawn_session_actor
     let system = items
         .first()
@@ -82,8 +85,11 @@ pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<Conversati
     }
     background.push_str("</background_context>");
 
-    let conversation = vec![system, ConversationItem::user(&background)];
-    (conversation, 2)
+    let mut background_item = ConversationItem::user(&background);
+    if project_files_withheld {
+        background_item.mark_project_files_withheld();
+    }
+    (vec![system, background_item], 2)
 }
 
 /// Count complete turns in a slice of non-System conversation items.
@@ -975,5 +981,28 @@ This is a very long skill body with many lines of instructions.\n\n\
         let text = extract_background_text(&result[1]);
         assert!(text.contains("Actual query"));
         assert!(!text.contains("Skill content"));
+    }
+}
+
+#[cfg(test)]
+mod withheld_bit_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_moves_the_bit_to_the_background_item_only_when_the_input_has_it() {
+        let mut prefix = ConversationItem::user("prefix");
+        prefix.mark_project_files_withheld();
+        let withheld = vec![ConversationItem::system("s"), prefix, ConversationItem::assistant("a")];
+        let (items, len) = normalize_forked_context(withheld);
+        assert_eq!(len, 2);
+        assert!(items[1].project_files_withheld());
+
+        let trusted = vec![
+            ConversationItem::system("s"),
+            ConversationItem::user("prefix"),
+            ConversationItem::assistant("a"),
+        ];
+        let (items, _) = normalize_forked_context(trusted);
+        assert!(!items[1].project_files_withheld());
     }
 }

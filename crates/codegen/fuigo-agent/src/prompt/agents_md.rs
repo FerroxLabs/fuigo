@@ -177,6 +177,17 @@ fn add_discovered_candidate(
     });
 }
 
+/// Show `files` under the display cwd the model is told about, instead of the on-disk `working_directory`.
+pub fn rewrite_display_paths(
+    files: &mut [AgentConfigFile],
+    working_directory: &str,
+    display_cwd: &str,
+) {
+    for file in files {
+        file.file_path = file.file_path.replace(working_directory, display_cwd);
+    }
+}
+
 /// Read Agents.md from ~/.fuigo/, git repo root, and session cwd.
 ///
 /// `compat` gates which vendor (`.claude`/`.cursor`) directories are scanned for rules and project-instruction files.

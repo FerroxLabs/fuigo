@@ -55,6 +55,38 @@ fn partition_rules_by_scope(
     }
     (workspace, user)
 }
+/// [`partition_rules_by_scope`] with a session's homes and workspace roots.
+pub(super) fn partition_session_rules(
+    files: Vec<fuigo_agent::prompt::agents_md::AgentConfigFile>,
+    compat: &CompatConfig,
+    session_cwd: &str,
+    display_cwd: Option<&str>,
+) -> (
+    Vec<fuigo_agent::prompt::user_message::RuleEntry>,
+    Vec<fuigo_agent::prompt::user_message::RuleEntry>,
+) {
+    let fuigo_home = fuigo_config::fuigo_home();
+    let vendor_homes = fuigo_dirs::home_dir()
+        .map(|home_dir| {
+            vec![
+                (home_dir.join(".claude"), compat.claude.agents),
+                (home_dir.join(".cursor"), compat.cursor.agents),
+            ]
+        })
+        .unwrap_or_default();
+    let on_disk_cwd = std::path::Path::new(session_cwd);
+    let on_disk_root = git2::Repository::discover(on_disk_cwd)
+        .ok()
+        .and_then(|repo| repo.workdir().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| on_disk_cwd.to_path_buf());
+    let display_root = display_cwd.map(std::path::PathBuf::from);
+    let workspace_roots: Vec<&std::path::Path> = display_root
+        .as_deref()
+        .into_iter()
+        .chain(std::iter::once(on_disk_root.as_path()))
+        .collect();
+    partition_rules_by_scope(files, &fuigo_home, &vendor_homes, &workspace_roots)
+}
 #[cfg(test)]
 mod partition_rules_by_scope_tests {
     use super::partition_rules_by_scope;
@@ -580,43 +612,19 @@ impl SessionActor {
             .set(prefix_carries_fallback_date);
         out
     }
-    fn gather_partitioned_rules(
+    pub(super) fn gather_partitioned_rules(
         &self,
     ) -> (
         Vec<fuigo_agent::prompt::user_message::RuleEntry>,
         Vec<fuigo_agent::prompt::user_message::RuleEntry>,
     ) {
         let files = self.agent.borrow().prompt_context().agents_md_files.clone();
-        let fuigo_home = fuigo_config::fuigo_home();
-        let vendor_homes = fuigo_dirs::home_dir()
-            .map(|home_dir| {
-                vec![
-                    (
-                        home_dir.join(".claude"),
-                        self.rebuild_spec.compat.claude.agents,
-                    ),
-                    (
-                        home_dir.join(".cursor"),
-                        self.rebuild_spec.compat.cursor.agents,
-                    ),
-                ]
-            })
-            .unwrap_or_default();
-        let on_disk_cwd = std::path::Path::new(&self.session_info.cwd);
-        let on_disk_root = git2::Repository::discover(on_disk_cwd)
-            .ok()
-            .and_then(|repo| repo.workdir().map(std::path::Path::to_path_buf))
-            .unwrap_or_else(|| on_disk_cwd.to_path_buf());
-        let display_root = self
-            .display_cwd
-            .get()
-            .map(|s| std::path::PathBuf::from(s.as_str()));
-        let workspace_roots: Vec<&std::path::Path> = display_root
-            .as_deref()
-            .into_iter()
-            .chain(std::iter::once(on_disk_root.as_path()))
-            .collect();
-        partition_rules_by_scope(files, &fuigo_home, &vendor_homes, &workspace_roots)
+        partition_session_rules(
+            files,
+            &self.rebuild_spec.compat,
+            &self.session_info.cwd,
+            self.display_cwd.get().map(String::as_str),
+        )
     }
     /// Build the custom-templated first user message.
     ///

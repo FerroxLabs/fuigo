@@ -8,7 +8,7 @@ use crate::ENV_TEST_LOCK as ENV_LOCK;
 use crate::TestEnvGuard as EnvVarGuard;
 use crate::trust::workspace_key;
 
-/// Whether `key` is trusted by the live decision (u35 t1: there is no process-local grant to inspect).
+/// Whether `key` is trusted by the live decision.
 fn trusted_now(key: &Path) -> bool {
     !folder_trust_inert() && decide_key(key, false).is_trusted()
 }
@@ -294,4 +294,211 @@ fn p167_persist_trust_over_unreadable_store_is_refused() {
     assert!(matches!(outcome, GrantOutcome::Refused { reason: GrantRefuse::Unreadable }), "{outcome:?}");
     assert_eq!(std::fs::read(&store_path).unwrap(), b"[[[");
     assert!(!trusted_now(&key));
+}
+
+// ── u38 F5: the process-only grant ───────────────────────────────────────────────────────────────
+
+/// Own process (the grant is a process static), a release-stamped build, an empty absolute home, a git repo.
+struct ProcessGrantWorld {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    _sim: EnvVarGuard,
+    _home_guard: EnvVarGuard,
+    _real: TestFolderTrust,
+    home: tempfile::TempDir,
+    repo: tempfile::TempDir,
+    key: PathBuf,
+}
+
+fn process_grant_world() -> ProcessGrantWorld {
+    let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let sim = simulate_release_build();
+    let home = tempfile::tempdir().unwrap();
+    let home_guard = EnvVarGuard::set("FUIGO_HOME", home.path());
+    let repo = repo_tmp();
+    let key = workspace_key(repo.path());
+    let real = TestFolderTrust::real();
+    ProcessGrantWorld { _lock: lock, _sim: sim, _home_guard: home_guard, _real: real, home, repo, key }
+}
+
+fn home_entries(home: &Path) -> Vec<PathBuf> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(home).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            entries.extend(home_entries(&path));
+        }
+        entries.push(path);
+    }
+    entries.sort();
+    entries
+}
+
+#[test]
+fn u38_f5_process_grant_trusts_now_and_writes_nothing() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let w = process_grant_world();
+    assert!(!trusted_now(&w.key), "premise: undecided");
+    let before = home_entries(w.home.path());
+    let generation = trust_generation();
+
+    let outcome = grant_folder_trust_key_for_process(&w.key);
+
+    assert!(
+        matches!(outcome, GrantOutcome::Granted { persist: PersistStatus::ProcessOnly, .. }),
+        "{outcome:?}"
+    );
+    assert!(outcome.dismisses_gate(), "settle_gui_grant lets a process grant through");
+    assert!(trusted_now(&w.key));
+    assert!(dir_trust(w.repo.path()).is_trusted(), "commands follow the one decision");
+    assert_ne!(trust_generation(), generation, "cached verdicts are re-derived");
+    assert_eq!(home_entries(w.home.path()), before, "nothing is written to disk");
+}
+
+#[test]
+fn u38_f5_process_grant_covers_exactly_what_a_durable_grant_refuses_not() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let w = process_grant_world();
+    // The same pre-check as a durable grant: a key that is not its own canonical form is refused.
+    let alias = w.key.join("..").join(w.key.file_name().unwrap());
+    let moved = grant_folder_trust_key_for_process(&alias);
+    assert!(matches!(moved, GrantOutcome::Refused { reason: GrantRefuse::KeyMoved }), "{moved:?}");
+    let root = grant_folder_trust_key_for_process(Path::new("/"));
+    assert!(matches!(root, GrantOutcome::Refused { reason: GrantRefuse::UnsafeRoot }), "{root:?}");
+    assert!(PROCESS_GRANTS.lock().is_empty(), "a refused grant records nothing");
+}
+
+/// An unread store keeps the folder untrusted whatever is held here, so the grant says so instead of reporting a
+/// success the decision would not honour (the session is told, as for a durable grant).
+#[test]
+fn u38_f5_process_grant_over_an_unreadable_store_is_refused() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let w = process_grant_world();
+    let store_path = TrustStore::default_path().expect("FUIGO_HOME is set");
+    std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+    std::fs::write(&store_path, b"[[[ truncated by a crash\n").unwrap();
+
+    let outcome = grant_folder_trust_key_for_process(&w.key);
+
+    assert!(matches!(outcome, GrantOutcome::Refused { reason: GrantRefuse::Unreadable }), "{outcome:?}");
+    assert!(PROCESS_GRANTS.lock().is_empty());
+    assert!(!trusted_now(&w.key));
+}
+
+#[test]
+fn u38_f5_a_stored_no_beats_a_process_grant() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let w = process_grant_world();
+    TrustStore::load().set_untrusted(&w.key).unwrap();
+    let store_path = TrustStore::default_path().expect("FUIGO_HOME is set");
+    let stored = std::fs::read(&store_path).unwrap();
+
+    let _ = grant_folder_trust_key_for_process(&w.key);
+
+    assert!(!trusted_now(&w.key), "a stored no outranks a process yes");
+    assert!(!dir_trust(w.repo.path()).is_trusted());
+    assert_eq!(std::fs::read(&store_path).unwrap(), stored, "the stored no is untouched");
+}
+
+#[test]
+fn u38_f5_a_stored_no_for_a_subfolder_beats_a_process_grant_of_the_repo() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let w = process_grant_world();
+    let sub = w.key.join("vendor");
+    std::fs::create_dir_all(&sub).unwrap();
+    TrustStore::load().set_untrusted(&sub).unwrap();
+
+    assert!(grant_folder_trust_key_for_process(&w.key).dismisses_gate());
+
+    assert!(trusted_now(&w.key), "premise: the repo itself is granted");
+    assert!(!decide(&sub, false).is_trusted(), "the most specific no wins");
+}
+
+#[test]
+fn u38_f5_a_process_no_beats_a_process_grant() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let w = process_grant_world();
+    set_process_decline(&w.key, true);
+
+    let _ = grant_folder_trust_key_for_process(&w.key);
+
+    assert!(!trusted_now(&w.key), "a no held in this process outranks a process yes");
+    assert!(PROCESS_DECLINES.lock().contains(&w.key), "the grant does not lift the no");
+}
+
+#[test]
+fn u38_f5_untrust_clears_a_process_grant() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let w = process_grant_world();
+    assert!(grant_folder_trust_key_for_process(&w.key).dismisses_gate());
+
+    let RevokeOutcome::Revoked { was_trusted, saved, .. } = revoke_folder_trust_store(w.repo.path()) else {
+        panic!("a release-stamped build revokes");
+    };
+
+    assert!(was_trusted, "/untrust reports what the process grant had trusted");
+    assert!(saved.is_ok());
+    assert!(!trusted_now(&w.key));
+    assert!(PROCESS_GRANTS.lock().is_empty(), "cleared, not only outranked");
+}
+
+/// `U38_F5_PROBE_KEY` turns the re-run into the new process: same home, same key, none of the parent's memory.
+#[test]
+fn u38_f5_process_grant_is_gone_in_a_new_process() {
+    const TEST: &str = "folder_trust::grant_tests::u38_f5_process_grant_is_gone_in_a_new_process";
+    const PROBE: &str = "U38_F5_PROBE_KEY";
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    if let Some(key) = std::env::var_os(PROBE) {
+        assert!(!trusted_now(Path::new(&key)), "a new process must not inherit the grant");
+        return;
+    }
+    let w = process_grant_world();
+    assert!(grant_folder_trust_key_for_process(&w.key).dismisses_gate());
+    assert!(trusted_now(&w.key), "premise: trusted in the granting process");
+
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", TEST, "--include-ignored", "--test-threads=1"])
+        .env(PROBE, &w.key)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.contains("1 passed"), "the probe must really have run: {stdout}");
+}
+
+/// A durable grant that can't be saved never falls back to a process grant.
+#[test]
+fn u38_f5_a_durable_grant_that_cannot_be_saved_stays_gated() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let w = process_grant_world();
+    let blocker = w.home.path().join("not-a-dir");
+    std::fs::write(&blocker, b"x").unwrap();
+
+    let outcome = grant_folder_trust_key_in(&dunce::canonicalize(&blocker).unwrap(), &w.key);
+
+    assert!(
+        matches!(outcome, GrantOutcome::Granted { persist: PersistStatus::NotSaved { .. }, .. }),
+        "{outcome:?}"
+    );
+    assert!(!outcome.dismisses_gate());
+    assert!(PROCESS_GRANTS.lock().is_empty(), "no process grant appears behind a failed save");
+    assert!(!trusted_now(&w.key));
 }

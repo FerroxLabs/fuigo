@@ -298,6 +298,12 @@ fn error_after_stream_drain(
     }
 }
 
+/// A turn request that ended in failure, with the model calls the sampler made for it.
+pub(super) struct FailedSubmission {
+    info: fuigo_sampler::SamplingErrorInfo,
+    attempts: u32,
+}
+
 fn revoked_sampling_info() -> fuigo_sampler::SamplingErrorInfo {
     fuigo_sampler::SamplingErrorInfo {
         // A revocation is a cancellation, not an upstream failure; typed so a client that still sees it reads `error_kind: cancelled`
@@ -1443,12 +1449,13 @@ impl SessionActor {
     }
 
     /// Classify a terminal sampler failure and decide recovery.
+    /// `attempts_made`: model calls this turn request took, reported when a rate limit ends it.
     /// `transient`: turn-loop retry state (the loop owns the counters).
     /// `park`: already parked — a still-credential-less 401 re-parks without a recovery dispatch.
     pub(crate) async fn handle_sampling_failure(
         self: &Arc<Self>,
         error: fuigo_sampler::SamplingErrorInfo,
-        rate_limit_waits: u32,
+        attempts_made: u32,
         transient: TransientRetryState,
         mid_salvage_continuation: bool,
         park: TurnParkState,
@@ -1628,7 +1635,7 @@ impl SessionActor {
             self.log_terminal_failure("rate_limited", error.status_code, &detailed_message);
             self.send_fuigo_notification(FuigoSessionUpdate::RetryState(
                 crate::extensions::notification::RetryState::Exhausted {
-                    attempts: rate_limit_waits,
+                    attempts: attempts_made,
                     reason: detailed_message.clone(),
                     is_rate_limited: true,
                     error_type: Some(SamplingErrorKind::RateLimited.as_str().to_string()),
@@ -2061,10 +2068,10 @@ impl SessionActor {
             // Nothing will send this request a second time, so move it into the sampler instead of deep-cloning the whole message history on every main-session turn
             return match self.submit_turn_request(request).await {
                 Ok(outcome) => Ok(outcome),
-                Err(info) => {
+                Err(failed) => {
                     self.recover_from_sampling_failure(
-                        info,
-                        budget,
+                        failed.info,
+                        failed.attempts,
                         transient,
                         mid_salvage_continuation,
                         park,
@@ -2074,26 +2081,30 @@ impl SessionActor {
             };
         }
 
+        // Model calls of the submissions a paced wait already followed.
+        let mut earlier_attempts = 0;
         loop {
             match self.submit_turn_request(request.clone()).await {
                 Ok(outcome) => {
                     budget.record_submission_accepted();
                     return Ok(outcome);
                 }
-                Err(info) => {
+                Err(FailedSubmission { info, attempts }) => {
+                    let attempts = earlier_attempts + attempts;
                     let decision = budget.decide(&info);
                     let RateLimitWaitDecision::Wait { attempt, backoff } = decision else {
                         self.log_rate_limit_budget_spent(decision, &info);
                         return self
                             .recover_from_sampling_failure(
                                 info,
-                                budget,
+                                attempts,
                                 transient,
                                 mid_salvage_continuation,
                                 park,
                             )
                             .await;
                     };
+                    earlier_attempts = attempts;
                     self.notify_rate_limit_wait(attempt, budget, backoff).await;
                     // Esc cancels a turn by aborting its task, so this await point is itself the cancellation point; no select needed
                     sleep(super::auth_retry::paced(backoff)).await;
@@ -2110,7 +2121,7 @@ impl SessionActor {
     async fn submit_turn_request(
         self: &Arc<Self>,
         mut request: ConversationRequest,
-    ) -> Result<SamplerTurnOutcome, fuigo_sampler::SamplingErrorInfo> {
+    ) -> Result<SamplerTurnOutcome, FailedSubmission> {
         // P189: a subagent whose root was parked mid-turn blocks here, before its next model call, until unpark
         crate::session::quiesce::wait_model_allowed(self.session_info.id.0.as_ref()).await;
         if request.purpose == fuigo_sampling_types::RequestPurpose::Unknown {
@@ -2146,6 +2157,7 @@ impl SessionActor {
                 .await
         };
         let terminal_event_queued = collected.terminal_event_queued;
+        let attempts = collected.attempts;
         let recovery_attempts = collected.doom_loop_recovery_attempts;
         let recovery_attempt_count = u32::try_from(recovery_attempts.len()).unwrap_or(u32::MAX);
         {
@@ -2190,10 +2202,16 @@ impl SessionActor {
                         .await
                         == StreamDrainOutcome::Revoked
                     {
-                        return Err(revoked_sampling_info());
+                        return Err(FailedSubmission {
+                            info: revoked_sampling_info(),
+                            attempts,
+                        });
                     }
                 } else if !self.turn_stream_drained.lock().contains_key(&request_id) {
-                    return Err(revoked_sampling_info());
+                    return Err(FailedSubmission {
+                            info: revoked_sampling_info(),
+                            attempts,
+                        });
                 }
 
                 // The awaited result is authoritative for successful-request accounting once the request survives the turn boundary
@@ -2255,7 +2273,10 @@ impl SessionActor {
                 } else {
                     StreamDrainOutcome::Revoked
                 };
-                Err(error_after_stream_drain(outcome, original))
+                Err(FailedSubmission {
+                    info: error_after_stream_drain(outcome, original),
+                    attempts,
+                })
             }
         }
     }
@@ -2263,7 +2284,7 @@ impl SessionActor {
     async fn recover_from_sampling_failure(
         self: &Arc<Self>,
         info: fuigo_sampler::SamplingErrorInfo,
-        budget: &RateLimitWaitBudget,
+        attempts_made: u32,
         transient: TransientRetryState,
         mid_salvage_continuation: bool,
         park: TurnParkState,
@@ -2273,7 +2294,7 @@ impl SessionActor {
         match self
             .handle_sampling_failure(
                 info,
-                budget.attempts_used(),
+                attempts_made,
                 transient,
                 mid_salvage_continuation,
                 park,

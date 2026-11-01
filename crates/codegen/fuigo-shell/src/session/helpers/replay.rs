@@ -22,6 +22,8 @@ pub struct ReplayResult {
     /// Extracted from the checkpoint file's `original_user_info` field.
     /// `None` if no checkpoint was encountered or the checkpoint predates the field (schema_version 1 without it).
     pub original_user_info: Option<String>,
+    /// That head held `project_files_withheld` at compaction time.
+    pub original_head_withheld: bool,
     /// Compaction marker for the rebuilt conversation: `Some(idx)` if a summary survives, else `None`.
     pub last_compaction_prompt_index: Option<usize>,
 }
@@ -126,6 +128,7 @@ pub fn replay_to_prompt(
             conversation: vec![],
             prompt_index_reached: 0,
             original_user_info: None,
+            original_head_withheld: false,
             last_compaction_prompt_index: None,
         });
     };
@@ -176,6 +179,7 @@ pub fn replay_to_prompt(
         conversation: state.conversation,
         prompt_index_reached: state.prompt_counter,
         original_user_info: state.original_user_info,
+        original_head_withheld: state.original_head_withheld,
         last_compaction_prompt_index: state.bases.last().map(|base| base.prompt_index),
     })
 }
@@ -253,6 +257,7 @@ struct ReplayState {
 
     /// The original User(user_info) text from before the first compaction.
     original_user_info: Option<String>,
+    original_head_withheld: bool,
 
     /// Rewind markers met so far, and [`abandon_floors`] of the whole transcript.
     markers_seen: usize,
@@ -274,6 +279,7 @@ impl ReplayState {
             has_pending_agent: false,
             bases: Vec::new(),
             original_user_info: None,
+            original_head_withheld: false,
             markers_seen: 0,
             abandon_floor: Vec::new(),
         }
@@ -325,6 +331,7 @@ impl ReplayState {
                 Ok(file) => {
                     if self.original_user_info.is_none() {
                         self.original_user_info = file.original_user_info;
+                        self.original_head_withheld = file.original_head_withheld;
                     }
                 }
                 Err(e) => {
@@ -369,6 +376,7 @@ impl ReplayState {
                 // handle_rewind needs original_user_info for the raw-updates prefix case even when the conversation is replaced
                 if self.original_user_info.is_none() {
                     self.original_user_info = file.original_user_info;
+                    self.original_head_withheld = file.original_head_withheld;
                 }
 
                 let replaced = std::mem::replace(&mut self.conversation, file.compacted_history);
@@ -1014,6 +1022,7 @@ mod tests {
             schema_version: 1,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             original_user_info: None,
+            original_head_withheld: false,
             reread_file_paths: vec![],
         };
         let bytes = serde_json::to_vec_pretty(&file).unwrap();
@@ -1666,6 +1675,7 @@ mod tests {
             schema_version: 2,
             created_at: "2024-01-01T00:00:00Z".to_owned(),
             original_user_info: None,
+            original_head_withheld: false,
             reread_file_paths: vec![],
         };
         std::fs::write(tmp.path().join("compaction_checkpoints/ckpt2.json"), serde_json::to_vec(&newer).unwrap())

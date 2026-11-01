@@ -1728,6 +1728,10 @@ pub struct CompactionCheckpointFile {
     /// `None` in older checkpoints (schema_version 1 without this field).
     #[serde(default)]
     pub original_user_info: Option<String>,
+    /// The head held `project_files_withheld` at compaction time. `original_user_info` keeps only its text, so a rewind
+    /// across this compaction marks the head it rebuilds from this. Absent means false, as in older checkpoints.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub original_head_withheld: bool,
     /// File paths that were re-read and injected after compaction.
     /// Informational: kept for debugging and for understanding replay.
     #[serde(default)]
