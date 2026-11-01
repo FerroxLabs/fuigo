@@ -19,8 +19,9 @@ concurrency:
   cancel-in-progress: true
 jobs:
   macos:
-    # macos-14 is arm64 and is the macOS label release.yml has probed (macos-13 queues forever).
-    runs-on: macos-14
+    # macos-15 is arm64 and is the macOS label release.yml uses (macos-14 was retired 2026-11-02;
+    # macos-13 queues forever).
+    runs-on: macos-15
     timeout-minutes: 120
     env:
       CARGO_TERM_COLOR: never

@@ -89,8 +89,9 @@ Runner availability was probed 2026-09-01 and is worth knowing before editing
 that matrix: `ubuntu-24.04`, `ubuntu-24.04-arm`, `windows-latest`,
 `windows-11-arm` and `macos-14` all schedule. **`macos-13` does not** — the job
 queues indefinitely rather than failing, which is the worst way to find out at
-the end of a two-hour build. `darwin-x64` therefore cross-compiles on
-`macos-14`; aws-lc-sys builds its C for x86_64 there in under a minute, and
+the end of a two-hour build. GitHub retired `macos-14` on 2026-11-02, so the
+macOS jobs now run on `macos-15`. `darwin-x64` therefore cross-compiles on
+`macos-15`; aws-lc-sys builds its C for x86_64 there in under a minute, and
 Rosetta 2 on the image means the smoke test still executes the binary.
 
 ---
