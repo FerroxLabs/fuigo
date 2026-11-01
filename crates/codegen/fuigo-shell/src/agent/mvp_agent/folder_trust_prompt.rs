@@ -48,40 +48,57 @@ pub(crate) struct FolderTrustRequest {
 /// The only scope a v2 trust question asks about, and the only one a reply may grant.
 pub(crate) const FOLDER_TRUST_SCOPE: &str = "configAndCommands";
 
+/// The only `duration` a reply may carry: trust for this process, saving nothing.
+const FOLDER_TRUST_PROCESS_DURATION: &str = "process";
+
 /// Outcome of the trust prompt, sent by the GUI client to the agent.
 /// Fail-closed: any value other than `"trust"`, including unknown strings via `#[serde(other)]`, decodes to [`FolderTrustOutcome::Reject`].
-/// Only an explicit grant unblocks.
+/// Only an explicit grant unblocks. `TrustForProcess` has no wire name: it comes from the reply's `duration`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FolderTrustOutcome {
     Trust,
+    #[serde(skip_deserializing)]
+    TrustForProcess,
     #[serde(other)]
     Reject,
 }
 
 /// ACP `fuigo/folder_trust/request` response, sent by the GUI client to the agent. u35 t1: a grant must be exactly
-/// `{"outcome": "trust", "scope": "configAndCommands"}`; an unknown field, another scope or a missing scope is a reject.
+/// `{"outcome": "trust", "scope": "configAndCommands"}`, with `"duration": "process"` to trust for this process only;
+/// an unknown field, another scope, a missing scope or any other `duration` is a reject.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FolderTrustResponse {
     pub outcome: FolderTrustOutcome,
     #[serde(default)]
     pub scope: Option<String>,
+    /// `None`: the field is absent, a durable grant. `Some(None)`: an explicit `null`, which is a reject.
+    #[serde(default, deserialize_with = "present_duration")]
+    pub duration: Option<Option<String>>,
+}
+
+fn present_duration<'de, D: serde::Deserializer<'de>>(value: D) -> Result<Option<Option<String>>, D::Error> {
+    <Option<String> as serde::Deserialize>::deserialize(value).map(Some)
 }
 
 impl FolderTrustResponse {
-    /// Whether this reply grants trust (settings and commands).
-    pub(crate) fn grants(&self) -> bool {
-        self.outcome == FolderTrustOutcome::Trust && self.scope.as_deref() == Some(FOLDER_TRUST_SCOPE)
+    /// What this reply grants (settings and commands), for how long.
+    pub(crate) fn decision(&self) -> FolderTrustOutcome {
+        if self.outcome != FolderTrustOutcome::Trust || self.scope.as_deref() != Some(FOLDER_TRUST_SCOPE) {
+            return FolderTrustOutcome::Reject;
+        }
+        match &self.duration {
+            None => FolderTrustOutcome::Trust,
+            Some(Some(duration)) if duration == FOLDER_TRUST_PROCESS_DURATION => FolderTrustOutcome::TrustForProcess,
+            Some(_) => FolderTrustOutcome::Reject,
+        }
     }
 }
 
 /// Decode a client's reply: anything that is not exactly a v2 grant is a reject (fail closed).
 pub(crate) fn decode_trust_reply(raw: &str) -> FolderTrustOutcome {
-    match serde_json::from_str::<FolderTrustResponse>(raw) {
-        Ok(reply) if reply.grants() => FolderTrustOutcome::Trust,
-        _ => FolderTrustOutcome::Reject,
-    }
+    serde_json::from_str::<FolderTrustResponse>(raw).map_or(FolderTrustOutcome::Reject, |reply| reply.decision())
 }
 
 impl MvpAgent {
@@ -167,6 +184,8 @@ impl MvpAgent {
             "folder_trust reverse-request must carry a non-empty sessionId (design §5.4)"
         );
 
+        // Before the session is handed back, so a first prompt sees the request whatever the task's scheduling.
+        let in_flight = folder_trust::TrustRequestInFlight::new(key.clone());
         tokio::task::spawn_local(async move {
             let request = FolderTrustRequest {
                 session_id,
@@ -219,7 +238,7 @@ impl MvpAgent {
                     return;
                 }
             };
-            if outcome != FolderTrustOutcome::Trust {
+            if outcome == FolderTrustOutcome::Reject {
                 // The client decided "reject": keep the dedup key so the user is not re-prompted for this workspace on every reconnect
                 tracing::info!(
                     cwd = %cwd.display(),
@@ -243,11 +262,17 @@ impl MvpAgent {
 
             // Persist the grant for the key the client was shown (not re-derived), then flip the cached untrusted verdict to trusted
             // The `Some(false)` arm of `resolve_and_record` re-reads the store (and this process's own grant)
-            let outcome = fuigo_workspace::folder_trust::grant_folder_trust_key(&key);
+            let outcome = if outcome == FolderTrustOutcome::TrustForProcess {
+                fuigo_workspace::folder_trust::grant_folder_trust_key_for_process(&key)
+            } else {
+                fuigo_workspace::folder_trust::grant_folder_trust_key(&key)
+            };
             let notify: Vec<_> = targets.iter().map(|t| t.cmd_tx.clone()).collect();
             if !settle_gui_grant(&outcome, &cwd, &notify, &prompted, &key) {
                 return;
             }
+            // The grant is stored: a first turn waiting on it goes ahead without the MCP reload below.
+            drop(in_flight);
 
             // A snapshot: the reload awaits, and a session starting meanwhile updates the set.
             let announcing = sessions_announcing.borrow().clone();
@@ -582,6 +607,38 @@ mod tests {
             r#"{"outcome":"reject","scope":"configAndCommands"}"#,
             r#"{"outcome":"banana"}"#,
             "not json",
+        ] {
+            assert_eq!(decode_trust_reply(raw), FolderTrustOutcome::Reject, "{raw}");
+        }
+    }
+
+    /// u38 F5: `duration` is absent (durable) or exactly `"process"`; every other shape is a reject, and the wire can't
+    /// name the process outcome itself.
+    #[test]
+    fn u38_f5_decode_table() {
+        assert_eq!(
+            decode_trust_reply(r#"{"outcome":"trust","scope":"configAndCommands","duration":"process"}"#),
+            FolderTrustOutcome::TrustForProcess
+        );
+        assert_eq!(
+            decode_trust_reply(r#"{"outcome":"trust","scope":"configAndCommands"}"#),
+            FolderTrustOutcome::Trust
+        );
+        for raw in [
+            r#"{"outcome":"trust","scope":"configAndCommands","duration":"forever"}"#,
+            r#"{"outcome":"trust","scope":"configAndCommands","duration":"session"}"#,
+            r#"{"outcome":"trust","scope":"configAndCommands","duration":"Process"}"#,
+            r#"{"outcome":"trust","scope":"configAndCommands","duration":""}"#,
+            r#"{"outcome":"trust","scope":"configAndCommands","duration":null}"#,
+            r#"{"outcome":"trust","scope":"configAndCommands","duration":1}"#,
+            r#"{"outcome":"trust","scope":"configAndCommands","duration":["process"]}"#,
+            r#"{"outcome":"trust","scope":"configAndCommands","duration":"process","duration":"forever"}"#,
+            r#"{"outcome":"trust","duration":"process"}"#,
+            r#"{"outcome":"trust","scope":"config","duration":"process"}"#,
+            r#"{"outcome":"reject","scope":"configAndCommands","duration":"process"}"#,
+            r#"{"outcome":"trust_for_process","scope":"configAndCommands"}"#,
+            r#"{"outcome":"trust_for_process","scope":"configAndCommands","duration":"process"}"#,
+            r#"{"outcome":"trust","scope":"configAndCommands","duration":"process","forever":true}"#,
         ] {
             assert_eq!(decode_trust_reply(raw), FolderTrustOutcome::Reject, "{raw}");
         }

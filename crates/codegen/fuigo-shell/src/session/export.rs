@@ -405,6 +405,7 @@ pub(crate) mod checkpoint_upload_tests {
             schema_version: 1,
             created_at: "2026-10-04T00:00:00Z".into(),
             original_user_info: None,
+            original_head_withheld: false,
             reread_file_paths: vec![],
         };
         (marker, file)

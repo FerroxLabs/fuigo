@@ -48,6 +48,8 @@ pub struct Agent {
     /// applies and the unmatched entries are recorded here, so a caller can tell the user
     /// which names did nothing instead of leaving it to a log line nobody reads.
     unresolved_tool_allowlist_entries: Vec<String>,
+    /// The folder-trust verdict this agent's instruction list was built on.
+    built_project_trusted: bool,
 }
 
 impl Agent {
@@ -73,7 +75,25 @@ impl Agent {
             hosted_tools,
             backend_search_enabled,
             unresolved_tool_allowlist_entries: Vec::new(),
+            built_project_trusted: false,
         }
+    }
+
+    /// Record the verdict passed to `AgentBuilder::with_project_trusted`.
+    #[must_use]
+    pub fn with_built_project_trusted(mut self, trusted: bool) -> Self {
+        self.built_project_trusted = trusted;
+        self
+    }
+
+    /// Whether this agent's instruction list was built with the folder trusted.
+    pub fn built_project_trusted(&self) -> bool {
+        self.built_project_trusted
+    }
+
+    /// Replace the instruction list after a folder-trust grant. A definition without `agents_md` keeps an empty list.
+    pub fn set_agents_md_files(&mut self, files: Vec<crate::prompt::agents_md::AgentConfigFile>) {
+        self.prompt_context.agents_md_files = if self.definition.agents_md { files } else { Vec::new() };
     }
 
     /// Record allowlist entries that matched no known tool. See the field docs. P01.

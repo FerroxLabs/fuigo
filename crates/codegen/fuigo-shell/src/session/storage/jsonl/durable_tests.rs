@@ -24,6 +24,7 @@ fn compaction_checkpoint_prefix_key_reads_as_legacy_in_older_releases() {
         schema_version: 1,
         created_at: "2026-10-03T00:00:00Z".into(),
         original_user_info: None,
+        original_head_withheld: false,
         reread_file_paths: vec![],
     };
     let written = serde_json::to_value(&checkpoint).unwrap();
@@ -60,6 +61,7 @@ async fn compaction_checkpoint_round_trip_and_directory_failure() {
         schema_version: 1,
         created_at: "2026-09-09T00:00:00Z".into(),
         original_user_info: None,
+        original_head_withheld: false,
         reread_file_paths: vec![],
     };
     adapter.write_compaction_checkpoint(&info(), &checkpoint).await.unwrap();

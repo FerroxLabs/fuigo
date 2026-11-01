@@ -24,6 +24,8 @@ pub struct CollectedSamplingResult {
     pub doom_loop_signals: Vec<String>,
     /// Doom-loop recovery actions performed for this request.
     pub doom_loop_recovery_attempts: Vec<DoomLoopRecoveryAttempt>,
+    /// Calls made for this request so far, resends and doom-loop resamples included.
+    pub attempts: u32,
 }
 
 /// Cheaply-cloneable handle to the sampler actor.
@@ -181,6 +183,7 @@ impl SamplerHandle {
                 terminal_event_queued: false,
                 doom_loop_signals: Vec::new(),
                 doom_loop_recovery_attempts: Vec::new(),
+                attempts: 0,
             })
     }
 }

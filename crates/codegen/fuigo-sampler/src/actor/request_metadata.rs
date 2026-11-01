@@ -33,6 +33,7 @@ pub(crate) struct CompletionState {
     tx: Option<oneshot::Sender<CollectedSamplingResult>>,
     doom_loop_signals: Vec<String>,
     doom_loop_recovery_attempts: Vec<DoomLoopRecoveryAttempt>,
+    attempts: u32,
 }
 
 impl CompletionState {
@@ -41,7 +42,13 @@ impl CompletionState {
             tx,
             doom_loop_signals: Vec::new(),
             doom_loop_recovery_attempts: Vec::new(),
+            attempts: 0,
         }
+    }
+
+    /// Record the number of the attempt about to run.
+    pub(crate) fn note_attempt(&mut self, attempt: u32) {
+        self.attempts = attempt;
     }
 
     pub(crate) fn merge_doom_loop_signals(&mut self, signals: impl IntoIterator<Item = String>) {
@@ -72,6 +79,7 @@ impl CompletionState {
                 terminal_event_queued,
                 doom_loop_signals: std::mem::take(&mut self.doom_loop_signals),
                 doom_loop_recovery_attempts: std::mem::take(&mut self.doom_loop_recovery_attempts),
+                attempts: self.attempts,
             });
         }
     }

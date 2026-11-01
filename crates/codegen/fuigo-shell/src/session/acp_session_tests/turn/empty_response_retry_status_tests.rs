@@ -466,7 +466,7 @@ async fn rate_limit_exhaustion_is_mirrored_as_a_thought() {
             else {
                 panic!("expected an Exhausted state first: {frames:#?}");
             };
-            assert_eq!(*attempts, RateLimitWaitConfig::DEFAULT_MAX_ATTEMPTS);
+            assert_eq!(*attempts, RateLimitWaitConfig::DEFAULT_MAX_ATTEMPTS + 1);
             assert_eq!(
                 exhausted,
                 vec![
@@ -482,6 +482,37 @@ async fn rate_limit_exhaustion_is_mirrored_as_a_thought() {
             );
         })
         .await;
+}
+
+/// u38 F6: a main session's 429 reads "(1/2)", then "failed after 2 attempts": the numbers of the calls it really made.
+#[test]
+fn main_session_rate_limit_status_shows_the_attempts_it_really_makes() {
+    on_session_stack(|| {
+        run_paused(|| async {
+            let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+                .await
+                .expect("mock inference server");
+            for _ in 0..2 {
+                server.enqueue_response("/v1/responses", rate_limited_reply(1));
+            }
+
+            let (outcome, frames, _elapsed, submissions) =
+                run_turn(&server, fuigo_sampler::RetryPolicy::default()).await;
+
+            assert!(outcome.is_err(), "two 429s fail the turn");
+            assert_eq!(submissions, 2, "retry behaviour: the ceiling is two calls");
+            let texts: Vec<&str> = frames
+                .iter()
+                .filter_map(|frame| match frame {
+                    Frame::Standard { text, retry_status: Some(_), .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(texts.len(), 2, "{frames:#?}");
+            assert!(texts[0].starts_with("Retrying the model (1/2)"), "{texts:#?}");
+            assert!(texts[1].starts_with("The model request failed after 2 attempts:"), "{texts:#?}");
+        })
+    });
 }
 
 /// Answer text already generated (held in the replay buffer's 10 ms / 2 KB merge window) reaches the client before a retry mirror sent after it.

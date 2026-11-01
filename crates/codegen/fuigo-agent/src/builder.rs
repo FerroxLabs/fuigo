@@ -1279,9 +1279,11 @@ impl AgentBuilder {
         }
         let now = chrono::Utc::now();
         if let Some(ref display_cwd) = self.prompt_working_directory {
-            for file in &mut agents_md_files {
-                file.file_path = file.file_path.replace(&working_dir_str, display_cwd);
-            }
+            crate::prompt::agents_md::rewrite_display_paths(
+                &mut agents_md_files,
+                &working_dir_str,
+                display_cwd,
+            );
         }
         let display_working_dir = self
             .prompt_working_directory
@@ -1347,7 +1349,8 @@ impl AgentBuilder {
             hosted_tools,
             use_backend_search,
         )
-        .with_unresolved_tool_allowlist_entries(unresolved_allowlist_entries))
+        .with_unresolved_tool_allowlist_entries(unresolved_allowlist_entries)
+        .with_built_project_trusted(self.project_trusted))
     }
 }
 /// CLI naming for the shared [`fuigo_tool_types::build_task_description`] builder.

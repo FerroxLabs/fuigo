@@ -209,3 +209,61 @@ fn fork_filter_drops_trailing_incomplete_goal_turn_after_reasoning() {
         other => panic!("expected trailing assistant, got {other:?}"),
     }
 }
+
+fn withheld_prefix() -> ConversationItem {
+    let mut item = ConversationItem::user("prefix");
+    item.mark_project_files_withheld();
+    item
+}
+
+fn compacted_withheld_prefix() -> ConversationItem {
+    let mut item = ConversationItem::user_meta("prefix".to_string());
+    item.mark_project_files_withheld();
+    item
+}
+
+#[test]
+fn fork_filter_keeps_the_withheld_bit_on_the_first_surviving_user_item() {
+    let mut items = vec![
+        ConversationItem::system("s"),
+        compacted_withheld_prefix(),
+        ConversationItem::user("kept"),
+        ConversationItem::assistant("done"),
+    ];
+    fork_filter_chat(&mut items);
+    assert_eq!(items.len(), 3, "the compacted prefix is dropped");
+    assert!(items[1].project_files_withheld(), "and its bit moves to the survivor");
+}
+
+#[test]
+fn fork_filter_keeps_the_bit_when_the_tail_ends_in_a_tool_call() {
+    let dangling = ConversationItem::assistant_tool_calls(vec![
+        fuigo_sampling_types::conversation::ToolCall {
+            id: "call".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+        },
+    ]);
+    let mut items = vec![
+        ConversationItem::system("s"),
+        withheld_prefix(),
+        ConversationItem::assistant("first"),
+        ConversationItem::user("tail"),
+        dangling,
+    ];
+    fork_filter_chat(&mut items);
+    assert_eq!(items.len(), 3, "the partial turn is gone");
+    assert!(items[1].project_files_withheld());
+}
+
+#[test]
+fn fork_filter_adds_no_bit_to_a_trusted_parent() {
+    let mut items = vec![
+        ConversationItem::system("s"),
+        ConversationItem::user_meta("prefix".to_string()),
+        ConversationItem::user("kept"),
+        ConversationItem::assistant("done"),
+    ];
+    fork_filter_chat(&mut items);
+    assert!(!items.iter().any(ConversationItem::project_files_withheld));
+}

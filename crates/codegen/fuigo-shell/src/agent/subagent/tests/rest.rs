@@ -3402,3 +3402,68 @@ fn fleet_pin_refuses_resume_pin_to_a_disallowed_source_model() {
     assert_eq!(subagent_model_policy_refusal("allowed-model", &ctx), None);
     assert_eq!(subagent_model_policy_refusal("blocked-model-id", &fleet_pinned_ctx(false)), None);
 }
+
+mod withheld_bit_routes {
+    use super::super::{forked_initial_context, verbatim_or_normalize_fork};
+    use fuigo_sampling_types::conversation::{ConversationItem, ToolCall};
+
+    fn head(compacted: bool, withheld: bool) -> ConversationItem {
+        let mut item = if compacted {
+            ConversationItem::user_meta("prefix".to_owned())
+        } else {
+            ConversationItem::user("prefix")
+        };
+        if withheld {
+            item.mark_project_files_withheld();
+        }
+        item
+    }
+
+    fn parent(compacted: bool, withheld: bool) -> Vec<ConversationItem> {
+        vec![
+            ConversationItem::system("s"),
+            head(compacted, withheld),
+            ConversationItem::user("task"),
+            ConversationItem::assistant("done"),
+        ]
+    }
+
+    fn bit(items: &[ConversationItem]) -> bool {
+        items.iter().any(ConversationItem::project_files_withheld)
+    }
+
+    #[test]
+    fn the_disk_fallback_carries_the_bit_plain_and_compacted_and_adds_none() {
+        for compacted in [false, true] {
+            assert!(bit(&forked_initial_context(parent(compacted, true)).conversation));
+            assert!(!bit(&forked_initial_context(parent(compacted, false)).conversation));
+        }
+    }
+
+    #[test]
+    fn the_live_route_carries_the_bit_on_every_branch() {
+        for compacted in [false, true] {
+            let mirror = verbatim_or_normalize_fork(parent(compacted, true), 10_000_000);
+            assert!(mirror.verbatim_fork, "premise: small parent, complete tail");
+            assert!(bit(&mirror.conversation));
+
+            let over_budget = verbatim_or_normalize_fork(parent(compacted, true), 1);
+            assert!(!over_budget.verbatim_fork, "premise: parent over 80%");
+            assert!(bit(&over_budget.conversation));
+
+            let mut tool_tail = parent(compacted, true);
+            tool_tail.push(ConversationItem::user("more"));
+            tool_tail.push(ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "call".into(),
+                name: "bash".into(),
+                arguments: "{}".into(),
+            }]));
+            let dangling = verbatim_or_normalize_fork(tool_tail, 10_000_000);
+            assert!(!dangling.verbatim_fork, "premise: the tail ends in a tool call");
+            assert!(bit(&dangling.conversation));
+
+            let trusted = verbatim_or_normalize_fork(parent(compacted, false), 1);
+            assert!(!bit(&trusted.conversation), "a trusted parent's child has no bit");
+        }
+    }
+}

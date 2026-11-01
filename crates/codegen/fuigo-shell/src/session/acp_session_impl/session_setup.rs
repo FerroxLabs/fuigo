@@ -154,7 +154,12 @@ impl SessionActor {
         };
         let mut conversation = self.chat_state_handle.get_conversation().await;
         let insert_at = conversation.len().min(1);
-        conversation.insert(insert_at, ConversationItem::user(prefix));
+        let mut prefix_item = ConversationItem::user(prefix);
+        if !self.instructions_built_trusted.get() {
+            prefix_item.mark_project_files_withheld();
+            self.withheld_pending.set(true);
+        }
+        conversation.insert(insert_at, prefix_item);
         if !self.startup_hints.preserve_inherited_system
             && !conversation_has_project_instructions(&conversation)
             && let Some(agents_md_reminder) = self.agent.borrow().agents_md_user_reminder()

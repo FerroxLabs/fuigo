@@ -1214,7 +1214,7 @@ pub(crate) async fn spawn_session_actor(
     let agent_build_span = spawn_ctx
         .as_ref()
         .map(|ctx| phase_region_under(SubagentSpawnPhase::AgentBuild, &ctx.parent));
-    let (agent, agent_build_elapsed) = rebuild_spec
+    let (mut agent, agent_build_elapsed) = rebuild_spec
         .build_agent_with_initial_overrides(
             agent_definition,
             persisted_announcement_state
@@ -1356,7 +1356,23 @@ pub(crate) async fn spawn_session_actor(
         repair_legacy_browser_head(&mut conversation, &session_info, &agent, &system_prompt, tool_context.cwd.as_path())
             .await;
     }
-    if !startup_hints.preserve_inherited_system
+    let built_trusted = agent.built_project_trusted();
+    let head_withheld = conversation
+        .iter()
+        .any(ConversationItem::project_files_withheld);
+    let delivered = head_withheld
+        && built_trusted
+        && deliver_at_open(
+            &mut agent,
+            &mut conversation,
+            startup_hints.inherited_prefix_len,
+            &compat,
+            &session_info,
+            prompt_display_cwd.as_deref(),
+            tool_context.cwd.as_path(),
+        );
+    if !delivered
+        && !startup_hints.preserve_inherited_system
         && !conversation_has_project_instructions(&conversation)
         && let Some(agents_md_reminder) = agent.agents_md_user_reminder()
     {
@@ -1369,6 +1385,23 @@ pub(crate) async fn spawn_session_actor(
             *len += 1;
         }
     }
+    // The invariants are in `withheld_instructions.rs`.
+    let instructions_built_trusted = built_trusted && (delivered || !head_withheld);
+    let withheld_pending = !instructions_built_trusted;
+    // A new child gets no prefix: its reminder, if it has one, holds the bit, or else its first User item will.
+    let head_holder_owed = !built_trusted && startup_hints.fresh_child && {
+        let reminder = conversation.iter_mut().find(|item| {
+            matches!(item, ConversationItem::User(user)
+                if user.synthetic_reason == Some(SyntheticReason::ProjectInstructions))
+        });
+        match reminder {
+            Some(item) => {
+                item.mark_project_files_withheld();
+                false
+            }
+            None => true,
+        }
+    };
     if let Some(section) = agent.agents_md_section()
         && should_set_classifier_project_instructions(
             owns_permission_manager,
@@ -2164,6 +2197,12 @@ pub(crate) async fn spawn_session_actor(
         laziness_debug_log: laziness_debug_log.map(|p| std::sync::Arc::from(p.as_path())),
         last_live_orphan_reconcile: std::cell::Cell::new(None),
         deferred_prefix: TaskSlot::new(),
+        instructions_built_trusted: std::cell::Cell::new(instructions_built_trusted),
+        withheld_pending: std::cell::Cell::new(withheld_pending),
+        head_holder_owed: std::cell::Cell::new(head_holder_owed),
+        trust_reply_wait_armed: std::cell::Cell::new(withheld_pending),
+        start_reserved: std::rc::Rc::new(std::cell::Cell::new(false)),
+        owns_permission_manager,
         repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::new(
             repo_status_plan,
         ),

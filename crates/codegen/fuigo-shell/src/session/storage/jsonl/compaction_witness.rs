@@ -502,6 +502,7 @@ mod tests {
             schema_version: 1,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             original_user_info: None,
+            original_head_withheld: false,
             reread_file_paths: vec![],
         };
         std::fs::write(

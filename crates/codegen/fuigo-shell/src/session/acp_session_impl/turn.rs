@@ -1335,6 +1335,9 @@ impl SessionActor {
                     item
                 }
             };
+            if self.head_holder_owed.replace(false) {
+                user_chat.mark_project_files_withheld();
+            }
             user_chat.set_prompt_index(current_prompt_index);
             if !self.is_cursor_harness() {
                 for image in &user_images {

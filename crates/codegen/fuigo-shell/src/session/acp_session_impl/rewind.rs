@@ -563,6 +563,9 @@ impl SessionActor {
 
             self.cancel_active_sampling_requests();
             self.cancel_pending_image_strips_for_rewind();
+            let head_withheld = conversation
+                .iter()
+                .any(ConversationItem::project_files_withheld);
             // The rewound history must be stored before the rewind can succeed (P111, Astra r4): it is persisted
             // first, with the disk acknowledged, and only then applied in memory. A failure leaves the conversation
             // as it was and keeps every snapshot, like a partial file revert above, so the same rewind can be retried.
@@ -603,6 +606,8 @@ impl SessionActor {
                     )),
                 });
             }
+            self.withheld_pending
+                .set(head_withheld || !self.instructions_built_trusted.get());
 
             #[cfg(any(test, feature = "test-support"))]
             if let Some(killed) =
@@ -745,7 +750,11 @@ impl SessionActor {
                         // Replace User(user_info) at index 1 with the original from the checkpoint if available, otherwise keep the current one
                         if let Some(ui0) = replay_result.original_user_info {
                             conversation.truncate(1); // keep System only
-                            conversation.push(ConversationItem::user(ui0));
+                            let mut head = ConversationItem::user(ui0);
+                            if replay_result.original_head_withheld {
+                                head.mark_project_files_withheld();
+                            }
+                            conversation.push(head);
                         } else {
                             conversation.truncate(2); // keep System + current user_info
                         }

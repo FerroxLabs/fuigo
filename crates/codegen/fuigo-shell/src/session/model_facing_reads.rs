@@ -140,6 +140,7 @@ mod tests {
         ("session/acp_session_impl/read_dedupe_hook.rs", 1, "tool-result presence check, nothing leaves the process"),
         ("session/acp_session_impl/session_mode.rs", 1, "read-modify-replace of the stored system head"),
         ("session/acp_session_impl/session_setup.rs", 1, "read-modify-replace of the stored history at setup"),
+        ("session/acp_session_impl/withheld_instructions.rs", 1, "read-modify-replace of the stored history (folder-trust delivery); markers must survive"),
     ];
 
     const RAW_READ: &str = "get_conversation()";

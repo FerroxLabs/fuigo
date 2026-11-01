@@ -460,6 +460,7 @@ async fn write_checkpoint_file(adapter: &JsonlStorageAdapter, info: &Info, id: &
                 schema_version: 1,
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 original_user_info: None,
+                original_head_withheld: false,
                 reread_file_paths: vec![],
             },
         )
@@ -1790,6 +1791,7 @@ async fn compaction_at(
                 schema_version: 1,
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 original_user_info: original_user_info.map(str::to_string),
+                original_head_withheld: false,
                 reread_file_paths: vec![],
             },
         )

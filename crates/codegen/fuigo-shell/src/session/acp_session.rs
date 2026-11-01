@@ -166,6 +166,9 @@ use super::telemetry;
 #[path = "acp_session_impl/prompt_build.rs"]
 mod prompt_build;
 use prompt_build::*;
+#[path = "acp_session_impl/withheld_instructions.rs"]
+mod withheld_instructions;
+use withheld_instructions::*;
 #[path = "acp_session_impl/session_mode.rs"]
 mod session_mode;
 use session_mode::*;
@@ -1087,6 +1090,20 @@ pub(crate) struct SessionActor {
     pub(crate) mcp_handshakes_done: Arc<tokio::sync::Notify>,
     /// Background-computed user-message prefix, injected before the first prompt.
     pub(crate) deferred_prefix: TaskSlot<String>,
+    /// The agent's instruction list is current for the verdict and no bit remains in the conversation.
+    /// A prefix rendered while this is false carries `project_files_withheld`.
+    pub(crate) instructions_built_trusted: std::cell::Cell<bool>,
+    /// The turn-start grant check has work to do. See the invariants in `withheld_instructions.rs`.
+    /// Always false for a session trusted from the start, so its turn start costs one `Cell::get` and no verdict read.
+    pub(crate) withheld_pending: std::cell::Cell<bool>,
+    /// A new child built untrusted has no prefix, so its first User item takes the bit (see `withheld_instructions.rs`).
+    pub(crate) head_holder_owed: std::cell::Cell<bool>,
+    /// The first turn may still wait for a trust reply in flight. Later turns never wait.
+    pub(crate) trust_reply_wait_armed: std::cell::Cell<bool>,
+    /// `maybe_start_running_task` is inside its await gap. See [`StartReservation`].
+    pub(crate) start_reserved: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Whether this session owns its permission manager (a child inherits its parent's).
+    pub(crate) owns_permission_manager: bool,
     /// Extensions to notify at turn and session lifecycle edges. Built once by `session_extension_registry` at actor construction and frozen after.
     pub(crate) extension_registry: fuigo_agent_lifecycle::LocalExtensionRegistry,
     /// Local date last shown to the model.

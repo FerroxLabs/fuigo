@@ -563,6 +563,11 @@ impl RawStdioClient {
         &self.sandbox
     }
 
+    /// Take the sandbox back after [`Self::close`], for a second process on the same `FUIGO_HOME`.
+    pub fn take_sandbox(&mut self) -> TestSandbox {
+        std::mem::take(&mut self.sandbox)
+    }
+
     /// Every stdout line received so far, verbatim, in arrival order.
     pub fn transcript(&self) -> &[String] {
         &self.transcript

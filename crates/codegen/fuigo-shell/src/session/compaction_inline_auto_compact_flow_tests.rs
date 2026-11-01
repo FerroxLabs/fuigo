@@ -140,6 +140,7 @@ async fn fork_reload_second_compaction_preserves_authority() {
                         1,
                         None,
                         None,
+                        false,
                         tokio_util::sync::CancellationToken::new(),
                         if release { 0 } else { 3 },
                     )
@@ -226,6 +227,7 @@ async fn fork_reload_second_compaction_preserves_authority() {
                         2,
                         None,
                         None,
+                        false,
                         tokio_util::sync::CancellationToken::new(),
                         if release { 0 } else { 3 },
                     )
@@ -541,6 +543,12 @@ async fn create_test_actor(
         laziness_debug_log: None,
         last_live_orphan_reconcile: std::cell::Cell::new(None),
         deferred_prefix: TaskSlot::new(),
+        instructions_built_trusted: std::cell::Cell::new(true),
+        withheld_pending: std::cell::Cell::new(false),
+        head_holder_owed: std::cell::Cell::new(false),
+        trust_reply_wait_armed: std::cell::Cell::new(false),
+        start_reserved: std::rc::Rc::new(std::cell::Cell::new(false)),
+        owns_permission_manager: true,
         extension_registry: fuigo_agent_lifecycle::LocalExtensionRegistry::default(),
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
         prefix_carries_fallback_date: std::cell::Cell::new(false),

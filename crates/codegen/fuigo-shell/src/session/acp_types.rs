@@ -536,6 +536,9 @@ pub struct FeedbackContext {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartupHints {
+    /// A subagent opened with no inherited context, so nothing it starts with can hold the withheld bit.
+    #[serde(skip)]
+    pub(crate) fresh_child: bool,
     /// Runtime-captured durable parent grant; never accepted from client metadata.
     #[serde(skip)]
     pub(crate) execution_parent_grant: Option<std::sync::Arc<crate::session::execution_state::ChildGrant>>,

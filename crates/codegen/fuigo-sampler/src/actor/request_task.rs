@@ -234,10 +234,12 @@ pub(crate) async fn run_request_task(
             .lock()
             .expect("accounting ledger")
             .begin_attempt();
+        let attempt_number = retry_counts.total + doom_retry_count + 1;
+        completion.note_attempt(attempt_number);
         let receipt = crate::request_accounting::Attempt::new(
             &request,
             request_id.as_str(),
-            retry_counts.total + doom_retry_count + 1,
+            attempt_number,
         );
         let mut outcome = receipt.scope(run_one_attempt(
             &client,
@@ -625,13 +627,19 @@ async fn apply_retry_decision(
         }
     }
 
+    // A 429 stops at the lower of the two caps (`classify_error`), so that is the ceiling `Retrying` shows.
+    let announced_max_retries = if err.is_rate_limited() {
+        max_retries.min(rate_limit_threshold)
+    } else {
+        max_retries
+    };
     match decision {
         RetryDecision::Retry { backoff } => {
             announce_resend(
                 retry_counts,
                 empty_response,
                 configured_max_retries,
-                max_retries,
+                announced_max_retries,
                 event_tx,
                 request_id,
                 err,
@@ -648,7 +656,7 @@ async fn apply_retry_decision(
                 retry_counts,
                 empty_response,
                 configured_max_retries,
-                max_retries,
+                announced_max_retries,
                 event_tx,
                 request_id,
                 err,
@@ -704,7 +712,7 @@ async fn apply_retry_decision(
                 retry_counts,
                 empty_response,
                 configured_max_retries,
-                max_retries,
+                announced_max_retries,
                 event_tx,
                 request_id,
                 err,
@@ -716,7 +724,7 @@ async fn apply_retry_decision(
                 retry_counts,
                 empty_response,
                 configured_max_retries,
-                max_retries,
+                announced_max_retries,
                 event_tx,
                 request_id,
                 err,
