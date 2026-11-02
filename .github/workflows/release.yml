@@ -11,7 +11,7 @@ name: release
 #
 # GitHub offers ARM runners for both Linux and Windows, so five of the six
 # targets build natively and no cross toolchain exists to break. The sixth,
-# darwin-x64, cross-compiles on macos-14 because the Intel image is gone --
+# darwin-x64, cross-compiles on macos-15 because the Intel image is gone --
 # see the matrix comment. Runner availability is tabulated at the bottom.
 #
 #   Actions -> release -> Run workflow      (dry_run defaults to true)
@@ -57,7 +57,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             target: aarch64-apple-darwin
             npm_platform: darwin-arm64
             bin: fuigo-pager
@@ -67,12 +67,13 @@ jobs:
           # does not error, it queues forever, so this would have hung the
           # matrix rather than failed it.
           #
-          # macos-14 (arm64) covers it instead. Probed on the same day:
+          # macos-15 (arm64) covers it instead (it replaced macos-14, retired
+          # by GitHub on 2026-11-02). First probed on macos-14 the same day:
           # aws-lc-sys cross-compiles its C for x86_64 in 46s and emits
           # libaws_lc_0_39_1_crypto.a, and Rosetta 2 is installed on the image
           # (`arch -x86_64` runs), so the smoke test below still executes the
           # binary it just built. Nothing about this target ships untested.
-          - runner: macos-14
+          - runner: macos-15
             target: x86_64-apple-darwin
             npm_platform: darwin-x64
             bin: fuigo-pager
@@ -470,8 +471,8 @@ jobs:
           # arm64 exe cannot execute here, so there is no post-signing smoke for it; the
           # verify-published job executes it natively on windows-11-arm after publish.
           - {runner: windows-latest, os: windows, npm_platform: win32-arm64, bin: fuigo-pager.exe}
-          - {runner: macos-14, os: macos, npm_platform: darwin-arm64, bin: fuigo-pager, arch: arm64}
-          - {runner: macos-14, os: macos, npm_platform: darwin-x64, bin: fuigo-pager, arch: x86_64}
+          - {runner: macos-15, os: macos, npm_platform: darwin-arm64, bin: fuigo-pager, arch: arm64}
+          - {runner: macos-15, os: macos, npm_platform: darwin-x64, bin: fuigo-pager, arch: x86_64}
     steps:
       - uses: actions/checkout@v4
 
@@ -953,8 +954,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: macos-14, platform: darwin-arm64 }
-          - { runner: macos-14, platform: darwin-x64 }
+          - { runner: macos-15, platform: darwin-arm64 }
+          - { runner: macos-15, platform: darwin-x64 }
           - { runner: ubuntu-24.04, platform: linux-x64 }
           - { runner: ubuntu-24.04-arm, platform: linux-arm64 }
           - { runner: windows-latest, platform: win32-x64 }
@@ -1213,7 +1214,9 @@ jobs:
 #   ubuntu-24.04-arm  schedules    cmake /usr/local/bin
 #   windows-latest    schedules    cmake C:\Program Files\CMake
 #   windows-11-arm    schedules    cmake C:\Program Files\CMake
-#   macos-14          schedules    cmake /opt/homebrew, Rosetta 2 present
+#   macos-15          schedules    cmake /opt/homebrew, Rosetta 2 present
+#                     (replaced macos-14, which GitHub retired on 2026-11-02;
+#                     re-proved by the 2026-11-02 signed dry run)
 #   macos-13          QUEUES FOREVER -- treat the Intel image as gone
 #
 # FALLBACKS
@@ -1237,7 +1240,7 @@ jobs:
 # Either fallback means shipping a binary nobody executed before publish. Prefer
 # the native runners.
 #
-# darwin-x64 is already the exception: it cross-compiles on macos-14 because
+# darwin-x64 is already the exception: it cross-compiles on macos-15 because
 # macos-13 is gone. That one is safe to accept only because Rosetta 2 lets the
 # arm64 runner execute the x86_64 result, so the smoke test is real. Do not
 # extend the same reasoning to a target with no such escape hatch.
