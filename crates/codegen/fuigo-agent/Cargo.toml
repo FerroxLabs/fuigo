@@ -6,6 +6,7 @@ edition.workspace = true
 description = "Agent builder, definition parsing, and system prompt assembly"
 
 [dependencies]
+blake3 = { workspace = true }
 dunce = { workspace = true }
 fuigo-hooks = { path = "../fuigo-hooks" }
 fuigo-sampling-types = { path = "../fuigo-sampling-types" }

@@ -42,7 +42,7 @@ impl MvpAgent {
         parent_session_id: &str,
     ) -> crate::agent::subagent::SubagentValidationContext {
         let parent_sid = acp::SessionId::new(parent_session_id);
-        let (parent_cwd, allowed_subagent_types) = {
+        let (parent_cwd, allowed_subagent_types, plugin_registry) = {
             let ps = self.resident_handle(&parent_sid);
             warn_on_missing_parent_session_for_validate_type(parent_session_id, ps.is_some());
             (
@@ -50,6 +50,11 @@ impl MvpAgent {
                     .map(|h| std::path::PathBuf::from(&h.info.cwd))
                     .unwrap_or_default(),
                 ps.as_ref().and_then(|h| h.allowed_subagent_types.clone()),
+                // The parent's own registry (its Task enum's source); an evicted parent keeps the process snapshot.
+                match ps.as_ref() {
+                    Some(h) => h.plugin_registry.get(),
+                    None => self.plugin_registry_handle.snapshot(),
+                },
             )
         };
         let (cli_agent_names, subagent_toggle) = {
@@ -61,7 +66,7 @@ impl MvpAgent {
         };
         crate::agent::subagent::SubagentValidationContext {
             parent_cwd,
-            plugin_registry: self.plugin_registry_handle.snapshot(),
+            plugin_registry,
             subagent_toggle,
             allowed_subagent_types,
             cli_agent_names,
@@ -134,7 +139,7 @@ impl MvpAgent {
                 ps.workspace_ops.clone(),
                 ps.terminal_backend.clone(),
                 ps.tools_notification_handle.clone(),
-                ps.scheduler_handle.clone(),
+                ps.scheduler_handle.get(),
             )
         })?;
         let available_models = self.models_manager.models();
@@ -295,7 +300,8 @@ impl MvpAgent {
                     ask_user_question: None,
                 }
             },
-            plugin_registry: self.plugin_registry_handle.snapshot(),
+            plugin_registry: ps.and_then(|h| h.plugin_registry.get()),
+            plugin_registry_handle: self.plugin_registry_handle.clone(),
             models_manager: self.models_manager.clone(),
             file_tool_overrides: {
                 let cfg = self.cfg.borrow();

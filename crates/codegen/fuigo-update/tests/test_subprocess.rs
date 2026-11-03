@@ -588,11 +588,27 @@ async fn p145_install_with_a_healthy_registry_runs_preflight_then_install() {
     assert!(log[1].starts_with("i -g fuigo@1.0.21 --registry=https://npm.example.com"), "{log:?}");
 }
 
-/// Whether `pid` still names a live (not zombie) process.
+/// Whether `pid` still names a live process. A killed process is dead once it is a zombie (`Z`), and still dead while
+/// its reaper releases it (`X`/`x`, EXIT_DEAD): the orphaned grandchild's reaper (init) moves it Z -> X -> gone, so
+/// counting X as alive let a second read flip a dead pid back to "alive" for a few microseconds.
 fn p145_alive(pid: i32) -> bool {
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(stat) => !stat.rsplit(')').next().unwrap_or("").trim_start().starts_with('Z'),
+        Ok(stat) => !matches!(stat.rsplit(')').next().unwrap_or("").trim_start().chars().next(), Some('Z' | 'X' | 'x')),
         Err(_) => unsafe { libc_kill0(pid) },
+    }
+}
+
+/// Poll until `pid` is dead or `within` passes. The verdict is the last observation itself, never a second later read.
+async fn p145_dies_within(pid: i32, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    loop {
+        if !p145_alive(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -612,11 +628,7 @@ async fn p145_a_timeout_kills_the_whole_npm_process_tree() {
     g.set_sleep(30);
     let _ = npm_view_version_for_test("fuigo", None, Duration::from_secs(1)).await.unwrap_err();
     let pid = g.grandchild_pid().expect("grandchild started");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while p145_alive(pid) && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(!p145_alive(pid), "npm's child {pid} survived the timeout");
+    assert!(p145_dies_within(pid, Duration::from_secs(5)).await, "npm's child {pid} survived the timeout");
 
     // Same for the install bound: the preflight answers, npm i -g starts a lifecycle child and stalls (r2 #6).
     let g2 = FakeBinGuard::install_npm();
@@ -631,11 +643,7 @@ async fn p145_a_timeout_kills_the_whole_npm_process_tree() {
     assert_eq!(log.len(), 2, "{log:?}");
     assert!(log[0].starts_with("view ") && log[1].starts_with("i -g "), "{log:?}");
     let pid = g2.install_grandchild_pid().expect("install grandchild started");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while p145_alive(pid) && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(!p145_alive(pid), "npm install's child {pid} survived the timeout");
+    assert!(p145_dies_within(pid, Duration::from_secs(5)).await, "npm install's child {pid} survived the timeout");
 }
 
 /// Astra P145 r1 #3 / r2 #4: `npm view` (the check and the install preflight) runs in npm's global mode, like `npm i -g`,

@@ -404,6 +404,23 @@ fn neutralize_reminder_tags(content: &str) -> String {
         .into_owned()
 }
 
+/// Provenance digest of one instruction file: blake3 over the length-prefixed raw path and the length-prefixed raw body,
+/// before any neutralizing or trimming, so two renderings can only be called equal when their sources are.
+/// Both sides of the fork de-dup (the parent's rendered rules and the child's reminder files) use this one function.
+pub fn rule_source_digest(path: &str, content: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&(path.len() as u64).to_le_bytes());
+    hasher.update(path.as_bytes());
+    hasher.update(&(content.len() as u64).to_le_bytes());
+    hasher.update(content.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Integrity digest of rendered bytes (a fragment span inside an item's text).
+pub fn span_digest(bytes: &str) -> String {
+    blake3::hash(bytes.as_bytes()).to_hex().to_string()
+}
+
 fn render_agents_md(configs: &[AgentConfigFile]) -> Option<String> {
     if configs.is_empty() {
         return None;

@@ -453,10 +453,15 @@ impl SuppressReason {
 /// A tagged item outside the prefix is a folder-trust delivery, which holds more than the prefix does, so it keeps the
 /// fresh copy. While a head is withheld only the tag counts: a user message can carry the legacy text.
 /// Returns `Err(compacted_history)` unchanged when `prefix_len` is 0 or out of range.
+///
+/// `child_files` is the child's own reminder files as `(path, content)`, given only for a child that has a reminder and
+/// has not relocated. Outside a withheld head, a pin whose harness-rendered prefix provably holds every one of those files
+/// (by raw-source digest, with each span verified) also counts as holding the reminder.
 pub(super) fn preserve_inherited_prefix(
     conversation: &[ConversationItem],
     compacted_history: Vec<ConversationItem>,
     prefix_len: usize,
+    child_files: Option<&[(String, String)]>,
 ) -> Result<Vec<ConversationItem>, Vec<ConversationItem>> {
     if prefix_len == 0 || prefix_len > conversation.len() {
         return Err(compacted_history);
@@ -466,19 +471,78 @@ pub(super) fn preserve_inherited_prefix(
         matches!(item, ConversationItem::User(user)
             if user.synthetic_reason == Some(fuigo_sampling_types::SyntheticReason::ProjectInstructions))
     };
-    let prefix_holds_reminder = if conversation.iter().any(ConversationItem::project_files_withheld) {
-        inherited.iter().any(tagged)
+    // A1's proof covers only the reminder the harness tagged, so on that path alone only tagged items are dropped; an
+    // untagged item that merely starts with the legacy opener (e.g. a custom compaction prefix) is kept.
+    let (prefix_holds_reminder, pin_duplicate) = if conversation
+        .iter()
+        .any(ConversationItem::project_files_withheld)
+    {
+        (inherited.iter().any(tagged), false)
+    } else if inherited.iter().any(is_project_instructions) {
+        (true, false)
     } else {
-        inherited.iter().any(is_project_instructions)
+        (false, pin_rules_duplicate(inherited.get(1), child_files))
     };
-    let drop_reinjected_agents_md = prefix_holds_reminder && !conversation[prefix_len..].iter().any(tagged);
+    let no_fresh_delivery = !conversation[prefix_len..].iter().any(tagged);
+    let drop_reinjected_agents_md = prefix_holds_reminder && no_fresh_delivery;
+    let drop_tagged_duplicate = pin_duplicate && no_fresh_delivery;
     let mut preserved = inherited.to_vec();
     let child_items = compacted_history
         .into_iter()
         .skip_while(|i| matches!(i, ConversationItem::System(_)))
-        .filter(|i| !(drop_reinjected_agents_md && is_project_instructions(i)));
+        .filter(|i| {
+            !((drop_reinjected_agents_md && is_project_instructions(i))
+                || (drop_tagged_duplicate && tagged(i)))
+        });
     preserved.extend(child_items);
     Ok(preserved)
+}
+/// A1's `child_files`: the child's own reminder files as `(path, content)`, only for a child that has a reminder and has
+/// not relocated (`cwd_generation == 0`).
+pub(super) fn a1_child_files(
+    cwd_generation: u64,
+    has_reminder: bool,
+    files: &[fuigo_agent::prompt::agents_md::AgentConfigFile],
+) -> Option<Vec<(String, String)>> {
+    (cwd_generation == 0 && has_reminder).then(|| {
+        files
+            .iter()
+            .map(|file| (file.file_path.clone(), file.content.clone()))
+            .collect()
+    })
+}
+/// A1: the pin's prefix (index 1) is a harness render from a trusted list whose marks all verify, and every child file's
+/// raw-source digest equals some mark's. Only the typed provenance decides; no text is searched.
+pub(super) fn pin_rules_duplicate(
+    pin_prefix: Option<&ConversationItem>,
+    child_files: Option<&[(String, String)]>,
+) -> bool {
+    let Some(ConversationItem::User(user)) = pin_prefix else {
+        return false;
+    };
+    let Some(fuigo_sampling_types::InstructionProvenance::HarnessPrefix(marks)) =
+        &user.instruction_provenance
+    else {
+        return false;
+    };
+    let Some(files) = child_files.filter(|files| !files.is_empty()) else {
+        return false;
+    };
+    let Some(fuigo_sampling_types::ContentPart::Text { text }) = user.content.first() else {
+        return false;
+    };
+    let spans_verify = marks.iter().all(|mark| {
+        let (start, end) = (mark.start as usize, mark.end as usize);
+        start <= end
+            && text.get(start..end).is_some_and(|bytes| {
+                fuigo_agent::prompt::agents_md::span_digest(bytes) == mark.span_digest
+            })
+    });
+    spans_verify
+        && files.iter().all(|(path, content)| {
+            let digest = fuigo_agent::prompt::agents_md::rule_source_digest(path, content);
+            marks.iter().any(|mark| mark.source_digest == digest)
+        })
 }
 /// Project the token count a re-pinned (preserved) history would reseed to.
 /// The release decision then compares against the same threshold the auto-compact trigger applies next turn.
@@ -864,10 +928,16 @@ impl SessionActor {
         prefix_len: usize,
         tokens_before: u64,
         context_window: u64,
+        child_files: Option<Vec<(String, String)>>,
     ) -> (Vec<ConversationItem>, bool) {
         let compacted_len = compacted_history.len();
         let release_candidate = compacted_history.clone();
-        match preserve_inherited_prefix(full_conv, compacted_history, prefix_len) {
+        match preserve_inherited_prefix(
+            full_conv,
+            compacted_history,
+            prefix_len,
+            child_files.as_deref(),
+        ) {
             Ok(preserved) => {
                 let projected_preserved = project_preserved_reseed_tokens(
                     fuigo_chat_state::estimate_conversation_tokens(&preserved),
@@ -1379,7 +1449,10 @@ impl SessionActor {
             }
         };
         let generate_session_compact = compact_output.content.clone();
-        let user_message_prefix = self.build_user_message_prefix().await;
+        let super::RenderedPrefix {
+            text: user_message_prefix,
+            marks: prefix_marks,
+        } = self.build_user_message_prefix().await;
         let conversation = input_conversation;
         let (discovered_agents_md, all_skills_for_compaction, _edited_paths, mut state_context) =
             if use_short_prompt {
@@ -1833,13 +1906,21 @@ impl SessionActor {
             })
         };
         let mut compacted_history = compacted_history;
-        if !self.instructions_built_trusted.get()
-            && let Some(prefix) = compacted_history
-                .iter_mut()
-                .find(|item| matches!(item, ConversationItem::User(_)))
+        if let Some(prefix) = compacted_history
+            .iter_mut()
+            .find(|item| matches!(item, ConversationItem::User(_)))
         {
-            prefix.mark_project_files_withheld();
-            self.withheld_pending.set(true);
+            if !self.instructions_built_trusted.get() {
+                prefix.mark_project_files_withheld();
+                self.withheld_pending.set(true);
+            } else if !prefix_marks.is_empty()
+                && let ConversationItem::User(user) = prefix
+            {
+                // The prefix was rendered from the trusted list just above: record where its files sit.
+                user.instruction_provenance = Some(
+                    fuigo_sampling_types::InstructionProvenance::HarnessPrefix(prefix_marks),
+                );
+            }
         }
         let post_compaction_ms = apply_start.elapsed().as_millis() as u64;
         let original_user_info = self
@@ -1877,12 +1958,21 @@ impl SessionActor {
         let (compacted_history, prefix_released) = if prefix_len == 0 {
             (compacted_history, self.compaction.prefix_released.load(std::sync::atomic::Ordering::Relaxed))
         } else {
+            let child_files = {
+                let agent = self.agent.borrow();
+                a1_child_files(
+                    compaction_state_context.cwd_generation,
+                    agent.agents_md_user_reminder().is_some(),
+                    &agent.prompt_context().agents_md_files,
+                )
+            };
             self.resolve_forked_compacted_history(
                 &conversation,
                 compacted_history,
                 prefix_len,
                 tokens_before,
                 context_window,
+                child_files,
             )
         };
         self.persist_compaction_checkpoint(
@@ -2560,6 +2650,10 @@ mod artifact_error_text_tests {
 #[cfg(test)]
 #[path = "compaction_inline_auto_compact_flow_tests.rs"]
 mod inline_auto_compact_flow_tests;
+
+#[cfg(test)]
+#[path = "acp_session_tests/instruction_provenance_tests.rs"]
+mod instruction_provenance_tests;
 
 impl SessionActor {
     /// Resolve two `${{ tools.by_kind.* }}` templates to tool names for a compaction summary.

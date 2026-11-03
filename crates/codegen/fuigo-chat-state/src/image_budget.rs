@@ -237,6 +237,8 @@ fn conversation_body_bytes(conversation: &[ConversationItem]) -> usize {
     for item in &mut blanked {
         match item {
             ConversationItem::User(user) => {
+                // Harness-only provenance never reaches the model; measure without it.
+                user.instruction_provenance = None;
                 blank_image_urls(&mut user.content, &mut image_url_bytes);
             }
             ConversationItem::ToolResult(tool_result) => {
@@ -496,6 +498,39 @@ mod tests {
         assert!(capped.outcome.needs_image_compaction);
         assert!(capped.outcome.evicted > 0);
         assert!(capped.outcome.body_bytes_after <= 15_000_000);
+    }
+
+    /// Instruction provenance is harness-only metadata that never reaches the model, so a marked history just below the
+    /// trigger gets the same budget outcome as the same history unmarked, and keeps its marks.
+    #[test]
+    fn provenance_does_not_count_toward_the_image_budget() {
+        let unmarked = mixed_history();
+        let mut marked = unmarked.clone();
+        let ConversationItem::User(user) = &mut marked[0] else {
+            unreachable!()
+        };
+        user.instruction_provenance = Some(
+            fuigo_sampling_types::InstructionProvenance::HarnessPrefix(vec![
+            fuigo_sampling_types::FragmentMark {
+                start: 0,
+                end: 3,
+                span_digest: "s".repeat(64),
+                source_digest: "d".repeat(64),
+            };
+            8
+        ]),
+        );
+        let trigger = conversation_body_bytes(&unmarked) + 1;
+        let reclaim = trigger / 2;
+        let plain = apply_image_budget_with_limits(unmarked, trigger, reclaim);
+        let with_marks = apply_image_budget_with_limits(marked.clone(), trigger, reclaim);
+        assert!(!plain.outcome.needs_image_compaction);
+        assert_eq!(with_marks.outcome, plain.outcome);
+        assert_eq!(
+            serde_json::to_value(&with_marks.items).unwrap(),
+            serde_json::to_value(&marked).unwrap(),
+            "history keeps its provenance"
+        );
     }
 
     #[test]

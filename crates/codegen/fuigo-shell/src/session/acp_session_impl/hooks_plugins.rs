@@ -227,6 +227,13 @@ impl SessionActor {
         self.publish_hook_registry();
     }
 
+    /// Copy the actor's plugin registry into the handle-visible live cell, so Task validation and `inherit_skills` read the
+    /// registry the parent's agent was built with. Call after every write to `plugin_registry`.
+    fn publish_plugin_registry(&self) {
+        self.plugin_registry_live
+            .set(self.plugin_registry.borrow().clone());
+    }
+
     /// Copy the actor's registry into the handle-visible live cell, so a subagent spawned after a reload inherits what the parent fires now.
     /// Call after every write to `hook_registry`.
     fn publish_hook_registry(&self) {
@@ -1184,6 +1191,7 @@ impl SessionActor {
         let session_cwd = std::path::Path::new(&self.session_info.cwd);
 
         *self.plugin_registry.borrow_mut() = new_registry_snapshot.clone();
+        self.publish_plugin_registry();
 
         // Reload hooks in the current session
         let t_hooks = std::time::Instant::now();
@@ -1862,5 +1870,42 @@ mod p169_managed_hooks_only_tests {
         assert_eq!(refused.message, fuigo_hooks::trust::MANAGED_HOOKS_ONLY_ENV_NOTE);
         assert!(refused.message.contains("FUIGO_MANAGED_HOOKS_ONLY"));
         assert!(managed_hooks_only_refusal(&env_pin, ["requirements/system:a[0].hooks[0]"], managed).is_none());
+    }
+}
+
+#[cfg(test)]
+mod u39_plugin_registry_publish_tests {
+    /// Item 4b: `/plugins reload` (the one production writer of the actor's registry) publishes it for the handle.
+    #[tokio::test(flavor = "current_thread")]
+    async fn applying_a_plugin_snapshot_publishes_the_session_registry() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let actor = crate::session::acp_session::support::create_test_actor(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                let actor = std::sync::Arc::new(actor);
+                assert!(actor.plugin_registry_live.get().is_none());
+                let registry = Some(std::sync::Arc::new(
+                    fuigo_agent::plugins::PluginRegistry::empty(),
+                ));
+                let _ = actor.apply_plugin_registry_snapshot(registry.clone()).await;
+                assert!(matches!(
+                    (actor.plugin_registry_live.get(), registry),
+                    (Some(a), Some(b)) if std::sync::Arc::ptr_eq(&a, &b)
+                ));
+            })
+            .await;
     }
 }

@@ -353,7 +353,10 @@ impl SessionActor {
         self.abort_and_clear_prefire().await;
         let list_was_withheld = !self.instructions_built_trusted.get();
         let rebuilt_trusted = new_agent.built_project_trusted();
+        let new_scheduler = toolset_scheduler_handle(&new_agent).await;
         *self.agent.borrow_mut() = new_agent;
+        // The old toolset's drop cancelled its scheduler: park and child spawn must reach the new one.
+        self.scheduler_handle_live.set(new_scheduler);
         self.instructions_built_trusted.set(rebuilt_trusted);
         self.withheld_pending.set(!rebuilt_trusted);
         // The agent's own inline hooks belong to the definition: swap them with it, and tell an open hooks view
@@ -482,6 +485,7 @@ impl SessionActor {
             Self::rewrite_zero_turn_prefix(
                 &mut conversation,
                 new_user_prefix,
+                rebuilt_trusted,
                 drop_startup_skill_reminder,
             );
             // A pin keeps its items, so a reminder agent's pinned user-level item stops the insert below: the rewritten head
@@ -598,3 +602,7 @@ impl SessionActor {
         self.compaction.prefire.clear();
     }
 }
+
+#[cfg(test)]
+#[path = "../acp_session_tests/u39_scheduler_handle_tests.rs"]
+mod u39_scheduler_handle_tests;

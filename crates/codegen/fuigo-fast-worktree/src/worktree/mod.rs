@@ -1772,6 +1772,7 @@ mod tests {
             let typed = err
                 .downcast_ref::<crate::TrackedCopyError>()
                 .unwrap_or_else(|| panic!("standalone={standalone}: untyped error: {err:#}"));
+            assert!(crate::is_copy_abort(&err), "a tracked copy failure is a copy abort");
             assert_eq!(typed.paths, vec![std::path::PathBuf::from("secret.txt")]);
             let line = err.to_string();
             assert!(line.contains("secret.txt"), "{line}");

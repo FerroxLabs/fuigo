@@ -49,9 +49,14 @@ pub fn print_table(records: &[WorktreeRecord], out: &mut impl Write) -> std::io:
         let branch = rec.git_ref.as_deref().unwrap_or("(detached)");
         let label = rec.label().unwrap_or("");
         let path = abbreviate_home(&rec.path);
+        let missing = if rec.path.exists() {
+            ""
+        } else {
+            "  missing (the path no longer exists)"
+        };
         writeln!(
             out,
-            "  {} {} {} {} {} {:<AGE_WIDTH$} {}",
+            "  {} {} {} {} {} {:<AGE_WIDTH$} {}{}",
             fuigo_tty_utils::untrusted(pad_to_width(&rec.id, id_width)),
             fuigo_tty_utils::untrusted(cell(rec.kind.as_str(), type_width)),
             fuigo_tty_utils::untrusted(cell(&rec.repo_name, REPO_WIDTH)),
@@ -59,6 +64,7 @@ pub fn print_table(records: &[WorktreeRecord], out: &mut impl Write) -> std::io:
             fuigo_tty_utils::untrusted(cell(branch, BRANCH_WIDTH)),
             age,
             fuigo_tty_utils::untrusted(path),
+            missing,
         )?;
     }
     let total = records.len();
@@ -162,6 +168,8 @@ pub fn print_show(rec: &WorktreeRecord, out: &mut impl Write) -> std::io::Result
             write!(out, " ({skipped} {noun} skipped)")?;
         }
         writeln!(out)?;
+    } else {
+        writeln!(out, "  Folder:         missing (the path no longer exists)")?;
     }
     Ok(())
 }
@@ -280,15 +288,59 @@ mod tests {
         assert!(!text.contains("clean-artifacts"), "{text}");
     }
     #[test]
-    fn print_table_pads_cjk_labels_by_display_width() {
+    fn print_show_marks_a_missing_folder() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let gone = temp.path().join("gone");
+        let rec = crate::test_util::make_worktree_record("wt-gone", &gone, "g");
+        let mut out = Vec::new();
+        print_show(&rec, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Folder:         missing"), "{text}");
+        assert!(!text.contains("Disk Usage:"), "{text}");
+        let here = crate::test_util::make_worktree_record("wt-here", temp.path(), "h");
+        let mut out = Vec::new();
+        print_show(&here, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("Disk Usage:") && !text.contains("missing"),
+            "{text}"
+        );
+    }
+    #[test]
+    fn print_table_marks_a_missing_folder() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let gone = temp.path().join("gone");
         let records = vec![
-            make_record("wt-cjk", "组件更新"),
-            make_record("wt-ascii", "plain-label"),
+            crate::test_util::make_worktree_record("wt-gone", &gone, "g"),
+            crate::test_util::make_worktree_record("wt-here", temp.path(), "h"),
+        ];
+        let mut out = Vec::new();
+        print_table(&records, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let line = |id: &str| text.lines().find(|l| l.contains(id)).unwrap().to_string();
+        assert!(
+            line("wt-gone").contains("missing (the path no longer exists)"),
+            "{text}"
+        );
+        assert!(!line("wt-here").contains("missing"), "{text}");
+    }
+    #[test]
+    fn print_table_pads_cjk_labels_by_display_width() {
+        // Folders must exist: a missing one gets a trailing marker after the PATH cell.
+        let temp = tempfile::TempDir::new().unwrap();
+        let record = |id: &str, label: &str| {
+            let dir = temp.path().join(format!("wt-{id}"));
+            std::fs::create_dir(&dir).unwrap();
+            crate::test_util::make_worktree_record(id, &dir, label)
+        };
+        let records = vec![
+            record("wt-cjk", "组件更新"),
+            record("wt-ascii", "plain-label"),
         ];
         let mut out = Vec::new();
         print_table(&records, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("组件更新"));
-        crate::test_util::assert_path_column_aligned(&text, "/tmp/wt-");
+        crate::test_util::assert_path_column_aligned(&text, "/wt-wt-");
     }
 }

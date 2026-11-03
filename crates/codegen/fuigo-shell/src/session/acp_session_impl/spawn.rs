@@ -1310,12 +1310,8 @@ pub(crate) async fn spawn_session_actor(
     });
     tool_context.scheduler_delete_tool_name = resolved_scheduler_delete;
     tool_context.scheduler_create_tool_name = resolved_scheduler_create;
-    let scheduler_handle_for_handle = {
-        let toolset = agent.tool_bridge().toolset();
-        let res = toolset.resources.lock().await;
-        res.get::<fuigo_tools::implementations::fuigo_build::scheduler::types::SchedulerHandle>()
-            .cloned()
-    };
+    let scheduler_handle_for_handle =
+        crate::session::LiveSchedulerHandle::new(toolset_scheduler_handle(&agent).await);
     if let Err(e) = workspace_ops.bind_local_session_governed(
         &session_info.id.0,
         tool_context.cwd.as_path().to_path_buf(),
@@ -1376,6 +1372,13 @@ pub(crate) async fn spawn_session_actor(
         && !conversation_has_project_instructions(&conversation)
         && let Some(agents_md_reminder) = agent.agents_md_user_reminder()
     {
+        // F1: a summarized fork's background drops only the parent-rendered files this reminder carries, proven by marks.
+        if is_subagent_spawn && built_trusted && !head_withheld {
+            cut_fork_background_duplicates(
+                &mut conversation,
+                &agent.prompt_context().agents_md_files,
+            );
+        }
         let insert_at = conversation.len().min(1);
         conversation.insert(
             insert_at,
@@ -1384,6 +1387,10 @@ pub(crate) async fn spawn_session_actor(
         if let Some(ref mut len) = startup_hints.inherited_prefix_len {
             *len += 1;
         }
+    }
+    if is_subagent_spawn {
+        // Marks the cut above did not consume (no reminder, or not cut) are spent: nothing later reads them.
+        clear_fork_background_marks(&mut conversation);
     }
     // The invariants are in `withheld_instructions.rs`.
     let instructions_built_trusted = built_trusted && (delivered || !head_withheld);
@@ -1562,8 +1569,8 @@ pub(crate) async fn spawn_session_actor(
             let project_trusted =
                 SessionActor::session_hook_trust(cwd_path, remote_settings.as_ref());
             // The initial load includes the session's plugin hooks: before this, plugin hooks fired only after something triggered a reload
-            // A subagent reaches this branch only when its parent fires no hooks at all; its `plugin_registry` is the process-wide snapshot,
-            // not the parent's view of its own workspace, so it must not pick plugin hooks out of it (they could belong to another workspace)
+            // A subagent reaches this branch only when its parent fires no hooks at all, and it adds no plugin hooks of its own here:
+            // hooks follow the parent's decision, whatever plugins the child's own folder registry holds
             let own_plugins = if startup_hints.is_subagent {
                 None
             } else {
@@ -1593,6 +1600,8 @@ pub(crate) async fn spawn_session_actor(
         };
     let hook_registry_for_handle =
         crate::session::LiveHookRegistry::new(built_hook_registry.clone());
+    let plugin_registry_for_handle =
+        crate::session::LivePluginRegistry::new(plugin_registry.clone());
     let workspace_ops_for_handle = workspace_ops.clone();
     #[allow(clippy::arc_with_non_send_sync)]
     let mut _hook_load_errors: Vec<String> = hook_discovery_errors
@@ -2221,6 +2230,8 @@ pub(crate) async fn spawn_session_actor(
         vcs_kind,
         hook_load_errors: std::cell::RefCell::new(_hook_load_errors),
         plugin_registry: std::cell::RefCell::new(plugin_registry.clone()),
+        plugin_registry_live: plugin_registry_for_handle.clone(),
+        scheduler_handle_live: scheduler_handle_for_handle.clone(),
         plugin_registry_handle,
         events: crate::session::events::EventTracker::new(
             &crate::session::persistence::session_dir(&session_info),
@@ -2627,6 +2638,7 @@ pub(crate) async fn spawn_session_actor(
             session_default_agent_profile,
             allowed_subagent_types: allowed_subagent_types_for_handle,
             hook_registry: hook_registry_for_handle,
+            plugin_registry: plugin_registry_for_handle,
             workspace_ops: workspace_ops_for_handle,
             terminal_backend: Some(terminal_backend.clone()),
             tools_notification_handle: Some(tools_notification_handle.clone()),
@@ -3255,6 +3267,88 @@ mod terminal_backend_select_tests {
 /// [`crate::session::browser_mode::is_legacy_browser_head`]): replaced by the session's canonical normal head (its
 /// restored client override, else the agent's system prompt) unless the collision guard skips it. Persisted by the
 /// spawn's ordinary history write; a repaired head no longer matches, so a later load changes nothing more.
+/// F1 cut: in the fork background item, remove each instruction-file span the parent harness marked when the span still
+/// verifies and its raw-source digest equals one of the child's reminder files. The marks are one-shot: the field is cleared
+/// whether or not anything was cut. Nothing else in the background changes.
+pub(super) fn cut_fork_background_duplicates(
+    conversation: &mut [ConversationItem],
+    child_files: &[fuigo_agent::prompt::agents_md::AgentConfigFile],
+) {
+    let child: std::collections::HashSet<String> = child_files
+        .iter()
+        .map(|file| {
+            fuigo_agent::prompt::agents_md::rule_source_digest(&file.file_path, &file.content)
+        })
+        .collect();
+    for item in conversation.iter_mut() {
+        let ConversationItem::User(user) = item else {
+            continue;
+        };
+        if !matches!(
+            user.instruction_provenance,
+            Some(fuigo_sampling_types::InstructionProvenance::ForkBackground(
+                _
+            ))
+        ) {
+            continue;
+        }
+        let Some(fuigo_sampling_types::InstructionProvenance::ForkBackground(mut marks)) =
+            user.instruction_provenance.take()
+        else {
+            continue;
+        };
+        let [ContentPart::Text { text }] = user.content.as_mut_slice() else {
+            continue;
+        };
+        let mut background = text.to_string();
+        marks.sort_by(|a, b| b.start.cmp(&a.start));
+        let mut cut_floor = background.len();
+        let mut cut = false;
+        for mark in &marks {
+            let (start, end) = (mark.start as usize, mark.end as usize);
+            let removable = start < end
+                && end <= cut_floor
+                && child.contains(&mark.source_digest)
+                && background.get(start..end).is_some_and(|bytes| {
+                    fuigo_agent::prompt::agents_md::span_digest(bytes) == mark.span_digest
+                });
+            if removable {
+                background.replace_range(start..end, "");
+                cut_floor = start;
+                cut = true;
+            }
+        }
+        if cut {
+            *text = std::sync::Arc::<str>::from(background);
+        }
+    }
+}
+/// Drop every `ForkBackground` mark still on the conversation.
+pub(super) fn clear_fork_background_marks(conversation: &mut [ConversationItem]) {
+    for item in conversation.iter_mut() {
+        if let ConversationItem::User(user) = item
+            && matches!(
+                user.instruction_provenance,
+                Some(fuigo_sampling_types::InstructionProvenance::ForkBackground(
+                    _
+                ))
+            )
+        {
+            user.instruction_provenance = None;
+        }
+    }
+}
+
+/// The scheduler handle an agent's toolset holds in its resources (the scheduler actor that toolset runs, or the parent's
+/// for a child).
+pub(super) async fn toolset_scheduler_handle(
+    agent: &fuigo_agent::Agent,
+) -> Option<fuigo_tools::implementations::fuigo_build::scheduler::types::SchedulerHandle> {
+    let toolset = agent.tool_bridge().toolset();
+    let res = toolset.resources.lock().await;
+    res.get::<fuigo_tools::implementations::fuigo_build::scheduler::types::SchedulerHandle>()
+        .cloned()
+}
 pub(super) async fn repair_legacy_browser_head(
     conversation: &mut Vec<ConversationItem>,
     session_info: &SessionInfo,

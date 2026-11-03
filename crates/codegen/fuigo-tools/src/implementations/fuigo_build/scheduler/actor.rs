@@ -1,7 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -31,11 +33,102 @@ use super::types::{
 
 const MAX_SCHEDULED_TASKS: usize = 50;
 const DURABILITY_BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
+const FIRE_ADMISSIONS_PER_STATE_FILE: usize = 64;
+
+/// Recent fire instances `(task_id, due_at)` per scheduler state file. Two schedulers over one file (the rebuilt and
+/// the replaced toolset during a zero-turn model switch) each hold their own copy of it; the first to admit an
+/// instance fires it.
+pub(crate) type FireAdmissions = HashMap<PathBuf, VecDeque<(String, DateTime<Utc>)>>;
+pub(crate) static FIRE_ADMISSIONS: LazyLock<parking_lot::Mutex<FireAdmissions>> =
+    LazyLock::new(Default::default);
+
+/// One background loop-fire decision at a time per scheduler state file. The holder asks the coordinator whether the
+/// task already has a live or queued child, admits, and sends its spawn before releasing, so the next scheduler's
+/// query (on the same coordinator channel) is ordered after that spawn and sees it.
+pub(crate) type LoopFireGates = HashMap<PathBuf, std::sync::Arc<tokio::sync::Mutex<()>>>;
+pub(crate) static LOOP_FIRE_GATES: LazyLock<parking_lot::Mutex<LoopFireGates>> =
+    LazyLock::new(Default::default);
+
+/// Live toolsets per scheduler state file, and the token the loop spawns their schedulers accept hang off.
+type StateFileScopes = HashMap<PathBuf, (usize, CancellationToken)>;
+static STATE_FILE_SCOPES: LazyLock<parking_lot::Mutex<StateFileScopes>> =
+    LazyLock::new(Default::default);
+
+/// Held by each toolset whose scheduler persists to a state file. A replacement toolset is built before the replaced
+/// one drops, so a loop spawn the replaced scheduler accepted (queued at the concurrent limit, or running) is not
+/// cancelled by the switch. When the last toolset over the file drops (session shutdown) those spawns are cancelled
+/// and the file's fire admissions are forgotten. An explicit Stop still cancels the spawn through the coordinator.
+pub(crate) struct SchedulerScope {
+    path: PathBuf,
+    loop_spawns: CancellationToken,
+}
+
+impl SchedulerScope {
+    pub(crate) fn register(path: &std::path::Path) -> Self {
+        let mut scopes = STATE_FILE_SCOPES.lock();
+        let (live, token) = scopes.entry(path.to_path_buf()).or_default();
+        *live += 1;
+        LOOP_FIRE_GATES
+            .lock()
+            .entry(path.to_path_buf())
+            .or_default();
+        Self {
+            path: path.to_path_buf(),
+            loop_spawns: token.clone(),
+        }
+    }
+
+    /// The parent token for loop spawns this toolset's scheduler accepts.
+    pub(crate) fn loop_spawns(&self) -> CancellationToken {
+        self.loop_spawns.clone()
+    }
+}
+
+impl Drop for SchedulerScope {
+    fn drop(&mut self) {
+        let last = {
+            let mut scopes = STATE_FILE_SCOPES.lock();
+            match scopes.get_mut(&self.path) {
+                Some((live, _)) if *live > 1 => {
+                    *live -= 1;
+                    false
+                }
+                Some(_) => {
+                    scopes.remove(&self.path);
+                    // Removed under the scopes lock (order: scopes, admissions, gates), so a fire's commit
+                    // (`admit_fire`) and gate lookup either precede this and are removed with the scope, or see no
+                    // scope.
+                    FIRE_ADMISSIONS.lock().remove(&self.path);
+                    LOOP_FIRE_GATES.lock().remove(&self.path);
+                    true
+                }
+                None => false,
+            }
+        };
+        if last {
+            self.loop_spawns.cancel();
+        }
+    }
+}
 
 enum LoopFireOutcome {
     Spawned(String),
     Foreground,
     Skipped,
+    /// Another scheduler over the same state file already admitted this fire instance.
+    Duplicate,
+    /// The scheduler was shut down before the fire committed (or its spawn send failed at shutdown): nothing is spawned
+    /// or published. The cadence advance stands, as in 1.0.38.
+    Dead,
+}
+
+/// The result of a fire's commit (`SchedulerActor::admit_fire`).
+enum Admission {
+    Admitted,
+    /// Another scheduler over the same state file already admitted this fire instance.
+    Duplicate,
+    /// Cancelled, or persisting to a state file with no live scope.
+    Dead,
 }
 
 enum ExpiryPersistenceOutcome {
@@ -116,9 +209,56 @@ pub struct SchedulerActor {
     pub(crate) clock: SchedulerClock,
     pub(crate) pending_removal: Option<PendingDurableRemoval>,
     pub(crate) blocked_expiries: HashSet<String>,
+    /// From the toolset's [`SchedulerScope`]; `None` (a scheduler that persists nothing) keeps loop spawns on a child
+    /// of `cancel_token`, as in 1.0.38.
+    pub(crate) loop_spawn_cancel: Option<CancellationToken>,
 }
 
 impl SchedulerActor {
+    /// The single commit of a fire: every spawn send and fire notification comes after it, and nothing before it
+    /// publishes or spawns. Liveness is decided here, under the scopes lock that the last `SchedulerScope`'s drop
+    /// holds while it removes the file's admissions, so a fire either commits before shutdown (and its admission goes
+    /// with the scope) or is refused as `Dead`; no await between an earlier check and this point can be overtaken.
+    /// `Duplicate` when another scheduler over the same state file already admitted the instance. A scheduler that
+    /// persists nothing has no scope and is not keyed; only cancellation refuses it.
+    fn admit_fire(&self, task_id: &str, due_at: DateTime<Utc>) -> Admission {
+        let Some(path) = self.resources_persistence.state_path() else {
+            return if self.cancel_token.is_cancelled() {
+                Admission::Dead
+            } else {
+                Admission::Admitted
+            };
+        };
+        let scopes = STATE_FILE_SCOPES.lock();
+        if self.cancel_token.is_cancelled() || !scopes.contains_key(path) {
+            return Admission::Dead;
+        }
+        let mut admissions = FIRE_ADMISSIONS.lock();
+        let recent = admissions.entry(path.to_path_buf()).or_default();
+        if recent
+            .iter()
+            .any(|(id, due)| id == task_id && *due == due_at)
+        {
+            return Admission::Duplicate;
+        }
+        if recent.len() == FIRE_ADMISSIONS_PER_STATE_FILE {
+            recent.pop_front();
+        }
+        recent.push_back((task_id.to_owned(), due_at));
+        Admission::Admitted
+    }
+
+    /// The actor's resources, or `None` once the scheduler is cancelled, so shutdown never leaves a fire waiting.
+    async fn lock_resources_unless_cancelled(
+        &self,
+    ) -> Option<tokio::sync::MutexGuard<'_, crate::types::resources::Resources>> {
+        tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => None,
+            resources = self.resources.lock() => Some(resources),
+        }
+    }
+
     async fn await_bounded<T, E>(
         &self,
         future: impl std::future::Future<Output = Result<T, E>>,
@@ -298,10 +438,25 @@ impl SchedulerActor {
             .unwrap_or(Duration::MAX)
     }
 
-    async fn fire_next_task(&mut self) {
+    /// Cancelled, or persisting to a state file with no live scope. A scheduler that persists nothing has no scope to
+    /// lose and is never dead on that account.
+    fn is_dead(&self) -> bool {
+        self.cancel_token.is_cancelled()
+            || self
+                .resources_persistence
+                .state_path()
+                .is_some_and(|path| !STATE_FILE_SCOPES.lock().contains_key(path))
+    }
+
+    pub(crate) async fn fire_next_task(&mut self) {
         debug_assert!(self.pending_removal.is_none());
         let now = Utc::now();
         let mut res = self.resources.lock().await;
+        // Early exit for a scheduler already dead when this fire took the lock (cancelled, or its last scope dropped).
+        // Correctness rests on the commit in `admit_fire`, which every spawn and fire notification comes after.
+        if self.is_dead() {
+            return;
+        }
         if res.get::<SchedulerPaused>().is_some_and(|paused| paused.0.is_some()) {
             return;
         }
@@ -316,6 +471,7 @@ impl SchedulerActor {
 
         let task = &state.tasks[idx];
         let task_id = task.id.clone();
+        let due_at = task.next_fire_at();
         let is_expired = task.recurring && task.is_expired(now);
         let should_remove = !task.recurring;
         let prompt = task.prompt.clone();
@@ -452,6 +608,8 @@ impl SchedulerActor {
         }
 
         // Advance the cadence before releasing actor state to avoid immediate reselection.
+        // A fire later refused at its commit (`Dead`) keeps this advance and removal, as a 1.0.38 fire racing shutdown
+        // does: nothing is undone in memory, so a concurrent persistence snapshot and this state always agree.
         let task = &mut state.tasks[idx];
         task.last_fired_at = Some(now);
         let next_fire_at = task.recurring.then(|| task.next_fire_at().to_rfc3339());
@@ -492,11 +650,29 @@ impl SchedulerActor {
                     last_subagent_id,
                     iterations_since_fresh,
                     chain_reset_pending,
+                    due_at,
                 )
                 .await
             }
-            None => LoopFireOutcome::Foreground,
+            None => match self.admit_fire(&task_id, due_at) {
+                Admission::Admitted => LoopFireOutcome::Foreground,
+                Admission::Duplicate => LoopFireOutcome::Duplicate,
+                Admission::Dead => LoopFireOutcome::Dead,
+            },
         };
+
+        if matches!(&outcome, LoopFireOutcome::Dead) {
+            // Shut down before the fire committed: no spawn, no fire or upsert notification. The cadence advance and
+            // a one-shot's removal stand, exactly as 1.0.38 leaves them when shutdown races a fire.
+            tracing::info!(task_id = %task_id, "Scheduler shut down before the fire committed; not firing");
+            return;
+        }
+
+        if matches!(&outcome, LoopFireOutcome::Duplicate) {
+            // The cadence is already advanced, as for a fired task; the other scheduler spawned and announced it.
+            tracing::info!(task_id = %task_id, "Fire already admitted by another scheduler over this state; skipping");
+            return;
+        }
 
         if matches!(&outcome, LoopFireOutcome::Skipped) {
             let version = self.clock.snapshot();
@@ -514,7 +690,9 @@ impl SchedulerActor {
         }
 
         match outcome {
-            LoopFireOutcome::Skipped => unreachable!("skipped outcome returned above"),
+            LoopFireOutcome::Skipped | LoopFireOutcome::Duplicate | LoopFireOutcome::Dead => {
+                unreachable!("skipped, duplicate and dead outcomes returned above")
+            }
             LoopFireOutcome::Foreground => {
                 let commit = reservation.commit_next(&mut self.clock);
                 log_rollover(transition, Some(&task_id), commit.rollover);
@@ -570,7 +748,29 @@ impl SchedulerActor {
         last_subagent_id: Option<String>,
         iterations_since_fresh: u32,
         chain_reset_pending: bool,
+        due_at: DateTime<Utc>,
     ) -> LoopFireOutcome {
+        // Held through the spawn send (see `LOOP_FIRE_GATES`). Looked up through a live scope and never created here:
+        // a scheduler that persists nothing, or whose scope has already gone, takes no gate.
+        let gate = self.resources_persistence.state_path().and_then(|path| {
+            let scopes = STATE_FILE_SCOPES.lock();
+            scopes
+                .contains_key(path)
+                .then(|| LOOP_FIRE_GATES.lock().get(path).cloned())
+                .flatten()
+        });
+        let _gate = match gate {
+            Some(gate) => tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => return LoopFireOutcome::Dead,
+                held = gate.lock_owned() => Some(held),
+            },
+            // A persisted scheduler without a scope is dead (`is_dead`); only one that persists nothing takes no gate.
+            None if self.resources_persistence.state_path().is_some() => {
+                return LoopFireOutcome::Dead;
+            }
+            None => None,
+        };
         let prev_snapshot = match &last_subagent_id {
             Some(prev_id) => {
                 let (respond_to, rx) = tokio::sync::oneshot::channel();
@@ -587,7 +787,7 @@ impl SchedulerActor {
                 if query_sent {
                     tokio::select! {
                         biased;
-                        _ = self.cancel_token.cancelled() => return LoopFireOutcome::Skipped,
+                        _ = self.cancel_token.cancelled() => return LoopFireOutcome::Dead,
                         snapshot = rx => match snapshot {
                             Ok(s) => s,
                             Err(_) => return LoopFireOutcome::Skipped,
@@ -631,28 +831,32 @@ impl SchedulerActor {
             return LoopFireOutcome::Skipped;
         }
 
-        if last_subagent_id.is_some() {
-            let (respond_to, rx) = tokio::sync::oneshot::channel();
-            if events
-                .0
-                .send(SubagentEvent::LoopUnitActive(
-                    SubagentLoopUnitActiveRequest {
-                        task_id: task_id.to_string(),
-                        respond_to,
-                    },
-                ))
-                .is_err()
-            {
-                return LoopFireOutcome::Skipped;
-            }
+        // The coordinator, not this scheduler's anchor, is the record of whether the task has a live or queued child:
+        // ask it before every background admission. A replacement scheduler (zero-turn model switch) loads the state
+        // from before the replaced scheduler's fire, so its anchor can be empty while that child still runs.
+        let (respond_to, rx) = tokio::sync::oneshot::channel();
+        let unit_query_sent = events
+            .0
+            .send(SubagentEvent::LoopUnitActive(
+                SubagentLoopUnitActiveRequest {
+                    task_id: task_id.to_string(),
+                    respond_to,
+                },
+            ))
+            .is_ok();
+        if !unit_query_sent && last_subagent_id.is_some() {
+            return LoopFireOutcome::Skipped;
+        }
+        // With no anchor and no coordinator the spawn send below fails too and takes the 1.0.38 foreground path.
+        if unit_query_sent {
             tokio::select! {
                 biased;
-                _ = self.cancel_token.cancelled() => return LoopFireOutcome::Skipped,
+                _ = self.cancel_token.cancelled() => return LoopFireOutcome::Dead,
                 active = rx => match active {
                     Ok(true) => {
                         tracing::info!(
                             task_id = %task_id,
-                            "Skipping loop fire: a descendant of the previous iteration is still running"
+                            "Skipping loop fire: a child of this loop task is still running or queued"
                         );
                         return LoopFireOutcome::Skipped;
                     }
@@ -688,7 +892,9 @@ impl SchedulerActor {
 
         let subagent_id = uuid::Uuid::now_v7().to_string();
         let (poll, delete, create) = {
-            let res = self.resources.lock().await;
+            let Some(res) = self.lock_resources_unless_cancelled().await else {
+                return LoopFireOutcome::Dead;
+            };
             let names = res.get::<NativeToolClientNames>();
             let poll = res
                 .get::<TemplateRenderer>()
@@ -714,12 +920,20 @@ impl SchedulerActor {
         );
 
         {
-            let mut res = self.resources.lock().await;
+            let Some(mut res) = self.lock_resources_unless_cancelled().await else {
+                return LoopFireOutcome::Dead;
+            };
             let state = res.get_or_default::<State<SchedulerState>>();
             let Some(task) = state.tasks.iter_mut().find(|t| t.id == task_id) else {
                 tracing::info!(task_id = %task_id, "Loop task deleted mid-fire; not spawning");
                 return LoopFireOutcome::Skipped;
             };
+            // The commit, after every skip and before the spawn send: a skipped fire does not consume the admission.
+            match self.admit_fire(task_id, due_at) {
+                Admission::Admitted => {}
+                Admission::Duplicate => return LoopFireOutcome::Duplicate,
+                Admission::Dead => return LoopFireOutcome::Dead,
+            }
             task.last_subagent_id = Some(subagent_id.clone());
             task.iterations_since_fresh = next_iterations_since_fresh;
             task.chain_reset_pending = false;
@@ -746,9 +960,13 @@ impl SchedulerActor {
             await_to_completion: false,
             fork_context: false,
             owner: SubagentOwner::Task,
-            // A child of the actor's token, so shutdown cancels a fire the
-            // coordinator still has queued at the concurrent limit.
-            cancel_token: self.cancel_token.child_token(),
+            // Session shutdown cancels a fire the coordinator still has queued at the concurrent limit; a scheduler
+            // replacement does not (see `SchedulerScope`).
+            cancel_token: self
+                .loop_spawn_cancel
+                .as_ref()
+                .unwrap_or(&self.cancel_token)
+                .child_token(),
             tool_call_id: None,
         };
 
@@ -761,7 +979,14 @@ impl SchedulerActor {
             }))
             .is_err()
         {
-            let mut res = self.resources.lock().await;
+            // A send that failed because the session is shutting down publishes no Foreground fire into it. The
+            // admission stays: it is removed with the scope.
+            if self.is_dead() {
+                return LoopFireOutcome::Dead;
+            }
+            let Some(mut res) = self.lock_resources_unless_cancelled().await else {
+                return LoopFireOutcome::Dead;
+            };
             let state = res.get_or_default::<State<SchedulerState>>();
             if let Some(task) = state.tasks.iter_mut().find(|t| t.id == task_id) {
                 // Restore the full pre-fire snapshot, including a pending
@@ -1133,6 +1358,7 @@ mod tests {
                 clock: SchedulerClock::new(),
                 pending_removal: None,
                 blocked_expiries: HashSet::new(),
+                loop_spawn_cancel: None,
             }
             .run(),
         );
@@ -1214,6 +1440,7 @@ mod tests {
                 clock: SchedulerClock::at_revision_for_test(revision),
                 pending_removal: None,
                 blocked_expiries: HashSet::new(),
+                loop_spawn_cancel: None,
             },
             notifications,
         )
@@ -1241,6 +1468,7 @@ mod tests {
             clock: SchedulerClock::new(),
             pending_removal: None,
             blocked_expiries: HashSet::new(),
+            loop_spawn_cancel: None,
         };
 
         tokio::spawn(actor.run());
@@ -1554,6 +1782,7 @@ mod tests {
                 clock: SchedulerClock::new(),
                 pending_removal: None,
                 blocked_expiries: HashSet::new(),
+                loop_spawn_cancel: None,
             }
             .run(),
         );
@@ -1565,12 +1794,70 @@ mod tests {
         cancel_token.cancel();
     }
 
+    /// RS3: two schedulers, each over its own copy of one state file, fire a due instance once; schedulers that persist
+    /// nothing are not keyed and each fire it (1.0.38).
+    #[tokio::test]
+    async fn fire_instance_is_admitted_once_per_state_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("resources_state.json");
+        // A persisted scheduler needs a live scope to fire or expire (`is_dead`).
+        let _scope = SchedulerScope::register(&path);
+        let mut task = ScheduledTask::new(60, "rs3".into(), true, false);
+        task.foreground = true;
+        task.created_at = Utc::now() - chrono::Duration::seconds(61);
+        let fires = |keyed: bool| {
+            let (path, task) = (path.clone(), task.clone());
+            async move {
+                let (notif_handle, mut notif_rx) = auto_acknowledged_notifications();
+                for _ in 0..2 {
+                    let mut resources = Resources::new();
+                    resources.register_state::<SchedulerState>();
+                    resources.get_or_default::<State<SchedulerState>>().tasks = vec![task.clone()];
+                    let persistence = if keyed {
+                        crate::persistence::ResourcesPersistence::new(path.clone())
+                    } else {
+                        crate::persistence::ResourcesPersistence::noop()
+                    };
+                    let mut actor = SchedulerActor {
+                        resources: Arc::new(Mutex::new(resources)),
+                        resources_persistence: Arc::new(persistence),
+                        notification_handle: notif_handle.clone(),
+                        cmd_rx: mpsc::unbounded_channel().1,
+                        cancel_token: CancellationToken::new(),
+                        clock: SchedulerClock::new(),
+                        pending_removal: None,
+                        blocked_expiries: HashSet::new(),
+                        loop_spawn_cancel: None,
+                    };
+                    actor.fire_next_task().await;
+                }
+                let mut fired = 0;
+                while let Ok(event) = notif_rx.try_recv() {
+                    fired += usize::from(matches!(event, ToolNotification::ScheduledTaskFired(_)));
+                }
+                fired
+            }
+        };
+        assert_eq!(
+            fires(true).await,
+            1,
+            "a second scheduler over the same file fired the same instance"
+        );
+        assert_eq!(
+            fires(false).await,
+            2,
+            "an unkeyed scheduler changed behaviour"
+        );
+    }
+
     /// A non-durable expiry must persist the task's absence, otherwise every restart resurrects
     /// the task, re-expires it, and stacks a duplicate expiry record in the session transcript.
     #[tokio::test]
     async fn non_durable_expiry_persists_task_absence() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("resources_state.json");
+        // A persisted scheduler needs a live scope to fire or expire (`is_dead`).
+        let _scope = SchedulerScope::register(&path);
         let persistence = Arc::new(crate::persistence::ResourcesPersistence::new(path.clone()));
 
         let mut resources = Resources::new();
@@ -1591,6 +1878,7 @@ mod tests {
             clock: SchedulerClock::new(),
             pending_removal: None,
             blocked_expiries: HashSet::new(),
+            loop_spawn_cancel: None,
         };
         actor.fire_next_task().await;
         persistence.flush().await;
@@ -1677,6 +1965,7 @@ mod tests {
             clock: SchedulerClock::new(),
             pending_removal: None,
             blocked_expiries: HashSet::new(),
+            loop_spawn_cancel: None,
         };
 
         tokio::spawn(actor.run());
@@ -1764,6 +2053,7 @@ mod tests {
             clock: SchedulerClock::new(),
             pending_removal: None,
             blocked_expiries: HashSet::new(),
+            loop_spawn_cancel: None,
         };
         tokio::spawn(actor.run());
 
@@ -1998,6 +2288,7 @@ mod tests {
             clock: SchedulerClock::new(),
             pending_removal: None,
             blocked_expiries: HashSet::new(),
+            loop_spawn_cancel: None,
         };
 
         let handle = tokio::spawn(actor.run());
@@ -2063,6 +2354,7 @@ mod tests {
             clock: SchedulerClock::at_revision_for_test(revision),
             pending_removal: None,
             blocked_expiries: HashSet::new(),
+            loop_spawn_cancel: None,
         };
         tokio::spawn(actor.run());
 
@@ -2140,13 +2432,25 @@ mod tests {
             .unwrap();
     }
 
+    /// The next spawn, answering "no live child" to the coordinator query every background fire makes first.
+    async fn next_spawn_event(
+        rx: &mut mpsc::UnboundedReceiver<SubagentEvent>,
+    ) -> SubagentSpawnRequest {
+        loop {
+            match next_event(rx).await {
+                SubagentEvent::LoopUnitActive(req) => {
+                    req.respond_to.send(false).unwrap();
+                }
+                SubagentEvent::Spawn(spawn) => return spawn,
+                _ => panic!("expected subagent spawn"),
+            }
+        }
+    }
+
     async fn next_subagent_spawn(
         rx: &mut mpsc::UnboundedReceiver<SubagentEvent>,
     ) -> Box<SubagentRequest> {
-        let SubagentEvent::Spawn(spawn) = next_event(rx).await else {
-            panic!("expected subagent spawn");
-        };
-        spawn.request
+        next_spawn_event(rx).await.request
     }
 
     async fn answer_loop_unit_active(
@@ -2164,10 +2468,7 @@ mod tests {
         let (handle, cancel, mut notif_rx, mut subagent_rx) = make_test_actor_with_subagents();
         let task_id = create_due_task(&handle, "check deploy status", false).await;
 
-        let event = next_event(&mut subagent_rx).await;
-        let SubagentEvent::Spawn(request) = event else {
-            panic!("expected Spawn, got a different event");
-        };
+        let request = next_spawn_event(&mut subagent_rx).await;
         assert!(request.run_in_background);
         assert!(request.surface_completion);
         assert!(request.parent_prompt_id.is_none());
@@ -2331,9 +2632,7 @@ mod tests {
         let (handle, cancel, _notif_rx, mut subagent_rx) = make_test_actor_with_subagents();
         let task_id = create_due_task(&handle, "watch ci", false).await;
 
-        let SubagentEvent::Spawn(first) = next_event(&mut subagent_rx).await else {
-            panic!("expected first Spawn");
-        };
+        let first = next_spawn_event(&mut subagent_rx).await;
         let first_id = first.id.clone();
 
         // Patch the prompt while iteration 1 is still running.
@@ -2426,9 +2725,7 @@ mod tests {
             .unwrap();
         reply_rx.await.unwrap().unwrap();
 
-        let SubagentEvent::Spawn(request) = next_event(&mut subagent_rx).await else {
-            panic!("expected Spawn");
-        };
+        let request = next_spawn_event(&mut subagent_rx).await;
         let spawned_id = request.id.clone();
         let _ = request.result_tx.send(
             crate::implementations::fuigo_build::task::types::SubagentResult {
@@ -2468,9 +2765,7 @@ mod tests {
         let (handle, cancel, _notif_rx, mut subagent_rx) = make_test_actor_with_subagents();
         let task_id = create_due_task(&handle, "watch ci", false).await;
 
-        let SubagentEvent::Spawn(first) = next_event(&mut subagent_rx).await else {
-            panic!("expected first Spawn");
-        };
+        let first = next_spawn_event(&mut subagent_rx).await;
         let first_id = first.id.clone();
 
         let (up_tx, up_rx) = tokio::sync::oneshot::channel();
@@ -2544,6 +2839,7 @@ mod tests {
                 clock: SchedulerClock::new(),
                 pending_removal: None,
                 blocked_expiries: HashSet::new(),
+                loop_spawn_cancel: None,
             }
             .run(),
         );
@@ -3128,6 +3424,8 @@ mod tests {
     #[tokio::test]
     async fn durable_expiry_persists_before_ack_and_commits_version() {
         let (persistence, mut saves) = crate::persistence::ResourcesPersistence::controlled();
+        // A persisted scheduler needs a live scope to fire or expire (`is_dead`).
+        let _scope = SchedulerScope::register(std::path::Path::new("/dev/null"));
         let mut actor = make_boundary_actor(vec![expired_task("expired", true)], 0).0;
         actor.resources_persistence = Arc::new(persistence);
         let (notification_handle, mut notifications) =
@@ -3174,6 +3472,8 @@ mod tests {
     #[tokio::test]
     async fn expiry_persistence_failure_restores_and_blocks_while_plain_task_fires() {
         let (persistence, mut saves) = crate::persistence::ResourcesPersistence::controlled();
+        // A persisted scheduler needs a live scope to fire or expire (`is_dead`).
+        let _scope = SchedulerScope::register(std::path::Path::new("/dev/null"));
         let tasks = vec![expired_task("expired", true), due_one_shot("plain")];
         let (mut actor, mut notifications) = make_boundary_actor(tasks, 0);
         actor.resources_persistence = Arc::new(persistence);
@@ -3237,6 +3537,8 @@ mod tests {
         let mut actor = make_boundary_actor(tasks, 0).0;
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("resources_state.json");
+        // A persisted scheduler needs a live scope to fire or expire (`is_dead`).
+        let _scope = SchedulerScope::register(&state_path);
         actor.resources_persistence = Arc::new(crate::persistence::ResourcesPersistence::new(
             state_path.clone(),
         ));
@@ -3307,6 +3609,8 @@ mod tests {
     #[tokio::test]
     async fn expiry_persistence_cancellation_leaves_absent_and_stops_actor() {
         let (persistence, mut saves) = crate::persistence::ResourcesPersistence::controlled();
+        // A persisted scheduler needs a live scope to fire or expire (`is_dead`).
+        let _scope = SchedulerScope::register(std::path::Path::new("/dev/null"));
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
         resources.get_or_default::<State<SchedulerState>>().tasks =
@@ -3325,6 +3629,7 @@ mod tests {
             clock: SchedulerClock::new(),
             pending_removal: None,
             blocked_expiries: HashSet::new(),
+            loop_spawn_cancel: None,
         };
         let actor_task = tokio::spawn(actor.run());
         let (_, _withheld) = next_event(&mut saves).await;
@@ -3371,6 +3676,7 @@ mod tests {
             clock: SchedulerClock::new(),
             pending_removal: None,
             blocked_expiries: HashSet::new(),
+            loop_spawn_cancel: None,
         };
 
         let handle = tokio::spawn(actor.run());
@@ -3381,5 +3687,427 @@ mod tests {
             notif_rx.try_recv().is_err(),
             "no notifications expected when state is empty"
         );
+    }
+
+    /// Runs `shutdown` once, synchronously, inside the event whose message contains `message`: a test hook for a
+    /// window with no await in it (a shutdown on another thread can land there; a test can only land there this way).
+    struct ShutdownOnEvent {
+        message: &'static str,
+        shutdown: parking_lot::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl tracing::Subscriber for ShutdownOnEvent {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            if message.0.contains(self.message)
+                && let Some(shutdown) = self.shutdown.lock().take()
+            {
+                shutdown();
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// R5-H1: shutdown (cancel, last scope dropped, coordinator closed) while a background loop fire waits for
+    /// resources after the coordinator answered "not active". The fire commits at `admit_fire` or not at all: no
+    /// admission, no fire notification, no spawn.
+    #[tokio::test]
+    async fn shutdown_during_the_later_resources_wait_commits_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("resources_state.json");
+        let scope = SchedulerScope::register(&path);
+        let mut task = ScheduledTask::new(60, "r5 loop".into(), true, false);
+        task.foreground = false;
+        task.created_at = Utc::now() - chrono::Duration::seconds(61);
+        let (notif_handle, mut notif_rx) = auto_acknowledged_notifications();
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        resources.get_or_default::<State<SchedulerState>>().tasks = vec![task];
+        resources.insert(SubagentEventSender(events_tx));
+        resources.insert(SessionIdResource("parent".to_owned()));
+        let shared = Arc::new(Mutex::new(resources));
+        let cancel = CancellationToken::new();
+        let mut actor = SchedulerActor {
+            resources: shared.clone(),
+            resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::new(
+                path.clone(),
+            )),
+            notification_handle: notif_handle,
+            cmd_rx: mpsc::unbounded_channel().1,
+            cancel_token: cancel.clone(),
+            clock: SchedulerClock::new(),
+            pending_removal: None,
+            blocked_expiries: HashSet::new(),
+            loop_spawn_cancel: Some(scope.loop_spawns()),
+        };
+        let fire = tokio::spawn(async move { actor.fire_next_task().await });
+
+        // Hold resources while answering the activity query, so the fire blocks at its later acquisition.
+        let SubagentEvent::LoopUnitActive(query) = next_event(&mut events_rx).await else {
+            panic!("expected the loop unit-active query");
+        };
+        let held = shared.lock().await;
+        query.respond_to.send(false).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !fire.is_finished(),
+            "the fire must be blocked at the later resources wait"
+        );
+
+        cancel.cancel();
+        drop(scope);
+        events_rx.close();
+        drop(held);
+        tokio::time::timeout(MUST_ARRIVE, fire)
+            .await
+            .expect("the released fire finishes")
+            .expect("join");
+
+        let admitted = FIRE_ADMISSIONS.lock().contains_key(&path);
+        assert!(
+            !admitted,
+            "a fire admitted after shutdown recreated FIRE_ADMISSIONS"
+        );
+        let mut spawns = 0;
+        while let Ok(event) = events_rx.try_recv() {
+            spawns += usize::from(matches!(event, SubagentEvent::Spawn(_)));
+        }
+        assert_eq!(spawns, 0, "a fire spawned after shutdown");
+        // Grok R6 LOW 4: a cancelled resources wait publishes no upsert either.
+        while let Ok(notification) = notif_rx.try_recv() {
+            assert!(
+                !matches!(
+                    notification,
+                    ToolNotification::ScheduledTaskFired(_)
+                        | ToolNotification::ScheduledTaskCreated(_)
+                ),
+                "a fire or upsert was published after shutdown"
+            );
+        }
+        let task = shared
+            .lock()
+            .await
+            .get::<State<SchedulerState>>()
+            .and_then(|state| state.tasks.first().cloned());
+        assert!(
+            task.is_some_and(|task| task.last_fired_at.is_some()),
+            "the 1.0.38 cadence advance must stand"
+        );
+    }
+
+    /// Grok R5 LOW 2: the foreground and one-shot arm has no await between the entry check and its commit, so the
+    /// shutdown runs from a hook on the "Firing scheduled task" event inside that window. Nothing commits and nothing
+    /// is published; the cadence advance and one-shot removal stand as in 1.0.38.
+    #[tokio::test]
+    async fn shutdown_before_a_foreground_or_one_shot_commit_commits_nothing() {
+        for (recurring, foreground) in [(true, true), (false, false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("resources_state.json");
+            let scope = SchedulerScope::register(&path);
+            let cancel = CancellationToken::new();
+            let mut task = ScheduledTask::new(60, "r5 foreground".into(), recurring, false);
+            task.foreground = foreground;
+            task.created_at = Utc::now() - chrono::Duration::seconds(61);
+            let task_id = task.id.clone();
+            let (notif_handle, mut notif_rx) = auto_acknowledged_notifications();
+            let mut resources = Resources::new();
+            resources.register_state::<SchedulerState>();
+            resources.get_or_default::<State<SchedulerState>>().tasks = vec![task];
+            let mut actor = SchedulerActor {
+                resources: Arc::new(Mutex::new(resources)),
+                resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::new(
+                    path.clone(),
+                )),
+                notification_handle: notif_handle,
+                cmd_rx: mpsc::unbounded_channel().1,
+                cancel_token: cancel.clone(),
+                clock: SchedulerClock::new(),
+                pending_removal: None,
+                blocked_expiries: HashSet::new(),
+                loop_spawn_cancel: Some(scope.loop_spawns()),
+            };
+            let shut_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let hook = tracing::subscriber::set_default(ShutdownOnEvent {
+                message: "Firing scheduled task",
+                shutdown: parking_lot::Mutex::new(Some(Box::new({
+                    let (cancel, shut_down) = (cancel.clone(), shut_down.clone());
+                    move || {
+                        cancel.cancel();
+                        drop(scope);
+                        shut_down.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }))),
+            });
+            actor.fire_next_task().await;
+            drop(hook);
+
+            assert!(
+                shut_down.load(std::sync::atomic::Ordering::SeqCst),
+                "the shutdown hook never ran"
+            );
+            let admitted = FIRE_ADMISSIONS.lock().contains_key(&path);
+            assert!(
+                !admitted,
+                "recurring={recurring}: a fire admitted after shutdown recreated FIRE_ADMISSIONS"
+            );
+            while let Ok(notification) = notif_rx.try_recv() {
+                assert!(
+                    !matches!(
+                        notification,
+                        ToolNotification::ScheduledTaskFired(_)
+                            | ToolNotification::ScheduledTaskCreated(_)
+                            | ToolNotification::ScheduledTaskRemoved(_)
+                    ),
+                    "recurring={recurring}: a dead scheduler published"
+                );
+            }
+            // 1.0.38 parity, no rollback: the recurring task keeps its cadence advance, the one-shot stays removed.
+            let resources = actor.resources.lock().await;
+            let task = resources
+                .get::<State<SchedulerState>>()
+                .and_then(|state| state.tasks.iter().find(|task| task.id == task_id).cloned());
+            if recurring {
+                assert!(
+                    task.is_some_and(|task| task.last_fired_at.is_some()),
+                    "a refused recurring fire must keep the 1.0.38 cadence advance"
+                );
+            } else {
+                assert!(task.is_none(), "a refused one-shot was reinserted");
+            }
+        }
+    }
+
+    /// Astra R6-H2: a due one-shot is removed, a concurrent persistence snapshot captures the resources, then shutdown
+    /// lands before the commit. What the snapshot persists and what the dying actor holds must agree with 1.0.38 (the
+    /// one-shot gone from both), with no in-memory-only reinsert, and nothing is published.
+    #[tokio::test]
+    async fn refused_one_shot_matches_a_concurrent_snapshot_like_1_0_38() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("resources_state.json");
+        let scope = SchedulerScope::register(&path);
+        let cancel = CancellationToken::new();
+        let mut one_shot = ScheduledTask::new(60, "r6 one-shot".into(), false, false);
+        one_shot.created_at = Utc::now() - chrono::Duration::seconds(61);
+        let mut later = ScheduledTask::new(3600, "r6 later".into(), true, false);
+        later.created_at = Utc::now();
+        let later_id = later.id.clone();
+        let (notif_handle, mut notif_rx) = auto_acknowledged_notifications();
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        resources.get_or_default::<State<SchedulerState>>().tasks = vec![one_shot, later];
+        let shared = Arc::new(Mutex::new(resources));
+        let mut actor = SchedulerActor {
+            resources: shared.clone(),
+            resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::new(
+                path.clone(),
+            )),
+            notification_handle: notif_handle,
+            cmd_rx: mpsc::unbounded_channel().1,
+            cancel_token: cancel.clone(),
+            clock: SchedulerClock::new(),
+            pending_removal: None,
+            blocked_expiries: HashSet::new(),
+            loop_spawn_cancel: Some(scope.loop_spawns()),
+        };
+        let snapshot: Arc<parking_lot::Mutex<Option<Vec<String>>>> = Arc::default();
+        let hook = tracing::subscriber::set_default(ShutdownOnEvent {
+            message: "Firing scheduled task",
+            shutdown: parking_lot::Mutex::new(Some(Box::new({
+                let (cancel, shared, snapshot) = (cancel.clone(), shared.clone(), snapshot.clone());
+                move || {
+                    // The concurrent persistence snapshot, taken after the removal and before the commit.
+                    let res = shared
+                        .try_lock()
+                        .expect("the fire released resources before its commit");
+                    *snapshot.lock() = res
+                        .get::<State<SchedulerState>>()
+                        .map(|state| state.tasks.iter().map(|task| task.id.clone()).collect());
+                    drop(res);
+                    cancel.cancel();
+                    drop(scope);
+                }
+            }))),
+        });
+        actor.fire_next_task().await;
+        drop(hook);
+
+        let persisted = snapshot
+            .lock()
+            .clone()
+            .expect("the snapshot hook never ran");
+        assert_eq!(
+            persisted,
+            vec![later_id.clone()],
+            "the snapshot holds what 1.0.38 persists"
+        );
+        let in_memory: Vec<String> = shared
+            .lock()
+            .await
+            .get::<State<SchedulerState>>()
+            .map(|state| state.tasks.iter().map(|task| task.id.clone()).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            in_memory, persisted,
+            "the dying actor diverged from the persisted state (in-memory-only reinsert)"
+        );
+        assert!(!FIRE_ADMISSIONS.lock().contains_key(&path));
+        while let Ok(notification) = notif_rx.try_recv() {
+            assert!(
+                !matches!(
+                    notification,
+                    ToolNotification::ScheduledTaskFired(_)
+                        | ToolNotification::ScheduledTaskCreated(_)
+                        | ToolNotification::ScheduledTaskRemoved(_)
+                ),
+                "a refused one-shot fire published"
+            );
+        }
+    }
+
+    /// Fable R6 MEDIUM / Grok R6 LOW 1: cancelled while the background fire waits on the coordinator's unit-active
+    /// query. The cancel arm returns `Dead`: no spawn, no fire, no `ScheduledTaskCreated` upsert, no admission, and the
+    /// cadence advance stands as in 1.0.38.
+    #[tokio::test]
+    async fn shutdown_during_the_unit_active_wait_publishes_no_upsert() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("resources_state.json");
+        let scope = SchedulerScope::register(&path);
+        let mut task = ScheduledTask::new(60, "r6 loop".into(), true, false);
+        task.foreground = false;
+        task.created_at = Utc::now() - chrono::Duration::seconds(61);
+        let task_id = task.id.clone();
+        let (notif_handle, mut notif_rx) = auto_acknowledged_notifications();
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        resources.get_or_default::<State<SchedulerState>>().tasks = vec![task];
+        resources.insert(SubagentEventSender(events_tx));
+        resources.insert(SessionIdResource("parent".to_owned()));
+        let shared = Arc::new(Mutex::new(resources));
+        let cancel = CancellationToken::new();
+        let mut actor = SchedulerActor {
+            resources: shared.clone(),
+            resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::new(
+                path.clone(),
+            )),
+            notification_handle: notif_handle,
+            cmd_rx: mpsc::unbounded_channel().1,
+            cancel_token: cancel.clone(),
+            clock: SchedulerClock::new(),
+            pending_removal: None,
+            blocked_expiries: HashSet::new(),
+            loop_spawn_cancel: Some(scope.loop_spawns()),
+        };
+        let fire = tokio::spawn(async move { actor.fire_next_task().await });
+
+        // Leave the query unanswered (the reply sender stays alive) and shut down.
+        let SubagentEvent::LoopUnitActive(_query) = next_event(&mut events_rx).await else {
+            panic!("expected the loop unit-active query");
+        };
+        cancel.cancel();
+        drop(scope);
+        tokio::time::timeout(MUST_ARRIVE, fire)
+            .await
+            .expect("the cancelled fire finishes")
+            .expect("join");
+
+        assert!(!FIRE_ADMISSIONS.lock().contains_key(&path));
+        let mut spawns = 0;
+        while let Ok(event) = events_rx.try_recv() {
+            spawns += usize::from(matches!(event, SubagentEvent::Spawn(_)));
+        }
+        assert_eq!(spawns, 0, "a cancelled fire spawned");
+        while let Ok(notification) = notif_rx.try_recv() {
+            assert!(
+                !matches!(
+                    notification,
+                    ToolNotification::ScheduledTaskFired(_)
+                        | ToolNotification::ScheduledTaskCreated(_)
+                ),
+                "a cancelled scheduler published"
+            );
+        }
+        let last_fired_at = shared
+            .lock()
+            .await
+            .get::<State<SchedulerState>>()
+            .and_then(|state| state.tasks.iter().find(|task| task.id == task_id).cloned())
+            .and_then(|task| task.last_fired_at);
+        assert!(
+            last_fired_at.is_some(),
+            "the 1.0.38 cadence advance must stand"
+        );
+    }
+
+    /// The commit is atomic with the last scope's drop: racing that drop on another thread against `admit_fire` never
+    /// leaves an admission for a path with no live scope.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admit_fire_racing_the_last_scope_drop_never_outlives_the_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("resources_state.json");
+        let mut actor = SchedulerActor {
+            resources: Arc::new(Mutex::new(Resources::new())),
+            resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::new(
+                path.clone(),
+            )),
+            notification_handle: ToolNotificationHandle::channel().0,
+            cmd_rx: mpsc::unbounded_channel().1,
+            cancel_token: CancellationToken::new(),
+            clock: SchedulerClock::new(),
+            pending_removal: None,
+            blocked_expiries: HashSet::new(),
+            loop_spawn_cancel: None,
+        };
+        let base = Utc::now();
+        for i in 0..2000 {
+            let scope = SchedulerScope::register(&path);
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let dropper = std::thread::spawn({
+                let barrier = barrier.clone();
+                move || {
+                    barrier.wait();
+                    drop(scope);
+                }
+            });
+            let admitter = std::thread::spawn({
+                let barrier = barrier.clone();
+                move || {
+                    barrier.wait();
+                    let _ = actor.admit_fire("race", base + chrono::Duration::seconds(i));
+                    actor
+                }
+            });
+            dropper.join().unwrap();
+            actor = admitter.join().unwrap();
+            let admitted = FIRE_ADMISSIONS.lock().contains_key(&path);
+            let scoped = STATE_FILE_SCOPES.lock().contains_key(&path);
+            assert!(
+                !admitted || scoped,
+                "iteration {i}: an admission outlived the last scope over its path"
+            );
+        }
     }
 }

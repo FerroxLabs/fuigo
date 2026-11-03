@@ -285,6 +285,34 @@ pub struct UserItem {
     /// delivers the files. A trusted session never has it, so its history is byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub project_files_withheld: bool,
+    /// Harness-only provenance. Never sent to a model; skip-if-none keeps every other item byte-identical on disk.
+    /// Set only by harness code on a prefix it rendered from a trusted instruction list (or on a fork background that
+    /// carries such a prefix), and cleared by every in-place rewrite of the item's text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_provenance: Option<InstructionProvenance>,
+}
+
+/// Where the instruction-file fragments inside an item's first text part came from (see
+/// [`UserItem::instruction_provenance`]). The two variants keep the two consumers apart at the type level.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstructionProvenance {
+    /// On the prefix item the harness rendered from a trusted list.
+    HarnessPrefix(Vec<FragmentMark>),
+    /// On a summarized fork's `<background_context>` item, remapped from the parent's `HarnessPrefix`.
+    ForkBackground(Vec<FragmentMark>),
+}
+
+/// One instruction-file fragment inside an item's first text part.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FragmentMark {
+    /// Byte span of the fragment in `content[0]`.
+    pub start: u32,
+    pub end: u32,
+    /// blake3 of the rendered bytes in the span (integrity of the item text).
+    pub span_digest: String,
+    /// blake3 of the length-prefixed raw rule path and raw rule body (see `fuigo_agent`'s `rule_source_digest`).
+    pub source_digest: String,
 }
 
 /// Assistant response with tool calls.
@@ -1273,6 +1301,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1287,6 +1316,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1299,6 +1329,16 @@ impl ConversationItem {
     pub fn mark_project_files_withheld(&mut self) {
         if let Self::User(user) = self {
             user.project_files_withheld = true;
+            // A withheld render never carries provenance.
+            user.instruction_provenance = None;
+        }
+    }
+
+    /// The harness provenance on this `User` item, if any (see [`UserItem::instruction_provenance`]).
+    pub fn instruction_provenance(&self) -> Option<&InstructionProvenance> {
+        match self {
+            Self::User(user) => user.instruction_provenance.as_ref(),
+            _ => None,
         }
     }
 
@@ -1316,6 +1356,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1333,6 +1374,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1347,6 +1389,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1376,6 +1419,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1390,6 +1434,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1404,6 +1449,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1422,6 +1468,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1434,6 +1481,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1474,6 +1522,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1510,6 +1559,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1527,6 +1577,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1544,6 +1595,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1562,6 +1614,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1576,6 +1629,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1590,6 +1644,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1604,6 +1659,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1618,6 +1674,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1634,6 +1691,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1648,6 +1706,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -1662,6 +1721,7 @@ impl ConversationItem {
             prior_turn_interrupt: None,
             prompt_index: None,
             project_files_withheld: false,
+            instruction_provenance: None,
         })
     }
 
@@ -5842,5 +5902,66 @@ mod project_files_withheld_tests {
         assert!(back.project_files_withheld());
         let old: ConversationItem = serde_json::from_str(&plain).unwrap();
         assert!(!old.project_files_withheld(), "an older line reads as not withheld");
+    }
+}
+
+#[cfg(test)]
+mod instruction_provenance_tests {
+    use super::*;
+
+    #[test]
+    fn old_jsonl_line_without_the_field_round_trips_byte_identically() {
+        let line =
+            r#"{"type":"user","content":[{"type":"text","text":"<user_info>x</user_info>"}]}"#;
+        let item: ConversationItem = serde_json::from_str(line).expect("old line loads");
+        assert!(item.instruction_provenance().is_none());
+        let reencoded = serde_json::to_string(&item).expect("encode");
+        let original: serde_json::Value = serde_json::from_str(line).unwrap();
+        let again: serde_json::Value = serde_json::from_str(&reencoded).unwrap();
+        assert_eq!(original, again);
+        assert_eq!(reencoded, line, "byte-identical");
+    }
+
+    #[test]
+    fn new_jsonl_line_loads_in_a_reader_without_the_field() {
+        let mut item = ConversationItem::user("prefix");
+        if let ConversationItem::User(u) = &mut item {
+            u.instruction_provenance =
+                Some(InstructionProvenance::HarnessPrefix(vec![FragmentMark {
+                    start: 0,
+                    end: 6,
+                    span_digest: "a".into(),
+                    source_digest: "b".into(),
+                }]));
+        }
+        let line = serde_json::to_string(&item).unwrap();
+        assert!(line.contains("instruction_provenance"));
+        let back: ConversationItem = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.instruction_provenance(), item.instruction_provenance());
+
+        // A reader that predates the field: the same shape without it, no deny_unknown_fields.
+        #[derive(serde::Deserialize)]
+        struct OldUser {
+            content: Vec<ContentPart>,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum OldItem {
+            User(OldUser),
+        }
+        let OldItem::User(old) =
+            serde_json::from_str::<OldItem>(&line).expect("older reader loads");
+        assert_eq!(old.content.len(), 1);
+    }
+
+    #[test]
+    fn marking_withheld_clears_provenance() {
+        let mut item = ConversationItem::user("prefix");
+        if let ConversationItem::User(u) = &mut item {
+            u.instruction_provenance = Some(InstructionProvenance::HarnessPrefix(Vec::new()));
+        }
+        item.mark_project_files_withheld();
+        assert!(item.project_files_withheld());
+        assert!(item.instruction_provenance().is_none());
     }
 }

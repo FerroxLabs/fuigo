@@ -242,8 +242,11 @@ pub(crate) struct SubagentSpawnContext {
     /// Per-tool params resolved from the parent's config, forwarded verbatim to the child spawn.
     /// A default here silently drops the child's bash tool to the compiled 5-minute ceiling and the tool's own auto-background default.
     pub tool_params_json: crate::session::agent_rebuild::ResolvedToolParamsJson,
-    /// Plugin registry for plugin-aware agent lookup.
+    /// Plugin registry for plugin-aware agent lookup: the parent session's own registry (type resolution, the toggle/allow
+    /// gate and `inherit_skills`).
     pub plugin_registry: Option<std::sync::Arc<fuigo_agent::plugins::PluginRegistry>>,
+    /// Builds the child's own registry for its cwd at spawn (item 4).
+    pub plugin_registry_handle: fuigo_agent::plugins::SharedPluginRegistryHandle,
     /// Shared models manager for etag-triggered refresh.
     pub models_manager: crate::agent::models::ModelsManager,
     /// Pre-resolved file tool overrides (hashline vs standard) from the parent.
@@ -1544,6 +1547,37 @@ fn available_agent_names(ctx: &SubagentSpawnContext) -> Vec<String> {
             allowed_types: ctx.allowed_subagent_types.as_deref(),
         },
     )
+}
+/// The child's own plugin registry: built for its cwd on its own folder verdict, the same build a top-level open runs.
+/// Runs inside `spawn_blocking` on the subagent worker runtime.
+pub(crate) fn build_child_plugin_registry(
+    handle: &fuigo_agent::plugins::SharedPluginRegistryHandle,
+    child_cwd: &Path,
+) -> Option<Arc<fuigo_agent::plugins::PluginRegistry>> {
+    handle.build_for_cwd(
+        child_cwd,
+        &crate::config::resolve_effective_plugins_config(child_cwd).to_discovery_config(),
+        &[],
+        crate::agent::folder_trust::project_scope_allowed(child_cwd),
+    )
+}
+/// The skills a child with `inherit_skills` gets when the parent sent none: listed from the parent's folder through the
+/// parent's own plugin registry (the source of its Task enum).
+pub(crate) async fn list_parent_skills(
+    parent_cwd: &Path,
+    parent_skills_config: &fuigo_agent::prompt::skills::SkillsConfig,
+    parent_plugin_registry: Option<&fuigo_agent::plugins::PluginRegistry>,
+    parent_compat: fuigo_tools::types::compat::CompatConfig,
+) -> Vec<fuigo_tools::implementations::skills::types::SkillInfo> {
+    let parent_cwd_str = parent_cwd.to_string_lossy().to_string();
+    fuigo_agent::prompt::skills::list_skills_with_plugins(
+        Some(&parent_cwd_str),
+        parent_skills_config,
+        parent_plugin_registry,
+        parent_compat,
+        crate::agent::folder_trust::project_scope_allowed(parent_cwd),
+    )
+    .await
 }
 /// Minimal per-session context for `validate_subagent_type`.
 /// Avoids the heavy `SubagentSpawnContext` clone on the validation hot path.

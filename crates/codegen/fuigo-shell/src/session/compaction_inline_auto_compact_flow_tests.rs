@@ -130,6 +130,7 @@ async fn fork_reload_second_compaction_preserves_authority() {
                     3,
                     100,
                     if release { 1 } else { 200_000 },
+                    None,
                 );
                 assert_eq!(released, release);
                 let (epoch, _, _) = actor.chat_state_handle.compaction_snapshot().await.unwrap();
@@ -217,7 +218,7 @@ async fn fork_reload_second_compaction_preserves_authority() {
                 let (second, _) = if release {
                     (summary, true)
                 } else {
-                    actor.resolve_forked_compacted_history(&full, summary, 3, 100, 200_000)
+                    actor.resolve_forked_compacted_history(&full, summary, 3, 100, 200_000, None)
                 };
                 let (epoch, _, _) = actor.chat_state_handle.compaction_snapshot().await.unwrap();
                 actor
@@ -556,6 +557,8 @@ async fn create_test_actor(
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(None),
         hook_registry_live: Default::default(),
+        plugin_registry_live: Default::default(),
+        scheduler_handle_live: Default::default(),
         turn_report: Default::default(),
         turn_abort: Default::default(),
         turn_end_tx: Default::default(),
@@ -2151,7 +2154,7 @@ mod preserve_prefix {
             ConversationItem::system("sys"),
             ConversationItem::user("summary"),
         ];
-        let items = preserve_inherited_prefix(&conversation, compacted, 3).expect("Ok");
+        let items = preserve_inherited_prefix(&conversation, compacted, 3, None).expect("Ok");
         assert_eq!(items.len(), 4);
         assert!(matches!(items[0], ConversationItem::System(_)));
     }
@@ -2168,10 +2171,11 @@ mod preserve_prefix {
             ConversationItem::system("sys"),
             ConversationItem::assistant("summary"),
         ];
-        let fixed = preserve_inherited_prefix(&conversation, compacted.clone(), 1).expect("Ok");
+        let fixed =
+            preserve_inherited_prefix(&conversation, compacted.clone(), 1, None).expect("Ok");
         assert!(fixed.len() < conversation.len(), "head-only shrinks");
-        let buggy =
-            preserve_inherited_prefix(&conversation, compacted, conversation.len()).expect("Ok");
+        let buggy = preserve_inherited_prefix(&conversation, compacted, conversation.len(), None)
+            .expect("Ok");
         assert!(
             buggy.len() >= conversation.len(),
             "full prefix never shrinks"
@@ -2208,7 +2212,7 @@ mod preserve_prefix {
             ConversationItem::project_instructions("AGENTS.md"),
             ConversationItem::user("summary"),
         ];
-        let items = preserve_inherited_prefix(&conversation, compacted, 2).expect("Ok");
+        let items = preserve_inherited_prefix(&conversation, compacted, 2, None).expect("Ok");
         let pi = items
             .iter()
             .filter(|i| super::super::is_project_instructions(i))
@@ -2226,7 +2230,7 @@ mod preserve_prefix {
             ConversationItem::project_instructions("AGENTS.md"),
             ConversationItem::user("summary"),
         ];
-        let items = preserve_inherited_prefix(&conversation, compacted, 1).expect("Ok");
+        let items = preserve_inherited_prefix(&conversation, compacted, 1, None).expect("Ok");
         let pi = items
             .iter()
             .filter(|i| super::super::is_project_instructions(i))

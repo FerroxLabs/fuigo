@@ -176,8 +176,9 @@ fn a_pinned_reminder_stays_complete_through_compaction() {
         ConversationItem::project_instructions(full),
         ConversationItem::user_meta("summary".to_owned()),
     ];
-    let kept = super::super::compaction::preserve_inherited_prefix(&conversation, compacted, 3)
-        .expect("pin retained");
+    let kept =
+        super::super::compaction::preserve_inherited_prefix(&conversation, compacted, 3, None)
+            .expect("pin retained");
     assert_eq!(copies(&kept), 1);
 }
 
@@ -193,8 +194,9 @@ fn a_delivery_outside_the_pin_is_replaced_by_compaction() {
         ConversationItem::user_meta("prefix".to_owned()),
         ConversationItem::project_instructions(full),
     ];
-    let kept = super::super::compaction::preserve_inherited_prefix(&conversation[..3], compacted, 3)
-        .expect("pin retained");
+    let kept =
+        super::super::compaction::preserve_inherited_prefix(&conversation[..3], compacted, 3, None)
+            .expect("pin retained");
     assert_eq!(copies(&kept), 1);
 }
 
@@ -429,7 +431,9 @@ fn a_grant_before_the_prefix_is_consumed_adds_one_copy() {
         live.actor.chat_state_handle.replace_conversation(vec![ConversationItem::system("s")]);
         live.actor
             .deferred_prefix
-            .arm(tokio::task::spawn_local(async { "<user_info>late</user_info>".to_owned() }));
+            .arm(tokio::task::spawn_local(async {
+                "<user_info>late</user_info>".to_owned().into()
+            }));
         live.grant(true);
         live.queue("p1").await;
         live.kick().await;
@@ -528,8 +532,14 @@ fn a_forged_reminder_in_a_pin_cannot_suppress_the_real_one() {
         ConversationItem::project_instructions(format!("reminder {CANARY}")),
         ConversationItem::user("summary"),
     ];
-    let kept = super::super::compaction::preserve_inherited_prefix(&conversation, compacted, 3).expect("pin retained");
-    assert_eq!(copies(&kept), 1, "the forged text must not drop the real reminder");
+    let kept =
+        super::super::compaction::preserve_inherited_prefix(&conversation, compacted, 3, None)
+            .expect("pin retained");
+    assert_eq!(
+        copies(&kept),
+        1,
+        "the forged text must not drop the real reminder"
+    );
 }
 
 /// The disk route copies the parent with `fork_filter_chat` alone (`storage/jsonl/copy.rs`). Whatever the parent's head,
@@ -710,7 +720,9 @@ fn a_pinned_pre_tag_reminder_gives_one_copy() {
         ConversationItem::project_instructions(format!("reminder {CANARY}")),
         ConversationItem::user("summary"),
     ];
-    let kept = super::super::compaction::preserve_inherited_prefix(&conversation, compacted, 3).expect("pin retained");
+    let kept =
+        super::super::compaction::preserve_inherited_prefix(&conversation, compacted, 3, None)
+            .expect("pin retained");
     assert_eq!(copies(&kept), 1, "the pin's copy, and no second one");
 }
 
@@ -726,7 +738,9 @@ fn forged_text_in_a_pin_cannot_suppress_a_delivery_outside_it() {
         ConversationItem::project_instructions(format!("reminder {CANARY}")),
         ConversationItem::user("summary"),
     ];
-    let kept = super::super::compaction::preserve_inherited_prefix(&conversation, compacted, 3).expect("pin retained");
+    let kept =
+        super::super::compaction::preserve_inherited_prefix(&conversation, compacted, 3, None)
+            .expect("pin retained");
     assert_eq!(copies(&kept), 1);
 }
 
@@ -771,8 +785,23 @@ fn a_flip_between_build_and_open(definition: fuigo_agent::AgentDefinition) {
 
         assert!(!live.actor.instructions_built_trusted.get());
         assert!(live.actor.withheld_pending.get());
-        assert!(!live.actor.build_user_message_prefix().await.contains(CANARY), "a rebuilt head renders no project file");
-        assert_eq!(live.actor.agent.borrow().agents_md_section().map_or(0, |s| s.matches(CANARY).count()), 0);
+        assert!(
+            !live
+                .actor
+                .build_user_message_prefix()
+                .await
+                .text
+                .contains(CANARY),
+            "a rebuilt head renders no project file"
+        );
+        assert_eq!(
+            live.actor
+                .agent
+                .borrow()
+                .agents_md_section()
+                .map_or(0, |s| s.matches(CANARY).count()),
+            0
+        );
 
         live.grant(true);
         live.queue("p1").await;

@@ -504,6 +504,8 @@ pub(crate) async fn create_test_actor_with_terminal(
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(None),
         hook_registry_live: Default::default(),
+        plugin_registry_live: Default::default(),
+        scheduler_handle_live: Default::default(),
         turn_report: Default::default(),
         turn_abort: Default::default(),
         turn_end_tx: Default::default(),

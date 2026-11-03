@@ -24,7 +24,14 @@ pub(crate) fn worktree_add_no_checkout(source: &Path, dest: &str, git_ref: &str)
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("git worktree add failed: {}", stderr);
+        let fs_paths = crate::git::space::add_fs_paths(Path::new(dest), source);
+        return Err(crate::git::space::git_write_failure(
+            "git worktree add",
+            &output.status,
+            &stderr,
+            &fs_paths,
+            None,
+        ));
     }
 
     Ok(())
