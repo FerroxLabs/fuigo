@@ -3676,6 +3676,7 @@ dependencies = [
 name = "fuigo-agent"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "chrono",
  "dunce",
  "fuigo-config",
@@ -5596,7 +5597,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.38"
+version = "1.0.39"
 dependencies = [
  "semver",
 ]

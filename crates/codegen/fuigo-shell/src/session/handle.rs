@@ -37,6 +37,74 @@ impl std::fmt::Debug for LiveHookRegistry {
             .finish()
     }
 }
+/// A session's own plugin registry (the one its agent was built with), shared between its actor (the only writer: the actor
+/// literal and `apply_plugin_registry_snapshot`) and its `SessionHandle`. Task validation and `inherit_skills` read the
+/// parent's registry from here, so they accept exactly the plugin agent types the parent's Task enum advertises.
+#[derive(Clone, Default)]
+pub struct LivePluginRegistry(
+    std::sync::Arc<
+        parking_lot::RwLock<Option<std::sync::Arc<fuigo_agent::plugins::PluginRegistry>>>,
+    >,
+);
+impl LivePluginRegistry {
+    pub fn new(registry: Option<std::sync::Arc<fuigo_agent::plugins::PluginRegistry>>) -> Self {
+        Self(std::sync::Arc::new(parking_lot::RwLock::new(registry)))
+    }
+    /// The registry the session uses now.
+    pub fn get(&self) -> Option<std::sync::Arc<fuigo_agent::plugins::PluginRegistry>> {
+        self.0.read().clone()
+    }
+    pub fn set(&self, registry: Option<std::sync::Arc<fuigo_agent::plugins::PluginRegistry>>) {
+        *self.0.write() = registry;
+    }
+}
+impl std::fmt::Debug for LivePluginRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LivePluginRegistry")
+            .field("plugins", &self.get().map(|r| r.len()))
+            .finish()
+    }
+}
+/// The handle of the scheduler actor a session's toolset runs, shared between its actor (which re-points it after a
+/// zero-turn model switch builds a new toolset and scheduler) and its `SessionHandle` (read by park and child spawn).
+#[derive(Clone, Default)]
+pub struct LiveSchedulerHandle(
+    std::sync::Arc<
+        parking_lot::RwLock<
+            Option<fuigo_tools::implementations::fuigo_build::scheduler::types::SchedulerHandle>,
+        >,
+    >,
+);
+impl LiveSchedulerHandle {
+    pub fn new(
+        handle: Option<
+            fuigo_tools::implementations::fuigo_build::scheduler::types::SchedulerHandle,
+        >,
+    ) -> Self {
+        Self(std::sync::Arc::new(parking_lot::RwLock::new(handle)))
+    }
+    /// The scheduler the session's toolset runs now.
+    pub fn get(
+        &self,
+    ) -> Option<fuigo_tools::implementations::fuigo_build::scheduler::types::SchedulerHandle> {
+        self.0.read().clone()
+    }
+    pub fn set(
+        &self,
+        handle: Option<
+            fuigo_tools::implementations::fuigo_build::scheduler::types::SchedulerHandle,
+        >,
+    ) {
+        *self.0.write() = handle;
+    }
+}
+impl std::fmt::Debug for LiveSchedulerHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveSchedulerHandle")
+            .field("present", &self.0.read().is_some())
+            .finish()
+    }
+}
 /// Coarse lifecycle state of a session as known to the leader/agent.
 ///
 /// A fuigo session is a resumable log on disk with no terminal status field of its own, so "liveness" is residency plus turn state, not a pid.
@@ -183,6 +251,8 @@ pub struct SessionHandle {
     pub allowed_subagent_types: Option<Vec<String>>,
     /// Hook registry for this session, kept current: the actor republishes it on every reload, so a subagent spawned after `/hooks-trust`, `/hooks reload` or a plugin change inherits what the parent fires NOW.
     pub hook_registry: LiveHookRegistry,
+    /// This session's own plugin registry, kept current by the actor (see `LivePluginRegistry`).
+    pub plugin_registry: LivePluginRegistry,
     /// Typed workspace operations handle (agent sessions use local ops).
     pub workspace_ops: fuigo_workspace::WorkspaceOps,
     /// Subagents inherit the parent's backend so background tasks and monitors survive the subagent's exit.
@@ -190,9 +260,9 @@ pub struct SessionHandle {
     /// Notification handle for this session's tool bridge.
     /// Subagents use this to reparent surviving tasks' notification handles on exit so events route to the parent's notification bridge.
     pub tools_notification_handle: Option<fuigo_tools::notification::types::ToolNotificationHandle>,
-    /// Subagents inherit the parent's handle so scheduled tasks survive the subagent's exit.
-    pub scheduler_handle:
-        Option<fuigo_tools::implementations::fuigo_build::scheduler::types::SchedulerHandle>,
+    /// Subagents inherit the parent's handle so scheduled tasks survive the subagent's exit. Kept pointing at the scheduler
+    /// the session's toolset runs (see `LiveSchedulerHandle`).
+    pub scheduler_handle: LiveSchedulerHandle,
 }
 impl SessionHandle {
     /// Peer admission (packet 4), in-process only: one round trip to the actor. `None` when the session is gone.

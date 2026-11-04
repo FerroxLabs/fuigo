@@ -529,13 +529,46 @@ pub(super) fn write_offload_and_build(
         }
     }
 }
+/// A rendered user-message prefix plus the provenance marks of the instruction-file fragments it holds.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RenderedPrefix {
+    pub(crate) text: String,
+    /// Spans of the rules-section file fragments in `text` (empty when the template renders no rules section).
+    pub(crate) marks: Vec<fuigo_sampling_types::FragmentMark>,
+}
+impl From<String> for RenderedPrefix {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            marks: Vec::new(),
+        }
+    }
+}
+impl RenderedPrefix {
+    /// The prefix as a conversation item, marked with its provenance only when `built_trusted` (the instruction list was
+    /// built for a trusted folder). A withheld render never carries marks.
+    pub(crate) fn into_item(self, built_trusted: bool) -> ConversationItem {
+        let mut item = ConversationItem::user(self.text);
+        if built_trusted
+            && !self.marks.is_empty()
+            && let ConversationItem::User(user) = &mut item
+        {
+            user.instruction_provenance = Some(
+                fuigo_sampling_types::InstructionProvenance::HarnessPrefix(self.marks),
+            );
+        }
+        item
+    }
+}
 impl SessionActor {
     /// Rewrite the user-message prefix at conversation index 1.
     /// Caller must guarantee zero turns.
     /// When `drop_startup_skill_reminder` is true, also strips the synthetic `<system-reminder>` user item.
+    /// The new item carries the prefix's provenance only when `built_trusted`.
     pub(super) fn rewrite_zero_turn_prefix(
         conversation: &mut Vec<ConversationItem>,
-        new_prefix: String,
+        new_prefix: RenderedPrefix,
+        built_trusted: bool,
         drop_startup_skill_reminder: bool,
     ) {
         let is_prefix_slot = matches!(
@@ -543,10 +576,10 @@ impl SessionActor {
             Some(ConversationItem::User(u)) if u.synthetic_reason.is_none()
         );
         if is_prefix_slot {
-            conversation[1] = ConversationItem::user(new_prefix);
+            conversation[1] = new_prefix.into_item(built_trusted);
         } else {
             let insert_at = conversation.len().min(1);
-            conversation.insert(insert_at, ConversationItem::user(new_prefix));
+            conversation.insert(insert_at, new_prefix.into_item(built_trusted));
         }
         if drop_startup_skill_reminder {
             conversation.retain(|item| {
@@ -560,7 +593,7 @@ impl SessionActor {
         }
     }
     #[tracing::instrument(skip_all)]
-    pub(super) async fn build_user_message_prefix(&self) -> String {
+    pub(super) async fn build_user_message_prefix(&self) -> RenderedPrefix {
         let display_path = self
             .display_cwd
             .get()
@@ -594,23 +627,25 @@ impl SessionActor {
         } else {
             self.construct_legacy_prefix(cwd, repo_status.as_ref())
         };
+        let mut marks = Vec::new();
         if matches!(template, UserMessageTemplate::Default) && include_verification {
             let (workspace_rules, mut user_rules) = self.gather_partitioned_rules();
             user_rules.splice(
                 0..0,
                 fuigo_agent::prompt::browser_verification::synthetic_user_rules(),
             );
-            fuigo_agent::prompt::user_message::append_rules_section(
+            let spans = fuigo_agent::prompt::user_message::append_rules_section(
                 &mut out,
                 &workspace_rules,
                 &user_rules,
             );
+            marks = fuigo_agent::prompt::user_message::fragment_marks(&out, &spans);
         }
         self.last_announced_local_date
             .set(chrono::Local::now().date_naive());
         self.prefix_carries_fallback_date
             .set(prefix_carries_fallback_date);
-        out
+        RenderedPrefix { text: out, marks }
     }
     pub(super) fn gather_partitioned_rules(
         &self,

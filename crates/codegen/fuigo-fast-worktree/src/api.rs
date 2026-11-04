@@ -581,6 +581,18 @@ fn is_out_of_disk(err: &anyhow::Error) -> bool {
     })
 }
 
+/// Whether a create failed in a way that must not fall back to an unisolated run: some cause in the
+/// chain is a [`crate::TrackedCopyError`] or an `io::Error` of kind `StorageFull` (which a classified
+/// [`crate::GitStorageFull`] carries as its source). Never reads `Display`.
+pub fn is_copy_abort(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<crate::TrackedCopyError>().is_some()
+            || cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::StorageFull)
+    })
+}
+
 /// Promote a disk-full reason to the top of the error chain.
 ///
 /// Downstream layers (the workspace hub, ACP) flatten the `anyhow` chain to its
@@ -1621,6 +1633,56 @@ mod tests {
         assert_eq!(annotated.to_string(), OUT_OF_DISK_CONTEXT);
         // The original chain is preserved underneath for logs.
         assert!(format!("{annotated:#}").contains("failed to copy index"));
+    }
+
+    #[test]
+    fn is_copy_abort_matches_typed_causes_only() {
+        let full = || std::io::Error::from(std::io::ErrorKind::StorageFull);
+        assert!(is_copy_abort(&anyhow::Error::new(full())));
+        assert!(is_copy_abort(
+            &anyhow::Error::new(full())
+                .context("copy a")
+                .context(OUT_OF_DISK_CONTEXT)
+        ));
+        let _g = crate::storage_seam::install(
+            Some(Box::new(|_: &std::path::Path| {
+                Ok(crate::Avail {
+                    bytes: 0,
+                    inodes: Some(0),
+                })
+            })),
+            None,
+        );
+        #[cfg(unix)]
+        let failed: std::process::ExitStatus =
+            std::os::unix::process::ExitStatusExt::from_raw(128 << 8);
+        #[cfg(windows)]
+        let failed: std::process::ExitStatus =
+            std::os::windows::process::ExitStatusExt::from_raw(128);
+        let typed = crate::git::space::git_write_failure(
+            "git worktree add",
+            &failed,
+            "error: unable to write file 'big.bin'\nfatal: Could not reset index file to revision 'HEAD'.\n",
+            &[".".into()],
+            None,
+        );
+        assert!(typed.downcast_ref::<crate::GitStorageFull>().is_some());
+        assert!(is_copy_abort(&annotate_disk_full(typed)));
+        assert!(!is_copy_abort(&anyhow::anyhow!("Not a git repository")));
+        assert!(!is_copy_abort(&anyhow::anyhow!(
+            "git worktree add failed: fatal: No space left on device"
+        )));
+    }
+
+    #[test]
+    fn non_git_dir_named_after_the_sentence_is_not_a_copy_abort() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let source = temp.path().join(ENOSPC_OS_MESSAGE);
+        std::fs::create_dir(&source).unwrap();
+        let err = WorktreeBuilder::new(&source, temp.path().join("wt"))
+            .create()
+            .expect_err("a non-git folder cannot be a worktree source");
+        assert!(!is_copy_abort(&err), "{err:#}");
     }
 
     #[test]

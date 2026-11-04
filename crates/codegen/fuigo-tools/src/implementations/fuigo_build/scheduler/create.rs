@@ -313,6 +313,7 @@ mod tests {
             clock: Default::default(),
             pending_removal: None,
             blocked_expiries: Default::default(),
+            loop_spawn_cancel: None,
         };
         tokio::spawn(actor.run());
         (shared, cancel_token)

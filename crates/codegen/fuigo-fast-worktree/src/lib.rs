@@ -74,7 +74,23 @@ pub use discovery::{
     managed_worktree_roots, path_under_managed_worktree_roots, path_under_worktree_roots,
     rebuild_worktree_db, rebuild_worktree_db_with_grove_data,
 };
+pub use api::is_copy_abort;
 pub use copy::TrackedCopyError;
+/// Test seams for the disk-full classifier (probe and tree-walk overrides).
+#[cfg(any(test, feature = "test-support"))]
+pub use git::space::seam as storage_seam;
+pub use git::space::{
+    Avail, GitStorageFull, LineClass, LineRule, Need, STORAGE_FLOOR_BYTES, STORAGE_FLOOR_INODES,
+    StorageFullBy,
+};
+
+/// The classifier pieces, for the BF-8 box test (`tests/enospc_box.rs`).
+#[doc(hidden)]
+pub mod enospc_box {
+    pub use crate::git::space::{
+        FitCheck, add_fs_paths, classify_lines, git_write_failure, line_rule, probe, tree_need,
+    };
+}
 pub use git::operand::{
     parse_git_ref_arg, parse_worktree_name_arg, validate_git_operand, validate_git_ref, validate_worktree_name,
 };

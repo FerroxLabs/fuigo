@@ -244,6 +244,36 @@ pub(super) async fn reparent_surviving_child_tasks(
         );
     }
 }
+/// Create a subagent's isolated worktree. On a typed abort (tracked-file copy failure or full disk),
+/// reclaim `dest` and its registration before returning, but only when `dest` did not exist before
+/// this create (a stat error counts as "not ours"). Blocking.
+pub(super) fn create_isolated_worktree(
+    source: &Path,
+    dest: &Path,
+    create: impl FnOnce() -> anyhow::Result<fuigo_fast_worktree::WorktreeReport>,
+) -> anyhow::Result<fuigo_fast_worktree::WorktreeReport> {
+    let dest_absent = matches!(dest.try_exists(), Ok(false));
+    let result = create();
+    if let Err(e) = &result
+        && dest_absent
+        && fuigo_fast_worktree::is_copy_abort(e)
+    {
+        let _ = fuigo_fast_worktree::remove_worktree(dest);
+        fuigo_fast_worktree::remove_stale_worktree_registration(source, dest);
+    }
+    result
+}
+
+/// The subagent's clean failure for a typed worktree abort; `None` keeps the shared-workspace fallback.
+pub(super) fn isolated_worktree_abort_message(e: &anyhow::Error) -> Option<String> {
+    fuigo_fast_worktree::is_copy_abort(e).then(|| {
+        format!(
+            "Couldn't create this subagent's isolated worktree: {e}. Nothing ran. Free disk space or fix the \
+             file and retry, or use isolation=\"none\"."
+        )
+    })
+}
+
 const INITIAL_PROMPT_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const CHILD_COMPLETION_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 pub(super) fn task_model_override_error(
@@ -436,11 +466,29 @@ pub(crate) async fn run_shell_child(
     // Admission precedes mutating worktree/bootstrap preparation, not merely
     // the child's first model request.
     let execution_parent_grant = if let Some(parent) = &ctx.execution_parent {
-        match parent.grant_child(&request.id, request.resume_from.clone(), request.run_in_background || definition.background.unwrap_or(false)).await {
+        match parent
+            .grant_child(
+                &request.id,
+                request.resume_from.clone(),
+                request.run_in_background || definition.background.unwrap_or(false),
+            )
+            .await
+        {
             Ok(grant) => Some(grant),
-            Err(_) => return child_run_output(failure_result(&request, "Durable parent execution grant unavailable; child was not dispatched."), completion_data, None),
+            Err(_) => {
+                return child_run_output(
+                    failure_result(
+                        &request,
+                        "Durable parent execution grant unavailable; child was not dispatched.",
+                    ),
+                    completion_data,
+                    None,
+                );
+            }
         }
-    } else { None };
+    } else {
+        None
+    };
     let worktree_path = if let Some(ref source) = resume_source {
         if effective_runtime.isolation != fuigo_tool_types::SubagentIsolationMode::None
             && source.worktree_path.is_none()
@@ -528,7 +576,7 @@ pub(crate) async fn run_shell_child(
             if let Some(delegate) = btrfs_delegate {
                 builder = builder.btrfs_delegate(delegate);
             }
-            builder.create()
+            create_isolated_worktree(&source_clone, &dest, || builder.create())
         })
         .await
         {
@@ -542,6 +590,15 @@ pub(crate) async fn run_shell_child(
                 Some(report.worktree_path)
             }
             Ok(Err(e)) => {
+                if let Some(msg) = isolated_worktree_abort_message(&e) {
+                    tracing::warn!(
+                        subagent_id = %request.id,
+                        error = %e,
+                        "Isolated worktree creation aborted (copy failure or full disk); failing the subagent"
+                    );
+                    worktree_create_span.close();
+                    return child_run_output(failure_result(&request, &msg), completion_data, None);
+                }
                 tracing::warn!(
                     subagent_id = %request.id,
                     error = %e,
@@ -935,6 +992,19 @@ pub(crate) async fn run_shell_child(
         }
     };
     let child_cwd = resolve_child_cwd(worktree_path.as_deref(), override_cwd, &ctx.parent_cwd);
+    // Item 4: the child's plugins come from its own folder on its own verdict, built off the session actors.
+    let child_plugin_registry = {
+        let handle = ctx.plugin_registry_handle.clone();
+        let cwd = child_cwd.clone();
+        match tokio::task::spawn_blocking(move || build_child_plugin_registry(&handle, &cwd)).await
+        {
+            Ok(registry) => registry,
+            Err(error) => {
+                tracing::warn!(subagent_id = %request.id, %error, "child plugin registry build failed; spawning without plugins");
+                None
+            }
+        }
+    };
     let covered_by_parent = fuigo_fsnotify::watch_root_covers(&ctx.parent_cwd, &child_cwd);
     let subagent_fs_watch = FsWatchCapabilities {
         hunk_tracking: ctx.hunk_tracking_enabled && !covered_by_parent,
@@ -1044,7 +1114,9 @@ pub(crate) async fn run_shell_child(
             }
         }
         // Project/local memory is read only from inside the project folder (contained read); user memory follows links.
-        if let Some((memory_dir, content)) = scope.read_memory_md(&agent_name_for_memory, &ctx.parent_cwd) {
+        if let Some((memory_dir, content)) =
+            scope.read_memory_md(&agent_name_for_memory, &ctx.parent_cwd)
+        {
             let memory_dir = &memory_dir;
             const MAX_LINES: usize = 200;
             const MAX_BYTES: usize = 25 * 1024;
@@ -1156,14 +1228,12 @@ pub(crate) async fn run_shell_child(
     let inherit_skills = definition.inherit_skills;
     let definition_background = definition.background.unwrap_or(false);
     if inherit_skills && ctx.parent_skills.is_none() {
-        let parent_cwd_str = ctx.parent_cwd.to_string_lossy().to_string();
         ctx.parent_skills = Some(
-            fuigo_agent::prompt::skills::list_skills_with_plugins(
-                Some(&parent_cwd_str),
+            list_parent_skills(
+                &ctx.parent_cwd,
                 &ctx.parent_skills_config,
                 ctx.plugin_registry.as_deref(),
                 ctx.parent_compat,
-                crate::agent::folder_trust::project_scope_allowed(&ctx.parent_cwd),
             )
             .await,
         );
@@ -1353,7 +1423,7 @@ pub(crate) async fn run_shell_child(
         ctx.respect_gitignore,
         ctx.path_not_found_hints,
         std::mem::take(&mut ctx.tool_params_json),
-        ctx.plugin_registry.clone(),
+        child_plugin_registry,
         None,
         ctx.models_manager.clone(),
         parent_traceparent,
@@ -1364,7 +1434,9 @@ pub(crate) async fn run_shell_child(
         ctx.workspace_ops.clone(),
         vec![],
         // 1.0.36 item a: a child that builds its own actor keeps the parent's launch policy.
-        ctx.permission_handle.as_ref().and_then(|h| h.launch_policy()),
+        ctx.permission_handle
+            .as_ref()
+            .and_then(|h| h.launch_policy()),
         ctx.todo_gate,
         std::mem::take(&mut ctx.remote_settings),
         std::mem::take(&mut ctx.laziness_debug_log),

@@ -1089,7 +1089,7 @@ pub(crate) struct SessionActor {
     /// Used by `wait_for_mcp_templated_prefix_ready` to avoid polling.
     pub(crate) mcp_handshakes_done: Arc<tokio::sync::Notify>,
     /// Background-computed user-message prefix, injected before the first prompt.
-    pub(crate) deferred_prefix: TaskSlot<String>,
+    pub(crate) deferred_prefix: TaskSlot<prompt_build::RenderedPrefix>,
     /// The agent's instruction list is current for the verdict and no bit remains in the conversation.
     /// A prefix rendered while this is false carries `project_files_withheld`.
     pub(crate) instructions_built_trusted: std::cell::Cell<bool>,
@@ -1150,6 +1150,11 @@ pub(crate) struct SessionActor {
     /// `RefCell` for mid-session reload from `&self` methods.
     pub(crate) plugin_registry:
         std::cell::RefCell<Option<std::sync::Arc<fuigo_agent::plugins::PluginRegistry>>>,
+    /// The same registry, published for the session's handle after every write to `plugin_registry` (see
+    /// `LivePluginRegistry`).
+    pub(crate) plugin_registry_live: crate::session::LivePluginRegistry,
+    /// The handle-visible scheduler handle; re-pointed after a zero-turn model switch (see `LiveSchedulerHandle`).
+    pub(crate) scheduler_handle_live: crate::session::LiveSchedulerHandle,
     /// Shared handle to the agent-level plugin registry.
     /// Used by `/plugins reload` to trigger a rebuild that new sessions see.
     pub(crate) plugin_registry_handle: Option<fuigo_agent::plugins::SharedPluginRegistryHandle>,

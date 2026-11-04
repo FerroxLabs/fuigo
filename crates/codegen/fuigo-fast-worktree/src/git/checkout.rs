@@ -107,11 +107,13 @@ pub(crate) fn git_reset_hard_command(worktree_path: &Path, target: Option<&str>)
         .context("failed to run git reset")?;
 
     if !output.status.success() {
-        anyhow::bail!(
-            "git reset --hard {} failed: {}",
-            tgt,
-            String::from_utf8_lossy(&output.stderr)
-        );
+        return Err(crate::git::space::git_write_failure(
+            &format!("git reset --hard {tgt}"),
+            &output.status,
+            &String::from_utf8_lossy(&output.stderr),
+            &[worktree_path.to_path_buf()],
+            None,
+        ));
     }
 
     tracing::debug!(path = %worktree_path.display(), target = %tgt, "git reset --hard");

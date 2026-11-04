@@ -479,6 +479,9 @@ pub struct FinalizedToolset {
     pub resources: SharedResources,
     resources_persistence: Arc<ResourcesPersistence>,
     scheduler_cancel: Option<tokio_util::sync::CancellationToken>,
+    /// Keeps loop spawns this toolset's scheduler accepted alive across a scheduler replacement; dropped after
+    /// `scheduler_cancel` fires.
+    _scheduler_scope: Option<crate::implementations::fuigo_build::scheduler::actor::SchedulerScope>,
     /// Shared local registry for in-process dispatch.
     /// Contains only config-enabled tools. Can be shared with ToolHarness.
     local_registry: fuigo_computer_hub_sdk::LocalRegistry,
@@ -1355,7 +1358,11 @@ impl ToolRegistryBuilder {
                 (Some(scheduler_cmd_rx), Some(cancel_token))
             };
         let shared_resources = resources.into_shared();
+        let mut scheduler_scope = None;
         if let (Some(cmd_rx), Some(cancel_token)) = (scheduler_cmd_rx, &scheduler_cancel_token) {
+            scheduler_scope = persistence.state_path().map(
+                crate::implementations::fuigo_build::scheduler::actor::SchedulerScope::register,
+            );
             let actor = crate::implementations::fuigo_build::scheduler::actor::SchedulerActor {
                 resources: shared_resources.clone(),
                 resources_persistence: persistence.clone(),
@@ -1365,6 +1372,7 @@ impl ToolRegistryBuilder {
                 clock: Default::default(),
                 pending_removal: None,
                 blocked_expiries: Default::default(),
+                loop_spawn_cancel: scheduler_scope.as_ref().map(|scope| scope.loop_spawns()),
             };
             tokio::spawn(actor.run());
         }
@@ -1374,6 +1382,7 @@ impl ToolRegistryBuilder {
             resources: shared_resources,
             resources_persistence: persistence,
             scheduler_cancel: scheduler_cancel_token,
+            _scheduler_scope: scheduler_scope,
             local_registry,
             renderer: renderer_arc,
             system_reminder_tag: ctx.system_reminder_tag,
@@ -1439,6 +1448,7 @@ impl FinalizedToolset {
             )),
             resources_persistence: Arc::new(ResourcesPersistence::noop()),
             scheduler_cancel: None,
+            _scheduler_scope: None,
             local_registry: fuigo_computer_hub_sdk::LocalRegistry::new(),
             renderer: Arc::new(TemplateRenderer::new(
                 std::collections::HashMap::new(),

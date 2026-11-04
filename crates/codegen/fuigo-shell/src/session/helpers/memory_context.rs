@@ -300,6 +300,8 @@ pub fn invalidate_stale_memory_context(
                         if updated != text.as_ref() {
                             *text = updated.into();
                             changed = true;
+                            // The text moved under any recorded spans.
+                            user.instruction_provenance = None;
                         }
                     }
                 }

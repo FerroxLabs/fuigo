@@ -35,7 +35,7 @@ pub(super) fn insert_session(
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     handle.cmd_tx = cmd_tx;
     let (sched_tx, sched_rx) = mpsc::unbounded_channel();
-    handle.scheduler_handle = Some(SchedulerHandle(sched_tx));
+    handle.scheduler_handle.set(Some(SchedulerHandle(sched_tx)));
     agent.insert_resident(sid, handle);
     (cmd_rx, sched_rx)
 }

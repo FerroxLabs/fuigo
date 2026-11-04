@@ -3405,3 +3405,373 @@ async fn workflow_spawns_bypass_the_session_concurrent_limit() {
     );
     harness.actor.abort();
 }
+
+/// RS3 across a scheduler replacement: the replaced scheduler admits a background loop fire that the coordinator
+/// queues at its concurrent limit; the replacement suppresses the same instance. The queued spawn survives the
+/// replacement, so exactly one loop child starts once capacity frees, and session shutdown (the last toolset over
+/// the state file dropping) still cancels it.
+#[tokio::test]
+async fn a_loop_fire_queued_by_a_replaced_scheduler_starts_exactly_once() {
+    use crate::implementations::fuigo_build::scheduler::actor::{SchedulerActor, SchedulerScope};
+    use crate::implementations::fuigo_build::scheduler::types::{ScheduledTask, SchedulerState};
+    use crate::implementations::fuigo_build::task::types::SessionIdResource;
+    use crate::types::resources::{Resources, State};
+
+    let mut harness = harness_with_config(false, limited(1, LimitBehavior::Queue));
+    let held = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("held", true), None).await }
+    });
+    harness
+        .requests
+        .recv()
+        .await
+        .expect("the held child started");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("resources_state.json");
+    let mut task = ScheduledTask::new(60, "rs3 loop".into(), true, false);
+    task.foreground = false;
+    task.created_at = chrono::Utc::now() - chrono::Duration::seconds(61);
+    let (notifications, _notification_rx) =
+        crate::notification::types::ToolNotificationHandle::channel();
+    let scheduler = |scope: &SchedulerScope, cancel: &CancellationToken| {
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        resources.get_or_default::<State<SchedulerState>>().tasks = vec![task.clone()];
+        resources.insert(harness.backend.event_sender());
+        resources.insert(SessionIdResource("parent".to_owned()));
+        SchedulerActor {
+            resources: resources.into_shared(),
+            resources_persistence: std::sync::Arc::new(
+                crate::persistence::ResourcesPersistence::new(path.clone()),
+            ),
+            notification_handle: notifications.clone(),
+            cmd_rx: mpsc::unbounded_channel().1,
+            cancel_token: cancel.clone(),
+            clock: Default::default(),
+            pending_removal: None,
+            blocked_expiries: Default::default(),
+            loop_spawn_cancel: Some(scope.loop_spawns()),
+        }
+    };
+
+    let replaced_scope = SchedulerScope::register(&path);
+    let replaced_cancel = CancellationToken::new();
+    scheduler(&replaced_scope, &replaced_cancel)
+        .fire_next_task()
+        .await;
+    await_queued(&harness.backend, 1).await;
+
+    // The switch: the replacement toolset is built, then the replaced one drops (cancel, then its scope).
+    let live_scope = SchedulerScope::register(&path);
+    let mut live = scheduler(&live_scope, &CancellationToken::new());
+    replaced_cancel.cancel();
+    drop(replaced_scope);
+    live.fire_next_task().await;
+    assert_eq!(
+        harness.backend.registry_counts().await.queued,
+        1,
+        "the replacement re-fired an admitted instance"
+    );
+    // The replacement's own state never saw the replaced scheduler's child (its anchor is empty). At its next
+    // interval, while that child is still queued, it must not queue another iteration.
+    let make_due = |actor: &SchedulerActor| {
+        let resources = actor.resources.clone();
+        async move {
+            resources
+                .lock()
+                .await
+                .get_or_default::<State<SchedulerState>>()
+                .tasks[0]
+                .last_fired_at = Some(chrono::Utc::now() - chrono::Duration::seconds(61));
+        }
+    };
+    make_due(&live).await;
+    live.fire_next_task().await;
+    assert_eq!(
+        harness.backend.registry_counts().await.queued,
+        1,
+        "the replacement queued an overlapping iteration at its next interval"
+    );
+
+    // Release capacity.
+    let _ = harness.finish.send(());
+    let started = tokio::time::timeout(std::time::Duration::from_secs(5), harness.requests.recv())
+        .await
+        .expect("the queued loop child never started after the switch")
+        .expect("runner open");
+    assert_eq!(
+        started.runtime_overrides.loop_task_id.as_deref(),
+        Some(task.id.as_str())
+    );
+    assert!(
+        held.await
+            .expect("join")
+            .expect("spawn round-trips")
+            .success
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        harness.requests.try_recv().is_err(),
+        "more than one loop child started"
+    );
+    // And at the interval after that, while the surviving child runs, no second iteration starts or queues.
+    make_due(&live).await;
+    live.fire_next_task().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        harness.requests.try_recv().is_err(),
+        "the replacement started an overlapping iteration"
+    );
+    assert_eq!(
+        harness.backend.registry_counts().await.queued,
+        0,
+        "the replacement queued an overlapping iteration while the child runs"
+    );
+
+    // Session shutdown: the last toolset over the file drops and the accepted loop spawn is cancelled.
+    assert!(!started.cancel_token.is_cancelled());
+    drop(live_scope);
+    assert!(started.cancel_token.is_cancelled());
+    harness.actor.abort();
+}
+
+/// An explicit Stop still cancels a loop spawn that hangs off the session's scope: the queued fire never starts, and
+/// the scope itself (later fires) is untouched.
+#[tokio::test]
+async fn an_explicit_stop_cancels_a_queued_loop_fire() {
+    use crate::implementations::fuigo_build::scheduler::actor::{SchedulerActor, SchedulerScope};
+    use crate::implementations::fuigo_build::scheduler::types::{ScheduledTask, SchedulerState};
+    use crate::implementations::fuigo_build::task::types::SessionIdResource;
+    use crate::notification::types::ToolNotification;
+    use crate::types::resources::{Resources, State};
+
+    let mut harness = harness_with_config(false, limited(1, LimitBehavior::Queue));
+    let held = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("held", true), None).await }
+    });
+    harness
+        .requests
+        .recv()
+        .await
+        .expect("the held child started");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("resources_state.json");
+    let mut task = ScheduledTask::new(60, "stop loop".into(), true, false);
+    task.foreground = false;
+    task.created_at = chrono::Utc::now() - chrono::Duration::seconds(61);
+    let (notifications, mut notification_rx) =
+        crate::notification::types::ToolNotificationHandle::channel();
+    let mut resources = Resources::new();
+    resources.register_state::<SchedulerState>();
+    resources.get_or_default::<State<SchedulerState>>().tasks = vec![task];
+    resources.insert(harness.backend.event_sender());
+    resources.insert(SessionIdResource("parent".to_owned()));
+    let scope = SchedulerScope::register(&path);
+    let mut actor = SchedulerActor {
+        resources: resources.into_shared(),
+        resources_persistence: std::sync::Arc::new(crate::persistence::ResourcesPersistence::new(
+            path.clone(),
+        )),
+        notification_handle: notifications,
+        cmd_rx: mpsc::unbounded_channel().1,
+        cancel_token: CancellationToken::new(),
+        clock: Default::default(),
+        pending_removal: None,
+        blocked_expiries: Default::default(),
+        loop_spawn_cancel: Some(scope.loop_spawns()),
+    };
+    actor.fire_next_task().await;
+    await_queued(&harness.backend, 1).await;
+    let mut spawned = None;
+    while let Ok(notification) = notification_rx.try_recv() {
+        if let ToolNotification::ScheduledTaskFired(fire) = notification {
+            spawned = fire.subagent_id;
+        }
+    }
+    let id = spawned.expect("the fire names its loop child");
+
+    assert!(matches!(
+        harness.backend.cancel(&id).await,
+        SubagentCancelOutcome::Cancelled
+    ));
+    let _ = harness.finish.send(());
+    assert!(
+        held.await
+            .expect("join")
+            .expect("spawn round-trips")
+            .success
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        harness.requests.try_recv().is_err(),
+        "a stopped loop fire started"
+    );
+    assert!(
+        !scope.loop_spawns().is_cancelled(),
+        "stopping one fire must not cancel the session's later fires"
+    );
+    harness.actor.abort();
+}
+
+/// A fire already in flight when the last toolset over a state file drops must be skipped and must not recreate the
+/// file's loop-fire gate: the gate belongs to the registered scope, and a fire never inserts into the registry.
+#[tokio::test]
+async fn an_in_flight_fire_after_the_last_scope_drops_leaves_no_gate() {
+    use crate::implementations::fuigo_build::scheduler::actor::{
+        LOOP_FIRE_GATES, SchedulerActor, SchedulerScope,
+    };
+    use crate::implementations::fuigo_build::scheduler::types::{ScheduledTask, SchedulerState};
+    use crate::implementations::fuigo_build::task::types::SessionIdResource;
+    use crate::notification::types::ToolNotification;
+    use crate::types::resources::{Resources, State};
+
+    let mut harness = harness_with_config(false, limited(1, LimitBehavior::Queue));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("resources_state.json");
+    let mut task = ScheduledTask::new(60, "gate loop".into(), true, false);
+    task.foreground = false;
+    task.created_at = chrono::Utc::now() - chrono::Duration::seconds(61);
+    let (notifications, mut notification_rx) =
+        crate::notification::types::ToolNotificationHandle::channel();
+    let mut resources = Resources::new();
+    resources.register_state::<SchedulerState>();
+    resources.get_or_default::<State<SchedulerState>>().tasks = vec![task];
+    resources.insert(harness.backend.event_sender());
+    resources.insert(SessionIdResource("parent".to_owned()));
+    let shared = resources.into_shared();
+    let scope = SchedulerScope::register(&path);
+    let cancel = CancellationToken::new();
+    let mut actor = SchedulerActor {
+        resources: shared.clone(),
+        resources_persistence: std::sync::Arc::new(crate::persistence::ResourcesPersistence::new(
+            path.clone(),
+        )),
+        notification_handle: notifications,
+        cmd_rx: mpsc::unbounded_channel().1,
+        cancel_token: cancel.clone(),
+        clock: Default::default(),
+        pending_removal: None,
+        blocked_expiries: Default::default(),
+        loop_spawn_cancel: Some(scope.loop_spawns()),
+    };
+
+    // Block the fire at its resources lock, before it reaches gate acquisition.
+    let blocker = shared.lock().await;
+    let fire = tokio::spawn(async move { actor.fire_next_task().await });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !fire.is_finished(),
+        "the fire must be blocked before the gate"
+    );
+
+    // The final toolset drops: its scope goes and its scheduler is cancelled.
+    drop(scope);
+    cancel.cancel();
+    drop(blocker);
+    tokio::time::timeout(std::time::Duration::from_secs(5), fire)
+        .await
+        .expect("the released fire finishes")
+        .expect("join");
+
+    assert!(
+        !LOOP_FIRE_GATES.lock().contains_key(&path),
+        "an in-flight fire recreated a gate after the last scope dropped"
+    );
+    while let Ok(notification) = notification_rx.try_recv() {
+        if let ToolNotification::ScheduledTaskFired(fire) = notification {
+            assert!(
+                fire.subagent_id.is_none(),
+                "the cancelled fire spawned a child"
+            );
+        }
+    }
+    assert!(
+        harness.requests.try_recv().is_err(),
+        "the cancelled fire started a child"
+    );
+    harness.actor.abort();
+}
+
+/// R4-H1: the same in-flight fire with the coordinator's event channel also closed (shutdown). With no gate and no
+/// anchor the activity query fails and nothing else would stop the fire, so a dead scheduler must be a chokepoint:
+/// no notification, no spawn, and no recreated fire admission or gate for the path.
+#[tokio::test]
+async fn a_dead_scheduler_fire_with_a_closed_coordinator_publishes_nothing() {
+    use crate::implementations::fuigo_build::scheduler::actor::{
+        FIRE_ADMISSIONS, LOOP_FIRE_GATES, SchedulerActor, SchedulerScope,
+    };
+    use crate::implementations::fuigo_build::scheduler::types::{ScheduledTask, SchedulerState};
+    use crate::implementations::fuigo_build::task::types::SessionIdResource;
+    use crate::notification::types::ToolNotification;
+    use crate::types::resources::{Resources, State};
+
+    let harness = harness_with_config(false, limited(1, LimitBehavior::Queue));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("resources_state.json");
+    let mut task = ScheduledTask::new(60, "gate loop".into(), true, false);
+    task.foreground = false;
+    task.created_at = chrono::Utc::now() - chrono::Duration::seconds(61);
+    let (notifications, mut notification_rx) =
+        crate::notification::types::ToolNotificationHandle::channel();
+    let mut resources = Resources::new();
+    resources.register_state::<SchedulerState>();
+    resources.get_or_default::<State<SchedulerState>>().tasks = vec![task];
+    let (dead_tx, dead_rx) = mpsc::unbounded_channel();
+    drop(dead_rx);
+    resources.insert(crate::implementations::fuigo_build::task::types::SubagentEventSender(dead_tx));
+    resources.insert(SessionIdResource("parent".to_owned()));
+    let shared = resources.into_shared();
+    let scope = SchedulerScope::register(&path);
+    let cancel = CancellationToken::new();
+    let mut actor = SchedulerActor {
+        resources: shared.clone(),
+        resources_persistence: std::sync::Arc::new(crate::persistence::ResourcesPersistence::new(
+            path.clone(),
+        )),
+        notification_handle: notifications,
+        cmd_rx: mpsc::unbounded_channel().1,
+        cancel_token: cancel.clone(),
+        clock: Default::default(),
+        pending_removal: None,
+        blocked_expiries: Default::default(),
+        loop_spawn_cancel: Some(scope.loop_spawns()),
+    };
+
+    // Block the fire at its resources lock, before it reaches gate acquisition.
+    let blocker = shared.lock().await;
+    let fire = tokio::spawn(async move { actor.fire_next_task().await });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !fire.is_finished(),
+        "the fire must be blocked before the gate"
+    );
+
+    // The final toolset drops: its scope goes and its scheduler is cancelled.
+    drop(scope);
+    cancel.cancel();
+    drop(blocker);
+    tokio::time::timeout(std::time::Duration::from_secs(5), fire)
+        .await
+        .expect("the released fire finishes")
+        .expect("join");
+
+    assert!(
+        !LOOP_FIRE_GATES.lock().contains_key(&path),
+        "an in-flight fire recreated a gate after the last scope dropped"
+    );
+    assert!(
+        !FIRE_ADMISSIONS.lock().contains_key(&path),
+        "a dead scheduler's fire recreated a fire admission"
+    );
+    while let Ok(notification) = notification_rx.try_recv() {
+        assert!(
+            !matches!(notification, ToolNotification::ScheduledTaskFired(_)),
+            "a dead scheduler published a fire after shutdown"
+        );
+    }
+    harness.actor.abort();
+}

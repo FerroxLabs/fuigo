@@ -79,11 +79,14 @@ pub(super) fn deliver_withheld_instructions(
                 _ => None,
             })
             .unwrap_or_default();
-        fuigo_agent::prompt::user_message::append_rules_section(
+        let spans = fuigo_agent::prompt::user_message::append_rules_section(
             &mut text,
             &instructions.workspace_rules,
             &[],
         );
+        let marks = fuigo_agent::prompt::user_message::fragment_marks(&text, &spans);
+        // An in-place rewrite clears the provenance first; after delivery the appended files are a trusted render.
+        user.instruction_provenance = None;
         let replaced = user.content.iter_mut().find_map(|part| match part {
             ContentPart::Text { text } => Some(text),
             _ => None,
@@ -93,6 +96,11 @@ pub(super) fn deliver_withheld_instructions(
             None => user.content.push(ContentPart::Text {
                 text: std::sync::Arc::<str>::from(text),
             }),
+        }
+        if !marks.is_empty() && matches!(user.content.as_slice(), [ContentPart::Text { .. }]) {
+            user.instruction_provenance = Some(
+                fuigo_sampling_types::InstructionProvenance::HarnessPrefix(marks),
+            );
         }
     }
     clear_withheld_bits(conversation);

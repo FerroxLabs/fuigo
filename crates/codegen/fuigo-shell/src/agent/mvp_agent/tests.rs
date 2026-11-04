@@ -1272,10 +1272,11 @@ fn make_test_handle(
         session_default_agent_profile: None,
         allowed_subagent_types: None,
         hook_registry: Default::default(),
+        plugin_registry: Default::default(),
         workspace_ops: fuigo_workspace::WorkspaceOps::for_test(),
         terminal_backend: None,
         tools_notification_handle: None,
-        scheduler_handle: None,
+        scheduler_handle: Default::default(),
     }
 }
 /// P71: a per-turn artifact uploaded directly (`upload_small_artifact` with `UploadWait::Confirm`, then
@@ -3151,6 +3152,8 @@ mod u36_browser_mode_acp_tests;
 mod u36_launch_policy_tests;
 mod p30_direct_lock_tests;
 mod subagent_spawn_context_tests;
+mod u39_plugin_registry_tests;
+mod u39_scheduler_spawn_tests;
 /// With no load in flight and no session the wait returns immediately (the caller then surfaces "unknown session id" exactly as before).
 #[tokio::test]
 async fn wait_for_in_flight_load_returns_immediately_when_idle() {

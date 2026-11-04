@@ -208,7 +208,7 @@ async fn send_scheduler_paused(
     deadline: tokio::time::Instant,
 ) -> Result<FoldedFires, ()> {
     use fuigo_tools::implementations::fuigo_build::scheduler::types::SchedulerCommand;
-    let Some(handle) = session.scheduler_handle.as_ref() else {
+    let Some(handle) = session.scheduler_handle.get() else {
         return Ok(Vec::new());
     };
     let (reply, rx) = oneshot::channel();

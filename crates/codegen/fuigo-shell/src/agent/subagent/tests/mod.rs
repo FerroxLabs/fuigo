@@ -263,10 +263,11 @@ fn wedged_child_handle() -> (
         session_default_agent_profile: None,
         allowed_subagent_types: None,
         hook_registry: Default::default(),
+        plugin_registry: Default::default(),
         workspace_ops: fuigo_workspace::WorkspaceOps::for_test(),
         terminal_backend: None,
         tools_notification_handle: None,
-        scheduler_handle: None,
+        scheduler_handle: Default::default(),
     };
     (handle, cmd_rx, signals_actor)
 }
@@ -2725,6 +2726,7 @@ fn spawn_test_parent_chat_state(model_slug: &str) -> fuigo_chat_state::ChatState
 }
 mod rest;
 mod p42_session_delivery;
+mod worktree_abort;
 #[tokio::test]
 async fn join_worker_task_resumes_worker_panics() {
     let inner = super::worker_runtime()

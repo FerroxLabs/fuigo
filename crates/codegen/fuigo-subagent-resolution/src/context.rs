@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use fuigo_sampling_types::conversation::ConversationItem;
+use fuigo_sampling_types::conversation::{ConversationItem, FragmentMark, InstructionProvenance};
 
 /// Maximum number of complete turns to render verbatim in the background context.
 /// Turns beyond this threshold (counting from the end) are summarized as metadata (message counts and tools used).
@@ -68,10 +68,11 @@ pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<Conversati
          Use it as background context to inform your work.\n\n",
     );
 
+    let mut marks = Vec::new();
     if turns.len() <= MAX_VERBATIM_TURNS {
         // All turns fit, so render them verbatim
         for item in &parent_items {
-            render_item_to_background(&mut background, item);
+            render_item_to_background(&mut background, item, Some(&mut marks));
         }
     } else {
         // Summarize early turns, keep last MAX_VERBATIM_TURNS verbatim.
@@ -80,12 +81,17 @@ pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<Conversati
         render_summary(&mut background, &parent_items[..early_end]);
         background.push_str("\n=== Recent turns (verbatim) ===\n");
         for item in &parent_items[early_end..] {
-            render_item_to_background(&mut background, item);
+            render_item_to_background(&mut background, item, None);
         }
     }
     background.push_str("</background_context>");
 
     let mut background_item = ConversationItem::user(&background);
+    if !marks.is_empty()
+        && let ConversationItem::User(user) = &mut background_item
+    {
+        user.instruction_provenance = Some(InstructionProvenance::ForkBackground(marks));
+    }
     if project_files_withheld {
         background_item.mark_project_files_withheld();
     }
@@ -171,6 +177,168 @@ fn strip_fork_noise(text: &str) -> String {
     let mut result = collapse_blank_lines(&cow);
     trim_string_in_place(&mut result);
     result
+}
+
+/// [`strip_fork_noise`] that also returns, for each output byte, the index of the source byte it came from.
+/// Every stage only deletes, so the map is strictly increasing. Returns an empty map when the text is too long to index.
+fn strip_fork_noise_mapped(text: &str) -> (String, Vec<u32>) {
+    let Ok(len) = u32::try_from(text.len()) else {
+        return (strip_fork_noise(text), Vec::new());
+    };
+    let mut mapped = MappedText {
+        text: text.to_owned(),
+        map: (0..len).collect(),
+    };
+    for tag in FORK_NOISE_TAGS {
+        let kept = xml_block_kept(&mapped.text, tag);
+        mapped = mapped.keep(&kept);
+    }
+    let kept = skill_instructions_kept(&mapped.text);
+    mapped = mapped.keep(&kept);
+    let kept = collapse_blank_lines_kept(&mapped.text);
+    mapped = mapped.keep(&kept);
+    let kept = trim_kept(&mapped.text);
+    mapped = mapped.keep(&kept);
+    (mapped.text, mapped.map)
+}
+
+/// Text plus the source index of each of its bytes.
+struct MappedText {
+    text: String,
+    map: Vec<u32>,
+}
+
+impl MappedText {
+    /// Keep only the given increasing, non-overlapping byte ranges.
+    fn keep(self, ranges: &[std::ops::Range<usize>]) -> Self {
+        let mut text = String::with_capacity(self.text.len());
+        let mut map = Vec::with_capacity(self.map.len());
+        for range in ranges {
+            text.push_str(&self.text[range.clone()]);
+            map.extend_from_slice(&self.map[range.clone()]);
+        }
+        Self { text, map }
+    }
+}
+
+/// The byte ranges [`strip_xml_block`] keeps.
+fn xml_block_kept(text: &str, tag: &str) -> Vec<std::ops::Range<usize>> {
+    let open_prefix = format!("<{tag}");
+    if !text.contains(&*open_prefix) {
+        return vec![0..text.len()];
+    }
+    let close_tag = format!("</{tag}>");
+    let mut kept = Vec::new();
+    let mut pos = 0;
+    while let Some(open_start) = text[pos..].find(&open_prefix) {
+        let remaining = &text[pos..];
+        let after_name = &remaining[open_start + open_prefix.len()..];
+        let is_tag = after_name.starts_with(|c: char| c == '>' || c.is_ascii_whitespace());
+        if !is_tag {
+            kept.push(pos..pos + open_start + open_prefix.len());
+            pos += open_start + open_prefix.len();
+            continue;
+        }
+        if let Some(close_rel) = remaining[open_start..].find(&close_tag) {
+            kept.push(pos..pos + open_start);
+            pos += open_start + close_rel + close_tag.len();
+        } else {
+            kept.push(pos..text.len());
+            pos = text.len();
+            break;
+        }
+    }
+    kept.push(pos..text.len());
+    kept
+}
+
+/// The byte ranges [`strip_skill_instructions`] keeps.
+fn skill_instructions_kept(text: &str) -> Vec<std::ops::Range<usize>> {
+    let marker = "</command-args>";
+    let Some(marker_pos) = text.find(marker) else {
+        return vec![0..text.len()];
+    };
+    let after_marker = marker_pos + marker.len();
+    let end_pos = text[after_marker..]
+        .find("</user_query>")
+        .map(|p| after_marker + p)
+        .unwrap_or(text.len());
+    vec![0..after_marker, end_pos..text.len()]
+}
+
+/// The byte ranges [`collapse_blank_lines`] keeps. A line join keeps the newline that ended the previous kept line.
+fn collapse_blank_lines_kept(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut kept = Vec::new();
+    let mut out_len = 0usize;
+    let mut prev_blank = false;
+    let mut prev_newline: Option<usize> = None;
+    let mut pos = 0usize;
+    // `str::lines` is `split_inclusive('\n')` with one `\n`, then one `\r`, stripped from each piece.
+    for piece in text.split_inclusive('\n') {
+        let start = pos;
+        pos += piece.len();
+        let (line, newline_at) = match piece.strip_suffix('\n') {
+            Some(line) => (line.strip_suffix('\r').unwrap_or(line), Some(pos - 1)),
+            None => (piece, None),
+        };
+        let is_blank = line.trim().is_empty();
+        if is_blank && prev_blank {
+            continue;
+        }
+        if out_len > 0
+            && let Some(newline) = prev_newline
+        {
+            kept.push(newline..newline + 1);
+            out_len += 1;
+        }
+        kept.push(start..start + line.len());
+        out_len += line.len();
+        prev_newline = newline_at;
+        prev_blank = is_blank;
+    }
+    kept
+}
+
+/// The byte range [`trim_string_in_place`] keeps.
+fn trim_kept(text: &str) -> Vec<std::ops::Range<usize>> {
+    let end = text.trim_end().len();
+    let start = end - text[..end].trim_start().len();
+    vec![start..end]
+}
+
+/// The parent's marks whose whole fragment survives the noise strip as one contiguous run, moved to `base + p` in the
+/// background. A mangled fragment gets no mark (and keeps today's double). If the mapped strip ever disagrees with
+/// [`strip_fork_noise`], no mark is kept.
+fn remap_intact_marks(
+    raw: &str,
+    stripped: &str,
+    source: &[FragmentMark],
+    base: usize,
+) -> Vec<FragmentMark> {
+    let (mapped, map) = strip_fork_noise_mapped(raw);
+    if mapped != stripped || map.len() != stripped.len() {
+        tracing::warn!(
+            target: "fork_context",
+            "fork context strip: mapped strip disagrees with the plain strip; instruction marks dropped"
+        );
+        return Vec::new();
+    }
+    source
+        .iter()
+        .filter_map(|mark| {
+            let len = mark.end.checked_sub(mark.start).filter(|len| *len > 0)? as usize;
+            let p = map.binary_search(&mark.start).ok()?;
+            let last = map.get(p + len - 1)?;
+            // The map is strictly increasing, so equal endpoints mean every byte of the fragment survived in order.
+            (*last == mark.end - 1).then_some(())?;
+            Some(FragmentMark {
+                start: u32::try_from(base + p).ok()?,
+                end: u32::try_from(base + p + len).ok()?,
+                span_digest: mark.span_digest.clone(),
+                source_digest: mark.source_digest.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Remove all occurrences of `<tag...>...</tag>` from the input string.
@@ -266,7 +434,14 @@ fn trim_string_in_place(s: &mut String) {
 }
 
 /// Render a single conversation item into the background context string.
-fn render_item_to_background(out: &mut String, item: &ConversationItem) {
+///
+/// `marks`, given only on the verbatim path, collects the parent harness's instruction-file marks that survive the noise
+/// strip intact, remapped into `out`. The rendered bytes are the same either way.
+fn render_item_to_background(
+    out: &mut String,
+    item: &ConversationItem,
+    marks: Option<&mut Vec<FragmentMark>>,
+) {
     match item {
         ConversationItem::User(u) => {
             let text: String = u
@@ -281,7 +456,8 @@ fn render_item_to_background(out: &mut String, item: &ConversationItem) {
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            let text = strip_fork_noise(&text);
+            let raw = text;
+            let text = strip_fork_noise(&raw);
             if text.is_empty() {
                 tracing::debug!(
                     target: "fork_context",
@@ -289,7 +465,19 @@ fn render_item_to_background(out: &mut String, item: &ConversationItem) {
                 );
                 return;
             }
+            let base = out.len() + "[User]: ".len();
             let _ = writeln!(out, "[User]: {text}");
+            if let Some(marks) = marks
+                && let Some(InstructionProvenance::HarnessPrefix(source)) =
+                    &u.instruction_provenance
+                && !u.project_files_withheld
+                && matches!(
+                    u.content.as_slice(),
+                    [fuigo_sampling_types::conversation::ContentPart::Text { .. }]
+                )
+            {
+                marks.extend(remap_intact_marks(&raw, &text, source, base));
+            }
         }
         ConversationItem::Assistant(a) => {
             if !a.content.is_empty() {
@@ -1004,5 +1192,172 @@ mod withheld_bit_tests {
         ];
         let (items, _) = normalize_forked_context(trusted);
         assert!(!items[1].project_files_withheld());
+    }
+}
+
+#[cfg(test)]
+mod instruction_mark_tests {
+    use super::*;
+    use fuigo_agent::prompt::user_message::{RuleEntry, append_rules_section, fragment_marks};
+
+    fn entry(path: &str, content: &str) -> RuleEntry {
+        RuleEntry {
+            path: path.into(),
+            content: content.into(),
+        }
+    }
+
+    /// A plan parent's prefix as the harness renders it, with its marks.
+    fn harness_prefix(ws: &[RuleEntry], user: &[RuleEntry]) -> ConversationItem {
+        let mut text = String::from(
+            "<user_info>\nOS: linux\n</user_info>\n\n<git_status>\n M a.rs\n</git_status>",
+        );
+        let spans = append_rules_section(&mut text, ws, user);
+        let marks = fragment_marks(&text, &spans);
+        let mut item = ConversationItem::user(text);
+        if let ConversationItem::User(u) = &mut item {
+            u.instruction_provenance = Some(InstructionProvenance::HarnessPrefix(marks));
+        }
+        item
+    }
+
+    fn background_marks(item: &ConversationItem) -> Vec<FragmentMark> {
+        match item.instruction_provenance() {
+            Some(InstructionProvenance::ForkBackground(marks)) => marks.clone(),
+            None => Vec::new(),
+            Some(other) => panic!("unexpected provenance {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mapped_strip_matches_the_plain_strip_over_the_corpus() {
+        let corpus = [
+            "",
+            "plain text with no tags",
+            "line one\r\nline two\r\n\r\n\r\nline three\r\n",
+            "a\n\n\n\nb\n\n\n",
+            "\n\n  leading and trailing  \n\n",
+            "<rules>\n<user_rule>\nbody <git_status>inside</git_status> rest\n</user_rule>\n</rules>",
+            "before <system-reminder>never closed",
+            "<user_query><command-name>x</command-name><command-args>y</command-args>SKILL BODY</user_query> tail",
+            "<command-args>z</command-args> no query close",
+            "<git_statusx>not a tag</git_statusx> <user_info attr=\"1\">gone</user_info> kept",
+            "unicode é 漢字 \r\n\r\n<system_reminder>r</system_reminder>\n\n\nend",
+        ];
+        for text in corpus {
+            let (mapped, map) = strip_fork_noise_mapped(text);
+            assert_eq!(mapped, strip_fork_noise(text), "input {text:?}");
+            assert_eq!(map.len(), mapped.len());
+            assert!(
+                map.windows(2).all(|w| w[0] < w[1]),
+                "strictly increasing for {text:?}"
+            );
+            for (i, &src) in map.iter().enumerate() {
+                assert_eq!(mapped.as_bytes()[i], text.as_bytes()[src as usize]);
+            }
+        }
+    }
+
+    #[test]
+    fn intact_fragments_are_remapped_into_the_background() {
+        let ws = [entry("/repo/AGENTS.md", "Use python3.")];
+        let user = [
+            entry("", "Synthetic browser rule."),
+            entry("/home/dev/.fuigo/AGENTS.md", "User prefs."),
+        ];
+        let prefix = harness_prefix(&ws, &user);
+        let parent = vec![
+            ConversationItem::system("s"),
+            prefix,
+            ConversationItem::user("do the task"),
+            ConversationItem::assistant("ok"),
+        ];
+        let (items, _) = normalize_forked_context(parent);
+        let marks = background_marks(&items[1]);
+        assert_eq!(marks.len(), 2);
+        let text = items[1].text_content();
+        for mark in &marks {
+            let bytes = &text[mark.start as usize..mark.end as usize];
+            assert_eq!(
+                fuigo_agent::prompt::agents_md::span_digest(bytes),
+                mark.span_digest
+            );
+        }
+        assert!(text[marks[0].start as usize..marks[0].end as usize].contains("Use python3."));
+        assert!(text[marks[1].start as usize..marks[1].end as usize].contains("User prefs."));
+    }
+
+    #[test]
+    fn mangled_fragments_are_not_marked() {
+        let ws = [
+            entry("/repo/AGENTS.md", "keep\n\n\n\ncollapsed"),
+            entry("/repo/a/AGENTS.md", "has <git_status>x</git_status> inside"),
+            entry("/repo/b/AGENTS.md", "crlf\r\nbody"),
+            entry("/repo/c/AGENTS.md", "intact"),
+        ];
+        let prefix = harness_prefix(&ws, &[]);
+        let parent = vec![
+            ConversationItem::system("s"),
+            prefix,
+            ConversationItem::assistant("ok"),
+        ];
+        let (items, _) = normalize_forked_context(parent);
+        let marks = background_marks(&items[1]);
+        assert_eq!(marks.len(), 1, "only the intact fragment is marked");
+        let text = items[1].text_content();
+        assert!(text[marks[0].start as usize..marks[0].end as usize].contains("intact"));
+    }
+
+    #[test]
+    fn no_marks_without_provenance_when_withheld_or_summarized() {
+        let ws = [entry("/repo/AGENTS.md", "Use python3.")];
+        // A typed message byte-equal to a harness prefix carries no provenance.
+        let forged = ConversationItem::user(harness_prefix(&ws, &[]).text_content());
+        let (items, _) = normalize_forked_context(vec![
+            ConversationItem::system("s"),
+            forged,
+            ConversationItem::assistant("a"),
+        ]);
+        assert!(items[1].instruction_provenance().is_none());
+
+        let mut withheld = harness_prefix(&ws, &[]);
+        if let ConversationItem::User(u) = &mut withheld {
+            u.project_files_withheld = true;
+        }
+        let (items, _) = normalize_forked_context(vec![
+            ConversationItem::system("s"),
+            withheld,
+            ConversationItem::assistant("a"),
+        ]);
+        assert!(items[1].instruction_provenance().is_none());
+
+        let mut long = vec![ConversationItem::system("s"), harness_prefix(&ws, &[])];
+        for i in 0..5 {
+            long.push(ConversationItem::user(format!("q{i}")));
+            long.push(ConversationItem::assistant(format!("a{i}")));
+        }
+        let (items, _) = normalize_forked_context(long);
+        assert!(
+            items[1].instruction_provenance().is_none(),
+            "the summarized branch marks nothing"
+        );
+    }
+
+    #[test]
+    fn plain_background_bytes_are_unchanged_by_marking() {
+        let ws = [entry("/repo/AGENTS.md", "Use python3.")];
+        let marked = harness_prefix(&ws, &[]);
+        let plain = ConversationItem::user(marked.text_content());
+        let (a, _) = normalize_forked_context(vec![
+            ConversationItem::system("s"),
+            marked,
+            ConversationItem::assistant("x"),
+        ]);
+        let (b, _) = normalize_forked_context(vec![
+            ConversationItem::system("s"),
+            plain,
+            ConversationItem::assistant("x"),
+        ]);
+        assert_eq!(a[1].text_content(), b[1].text_content());
     }
 }

@@ -1492,7 +1492,17 @@ fn execute_git_checkout_worktree(plan: WorktreePlan) -> Result<CreateWorktreeRes
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("git worktree add failed: {}", stderr);
+        let fs_paths = git::space::add_fs_paths(dest, &source_root);
+        return Err(git::space::git_write_failure(
+            "git worktree add",
+            &output.status,
+            &stderr,
+            &fs_paths,
+            Some(git::space::FitCheck {
+                repo: &source_root,
+                git_ref,
+            }),
+        ));
     }
 
     tracing::debug!(

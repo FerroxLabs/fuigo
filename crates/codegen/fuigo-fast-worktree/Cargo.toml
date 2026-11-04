@@ -22,6 +22,8 @@ required-features = ["bench"]
 [features]
 default-bazel = ["metadata"]
 bench = []
+# Probe and tree-walk overrides for the disk-full classifier (`storage_seam`).
+test-support = []
 # SQLite metadata DB for worktree tracking.
 metadata = ["dep:rusqlite", "dep:fuigo-sqlite-journal"]
 

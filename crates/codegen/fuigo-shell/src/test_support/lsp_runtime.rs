@@ -113,6 +113,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         path_not_found_hints: false,
         tool_params_json: Default::default(),
         plugin_registry: None,
+        plugin_registry_handle: fuigo_agent::plugins::SharedPluginRegistryHandle::new(None, vec![]),
         models_manager: Default::default(),
         file_tool_overrides: None,
         agent_config: None,

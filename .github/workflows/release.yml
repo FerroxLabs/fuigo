@@ -49,10 +49,9 @@ jobs:
   build:
     name: ${{ matrix.npm_platform }}
     runs-on: ${{ matrix.runner }}
-    # The workspace is large; a cold cache genuinely takes this long. release-dist (thin LTO, codegen-units=1) builds
-    # ~2.8x slower than --release (Hetzner, linux-x64: 6m57 -> 19m21, same load). The 1.0.31 --release jobs took
-    # 23-50 min, so the slowest projects to ~145 min; 300 is the 2x headroom (and the hosted-runner ceiling).
-    timeout-minutes: 300
+    # macos-15 release-dist builds take ~3.5-4.2 h (Nov 2026); 360 is GitHub's hard limit for hosted-runner jobs, so
+    # there is no headroom past it. If macOS passes ~5 h, add caching or split the build.
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:

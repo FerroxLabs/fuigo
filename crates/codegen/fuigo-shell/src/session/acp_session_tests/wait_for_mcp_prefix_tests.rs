@@ -87,7 +87,7 @@ async fn resolved_repo_status_prefetch_builds_first_prefix_with_zero_wait() {
                     snapshot_rx,
                 ))),
             });
-            let prefix = actor.build_user_message_prefix().await;
+            let prefix = actor.build_user_message_prefix().await.text;
             assert!(
                 prefix.contains("<git_status>") && prefix.contains(" M src/lib.rs"),
                 "prefix must render the prefetched status, got: {prefix}"
@@ -117,7 +117,7 @@ async fn absent_inputs_omit_the_status_block() {
             let (gw_tx, _gw_rx) = tokio::sync::mpsc::unbounded_channel();
             let (persist_tx, _persist_rx) = tokio::sync::mpsc::unbounded_channel();
             let actor = create_test_actor(100, 256_000, 80, gw_tx, persist_tx).await;
-            let prefix = actor.build_user_message_prefix().await;
+            let prefix = actor.build_user_message_prefix().await.text;
             assert!(
                 !prefix.contains("<git_status>") && !prefix.contains("<jj_status>"),
                 "absent inputs must omit the status block, got: {prefix}"
@@ -154,7 +154,7 @@ async fn resumed_session_gathers_status_inline_without_a_prefetch() {
                 },
                 prefetch: std::cell::RefCell::new(None),
             });
-            let prefix = actor.build_user_message_prefix().await;
+            let prefix = actor.build_user_message_prefix().await.text;
             assert!(
                 prefix.contains("<git_status>") && prefix.contains("untracked.txt"),
                 "inline gather (no prefetch) must render the status block, got: {prefix}"
@@ -186,7 +186,7 @@ async fn suppressed_status_omits_the_body_but_keeps_the_repo_root() {
                 root: discover_vcs_root(repo.path()),
                 vcs_kind: VcsKind::Git,
             });
-            let prefix = actor.build_user_message_prefix().await;
+            let prefix = actor.build_user_message_prefix().await.text;
             assert!(
                 !prefix.contains("<git_status>"),
                 "suppressed status must omit the body, got: {prefix}"

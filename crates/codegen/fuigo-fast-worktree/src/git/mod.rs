@@ -9,6 +9,7 @@ pub(crate) mod probe;
 pub(crate) mod reason;
 pub(crate) mod reclaimed;
 pub(crate) mod safety;
+pub(crate) mod space;
 pub(crate) mod status;
 pub(crate) mod worktree;
 #[cfg(test)]

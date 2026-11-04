@@ -105,7 +105,7 @@ impl SessionActor {
         effects
     }
     #[tracing::instrument(skip_all)]
-    pub(super) async fn build_prefix_background(&self) -> String {
+    pub(super) async fn build_prefix_background(&self) -> super::prompt_build::RenderedPrefix {
         let start = std::time::Instant::now();
         if matches!(self.mcp_strategy.get(), McpInitStrategy::Blocking) {
             use fuigo_agent::prompt::user_message::UserMessageTemplate;
@@ -154,7 +154,8 @@ impl SessionActor {
         };
         let mut conversation = self.chat_state_handle.get_conversation().await;
         let insert_at = conversation.len().min(1);
-        let mut prefix_item = ConversationItem::user(prefix);
+        // Provenance only on a render from a trusted list; a withheld head never carries marks.
+        let mut prefix_item = prefix.into_item(self.instructions_built_trusted.get());
         if !self.instructions_built_trusted.get() {
             prefix_item.mark_project_files_withheld();
             self.withheld_pending.set(true);

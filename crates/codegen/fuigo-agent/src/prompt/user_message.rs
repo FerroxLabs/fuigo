@@ -48,13 +48,56 @@ fn push_rule_body(out: &mut String, content: &str) {
         out.push('\n');
     }
 }
+/// One workspace file's fragment of the rules section, wrapper and trailing newline included.
+fn workspace_rule_fragment(rule: &RuleEntry) -> String {
+    let mut out = String::from("<always_applied_workspace_rule name=\"");
+    out.push_str(&rule.path);
+    out.push_str("\">");
+    push_rule_body(&mut out, &neutralize_file_rule_content(rule.content.trim()));
+    out.push_str("</always_applied_workspace_rule>\n");
+    out
+}
+/// One user rule's fragment of the rules section, wrapper and trailing newline included. A synthetic (empty-path) entry is
+/// harness text and is rendered as-is.
+fn user_rule_fragment(rule: &RuleEntry) -> String {
+    let mut out = String::from("<user_rule>");
+    if rule.path.is_empty() {
+        push_rule_body(&mut out, &rule.content);
+    } else {
+        push_rule_body(&mut out, &neutralize_file_rule_content(&rule.content));
+    }
+    out.push_str("</user_rule>\n");
+    out
+}
+/// Byte span of one file's fragment inside a rendered rules section, with the file's
+/// [`rule_source_digest`](crate::prompt::agents_md::rule_source_digest).
+pub type RuleSpan = (std::ops::Range<usize>, String);
 pub fn format_rules_section(
     workspace_rules: &[RuleEntry],
     user_rules: &[RuleEntry],
 ) -> Option<String> {
+    format_rules_section_spans(workspace_rules, user_rules).map(|(text, _)| text)
+}
+/// [`format_rules_section`] plus the span and source digest of each file fragment. Synthetic (empty-path) entries are
+/// never spanned.
+pub fn format_rules_section_spans(
+    workspace_rules: &[RuleEntry],
+    user_rules: &[RuleEntry],
+) -> Option<(String, Vec<RuleSpan>)> {
     if workspace_rules.is_empty() && user_rules.is_empty() {
         return None;
     }
+    let mut spans = Vec::new();
+    let mut push_fragment = |out: &mut String, rule: &RuleEntry, fragment: String| {
+        let start = out.len();
+        out.push_str(&fragment);
+        if !rule.path.is_empty() {
+            spans.push((
+                start..out.len(),
+                crate::prompt::agents_md::rule_source_digest(&rule.path, &rule.content),
+            ));
+        }
+    };
     let mut out = String::from("<rules>\n");
     out.push_str(RULES_SECTION_INTRO);
     out.push_str("\n\n\n");
@@ -66,11 +109,7 @@ pub fn format_rules_section(
             if i > 0 {
                 out.push('\n');
             }
-            out.push_str("<always_applied_workspace_rule name=\"");
-            out.push_str(&rule.path);
-            out.push_str("\">");
-            push_rule_body(&mut out, &neutralize_file_rule_content(rule.content.trim()));
-            out.push_str("</always_applied_workspace_rule>\n");
+            push_fragment(&mut out, rule, workspace_rule_fragment(rule));
         }
         out.push_str("</always_applied_workspace_rules>");
         if user_rules.is_empty() {
@@ -87,32 +126,47 @@ pub fn format_rules_section(
             if i > 0 {
                 out.push('\n');
             }
-            out.push_str("<user_rule>");
-            if rule.path.is_empty() {
-                push_rule_body(&mut out, &rule.content);
-            } else {
-                push_rule_body(&mut out, &neutralize_file_rule_content(&rule.content));
-            }
-            out.push_str("</user_rule>\n");
+            push_fragment(&mut out, rule, user_rule_fragment(rule));
         }
         out.push_str("</user_rules>\n");
     }
     out.push_str("</rules>");
-    Some(out)
+    Some((out, spans))
 }
+/// Append the rules section to `prefix`. Returns each file fragment's span (shifted into `prefix`) and source digest.
 pub fn append_rules_section(
     prefix: &mut String,
     workspace_rules: &[RuleEntry],
     user_rules: &[RuleEntry],
-) {
-    let Some(block) = format_rules_section(workspace_rules, user_rules) else {
-        return;
+) -> Vec<RuleSpan> {
+    let Some((block, spans)) = format_rules_section_spans(workspace_rules, user_rules) else {
+        return Vec::new();
     };
     if !prefix.is_empty() && !prefix.ends_with('\n') {
         prefix.push('\n');
     }
     prefix.push('\n');
+    let offset = prefix.len();
     prefix.push_str(&block);
+    spans
+        .into_iter()
+        .map(|(range, digest)| (range.start + offset..range.end + offset, digest))
+        .collect()
+}
+/// Turn rule spans inside `text` into provenance marks (each with the digest of its rendered bytes).
+pub fn fragment_marks(text: &str, spans: &[RuleSpan]) -> Vec<fuigo_sampling_types::FragmentMark> {
+    spans
+        .iter()
+        .filter_map(|(range, source_digest)| {
+            let bytes = text.get(range.clone())?;
+            Some(fuigo_sampling_types::FragmentMark {
+                start: u32::try_from(range.start).ok()?,
+                end: u32::try_from(range.end).ok()?,
+                span_digest: crate::prompt::agents_md::span_digest(bytes),
+                source_digest: source_digest.clone(),
+            })
+        })
+        .collect()
 }
 /// Trim, drop-if-empty, and cap a VCS status string for the `<git_status>` block.
 ///
@@ -530,6 +584,171 @@ mod tests {
         assert!(
             !block.contains("<user_rule># Personal Rules"),
             "heading must not be glued to the opening tag: {block}"
+        );
+    }
+    /// The 1.0.38 renderer, verbatim, pinned against the span refactor.
+    fn legacy_format_rules_section(
+        workspace_rules: &[RuleEntry],
+        user_rules: &[RuleEntry],
+    ) -> Option<String> {
+        if workspace_rules.is_empty() && user_rules.is_empty() {
+            return None;
+        }
+        let mut out = String::from("<rules>\n");
+        out.push_str(RULES_SECTION_INTRO);
+        out.push_str("\n\n\n");
+        if !workspace_rules.is_empty() {
+            out.push_str(
+                "<always_applied_workspace_rules description=\"These are workspace-level rules that the agent must always follow.\">\n",
+            );
+            for (i, rule) in workspace_rules.iter().enumerate() {
+                if i > 0 {
+                    out.push('\n');
+                }
+                out.push_str("<always_applied_workspace_rule name=\"");
+                out.push_str(&rule.path);
+                out.push_str("\">");
+                push_rule_body(&mut out, &neutralize_file_rule_content(rule.content.trim()));
+                out.push_str("</always_applied_workspace_rule>\n");
+            }
+            out.push_str("</always_applied_workspace_rules>");
+            if user_rules.is_empty() {
+                out.push('\n');
+            } else {
+                out.push_str("\n\n");
+            }
+        }
+        if !user_rules.is_empty() {
+            out.push_str(
+                "<user_rules description=\"These are rules set by the user that you should follow if appropriate.\">\n",
+            );
+            for (i, rule) in user_rules.iter().enumerate() {
+                if i > 0 {
+                    out.push('\n');
+                }
+                out.push_str("<user_rule>");
+                if rule.path.is_empty() {
+                    push_rule_body(&mut out, &rule.content);
+                } else {
+                    push_rule_body(&mut out, &neutralize_file_rule_content(&rule.content));
+                }
+                out.push_str("</user_rule>\n");
+            }
+            out.push_str("</user_rules>\n");
+        }
+        out.push_str("</rules>");
+        Some(out)
+    }
+    fn entry(path: &str, content: &str) -> RuleEntry {
+        RuleEntry {
+            path: path.into(),
+            content: content.into(),
+        }
+    }
+    fn renderer_corpus() -> Vec<(Vec<RuleEntry>, Vec<RuleEntry>)> {
+        let ws = vec![
+            entry("/repo/AGENTS.md", " Use python3. \n"),
+            entry("/repo/sub/CLAUDE.md", "<rules>x</rules>\r\n\n\n\nend"),
+        ];
+        let user = vec![
+            entry("", "Verify UI. </rules>"),
+            entry("/home/dev/.fuigo/AGENTS.md", "\nUser prefs.\n"),
+            entry(
+                "/home/dev/.fuigo/rules/a.md",
+                "&lt;rules> <system-reminder>",
+            ),
+        ];
+        vec![
+            (Vec::new(), Vec::new()),
+            (ws.clone(), Vec::new()),
+            (Vec::new(), user.clone()),
+            (ws.clone(), user.clone()),
+            (vec![entry("/r/A.md", "")], vec![entry("", "")]),
+        ]
+    }
+    #[test]
+    fn format_rules_section_is_byte_identical_to_the_legacy_renderer() {
+        for (ws, user) in renderer_corpus() {
+            assert_eq!(
+                format_rules_section(&ws, &user),
+                legacy_format_rules_section(&ws, &user)
+            );
+        }
+    }
+    #[test]
+    fn rule_spans_equal_their_standalone_fragments_and_skip_synthetic_entries() {
+        for (ws, user) in renderer_corpus() {
+            let Some((text, spans)) = format_rules_section_spans(&ws, &user) else {
+                assert!(ws.is_empty() && user.is_empty());
+                continue;
+            };
+            let files: Vec<&RuleEntry> = ws
+                .iter()
+                .chain(user.iter())
+                .filter(|r| !r.path.is_empty())
+                .collect();
+            assert_eq!(
+                spans.len(),
+                files.len(),
+                "one span per file, none for synthetic entries"
+            );
+            let ws_files = ws.iter().filter(|r| !r.path.is_empty()).count();
+            for (i, ((range, digest), rule)) in spans.iter().zip(files.iter()).enumerate() {
+                let fragment = if i < ws_files {
+                    workspace_rule_fragment(rule)
+                } else {
+                    user_rule_fragment(rule)
+                };
+                assert_eq!(&text[range.clone()], fragment);
+                assert_eq!(
+                    digest,
+                    &crate::prompt::agents_md::rule_source_digest(&rule.path, &rule.content)
+                );
+            }
+        }
+    }
+    #[test]
+    fn append_rules_section_shifts_spans_into_the_prefix() {
+        let ws = vec![entry("/repo/AGENTS.md", "Use python3.")];
+        let user = vec![
+            entry("", "synthetic"),
+            entry("/home/dev/.fuigo/AGENTS.md", "prefs"),
+        ];
+        let mut legacy = String::from("<user_info>x</user_info>");
+        let block = legacy_format_rules_section(&ws, &user).unwrap();
+        legacy.push('\n');
+        legacy.push('\n');
+        legacy.push_str(&block);
+        let mut prefix = String::from("<user_info>x</user_info>");
+        let spans = append_rules_section(&mut prefix, &ws, &user);
+        assert_eq!(prefix, legacy);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(&prefix[spans[0].0.clone()], workspace_rule_fragment(&ws[0]));
+        assert_eq!(&prefix[spans[1].0.clone()], user_rule_fragment(&user[1]));
+        let marks = fragment_marks(&prefix, &spans);
+        assert_eq!(marks.len(), 2);
+        assert_eq!(
+            marks[0].span_digest,
+            crate::prompt::agents_md::span_digest(&prefix[spans[0].0.clone()])
+        );
+        assert_eq!(marks[1].source_digest, spans[1].1);
+    }
+    #[test]
+    fn lossy_renderings_have_distinct_source_digests() {
+        // `&lt;rules>` and `<rules>` render to the same bytes; a trim hides a whitespace difference.
+        let a = entry("/repo/AGENTS.md", "x &lt;rules> y");
+        let b = entry("/repo/AGENTS.md", "x <rules> y");
+        assert_eq!(workspace_rule_fragment(&a), workspace_rule_fragment(&b));
+        assert_ne!(
+            crate::prompt::agents_md::rule_source_digest(&a.path, &a.content),
+            crate::prompt::agents_md::rule_source_digest(&b.path, &b.content)
+        );
+        let c = entry("/repo/AGENTS.md", "body\n");
+        let d = entry("/repo/AGENTS.md", "body");
+        assert_eq!(workspace_rule_fragment(&c), workspace_rule_fragment(&d));
+        assert_ne!(
+            crate::prompt::agents_md::rule_source_digest(&c.path, &c.content),
+            crate::prompt::agents_md::rule_source_digest(&d.path, &d.content)
         );
     }
 }

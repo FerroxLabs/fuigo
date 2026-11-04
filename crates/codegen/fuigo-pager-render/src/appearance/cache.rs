@@ -317,21 +317,43 @@ thread_local! {
 
 /// Read cached `vim_mode`, seeding from disk on first call.
 ///
-/// `vim_mode` is ephemeral: this cache is the process-wide source of truth and no `Effect` writes it back to disk.
-/// The first read still seeds from `[ui].vim_mode` so historical configs keep working.
+/// This cache is the process-wide source of truth. `/vim-mode` and the settings modal write the new value back to
+/// `[ui].vim_mode` through `Effect::PersistSetting`, which then wins over `[keys] vim` on the next start.
+/// The first read still seeds from `[ui].vim_mode` so historical configs keep working, or from `[keys] vim`.
 pub fn load_vim_mode() -> bool {
     VIM_MODE_LOADED.with(|loaded| {
         if !loaded.get() {
             VIM_MODE_CURRENT.with(|c| {
-                c.set(load_bool_from_effective_config(
-                    "vim_mode",
-                    VIM_MODE_DEFAULT,
-                ))
+                c.set(
+                    fuigo_config::load_effective_config_disk_only()
+                        .map_or(VIM_MODE_DEFAULT, |root| vim_mode_from_config(&root)),
+                )
             });
             loaded.set(true);
         }
     });
     VIM_MODE_CURRENT.with(|c| c.get())
+}
+
+/// `[ui].vim_mode` wins when set (so old configs read exactly as before); otherwise `[keys] vim = "nav"` turns
+/// scrollback vim keys on and `"off"` turns them off; otherwise the default.
+fn vim_mode_from_config(root: &toml::Value) -> bool {
+    if let Some(enabled) = root
+        .get("ui")
+        .and_then(|ui| ui.get("vim_mode"))
+        .and_then(toml::Value::as_bool)
+    {
+        return enabled;
+    }
+    match root
+        .get("keys")
+        .and_then(|keys| keys.get("vim"))
+        .and_then(toml::Value::as_str)
+    {
+        Some("nav") => true,
+        Some("off") => false,
+        _ => VIM_MODE_DEFAULT,
+    }
 }
 
 /// Replace cached `vim_mode`.
@@ -924,6 +946,26 @@ mod tests {
         })
         .join()
         .unwrap();
+    }
+
+    #[test]
+    fn keys_vim_seeds_vim_mode_and_ui_wins() {
+        let cfg = |t: &str| -> toml::Value { toml::from_str(t).unwrap() };
+        assert_eq!(vim_mode_from_config(&cfg("")), VIM_MODE_DEFAULT);
+        assert!(vim_mode_from_config(&cfg("[ui]\nvim_mode = true\n")));
+        assert!(!vim_mode_from_config(&cfg("[ui]\nvim_mode = false\n")));
+        assert!(vim_mode_from_config(&cfg("[keys]\nvim = \"nav\"\n")));
+        assert!(!vim_mode_from_config(&cfg("[keys]\nvim = \"off\"\n")));
+        assert_eq!(
+            vim_mode_from_config(&cfg("[keys]\nvim = \"bogus\"\n")),
+            VIM_MODE_DEFAULT
+        );
+        assert!(!vim_mode_from_config(&cfg(
+            "[ui]\nvim_mode = false\n[keys]\nvim = \"nav\"\n"
+        )));
+        assert!(vim_mode_from_config(&cfg(
+            "[ui]\nvim_mode = true\n[keys]\nvim = \"off\"\n"
+        )));
     }
 
     #[test]
