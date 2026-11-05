@@ -40,14 +40,13 @@ fn sanitize_token_ranges(text: &str, mut ranges: Vec<Range<usize>>) -> Vec<Range
 fn token_styled_line(
     line_text: &str,
     line_start: usize,
-    ranges: &[Range<usize>],
-    token_style: Style,
+    ranges: &[(Range<usize>, Style)],
     body_style: Style,
 ) -> Line<'static> {
     let line_end = line_start + line_text.len();
     let mut spans = Vec::new();
     let mut pos = line_start;
-    for r in ranges {
+    for (r, token_style) in ranges {
         let start = r.start.clamp(line_start, line_end);
         let end = r.end.clamp(line_start, line_end);
         if start >= end {
@@ -61,7 +60,7 @@ fn token_styled_line(
         }
         spans.push(Span::styled(
             line_text[start - line_start..end - line_start].to_string(),
-            token_style,
+            *token_style,
         ));
         pos = end;
     }
@@ -72,6 +71,18 @@ fn token_styled_line(
         ));
     }
     Line::from(spans)
+}
+
+/// `[Image #N]` (or the path form `[Image #N: <path>]`) placeholders in `text`, with their numbers.
+fn image_placeholders(text: &str) -> impl Iterator<Item = (Range<usize>, usize)> + '_ {
+    use std::sync::LazyLock;
+    static RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\[Image #(\d+)(?::[^\]\n]*)?\]").expect("valid regex"));
+    RE.captures_iter(text).filter_map(|c| {
+        let whole = c.get(0)?;
+        let number = c.get(1)?.as_str().parse().ok()?;
+        Some((whole.range(), number))
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +101,12 @@ pub struct UserPromptBlock {
     /// Empty means plain prompt styling.
     /// This is the sole skill signal; a leading skill invocation is `[0..token_end]`.
     pub skill_token_ranges: Vec<Range<usize>>,
+    /// `[Image #N]` numbers whose image was actually sent with this prompt (from the sent blocks, or the stored echo on resume).
+    /// Any other `[Image #N]` in `text` was only typed, or its image was not sent, and renders struck through.
+    pub sent_image_numbers: Vec<usize>,
+    /// Images of this prompt rebuilt from the stored session on resume (in memory only), so `/rewind` can re-attach them.
+    /// Prompts sent in this run keep theirs in `AgentView::sent_prompt_attachments` instead.
+    pub resumed_images: Vec<crate::prompt_images::PastedImage>,
 }
 
 impl UserPromptBlock {
@@ -101,11 +118,37 @@ impl UserPromptBlock {
             is_interjection: false,
             prompt_index: None,
             skill_token_ranges: Vec::new(),
+            sent_image_numbers: Vec::new(),
+            resumed_images: Vec::new(),
         }
     }
 
     pub fn copy_text(&self) -> String {
         self.text.clone()
+    }
+
+    /// Byte ranges of the `[Image #N]` placeholders whose image was not sent with this prompt.
+    /// Bash and scheduler prompts carry no attachments, so their text is never marked.
+    pub fn unsent_image_ranges(&self) -> Vec<Range<usize>> {
+        if self.is_bash || self.is_cron {
+            return Vec::new();
+        }
+        image_placeholders(&self.text)
+            .filter(|(_, n)| !self.sent_image_numbers.contains(n))
+            .map(|(range, _)| range)
+            .collect()
+    }
+
+    /// Record images sent with this prompt; true when anything new was recorded.
+    pub fn mark_images_sent(&mut self, numbers: &[usize]) -> bool {
+        let mut changed = false;
+        for n in numbers {
+            if !self.sent_image_numbers.contains(n) {
+                self.sent_image_numbers.push(*n);
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn bash(text: impl Into<String>) -> Self {
@@ -116,6 +159,8 @@ impl UserPromptBlock {
             is_interjection: false,
             prompt_index: None,
             skill_token_ranges: Vec::new(),
+            sent_image_numbers: Vec::new(),
+            resumed_images: Vec::new(),
         }
     }
 
@@ -139,6 +184,8 @@ impl UserPromptBlock {
             is_interjection: false,
             prompt_index: None,
             skill_token_ranges,
+            sent_image_numbers: Vec::new(),
+            resumed_images: Vec::new(),
         }
     }
 
@@ -154,6 +201,8 @@ impl UserPromptBlock {
             is_interjection: false,
             prompt_index: None,
             skill_token_ranges,
+            sent_image_numbers: Vec::new(),
+            resumed_images: Vec::new(),
         }
     }
 
@@ -165,6 +214,8 @@ impl UserPromptBlock {
             is_interjection: false,
             prompt_index: None,
             skill_token_ranges: Vec::new(),
+            sent_image_numbers: Vec::new(),
+            resumed_images: Vec::new(),
         }
     }
 
@@ -176,6 +227,8 @@ impl UserPromptBlock {
             is_interjection: true,
             prompt_index: None,
             skill_token_ranges: Vec::new(),
+            sent_image_numbers: Vec::new(),
+            resumed_images: Vec::new(),
         }
     }
 
@@ -248,6 +301,22 @@ impl UserPromptBlock {
             text_style = text_style.add_modifier(Modifier::BOLD);
             skill_style = skill_style.add_modifier(Modifier::BOLD);
         }
+        // Typed-only or not-sent image placeholders: dim and struck through, on a theme token for light and dark alike
+        let unsent_style = theme
+            .fg(theme.text_secondary)
+            .add_modifier(Modifier::DIM | Modifier::CROSSED_OUT);
+        let mut styled_ranges: Vec<(Range<usize>, Style)> = self
+            .skill_token_ranges
+            .iter()
+            .map(|r| (r.clone(), skill_style))
+            .chain(
+                self.unsent_image_ranges()
+                    .into_iter()
+                    .map(|r| (r, unsent_style)),
+            )
+            .collect();
+        styled_ranges.sort_by_key(|(r, _)| (r.start, r.end));
+        styled_ranges.dedup_by(|later, earlier| later.0.start < earlier.0.end);
         let band = Self::prompt_band_color_for(&theme, is_selected, terminal_native);
         // Semantic line bg (not a "panel") so it survives minimal's flat_background.
         let with_band = |line: BlockLine| -> BlockLine {
@@ -317,7 +386,7 @@ impl UserPromptBlock {
             }
 
             // Wrap this line's content.
-            let content_line = if self.skill_token_ranges.is_empty() {
+            let content_line = if styled_ranges.is_empty() {
                 Line::from(Span::styled(line_text.to_string(), text_style))
             } else {
                 // `lines()` strips terminators, so recover this line's byte offset from the subslice pointer into `self.text`
@@ -329,13 +398,7 @@ impl UserPromptBlock {
                     "line_text must be a subslice of self.text"
                 );
                 let line_start = line_text.as_ptr() as usize - self.text.as_ptr() as usize;
-                token_styled_line(
-                    line_text,
-                    line_start,
-                    &self.skill_token_ranges,
-                    skill_style,
-                    text_style,
-                )
+                token_styled_line(line_text, line_start, &styled_ranges, text_style)
             };
             let (wrapped, wrap_joiners) =
                 word_wrap_line_with_joiners(&content_line, RtOptions::new(base_content_width));
@@ -440,6 +503,60 @@ impl UserPromptBlock {
         }
 
         all_lines
+    }
+}
+
+/// Record images sent with the user prompt at `id`; the entry re-renders when anything changed.
+pub(crate) fn mark_entry_images_sent(
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+    id: crate::scrollback::entry::EntryId,
+    numbers: &[usize],
+) -> bool {
+    if numbers.is_empty() {
+        return false;
+    }
+    let Some(entry) = scrollback.get_by_id_mut(id) else {
+        return false;
+    };
+    let crate::scrollback::block::RenderBlock::UserPrompt(block) = &mut entry.block else {
+        return false;
+    };
+    let changed = block.mark_images_sent(numbers);
+    if changed {
+        entry.invalidate_cache();
+    }
+    changed
+}
+
+/// [`mark_entry_images_sent`] for the newest user prompt: a user message's image blocks follow its text, live and on resume.
+pub(crate) fn mark_latest_prompt_images_sent(
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+    numbers: &[usize],
+) -> bool {
+    let latest = (0..scrollback.len()).rev().find_map(|idx| {
+        scrollback
+            .get(idx)
+            .filter(|e| matches!(e.block, crate::scrollback::block::RenderBlock::UserPrompt(_)))
+            .map(|e| e.id)
+    });
+    latest.is_some_and(|id| mark_entry_images_sent(scrollback, id, numbers))
+}
+
+/// Keep a replayed user-message image on the newest user prompt for `/rewind` (resume only).
+pub(crate) fn keep_latest_prompt_resumed_image(
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+    image: crate::prompt_images::PastedImage,
+) {
+    let latest = (0..scrollback.len()).rev().find(|idx| {
+        scrollback
+            .get(*idx)
+            .is_some_and(|e| matches!(e.block, crate::scrollback::block::RenderBlock::UserPrompt(_)))
+    });
+    if let Some(entry) = latest.and_then(|idx| scrollback.entry_mut(idx))
+        && let crate::scrollback::block::RenderBlock::UserPrompt(block) = &mut entry.block
+    {
+        block.resumed_images.retain(|kept| kept.display_number != image.display_number);
+        block.resumed_images.push(image);
     }
 }
 
@@ -1201,6 +1318,64 @@ mod tests {
                 false,
                 crate::theme::cache::terminal_native_locked(),
             )
+        );
+    }
+}
+
+#[cfg(test)]
+mod sent_image_tests {
+    use super::*;
+
+    fn struck_text(lines: &[BlockLine]) -> String {
+        lines
+            .iter()
+            .flat_map(|l| l.content.spans.iter())
+            .filter(|s| s.style.add_modifier.contains(Modifier::CROSSED_OUT))
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    /// A sent image placeholder renders as today; a typed-only one renders dim and struck through.
+    #[test]
+    fn typed_only_placeholder_is_struck_and_sent_one_is_not() {
+        let mut block = UserPromptBlock::new("see [Image #1] and [Image #2]");
+        assert!(block.mark_images_sent(&[1]));
+        assert!(!block.mark_images_sent(&[1]), "marking is idempotent");
+        assert_eq!(block.unsent_image_ranges(), vec![19..29]);
+
+        let lines = block.wrap_prompt_lines(80, None, true, false);
+        assert_eq!(struck_text(&lines), "[Image #2]");
+        let dim = lines
+            .iter()
+            .flat_map(|l| l.content.spans.iter())
+            .filter(|s| s.style.add_modifier.contains(Modifier::CROSSED_OUT))
+            .all(|s| s.style.add_modifier.contains(Modifier::DIM));
+        assert!(dim, "struck placeholders are also dim");
+    }
+
+    /// Path form and prompts without placeholders; bash commands never mark their text.
+    #[test]
+    fn placeholder_forms_and_bash_text() {
+        let block = UserPromptBlock::new("[Image #3: /tmp/a.png] plain");
+        assert_eq!(block.unsent_image_ranges(), vec![0..22]);
+        assert!(UserPromptBlock::new("no images here").unsent_image_ranges().is_empty());
+        assert!(UserPromptBlock::bash("echo [Image #1]").unsent_image_ranges().is_empty());
+        let lines = UserPromptBlock::new("all plain").wrap_prompt_lines(80, None, true, false);
+        assert_eq!(struck_text(&lines), "");
+    }
+
+    /// Skill tokens keep their accent next to a struck placeholder.
+    #[test]
+    fn skill_token_and_unsent_placeholder_coexist() {
+        let block = UserPromptBlock::skill("/review [Image #1]");
+        let lines = block.wrap_prompt_lines(80, None, true, false);
+        assert_eq!(struck_text(&lines), "[Image #1]");
+        assert!(
+            lines
+                .iter()
+                .flat_map(|l| l.content.spans.iter())
+                .any(|s| s.content.as_ref() == "/review"),
+            "skill token span survives"
         );
     }
 }

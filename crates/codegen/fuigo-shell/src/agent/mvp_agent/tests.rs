@@ -7199,6 +7199,125 @@ fn interactive_trust_prompt_dedups_same_workspace() {
         );
     });
 }
+/// u40 P1: the reopen notices (`NotifyConfigNotice` with the exact text) a session received within a short window.
+async fn drain_reopen_notices(
+    cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TestSessionCommand>,
+) -> usize {
+    let mut count = 0;
+    while let Ok(Some(cmd)) =
+        tokio::time::timeout(std::time::Duration::from_millis(500), cmd_rx.recv()).await
+    {
+        if let TestSessionCommand::NotifyConfigNotice { notice } = cmd {
+            assert_eq!(notice, super::folder_trust_prompt::FOLDER_TRUST_REOPEN_NOTICE);
+            count += 1;
+        }
+    }
+    count
+}
+/// u40 P1: a mid-session grant sends an opted-in client one reopen notice on the asked session (none to a sibling), a
+/// reconnect (`session/load` re-entry) sends nothing more, and a client that did not opt in gets none at all.
+#[test]
+#[serial_test::serial]
+fn u40_reopen_notice_once_per_grant_only_for_opted_in_clients() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    use fuigo_test_support::EnvGuard;
+    let home = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::set("FUIGO_HOME", home.path());
+    let _sim = EnvGuard::set(fuigo_version::TEST_VERSION_ENV, "0.0-sim");
+    let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
+    let remote = folder_trust_on();
+    for opted_in in [true, false] {
+        let repo = repo_with_project_mcp_server();
+        let root = repo.path().to_path_buf();
+        let subdir = root.join("sub");
+        std::fs::create_dir_all(&subdir).unwrap();
+        run_local_for_bridge_test(|| async {
+            let (agent, mut gw_rx) = build_agent_with_gateway_rx();
+            agent.interactive_trust_client.set(true);
+            agent.folder_trust_reopen_notice.set(opted_in);
+            crate::agent::folder_trust::resolve_and_record(&root, Some(&remote), false);
+            let sid = acp::SessionId::new("sess-asked");
+            let (mut h, _t1, mut rx) = make_live_session_handle(&sid, None);
+            h.info.cwd = root.to_string_lossy().to_string();
+            agent.insert_resident(&sid, h);
+            let sib = acp::SessionId::new("sess-sibling");
+            let (mut h_sib, _t2, mut rx_sib) = make_live_session_handle(&sib, None);
+            h_sib.info.cwd = subdir.to_string_lossy().to_string();
+            agent.insert_resident(&sib, h_sib);
+            agent.maybe_spawn_interactive_trust_prompt(&sid, &root, Some(&remote));
+            let _ = answer_folder_trust_request(&mut gw_rx, "trust").await;
+            assert_eq!(
+                drain_reopen_notices(&mut rx).await,
+                usize::from(opted_in),
+                "asked session, opted_in={opted_in}"
+            );
+            assert_eq!(drain_reopen_notices(&mut rx_sib).await, 0, "sibling, opted_in={opted_in}");
+            // Re-entry (a `session/load` reconnect): already decided, so no request and no second notice.
+            agent.maybe_spawn_interactive_trust_prompt(&sid, &root, Some(&remote));
+            while let Ok(Some(msg)) =
+                tokio::time::timeout(std::time::Duration::from_millis(300), gw_rx.recv()).await
+            {
+                // The grant pushes the MCP catalog notification; only a second trust request is a failure.
+                assert!(
+                    !matches!(msg, fuigo_acp_lib::AcpClientMessage::ExtMethod(_)),
+                    "a decided workspace is not asked again"
+                );
+            }
+            assert_eq!(drain_reopen_notices(&mut rx).await, 0, "no notice on re-entry");
+        });
+    }
+}
+/// u40 P1: a folder already trusted is never asked, so an opted-in client gets no notice; a reject sends none either.
+#[test]
+#[serial_test::serial]
+fn u40_reopen_notice_absent_when_already_trusted_or_rejected() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    use fuigo_test_support::EnvGuard;
+    let home = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::set("FUIGO_HOME", home.path());
+    let _sim = EnvGuard::set(fuigo_version::TEST_VERSION_ENV, "0.0-sim");
+    let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
+    let remote = folder_trust_on();
+    let trusted = repo_with_project_mcp_server();
+    let trusted_path = trusted.path().to_path_buf();
+    let rejected = repo_with_project_mcp_server();
+    let rejected_path = rejected.path().to_path_buf();
+    run_local_for_bridge_test(|| async {
+        let (agent, mut gw_rx) = build_agent_with_gateway_rx();
+        agent.interactive_trust_client.set(true);
+        agent.folder_trust_reopen_notice.set(true);
+
+        let key = fuigo_workspace::trust::workspace_key(&trusted_path);
+        let _ = fuigo_workspace::folder_trust::grant_folder_trust_key(&key);
+        crate::agent::folder_trust::resolve_and_record(&trusted_path, Some(&remote), false);
+        assert!(crate::agent::folder_trust::project_scope_allowed(&trusted_path));
+        let sid = acp::SessionId::new("sess-trusted");
+        let (mut h, _t1, mut rx) = make_live_session_handle(&sid, None);
+        h.info.cwd = trusted_path.to_string_lossy().to_string();
+        agent.insert_resident(&sid, h);
+        agent.maybe_spawn_interactive_trust_prompt(&sid, &trusted_path, Some(&remote));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), gw_rx.recv())
+                .await
+                .is_err(),
+            "a trusted folder is not asked"
+        );
+        assert_eq!(drain_reopen_notices(&mut rx).await, 0, "no notice for an already trusted folder");
+
+        crate::agent::folder_trust::resolve_and_record(&rejected_path, Some(&remote), false);
+        let sid_r = acp::SessionId::new("sess-rejected");
+        let (mut h_r, _t2, mut rx_r) = make_live_session_handle(&sid_r, None);
+        h_r.info.cwd = rejected_path.to_string_lossy().to_string();
+        agent.insert_resident(&sid_r, h_r);
+        agent.maybe_spawn_interactive_trust_prompt(&sid_r, &rejected_path, Some(&remote));
+        let _ = answer_folder_trust_request(&mut gw_rx, "reject").await;
+        assert_eq!(drain_reopen_notices(&mut rx_r).await, 0, "no notice on a reject");
+    });
+}
 /// Which reload commands a session received after a grant.
 struct ReloadCmds {
     update_mcp: bool,

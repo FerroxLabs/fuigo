@@ -1587,6 +1587,20 @@ impl AcpUpdateTracker {
         // and hook batches keyed by them, are turn-scoped, and a replay never runs `finish_turn` between historical turns
         self.tool_entry_ids.clear();
         self.orphan_tool_hooks.clear();
+        // An image block of the user message: the prompt it follows really sent that `[Image #N]` (live echo, or the stored session on resume)
+        if let acp::ContentBlock::Image(img) = &chunk.content {
+            // Resume: the stored block still holds the image, which `/rewind` to this prompt re-attaches
+            if meta.is_replay
+                && let Some(image) = crate::prompt_images::pasted_image_from_sent_block(img)
+            {
+                crate::scrollback::blocks::keep_latest_prompt_resumed_image(scrollback, image);
+            }
+            let numbers =
+                crate::prompt_images::sent_image_display_numbers(std::slice::from_ref(&chunk.content));
+            return crate::scrollback::blocks::mark_latest_prompt_images_sent(
+                scrollback, &numbers,
+            );
+        }
         let text = extract_text_from_content(&chunk.content);
         if self.skip_next_skill_body {
             self.skip_next_skill_body = false;

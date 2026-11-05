@@ -215,6 +215,8 @@ impl acp::Agent for MvpAgent {
             &arguments,
         );
         self.interactive_trust_client.set(interactive_trust_client);
+        self.folder_trust_reopen_notice
+            .set(Self::parse_folder_trust_reopen_notice_capability(&arguments));
         let client_supports_mcp_apps = arguments
             .meta
             .as_ref()

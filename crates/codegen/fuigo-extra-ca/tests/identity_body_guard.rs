@@ -150,7 +150,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/dashboard.rs", 3),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/mod.rs", 3), // P77: +1 `hostname: None` fixture
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/notes.rs", 14), // P152: +2 `agent_id:` are the pager's local tab id in `TaskResult::FeedbackComplete` test literals (an in-process action, never a request body).
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/prompt.rs", 50), // P152: +2, W3-B: +1 `agent_id:` are the pager's local tab id in test action literals (in-process, never a request body).
+    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/prompt.rs", 53), // P152: +2, W3-B: +1, 1.0.40 P2 image tests: +3 `agent_id:` are the pager's local tab id in test action literals (in-process, never a request body).
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/queue_release.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/rewind.rs", 21), // LEFTOVERS: +8 `agent_id:` fields of `TaskResult::RewindExecuteComplete` test literals and `files_response` fixtures (rewind files restore); pager-local tab id, in-process, no body. Keep. Earlier: pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/router.rs", 1),

@@ -705,6 +705,9 @@ pub struct MvpAgent {
     /// Gates the DORMANT agent-to-client trust round-trip in `new_session`/`load_session`.
     /// `Cell<bool>` so `.get()` is a borrow-free copy across await points.
     interactive_trust_client: std::cell::Cell<bool>,
+    /// Whether the current client advertised `fuigo/folderTrust.reopenNotice`: it is sent one config notice when a grant
+    /// lands mid-session, since part of trust applies only on reopen. Set on every `initialize()` (last-client-wins).
+    folder_trust_reopen_notice: std::cell::Cell<bool>,
     /// Workspaces (canonical `workspace_key`) already prompted/decided for the interactive folder-trust round-trip this process.
     /// Dedups re-prompts on `load_session` reconnect and concurrent same-workspace sessions.
     /// Agent-owned (mirrors the `DECISIONS` cache, but not a process global) and captured into the detached prompt task.
@@ -1449,6 +1452,7 @@ mod session_setup;
 mod settings_manager;
 mod subagent_spawn;
 use session_registry::SessionRegistry;
+pub(crate) use folder_trust_prompt::FOLDER_TRUST_REOPEN_NOTICE;
 pub(crate) use session_lifecycle::RegistrySnapshot;
 pub(super) use super::ext_parsers;
 /// Named `auth.lifecycle` (not `auth`) to avoid colliding with the pre-existing per-request `AuthManager::auth()` `#[instrument]` span.

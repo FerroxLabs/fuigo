@@ -411,6 +411,8 @@ impl AgentView {
             send_now_painted_blocks: std::collections::HashMap::new(),
             minimal_cancel_hint_turn: None,
             send_now_echo_pending: std::collections::HashMap::new(),
+            send_now_attachments: std::collections::HashMap::new(),
+            sent_prompt_attachments: std::collections::HashMap::new(),
             follow_without_jump_prompt_id: None,
             plugin_cta: PluginCtaState::default(),
             follow_ups: None,
@@ -544,6 +546,8 @@ impl AgentView {
         self.send_now_awaiting_confirm = None;
         self.send_now_painted_blocks.clear();
         self.send_now_echo_pending.clear();
+        self.send_now_attachments.clear();
+        self.sent_prompt_attachments.clear();
         self.workflow_blocks.clear();
         self.workflow_run_revisions.clear();
         self.cleared_workflow_runs.clear();

@@ -1244,7 +1244,10 @@ pub async fn run_leader(
                                 // Before the fan-out: no answer to a session request counts until the leader delivers it.
                                 crate::leader::server::note_agent_request(&msg, &agent_out_board);
                                 let maybe_tx = agent_to_ws_tx_clone.lock();
-                                if let Some(ref tx) = *maybe_tx {
+                                // P1 (1.0.40): the reopen notice is for one opted-in local connection, never the relay.
+                                if let Some(ref tx) = *maybe_tx
+                                    && !crate::leader::server::is_folder_trust_reopen_notice_line(&msg)
+                                {
                                     let _ = tx.send(msg.clone());
                                 }
                                 drop(maybe_tx);

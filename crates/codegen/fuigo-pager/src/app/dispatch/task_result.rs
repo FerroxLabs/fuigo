@@ -741,6 +741,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 &prompt_id,
             );
             if let Some(agent) = app.agents.get_mut(&agent_id) {
+                // Taken before the retire below drops it: the requeued row gets the typed text, images and chips back
+                // A payload kept only for its sent marks (no images or chips) requeues its wire blocks, as before
+                let sent = agent
+                    .send_now_attachments
+                    .remove(&prompt_id)
+                    .filter(|sent| !sent.images.is_empty() || !sent.chip_elements.is_empty());
                 agent.shared_queue.retain(|e| e.id != prompt_id);
                 agent.note_queue_echo_retired(&prompt_id);
                 if agent.expect_send_now_cancel.as_deref() == Some(prompt_id.as_str())
@@ -758,17 +764,27 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     .unwrap_or_default();
                 let id = agent.session.next_queue_id;
                 agent.session.next_queue_id += 1;
-                agent
-                    .session
-                    .pending_prompts
-                    .push_front(crate::app::agent::QueuedPrompt {
+                let row = match sent {
+                    // Same payload the send built its blocks from; the drain rebuilds them and restores chips on edit or cancel
+                    Some(sent) => crate::app::agent::QueuedPrompt {
+                        images: sent.images,
+                        chip_elements: sent.chip_elements,
+                        ..crate::app::agent::QueuedPrompt::plain(
+                            id,
+                            &sent.text,
+                            crate::app::agent::QueueEntryKind::Prompt,
+                        )
+                    },
+                    None => crate::app::agent::QueuedPrompt {
                         wire_blocks: Some(blocks),
                         ..crate::app::agent::QueuedPrompt::plain(
                             id,
                             &text,
                             crate::app::agent::QueueEntryKind::Prompt,
                         )
-                    });
+                    },
+                };
+                agent.session.pending_prompts.push_front(row);
                 agent.show_toast(&format!("Send now failed. Requeued: {error}"));
             }
             vec![]

@@ -230,6 +230,8 @@ pub enum Action {
         text: String,
         /// Pasted images riding along with the prompt.
         images: Vec<crate::prompt_images::PastedImage>,
+        /// Chips (image, paste block, @-file) over `text`, so a cancel or a failed send restores them.
+        chip_elements: Vec<crate::app::agent::ChipElement>,
         /// Notice raised when the composer was read, shown when this dispatch ends.
         /// `None` for producers that carry no composer text (a queue row).
         image_notice: Option<String>,

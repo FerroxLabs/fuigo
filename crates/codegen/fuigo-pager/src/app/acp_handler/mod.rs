@@ -708,6 +708,7 @@ fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool 
             && let Some((entry_id, _)) = agent.send_now_painted_blocks.remove(iid)
         {
             agent.send_now_echo_pending.remove(iid);
+            agent.send_now_attachments.remove(iid);
             agent.clear_send_now_expectation();
             if let Some(index) = agent.scrollback.index_of_id(entry_id)
                 && let Some(RenderBlock::UserPrompt(block)) = agent

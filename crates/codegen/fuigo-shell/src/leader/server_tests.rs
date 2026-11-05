@@ -6376,3 +6376,305 @@ fn relay_messages_get_the_reserved_connection_id_and_forged_ids_are_dropped() {
     assert!(out["params"].get("fuigo/leaderConnectionId").is_none());
     assert_eq!(stamp_relay_connection_identity("not json"), "not json");
 }
+
+// P1 (1.0.40, Astra HIGH): the folder-trust reopen notice is per connection. On a shared leader it reaches only the
+// opted-in client the trust request went to (and that answered it); every other subscriber's frames are unchanged.
+
+fn reopen_notice_line(session_id: &str) -> String {
+    serde_json::json!({"jsonrpc": "2.0", "method": "_fuigo/session_notification", "params": {
+        "method": "fuigo/session_notification", "params": {"sessionId": session_id,
+        "update": {"sessionUpdate": "config_notice", "message": crate::agent::mvp_agent::FOLDER_TRUST_REOPEN_NOTICE},
+        "_meta": {"agentTimestampMs": 1}}}})
+    .to_string()
+}
+
+fn initialize_line(reopen_notice: Option<bool>) -> String {
+    let folder_trust = match reopen_notice {
+        Some(opted_in) => serde_json::json!({"interactive": true, "v2": true, "reopenNotice": opted_in}),
+        None => serde_json::json!({"interactive": true, "v2": true}),
+    };
+    serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": 1,
+        "clientCapabilities": {"_meta": {"fuigo/folderTrust": folder_trust}}}})
+    .to_string()
+}
+
+#[test]
+fn reopen_notice_opt_in_is_read_from_a_clients_own_initialize_only() {
+    assert_eq!(initialize_folder_trust_reopen_notice(&pv(&initialize_line(Some(true)))), Some(true));
+    assert_eq!(initialize_folder_trust_reopen_notice(&pv(&initialize_line(Some(false)))), Some(false));
+    assert_eq!(initialize_folder_trust_reopen_notice(&pv(&initialize_line(None))), Some(false));
+    let stringly = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"clientCapabilities":{"_meta":{"fuigo/folderTrust":{"reopenNotice":"true"}}}}}"#;
+    assert_eq!(initialize_folder_trust_reopen_notice(&pv(stringly)), Some(false));
+    let load = r#"{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"s","clientCapabilities":{"_meta":{"fuigo/folderTrust":{"reopenNotice":true}}}}}"#;
+    assert_eq!(initialize_folder_trust_reopen_notice(&pv(load)), None, "only an initialize sets the opt-in");
+}
+
+#[test]
+fn reopen_notice_is_recognised_only_by_its_exact_config_notice() {
+    let wrapped = reopen_notice_line("s");
+    assert!(is_folder_trust_reopen_notice(&pv(&wrapped)));
+    assert!(is_folder_trust_reopen_notice_line(&wrapped));
+    let direct = serde_json::json!({"jsonrpc": "2.0", "method": "fuigo/session_notification", "params": {"sessionId": "s",
+        "update": {"sessionUpdate": "config_notice", "message": crate::agent::mvp_agent::FOLDER_TRUST_REOPEN_NOTICE}}});
+    assert!(is_folder_trust_reopen_notice(&direct));
+    // Any other config notice, or the same text in another update, is ordinary session output.
+    let other = wrapped.replace(crate::agent::mvp_agent::FOLDER_TRUST_REOPEN_NOTICE, "MCP server x was refused.");
+    assert!(!is_folder_trust_reopen_notice_line(&other));
+    let chunk = wrapped.replace("config_notice", "agent_message_chunk");
+    assert!(!is_folder_trust_reopen_notice_line(&chunk));
+    assert!(!is_folder_trust_reopen_notice_line("not json"));
+}
+
+/// Every ACP frame `reader` receives up to and including the first containing `marker`.
+async fn frames_until(reader: &mut tokio::io::ReadHalf<LeaderStream>, marker: &str) -> Vec<String> {
+    let mut frames = Vec::new();
+    for _ in 0..8 {
+        match next_acp_payload(reader).await {
+            Some(p) => {
+                let done = p.contains(marker);
+                frames.push(p);
+                if done {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    frames
+}
+
+/// A leader whose ownership board the test keeps (the agent-output path of `app.rs` notes requests on it before the fan-out).
+async fn spawn_reopen_leader(
+    temp: &TempDir,
+    grace: Duration,
+) -> (PathBuf, CancellationToken, mpsc::UnboundedSender<String>, mpsc::UnboundedReceiver<String>, super::super::drivers::OwnerBoard) {
+    let sock_path = temp.path().join("test.sock");
+    let (acp_tx, acp_rx) = mpsc::unbounded_channel();
+    let (response_tx, response_rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let control_state = default_test_control_state(&sock_path).with_driver_grace(grace);
+    let board = control_state.driver_board();
+    let (sock_clone, cancel_clone) = (sock_path.clone(), cancel.clone());
+    tokio::spawn(async move {
+        let _ = run_leader_server(
+            sock_clone,
+            acp_tx,
+            response_rx,
+            cancel_clone,
+            true,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicBool::new(false)),
+            AgentActivity::default(),
+            watch::channel(true).1,
+            watch::channel(false).0,
+            watch::channel(super::super::protocol::ShutdownReason::Manual).0,
+            None,
+            control_state,
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (sock_path, cancel, response_tx, acp_rx, board)
+}
+
+/// An agent line as `app.rs` hands it on: its request is noted on the board before the fan-out, then the server loop gets it.
+fn agent_line(board: &super::super::drivers::OwnerBoard, response_tx: &mpsc::UnboundedSender<String>, line: &str) {
+    note_agent_request(line, board);
+    response_tx.send(line.to_string()).unwrap();
+}
+
+fn folder_trust_request_line(id: u64) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"method":"_fuigo/folder_trust/request","params":{{"method":"fuigo/folder_trust/request","params":{{"sessionId":"sess-ft","cwd":"/w","workspace":"/w","configKinds":[],"scope":"configAndCommands","reason":"new"}}}}}}"#
+    )
+}
+
+/// On one leader, A (the session's owner) and B attach the same session, each with its own `initialize` opt-in. The
+/// agent asks A to trust the folder, A answers, the agent emits the reopen notice, then an ordinary update. Returns
+/// the frames each client received from the trust request on.
+async fn reopen_notice_frames(a_opted_in: Option<bool>, b_opted_in: Option<bool>) -> (Vec<String>, Vec<String>) {
+    let temp = TempDir::new().unwrap();
+    let (sock_path, cancel, response_tx, mut acp_rx, board) = spawn_reopen_leader(&temp, Duration::from_secs(30)).await;
+
+    let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
+    write_message(&mut writer_a, &ClientMessage::Acp { payload: initialize_line(a_opted_in) }).await.unwrap();
+    load_session(&mut writer_a, "sess-ft").await;
+    complete_load(&mut acp_rx, &response_tx).await;
+    let _ = next_acp_payload(&mut reader_a).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
+    write_message(&mut writer_b, &ClientMessage::Acp { payload: initialize_line(b_opted_in) }).await.unwrap();
+    load_session(&mut writer_b, "sess-ft").await;
+    complete_load(&mut acp_rx, &response_tx).await;
+    let _ = next_acp_payload(&mut reader_b).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    // The trust request goes to the owner A only, and A's answer is the one that reaches the agent.
+    agent_line(&board, &response_tx, &folder_trust_request_line(601));
+    assert!(next_acp_payload_matching(&mut reader_a, "folder_trust/request").await.is_some(), "owner A is asked");
+    assert!(next_acp_payload_matching(&mut reader_b, "folder_trust/request").await.is_none(), "B is never asked");
+    send_answer(&mut writer_a, 601, "A-TRUSTS").await;
+    assert!(forwarded_matching(&mut acp_rx, "A-TRUSTS").await.is_some(), "A's answer reaches the agent");
+
+    response_tx.send(reopen_notice_line("sess-ft")).unwrap();
+    let after = r#"{"jsonrpc":"2.0","method":"session/notification","params":{"sessionId":"sess-ft","updates":[{"type":"message_start","message_id":"after-notice"}]}}"#;
+    response_tx.send(after.to_string()).unwrap();
+
+    let a = frames_until(&mut reader_a, "after-notice").await;
+    let b = frames_until(&mut reader_b, "after-notice").await;
+    cancel.cancel();
+    (a, b)
+}
+
+fn notices(frames: &[String]) -> usize {
+    frames.iter().filter(|f| f.contains(crate::agent::mvp_agent::FOLDER_TRUST_REOPEN_NOTICE)).count()
+}
+
+#[tokio::test]
+async fn reopen_notice_reaches_only_the_opted_in_client_that_answered() {
+    let (a, b) = reopen_notice_frames(Some(true), None).await;
+    assert_eq!(notices(&a), 1, "opted-in A answered the trust request: it gets the notice once, got {a:?}");
+    assert!(a.last().is_some_and(|f| f.contains("after-notice")), "{a:?}");
+    // B did not opt in: exactly the frames it had before the notice existed (the ordinary update only).
+    assert_eq!(b.len(), 1, "non-opted-in B's frames are unchanged, got {b:?}");
+    assert!(b[0].contains("after-notice"), "{b:?}");
+}
+
+#[tokio::test]
+async fn reopen_notice_never_goes_to_an_opted_in_client_that_was_not_asked() {
+    // A answered but did not opt in; B opted in but was never asked: nobody gets it.
+    let (a, b) = reopen_notice_frames(Some(false), Some(true)).await;
+    assert_eq!(notices(&a), 0, "{a:?}");
+    assert_eq!(notices(&b), 0, "{b:?}");
+    assert_eq!((a.len(), b.len()), (1, 1), "both see only the ordinary update: a={a:?} b={b:?}");
+}
+
+#[tokio::test]
+async fn reopen_notice_with_two_opted_in_clients_goes_to_the_answering_one_only() {
+    let (a, b) = reopen_notice_frames(Some(true), Some(true)).await;
+    assert_eq!(notices(&a), 1, "{a:?}");
+    assert_eq!(notices(&b), 0, "the notice is never broadcast, even to an opted-in subscriber: {b:?}");
+}
+
+/// Astra re-review: the notice goes to the connection whose trust answer the agent accepted, never to whoever owns the
+/// session when the notice arrives. Opted-in A owns and answers, then leaves; opted-in B is promoted at the end of the
+/// grace window. B never answered, so nobody gets the notice.
+#[tokio::test]
+async fn reopen_notice_is_dropped_when_the_answerer_left_and_another_client_was_promoted() {
+    let temp = TempDir::new().unwrap();
+    let (sock_path, cancel, response_tx, mut acp_rx, board) = spawn_reopen_leader(&temp, Duration::from_millis(300)).await;
+
+    let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
+    write_message(&mut writer_a, &ClientMessage::Acp { payload: initialize_line(Some(true)) }).await.unwrap();
+    load_session(&mut writer_a, "sess-ft").await;
+    complete_load(&mut acp_rx, &response_tx).await;
+    let _ = next_acp_payload(&mut reader_a).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
+    write_message(&mut writer_b, &ClientMessage::Acp { payload: initialize_line(Some(true)) }).await.unwrap();
+    load_session(&mut writer_b, "sess-ft").await;
+    complete_load(&mut acp_rx, &response_tx).await;
+    let _ = next_acp_payload(&mut reader_b).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    agent_line(&board, &response_tx, &folder_trust_request_line(602));
+    assert!(next_acp_payload_matching(&mut reader_a, "folder_trust/request").await.is_some(), "owner A is asked");
+    send_answer(&mut writer_a, 602, "A-TRUSTS").await;
+    assert!(forwarded_matching(&mut acp_rx, "A-TRUSTS").await.is_some(), "A's answer reaches the agent");
+    drop(reader_a);
+    drop(writer_a);
+
+    // Grace ends and B is promoted: the next driver-only request is B's.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let req = r#"{"jsonrpc":"2.0","id":953,"method":"session/request_permission","params":{"sessionId":"sess-ft","toolCall":{"toolCallId":"tc-ft"},"options":[]}}"#;
+    response_tx.send(req.to_string()).unwrap();
+    assert!(next_acp_payload_matching(&mut reader_b, "request_permission").await.is_some(), "B is the owner now");
+
+    response_tx.send(reopen_notice_line("sess-ft")).unwrap();
+    let after = r#"{"jsonrpc":"2.0","method":"session/notification","params":{"sessionId":"sess-ft","updates":[{"type":"message_start","message_id":"after-notice"}]}}"#;
+    response_tx.send(after.to_string()).unwrap();
+    let b = frames_until(&mut reader_b, "after-notice").await;
+    cancel.cancel();
+    assert_eq!(notices(&b), 0, "the promoted owner never answered the trust request: {b:?}");
+    assert!(b.last().is_some_and(|f| f.contains("after-notice")), "{b:?}");
+    drop(writer_b);
+}
+
+/// Astra re-review (round 3): the relay answers the trust request on its own path before the server loop routes it, then
+/// disconnects. Opted-in B, queued behind the relay, is promoted, is handed the request and answers it late. The answer the
+/// agent accepted first was the relay's, so nobody gets the notice (B never gave the grant).
+#[tokio::test]
+async fn reopen_notice_is_dropped_when_the_relay_answered_first_and_a_promoted_client_answers_late() {
+    let temp = TempDir::new().unwrap();
+    let (sock_path, cancel, response_tx, mut acp_rx, board) = spawn_reopen_leader(&temp, Duration::from_secs(30)).await;
+    assert!(board.claim_new_for_relay("sess-ft"));
+    let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
+    write_message(&mut writer_b, &ClientMessage::Acp { payload: initialize_line(Some(true)) }).await.unwrap();
+    load_session(&mut writer_b, "sess-ft").await;
+    complete_load(&mut acp_rx, &response_tx).await;
+    let _ = next_acp_payload(&mut reader_b).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    // app.rs order: noted, then the relay (its own path) answers and drops, then the server loop gets the request.
+    let request = folder_trust_request_line(603);
+    note_agent_request(&request, &board);
+    let relay_answer = r#"{"jsonrpc":"2.0","id":603,"result":{"outcome":{"outcome":"selected","optionId":"allow"}}}"#;
+    assert!(filter_relay_answers(relay_answer, &board).is_some(), "the relay owns the session: its answer counts");
+    let _ = stamp_relay_connection_identity_with(relay_answer, &board);
+    board.relay_dropped();
+    response_tx.send(request).unwrap();
+    assert!(next_acp_payload_matching(&mut reader_b, "folder_trust/request").await.is_some(), "promoted B is handed the request");
+    send_answer(&mut writer_b, 603, "B-LATE").await;
+    assert!(forwarded_matching(&mut acp_rx, "B-LATE").await.is_some(), "B's late answer reaches the agent");
+
+    response_tx.send(reopen_notice_line("sess-ft")).unwrap();
+    let after = r#"{"jsonrpc":"2.0","method":"session/notification","params":{"sessionId":"sess-ft","updates":[{"type":"message_start","message_id":"after-notice"}]}}"#;
+    response_tx.send(after.to_string()).unwrap();
+    let b = frames_until(&mut reader_b, "after-notice").await;
+    cancel.cancel();
+    assert_eq!(notices(&b), 0, "the relay answered first; B's late answer is not the grant: {b:?}");
+    assert!(b.last().is_some_and(|f| f.contains("after-notice")), "{b:?}");
+    drop(writer_b);
+}
+
+/// Two trust requests for one session, both to owner A. A answers request 2 and then (late) request 1: the late answer
+/// reaches the agent but records nothing, and the notice follows request 2's answerer, once; opted-in B, never asked,
+/// gets nothing. (Distinct answerers for the two ids: the board test
+/// `a_late_answer_to_an_older_folder_trust_request_never_overwrites_the_latest`.)
+#[tokio::test]
+async fn reopen_notice_follows_the_latest_requests_answerer_despite_a_late_answer_to_an_older_one() {
+    let temp = TempDir::new().unwrap();
+    let (sock_path, cancel, response_tx, mut acp_rx, board) = spawn_reopen_leader(&temp, Duration::from_secs(30)).await;
+    let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
+    write_message(&mut writer_a, &ClientMessage::Acp { payload: initialize_line(Some(true)) }).await.unwrap();
+    load_session(&mut writer_a, "sess-ft").await;
+    complete_load(&mut acp_rx, &response_tx).await;
+    let _ = next_acp_payload(&mut reader_a).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
+    write_message(&mut writer_b, &ClientMessage::Acp { payload: initialize_line(Some(true)) }).await.unwrap();
+    load_session(&mut writer_b, "sess-ft").await;
+    complete_load(&mut acp_rx, &response_tx).await;
+    let _ = next_acp_payload(&mut reader_b).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    agent_line(&board, &response_tx, &folder_trust_request_line(611));
+    assert!(next_acp_payload_matching(&mut reader_a, "\"id\":611").await.is_some(), "owner A is asked request 1");
+    agent_line(&board, &response_tx, &folder_trust_request_line(612));
+    assert!(next_acp_payload_matching(&mut reader_a, "\"id\":612").await.is_some(), "owner A is asked request 2");
+    send_answer(&mut writer_a, 612, "A-TWO").await;
+    assert!(forwarded_matching(&mut acp_rx, "A-TWO").await.is_some());
+    send_answer(&mut writer_a, 611, "A-ONE-LATE").await;
+    assert!(forwarded_matching(&mut acp_rx, "A-ONE-LATE").await.is_some());
+
+    response_tx.send(reopen_notice_line("sess-ft")).unwrap();
+    let after = r#"{"jsonrpc":"2.0","method":"session/notification","params":{"sessionId":"sess-ft","updates":[{"type":"message_start","message_id":"after-notice"}]}}"#;
+    response_tx.send(after.to_string()).unwrap();
+    let a = frames_until(&mut reader_a, "after-notice").await;
+    let b = frames_until(&mut reader_b, "after-notice").await;
+    cancel.cancel();
+    assert_eq!(notices(&a), 1, "request 2's answerer gets the notice once: {a:?}");
+    assert_eq!(notices(&b), 0, "{b:?}");
+    drop((writer_a, writer_b));
+}

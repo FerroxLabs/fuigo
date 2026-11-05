@@ -51,6 +51,10 @@ pub(crate) const FOLDER_TRUST_SCOPE: &str = "configAndCommands";
 /// The only `duration` a reply may carry: trust for this process, saving nothing.
 const FOLDER_TRUST_PROCESS_DURATION: &str = "process";
 
+/// The one notice a mid-session grant sends a client that advertised `fuigo/folderTrust.reopenNotice`. Part of trust
+/// (nested instruction files, project skills, some config) applies only when the session is reopened.
+pub(crate) const FOLDER_TRUST_REOPEN_NOTICE: &str = "Folder trust is on. Reopen this session to use it.";
+
 /// Outcome of the trust prompt, sent by the GUI client to the agent.
 /// Fail-closed: any value other than `"trust"`, including unknown strings via `#[serde(other)]`, decodes to [`FolderTrustOutcome::Reject`].
 /// Only an explicit grant unblocks. `TrustForProcess` has no wire name: it comes from the reply's `duration`.
@@ -111,6 +115,18 @@ impl MvpAgent {
             .as_ref()
             .and_then(|m| m.get("fuigo/folderTrust"))
             .and_then(|v| v.get("v2"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Parse the opt-in for the post-grant reopen notice (`_meta["fuigo/folderTrust"]["reopenNotice"] == true`).
+    /// Absent or not `true`: the client gets no notice, and its wire is unchanged.
+    pub(crate) fn parse_folder_trust_reopen_notice_capability(init: &acp::InitializeRequest) -> bool {
+        init.client_capabilities
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("fuigo/folderTrust"))
+            .and_then(|v| v.get("reopenNotice"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
     }
@@ -177,6 +193,11 @@ impl MvpAgent {
         let cwd = cwd.to_path_buf();
         let workspace = key.display().to_string();
         let config_kinds = folder_trust::detected_config_kinds(&cwd);
+        // Under the leader the opt-in is per connection, so the leader holds it: the notice is always emitted here and the
+        // leader delivers it only to the opted-in client the trust request went to (`is_folder_trust_reopen_notice`).
+        // The agent's own flag is only the last `initialize` it saw, never one connection's.
+        let reopen_notice = self.leader_mode || self.folder_trust_reopen_notice.get();
+        let prompting_session = session_id.clone();
         let session_id = session_id.0.to_string();
         // Regression guard: every reverse-request must carry a non-empty sessionId or leader Tier-2 routing silently drops it
         debug_assert!(
@@ -271,6 +292,7 @@ impl MvpAgent {
             if !settle_gui_grant(&outcome, &cwd, &notify, &prompted, &key) {
                 return;
             }
+            send_reopen_notice(reopen_notice, &prompting_session, &targets);
             // The grant is stored: a first turn waiting on it goes ahead without the MCP reload below.
             drop(in_flight);
 
@@ -336,6 +358,26 @@ fn settle_gui_grant(
             false
         }
     }
+}
+
+/// After a grant that took effect, tell an opted-in client once, on the session it was asked in, that reopening applies
+/// the rest of trust. Transient (`NotifyConfigNotice` is never persisted), so a `session/load` never replays it. Returns
+/// whether the notice was queued.
+fn send_reopen_notice(enabled: bool, prompting_session: &acp::SessionId, targets: &[ReloadTarget]) -> bool {
+    if !enabled {
+        return false;
+    }
+    targets
+        .iter()
+        .find(|target| &target.session_id == prompting_session)
+        .is_some_and(|target| {
+            target
+                .cmd_tx
+                .send(crate::session::SessionCommand::NotifyConfigNotice {
+                    notice: FOLDER_TRUST_REOPEN_NOTICE.to_owned(),
+                })
+                .is_ok()
+        })
 }
 
 /// Inputs for [`reload_project_servers_after_grant`], bundled to avoid a long positional arg list.
@@ -569,6 +611,70 @@ mod tests {
         );
         let init = init_with_meta(Some(serde_json::Value::Object(meta)));
         assert!(!MvpAgent::parse_interactive_trust_capability(&init));
+    }
+
+    #[test]
+    fn parse_reopen_notice_capability_is_opt_in() {
+        let with = |value: serde_json::Value| {
+            let mut meta = serde_json::Map::new();
+            meta.insert("fuigo/folderTrust".to_string(), value);
+            init_with_meta(Some(serde_json::Value::Object(meta)))
+        };
+        assert!(MvpAgent::parse_folder_trust_reopen_notice_capability(&with(
+            serde_json::json!({ "interactive": true, "v2": true, "reopenNotice": true })
+        )));
+        for value in [
+            serde_json::json!({ "interactive": true, "v2": true }),
+            serde_json::json!({ "v2": true, "reopenNotice": false }),
+            serde_json::json!({ "v2": true, "reopenNotice": "true" }),
+        ] {
+            assert!(!MvpAgent::parse_folder_trust_reopen_notice_capability(&with(value.clone())), "{value}");
+        }
+        assert!(!MvpAgent::parse_folder_trust_reopen_notice_capability(&init_with_meta(None)));
+    }
+
+    fn reopen_target(
+        id: &str,
+    ) -> (ReloadTarget, tokio::sync::mpsc::UnboundedReceiver<crate::session::SessionCommand>) {
+        let (cmd_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let target = ReloadTarget {
+            session_id: acp::SessionId::new(id),
+            cmd_tx,
+            initial_client_mcp_servers: Default::default(),
+            cwd: PathBuf::from("/u40/ws"),
+        };
+        (target, rx)
+    }
+
+    fn reopen_notices(rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::session::SessionCommand>) -> Vec<String> {
+        let mut notices = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            if let crate::session::SessionCommand::NotifyConfigNotice { notice } = cmd {
+                notices.push(notice);
+            }
+        }
+        notices
+    }
+
+    /// u40 P1: an opted-in client gets exactly one notice, on the prompting session only; a client that did not opt in
+    /// gets nothing.
+    #[test]
+    fn reopen_notice_goes_once_to_the_prompting_session_of_an_opted_in_client() {
+        let (asked, mut asked_rx) = reopen_target("asked");
+        let (sibling, mut sibling_rx) = reopen_target("sibling");
+        let prompting = acp::SessionId::new("asked");
+        let targets = [asked, sibling];
+
+        assert!(!send_reopen_notice(false, &prompting, &targets));
+        assert!(reopen_notices(&mut asked_rx).is_empty());
+        assert!(reopen_notices(&mut sibling_rx).is_empty());
+
+        assert!(send_reopen_notice(true, &prompting, &targets));
+        assert_eq!(reopen_notices(&mut asked_rx), vec![FOLDER_TRUST_REOPEN_NOTICE.to_owned()]);
+        assert!(reopen_notices(&mut sibling_rx).is_empty());
+
+        assert!(!send_reopen_notice(true, &acp::SessionId::new("gone"), &targets));
+        assert!(reopen_notices(&mut asked_rx).is_empty());
     }
 
     #[test]

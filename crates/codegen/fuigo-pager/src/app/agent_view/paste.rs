@@ -265,12 +265,13 @@ impl AgentView {
                     return None;
                 }
                 let image_notice = self.unbound_image_placeholder_notice();
-                let images = self.prompt.drain_images();
+                let (text, images, chip_elements) = self.prompt.drain_send_now_payload();
                 self.prompt.set_text("");
                 self.note_draft_consumed();
                 Some(Action::SendPromptNow {
                     text,
                     images,
+                    chip_elements,
                     image_notice,
                 })
             }

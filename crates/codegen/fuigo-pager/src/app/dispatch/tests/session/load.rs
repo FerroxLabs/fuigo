@@ -3974,6 +3974,7 @@ fn send_now_and_interject_on_a_failed_tab_give_the_payload_back() {
             Action::SendPromptNow {
                 text: "now please".into(),
                 images: Vec::new(),
+                chip_elements: Vec::new(),
                 image_notice: None,
             }
         } else {
@@ -4001,6 +4002,7 @@ fn send_now_during_a_load_is_held() {
         Action::SendPromptNow {
             text: "now please".into(),
             images: Vec::new(),
+            chip_elements: Vec::new(),
             image_notice: None,
         },
         &mut app,
@@ -4298,6 +4300,7 @@ fn healthy_session_sends_everything_immediately() {
         Action::SendPromptNow {
             text: "now".into(),
             images: vec![],
+            chip_elements: Vec::new(),
             image_notice: None,
         },
         &mut app,
