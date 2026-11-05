@@ -169,6 +169,10 @@ struct BoardState {
     answer_order: std::collections::VecDeque<String>,
     /// Subagent session -> parent: a subagent's request is decided by the owner of the root session.
     child_parent: HashMap<String, String>,
+    /// P1 (1.0.40): each session's latest `fuigo/folder_trust/request`, by its JSON-RPC id: the session, and the party whose
+    /// answer to it was admitted first (`None` until then). One entry per session: a newer request replaces the older one,
+    /// so a late answer to the older id records nothing. The reopen notice that follows a grant is for that answerer only.
+    folder_trust: HashMap<String, (String, Option<Claimer>)>,
 }
 
 /// Who may answer one of the agent's requests.
@@ -320,7 +324,7 @@ impl BoardState {
 impl OwnerBoard {
     pub(crate) fn new(grace: Duration) -> Self {
         Self {
-            state: Arc::new(std::sync::Mutex::new(BoardState { grace, relay_lease: RELAY_CLAIM_LEASE, sessions: HashMap::new(), events: Vec::new(), relay_loads: HashMap::new(), relay_inflight: HashMap::new(), relay_prompts: HashMap::new(), relay_answered_early: std::collections::VecDeque::new(), answer_routes: HashMap::new(), answer_order: std::collections::VecDeque::new(), child_parent: HashMap::new() })),
+            state: Arc::new(std::sync::Mutex::new(BoardState { grace, relay_lease: RELAY_CLAIM_LEASE, sessions: HashMap::new(), events: Vec::new(), relay_loads: HashMap::new(), relay_inflight: HashMap::new(), relay_prompts: HashMap::new(), relay_answered_early: std::collections::VecDeque::new(), answer_routes: HashMap::new(), answer_order: std::collections::VecDeque::new(), child_parent: HashMap::new(), folder_trust: HashMap::new() })),
             wake: Arc::new(tokio::sync::Notify::new()),
         }
     }
@@ -532,6 +536,7 @@ impl OwnerBoard {
                 *answerer = Answerer::Nobody;
             }
         }
+        st.folder_trust.retain(|_, (_, who)| *who != Some(Claimer::Client(client)));
         drop(st);
         self.wake.notify_one();
     }
@@ -601,6 +606,7 @@ impl OwnerBoard {
                 *dropped = true;
             }
         }
+        st.folder_trust.retain(|_, (_, who)| *who != Some(Claimer::Relay));
         drop(st);
         self.wake.notify_one();
     }
@@ -653,6 +659,7 @@ impl OwnerBoard {
         st.relay_prompts.retain(|_, sid| sid != session_id);
         st.answer_routes.retain(|_, (sid, _)| sid != session_id);
         st.child_parent.retain(|child, parent| child != session_id && parent != session_id);
+        st.folder_trust.retain(|_, (sid, _)| sid != session_id);
     }
 
     /// The agent sent request `request_id` for `session_id`, not delivered to anybody yet: nobody's answer counts until
@@ -682,8 +689,30 @@ impl OwnerBoard {
         };
         if admitted {
             st.answer_routes.remove(request_id);
+            // The first admitted answer to a folder-trust request is its answerer; a later one never replaces it.
+            if let Some((_, answerer)) = st.folder_trust.get_mut(request_id) {
+                answerer.get_or_insert(who);
+            }
         }
         admitted
+    }
+
+    /// P1 (1.0.40): [`OwnerBoard::note_request`] for a `fuigo/folder_trust/request`, under the same lock: the request is
+    /// also the session's latest folder-trust request (replacing an older one), with no answerer yet. Called once per
+    /// request, before the agent's line is fanned out, so no answer can arrive first.
+    pub(crate) fn note_folder_trust_request(&self, request_id: &str, session_id: &str) {
+        let mut st = self.state();
+        st.set_answer_route(request_id, session_id, Answerer::Nobody, true);
+        st.folder_trust.retain(|_, (sid, _)| sid != session_id);
+        st.folder_trust.insert(request_id.to_string(), (session_id.to_string(), None));
+    }
+
+    /// P1 (1.0.40): the party whose admitted answer to `session_id`'s latest folder-trust request reached the agent, taken
+    /// (the reopen notice is delivered once). `None` when it is unanswered, or its answerer disconnected (local or relay).
+    pub(crate) fn take_folder_trust_answerer(&self, session_id: &str) -> Option<Claimer> {
+        let mut st = self.state();
+        let id = st.folder_trust.iter().find(|(_, (sid, who))| sid == session_id && who.is_some()).map(|(id, _)| id.clone())?;
+        st.folder_trust.remove(&id).and_then(|(_, who)| who)
     }
 
     /// `child` is a subagent session of `parent`: its requests are decided by the root session's owner.
@@ -997,6 +1026,77 @@ mod tests {
         assert!(b.admit_answer("7", Claimer::Client(B)));
         // An id the leader never tracked (no session) is admitted as before.
         assert!(b.admit_answer("99", Claimer::Client(B)));
+    }
+
+    #[test]
+    fn the_folder_trust_answerer_is_the_first_admitted_answer_to_that_request() {
+        let b = board(30_000);
+        b.claim("s", Claimer::Client(A));
+        b.note_folder_trust_request("5", "s");
+        b.deliver_request("5", "s", Claimer::Client(A));
+        assert!(!b.admit_answer("5", Claimer::Client(B)));
+        assert_eq!(b.take_folder_trust_answerer("s"), None, "a refused answer records nobody");
+        assert!(b.admit_answer("5", Claimer::Client(A)));
+        // Delivered again (a promotion) and answered again: the first answerer stays.
+        b.deliver_request("5", "s", Claimer::Client(B));
+        assert!(b.admit_answer("5", Claimer::Client(B)));
+        assert_eq!(b.take_folder_trust_answerer("s"), Some(Claimer::Client(A)));
+        assert_eq!(b.take_folder_trust_answerer("s"), None, "taken once");
+        // An answer to a consumed id records nothing.
+        b.deliver_request("5", "s", Claimer::Client(A));
+        assert!(b.admit_answer("5", Claimer::Client(A)));
+        assert_eq!(b.take_folder_trust_answerer("s"), None);
+        // The answerer leaving forgets it; it is never handed to whoever owns the session next.
+        b.note_folder_trust_request("6", "s");
+        b.deliver_request("6", "s", Claimer::Client(A));
+        assert!(b.admit_answer("6", Claimer::Client(A)));
+        b.client_gone(A);
+        assert_eq!(b.take_folder_trust_answerer("s"), None);
+        // forget() drops the session's record.
+        b.note_folder_trust_request("7", "s");
+        b.deliver_request("7", "s", Claimer::Client(B));
+        assert!(b.admit_answer("7", Claimer::Client(B)));
+        b.forget("s");
+        assert_eq!(b.take_folder_trust_answerer("s"), None);
+    }
+
+    #[test]
+    fn a_late_answer_to_an_older_folder_trust_request_never_overwrites_the_latest() {
+        let b = board(30_000);
+        b.claim("s", Claimer::Client(A));
+        b.note_folder_trust_request("1", "s");
+        b.deliver_request("1", "s", Claimer::Client(A));
+        b.note_folder_trust_request("2", "s");
+        b.deliver_request("2", "s", Claimer::Client(B));
+        assert_eq!(b.take_folder_trust_answerer("s"), None, "request 2 is unanswered");
+        assert!(b.admit_answer("2", Claimer::Client(B)));
+        assert!(b.admit_answer("1", Claimer::Client(A)), "the old route still admits its answer");
+        assert_eq!(b.take_folder_trust_answerer("s"), Some(Claimer::Client(B)), "the notice follows request 2's answerer");
+        // Another session's request never touches this one's record.
+        b.note_folder_trust_request("3", "s");
+        b.note_folder_trust_request("4", "t");
+        b.deliver_request("3", "s", Claimer::Client(A));
+        assert!(b.admit_answer("3", Claimer::Client(A)));
+        assert_eq!(b.take_folder_trust_answerer("t"), None);
+        assert_eq!(b.take_folder_trust_answerer("s"), Some(Claimer::Client(A)));
+    }
+
+    #[test]
+    fn the_relay_answering_a_folder_trust_request_ahead_of_the_loop_is_recorded_and_its_drop_clears_it() {
+        let r = board(30_000);
+        relay_owned(&r);
+        // Registered before the fan-out: the relay's answer, ahead of the server loop, is recorded as the relay's.
+        r.note_folder_trust_request("8", "s");
+        assert!(r.admit_answer("8", Claimer::Relay));
+        assert_eq!(r.take_folder_trust_answerer("s"), Some(Claimer::Relay));
+        r.note_folder_trust_request("9", "s");
+        assert!(r.admit_answer("9", Claimer::Relay));
+        r.relay_dropped();
+        // A promoted local owner is handed the request and answers late: nothing is recorded for it.
+        r.claim("s", Claimer::Client(B));
+        r.deliver_request("9", "s", Claimer::Client(B));
+        assert!(r.admit_answer("9", Claimer::Client(B)));
+        assert_eq!(r.take_folder_trust_answerer("s"), None, "the relay's drop cleared its record");
     }
 
     #[test]

@@ -272,6 +272,15 @@ fn record_dot_pulse() -> (bool, f32) {
     let brightness = 0.4 + 0.6 * (0.5 + 0.5 * s);
     (s >= 0.0, brightness)
 }
+/// What a sent prompt carried besides its wire blocks: kept so a cancel, a failed send or `/rewind` can put it back.
+#[derive(Debug, Clone)]
+pub(crate) struct SentPromptAttachments {
+    pub text: String,
+    pub images: Vec<crate::prompt_images::PastedImage>,
+    pub chip_elements: Vec<crate::app::agent::ChipElement>,
+    /// `[Image #N]` numbers whose image was actually sent: a Send Now block painted only at the turn-start adoption is marked from these.
+    pub sent_image_numbers: Vec<usize>,
+}
 /// Painted kill hit. A click is ignored unless this identity still occupies the cell.
 #[derive(Clone, Debug)]
 pub struct CachedDockStop {
@@ -1810,6 +1819,13 @@ pub struct AgentView {
     /// adopted/retired. Without it a send-now'd queue row renders twice: once
     /// from the optimistic paint and once from the racing `UserMessageChunk`.
     pub(crate) send_now_echo_pending: std::collections::HashMap<String, String>,
+    /// Payload of a send-now'd prompt, keyed by prompt id, until the turn-start adoption moves it into
+    /// the in-flight prompt (Ctrl+C restore) or a failed send requeues it. Cleared on session reload.
+    pub(crate) send_now_attachments: std::collections::HashMap<String, SentPromptAttachments>,
+    /// Images and chips of sent prompts that had any, keyed by their user block, for `/rewind`.
+    /// Cleared on session reload (a resumed session's earlier prompts rewind to text only, as before).
+    pub(crate) sent_prompt_attachments:
+        std::collections::HashMap<crate::scrollback::EntryId, SentPromptAttachments>,
     /// Cached official-marketplace candidates for the plugin CTA, populated on
     /// session start independently of the Extensions modal.
     pub plugin_cta: PluginCtaState,

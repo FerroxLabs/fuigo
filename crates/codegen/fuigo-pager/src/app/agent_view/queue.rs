@@ -418,6 +418,7 @@ impl AgentView {
             return InputOutcome::Action(Action::SendPromptNow {
                 text: prompt.text,
                 images: prompt.images,
+                chip_elements: prompt.chip_elements,
                 image_notice: None,
             });
         }
@@ -482,6 +483,11 @@ impl AgentView {
         if let Some(text) = self.send_now_echo_pending.remove(old_id) {
             self.send_now_echo_pending.insert(new_id.to_string(), text);
         }
+        if let Some(attachments) = self.send_now_attachments.remove(old_id) {
+            self.send_now_attachments
+                .entry(new_id.to_string())
+                .or_insert(attachments);
+        }
         if let Some(entry) = self.send_now_painted_blocks.remove(old_id) {
             match self.send_now_painted_blocks.entry(new_id.to_string()) {
                 std::collections::hash_map::Entry::Vacant(slot) => {
@@ -498,8 +504,43 @@ impl AgentView {
     /// Remove the optimistic block for a send-now'd prompt that will never run (send failure, removal); a leftover would duplicate on requeue.
     pub(crate) fn retire_send_now_painted_block(&mut self, prompt_id: &str) {
         self.send_now_echo_pending.remove(prompt_id);
+        self.send_now_attachments.remove(prompt_id);
         if let Some((id, _)) = self.send_now_painted_blocks.remove(prompt_id) {
             self.scrollback.remove_entry(id);
+        }
+    }
+
+    /// Remember a sent prompt's images (and its chips) under its user block(s), so `/rewind` to it restores them.
+    /// Prompts without images are not recorded: their rewind is unchanged.
+    pub(crate) fn remember_sent_prompt_attachments(
+        &mut self,
+        entries: &[crate::scrollback::EntryId],
+        text: &str,
+        images: &[crate::prompt_images::PastedImage],
+        chip_elements: &[crate::app::agent::ChipElement],
+    ) {
+        if images.is_empty() {
+            return;
+        }
+        // Blocks a rewind or cancel already removed take their record with them
+        let scrollback = &self.scrollback;
+        self.sent_prompt_attachments
+            .retain(|id, _| scrollback.index_of_id(*id).is_some());
+        let record = super::SentPromptAttachments {
+            text: text.to_string(),
+            // The composer owns (and unlinks) staged temps; this copy loads from the bytes or the session file
+            images: images
+                .iter()
+                .map(|img| crate::prompt_images::PastedImage {
+                    staged_temp_path: None,
+                    ..img.clone()
+                })
+                .collect(),
+            chip_elements: chip_elements.to_vec(),
+            sent_image_numbers: Vec::new(),
+        };
+        for id in entries {
+            self.sent_prompt_attachments.insert(*id, record.clone());
         }
     }
 

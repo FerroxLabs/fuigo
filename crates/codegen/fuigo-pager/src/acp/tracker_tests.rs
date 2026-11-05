@@ -5537,3 +5537,34 @@ fn p188_discard_of_a_rowless_attempt_spares_the_accepted_response() {
     tracker.finish_turn(&mut sb);
     assert_eq!(p188_agent_rows(&sb), ["accepted", "retry"]);
 }
+
+fn user_image(display_number: Option<usize>) -> acp::SessionUpdate {
+    let mut img = acp::ImageContent::new("AAAA", "image/png");
+    if let Some(n) = display_number {
+        let mut m = acp::Meta::new();
+        m.insert("fuigo.dev/imageDisplayNumber".to_owned(), serde_json::json!(n));
+        img = img.meta(Some(m));
+    }
+    acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Image(img)))
+}
+
+/// Resume: the stored user message carries image #1 but not #2, so only `[Image #2]` renders struck through.
+#[test]
+fn replayed_image_block_marks_its_placeholder_sent() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let replay = NotificationMeta {
+        is_replay: true,
+        ..NotificationMeta::default()
+    };
+    tracker.handle_update(user_message("see [Image #1] and [Image #2]"), &replay, &mut sb);
+    assert!(tracker.handle_update(user_image(Some(1)), &replay, &mut sb));
+    // An image block without a display number names no placeholder
+    assert!(!tracker.handle_update(user_image(None), &replay, &mut sb));
+    assert_eq!(sb.len(), 1, "image blocks add no rows");
+    let RenderBlock::UserPrompt(ref block) = sb.get(0).unwrap().block else {
+        panic!("expected a user prompt");
+    };
+    assert_eq!(block.sent_image_numbers, vec![1]);
+    assert_eq!(block.unsent_image_ranges(), vec![19..29]);
+}

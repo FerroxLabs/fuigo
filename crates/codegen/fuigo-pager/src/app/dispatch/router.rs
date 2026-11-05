@@ -409,8 +409,15 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SendPromptNow {
             text,
             images,
+            chip_elements,
             image_notice,
-        } => super::interject::dispatch_send_prompt_now(app, text, images, image_notice),
+        } => super::interject::dispatch_send_prompt_now(
+            app,
+            text,
+            images,
+            chip_elements,
+            image_notice,
+        ),
         Action::EnableVoiceMode => dispatch_enable_voice_mode(app, true),
         Action::VoiceToggle => dispatch_voice_toggle(app),
         Action::VoiceStop => dispatch_voice_stop(app),

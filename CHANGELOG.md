@@ -4,6 +4,7 @@ Each release has its own notes under `docs/`. Binaries and npm platform packages
 
 | Version | Notes | Highlights |
 | --- | --- | --- |
+| 1.0.40 | [release notes](docs/release-notes-1.0.40.md) | An ACP client can opt in to a reopen notice after granting folder trust mid-session; images pasted with Send Now come back after cancel, a failed send or `/rewind` (also after resume), a missing stored image is reported, and an `[Image #N]` that was not sent shows dim and struck through; the Linux release build frees runner disk first. |
 | 1.0.39 | [release notes](docs/release-notes-1.0.39.md) | Subagents no longer get project instructions twice, use the plugins of the folder they work in, and stop with a clear error when their worktree cannot be created; scheduled tasks keep working after an early model switch and fire once; new `[keys] vim` setting; `worktree list` marks missing folders. |
 | 1.0.38 | [release notes](docs/release-notes-1.0.38.md) | Trusting a folder during a session now brings in its project instructions at the next turn. A client can also trust a folder for this run only. |
 | 1.0.37 | [release notes](docs/release-notes-1.0.37.md) | On Windows, a PATH ending in `;` no longer makes every shell command ask. |

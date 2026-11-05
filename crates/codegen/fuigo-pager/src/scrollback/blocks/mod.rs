@@ -13,6 +13,9 @@ mod system;
 mod thinking;
 pub mod tool;
 mod user;
+pub(crate) use user::{
+    keep_latest_prompt_resumed_image, mark_entry_images_sent, mark_latest_prompt_images_sent,
+};
 mod workflow;
 
 pub use agent::AgentMessageBlock;

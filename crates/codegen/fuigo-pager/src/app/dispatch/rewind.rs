@@ -565,6 +565,47 @@ pub(super) fn dispatch_rewind_success(
     // Bump gen so a late SessionMetaFromDisk hydrate cannot restore the pre-rewind summary.json value into the cleared field
     agent.set_last_turn_summary(None);
     let target_idx = find_user_prompt_entry_for_shell_index(&agent.scrollback, target);
+    // The images the rewound prompt carried: recorded when it was sent in this run, else rebuilt from the stored session on resume
+    let target_entry = target_idx.and_then(|idx| agent.scrollback.get(idx));
+    let target_block = target_entry.and_then(|entry| match &entry.block {
+        RenderBlock::UserPrompt(ub) => Some(ub),
+        _ => None,
+    });
+    let sent = target_entry.and_then(|entry| {
+        agent.sent_prompt_attachments.get(&entry.id).cloned().or_else(|| {
+            target_block
+                .filter(|ub| !ub.resumed_images.is_empty())
+                .map(|ub| crate::app::agent_view::SentPromptAttachments {
+                    text: ub.text.clone(),
+                    images: ub.resumed_images.clone(),
+                    chip_elements: Vec::new(),
+                    sent_image_numbers: ub.sent_image_numbers.clone(),
+                })
+        })
+    });
+    // A sent image whose bytes are gone cannot be re-attached: say so rather than leave a silent `[Image #N]`
+    let missing: Vec<String> = target_block
+        .filter(|_| response.prompt_text.is_some())
+        .map(|ub| {
+            ub.sent_image_numbers
+                .iter()
+                .filter(|n| {
+                    !sent
+                        .as_ref()
+                        .is_some_and(|s| s.images.iter().any(|img| img.display_number == **n))
+                })
+                .map(|n| format!("#{n}"))
+                .collect()
+        })
+        .unwrap_or_default();
+    let msg = match missing.len() {
+        0 => msg,
+        1 => format!("{msg} · Image {} is no longer available and was not re-attached", missing[0]),
+        _ => format!(
+            "{msg} · Images {} are no longer available and were not re-attached",
+            missing.join(", ")
+        ),
+    };
     if let Some(anchor_idx) = target_idx {
         let removed = agent.scrollback.remove_from(anchor_idx);
         // Explicit drop BEFORE the purge: the rewound tail must be freed for the release below to return its pages
@@ -585,6 +626,13 @@ pub(super) fn dispatch_rewind_success(
 
     if let Some(ref prompt_text) = response.prompt_text {
         agent.prompt.set_text_discarding_images(prompt_text);
+        if let Some(sent) = sent {
+            // Chip ranges fit only the text they were taken on; the images re-chip by their `[Image #N]` text either way
+            if sent.text == *prompt_text {
+                agent.prompt.restore_chip_elements(&sent.chip_elements);
+            }
+            agent.prompt.set_images(sent.images);
+        }
     } else if let Some(draft) = stashed_draft {
         agent.prompt.restore(draft);
     }

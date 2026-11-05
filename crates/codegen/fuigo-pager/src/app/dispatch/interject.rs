@@ -52,13 +52,13 @@ pub(super) fn dispatch_interject_on(
     agent.release_hook_block_hold();
 
     if agent.load_failed {
-        give_back_consumed(agent, text, images, minimal);
+        give_back_consumed(agent, text, images, Vec::new(), minimal);
         return vec![];
     }
     // A session that is still opening may yet fail to open: hold the payload with the other held rows rather than send into it
     // (a forced interject has already taken its queue row, so a failed open could not give it back)
     if agent.session.loading_replay {
-        requeue_consumed(agent, text, images);
+        requeue_consumed(agent, text, images, Vec::new());
         agent.show_toast("Still opening this session. Your message is held until it is open.");
         return vec![];
     }
@@ -73,7 +73,7 @@ pub(super) fn dispatch_interject_on(
     // Record its id so the broadcast echo (`fuigo/session/interjection`) is deduped instead of rendering a second copy on this pane
     let interjection_id = uuid::Uuid::new_v4().to_string();
     agent.self_interjection_ids.insert(interjection_id.clone());
-    agent
+    let entry_id = agent
         .scrollback
         .push_block(RenderBlock::interjection_prompt(&text));
 
@@ -93,6 +93,11 @@ pub(super) fn dispatch_interject_on(
         );
         app.pending_image_notices
             .extend(agent.skipped_image_send_notice(&build.skipped_display_numbers));
+        crate::scrollback::blocks::mark_entry_images_sent(
+            &mut agent.scrollback,
+            entry_id,
+            &crate::prompt_images::sent_image_display_numbers(&build.blocks),
+        );
         Some(build.blocks)
     };
 
@@ -110,6 +115,7 @@ fn requeue_consumed(
     agent: &mut crate::app::agent_view::AgentView,
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
+    chip_elements: Vec<crate::app::agent::ChipElement>,
 ) {
     let queue_id = agent.session.next_queue_id;
     agent.session.next_queue_id += 1;
@@ -118,6 +124,7 @@ fn requeue_consumed(
         .pending_prompts
         .push_front(crate::app::agent::QueuedPrompt {
             images,
+            chip_elements,
             ..crate::app::agent::QueuedPrompt::plain(
                 queue_id,
                 &text,
@@ -131,9 +138,10 @@ fn give_back_consumed(
     agent: &mut crate::app::agent_view::AgentView,
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
+    chip_elements: Vec<crate::app::agent::ChipElement>,
     minimal: bool,
 ) {
-    requeue_consumed(agent, text, images);
+    requeue_consumed(agent, text, images, chip_elements);
     super::session::load::restore_prompts_held_during_load(agent);
     super::prompt::refuse_on_failed_tab(agent, minimal);
 }
@@ -144,6 +152,7 @@ pub(super) fn dispatch_send_prompt_now(
     app: &mut AppView,
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
+    chip_elements: Vec<crate::app::agent::ChipElement>,
     image_notice: Option<String>,
 ) -> Vec<Effect> {
     // Hard-reset only; `text` may be a queue row, not the composer
@@ -174,6 +183,7 @@ pub(super) fn dispatch_send_prompt_now(
             .pending_prompts
             .push_front(crate::app::agent::QueuedPrompt {
                 images,
+                chip_elements,
                 ..crate::app::agent::QueuedPrompt::plain(
                     queue_id,
                     &text,
@@ -189,17 +199,17 @@ pub(super) fn dispatch_send_prompt_now(
 
     // The producer already took the payload: a tab with no session gets it back, never a bare toast
     if agent.load_failed {
-        give_back_consumed(agent, text, images, minimal);
+        give_back_consumed(agent, text, images, chip_elements, minimal);
         return vec![];
     }
     // A session that is still opening may yet fail to open: hold the row with the others rather than send into it
     if agent.session.loading_replay {
-        requeue_consumed(agent, text, images);
+        requeue_consumed(agent, text, images, chip_elements);
         agent.show_toast("Still opening this session. Your message is held until it is open.");
         return vec![];
     }
     let Some(session_id) = agent.session.session_id.clone() else {
-        requeue_consumed(agent, text, images);
+        requeue_consumed(agent, text, images, chip_elements);
         agent.show_toast(NO_SESSION_NOTICE);
         return vec![];
     };
@@ -212,11 +222,32 @@ pub(super) fn dispatch_send_prompt_now(
     // Expect the shell's send-now cancel so the turn-end handling suppresses its marker
     super::queue::arm_send_now_and_paint_dispatched(agent, &prompt_id, &text);
 
-    let build = crate::prompt_images::build_content_blocks_with_workspace_report(
+    let build = crate::prompt_images::build_content_blocks_with_workspace_report_ref(
         text.clone(),
-        images,
+        &images,
         Some(std::path::Path::new(&agent.session.cwd)),
     );
+    let sent_image_numbers = crate::prompt_images::sent_image_display_numbers(&build.blocks);
+    if let Some((entry_id, _)) = agent.send_now_painted_blocks.get(&prompt_id).copied() {
+        crate::scrollback::blocks::mark_entry_images_sent(
+            &mut agent.scrollback,
+            entry_id,
+            &sent_image_numbers,
+        );
+    }
+    // Kept until the turn starts (Ctrl+C restore, and the sent marks for a block the adoption paints) or the send fails
+    // (requeue): the wire blocks alone lose the chips
+    if !images.is_empty() || !chip_elements.is_empty() || !sent_image_numbers.is_empty() {
+        agent.send_now_attachments.insert(
+            prompt_id.clone(),
+            crate::app::agent_view::SentPromptAttachments {
+                text: text.clone(),
+                images,
+                chip_elements,
+                sent_image_numbers,
+            },
+        );
+    }
     app.pending_image_notices
         .extend(agent.skipped_image_send_notice(&build.skipped_display_numbers));
     let blocks = build.blocks;

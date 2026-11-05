@@ -507,6 +507,12 @@ fn maybe_drain_queue_rows(agent: &mut AgentView, notices: &mut Vec<String>) -> Q
                     combined_scrollback_entries: earlier,
                     chip_elements: queued.chip_elements.clone(),
                 });
+                agent.remember_sent_prompt_attachments(
+                    &combined_entries,
+                    &queued.text,
+                    &queued.images,
+                    &queued.chip_elements,
+                );
             }
             agent.turn_started_at = Some(Instant::now());
             let flip = page_flip_on_send();
@@ -554,6 +560,14 @@ fn maybe_drain_queue_rows(agent: &mut AgentView, notices: &mut Vec<String>) -> Q
                 );
                 notices.extend(agent.skipped_image_send_notice(&build.skipped_display_numbers));
                 let mut blocks = build.blocks;
+                let sent = crate::prompt_images::sent_image_display_numbers(&blocks);
+                for id in &combined_entries {
+                    crate::scrollback::blocks::mark_entry_images_sent(
+                        &mut agent.scrollback,
+                        *id,
+                        &sent,
+                    );
+                }
                 if let Some(acp::ContentBlock::Text(tb)) = blocks.first_mut() {
                     let map = tb.meta.get_or_insert_with(acp::Meta::new);
                     fuigo_prompt_queue::stamp_combined_display_texts(map, &combined_segs);
@@ -1115,12 +1129,36 @@ pub(crate) fn apply_turn_start_shim(
                 Some(RenderBlock::UserPrompt(ub)) if ub.text != text => ub.text.clone(),
                 _ => text,
             };
+            // A send-now from this client still holds its images and chips; chip ranges only fit the text they were taken on
+            let (images, chip_elements) = match agent.send_now_attachments.remove(&prompt_id) {
+                Some(sent) => {
+                    // A block first painted here (no dispatch paint) shows its sent images as sent from the start
+                    crate::scrollback::blocks::mark_entry_images_sent(
+                        &mut agent.scrollback,
+                        prompt_entry_id,
+                        &sent.sent_image_numbers,
+                    );
+                    let chips = if sent.text == restore_text {
+                        sent.chip_elements
+                    } else {
+                        Vec::new()
+                    };
+                    (sent.images, chips)
+                }
+                None => (Vec::new(), Vec::new()),
+            };
+            agent.remember_sent_prompt_attachments(
+                &[prompt_entry_id],
+                &restore_text,
+                &images,
+                &chip_elements,
+            );
             agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
                 text: restore_text,
-                images: Vec::new(),
+                images,
                 scrollback_entry: prompt_entry_id,
                 combined_scrollback_entries: Vec::new(),
-                chip_elements: Vec::new(),
+                chip_elements,
             });
         }
         if skip_entry_top {
@@ -1145,6 +1183,8 @@ pub(crate) fn apply_turn_start_shim(
     };
 
     agent.turn_started_at = Some(Instant::now());
+    // The turn started: a send-now payload the branches above did not adopt has nothing left to restore into
+    agent.send_now_attachments.remove(&prompt_id);
 
     // After the echo-skip above; mirror the live-arm transitions the flush bypasses.
     agent.flush_pending_adoption_updates(&prompt_id);
@@ -2620,6 +2660,7 @@ mod tests {
             Action::SendPromptNow {
                 text: "hurry".into(),
                 images: vec![],
+                chip_elements: Vec::new(),
                 image_notice: None,
             },
             &mut app,

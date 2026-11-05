@@ -1932,6 +1932,7 @@ impl MvpAgent {
             client_type: RefCell::new(ClientType::default()),
             code_nav_enabled: std::cell::Cell::new(false),
             interactive_trust_client: std::cell::Cell::new(false),
+            folder_trust_reopen_notice: std::cell::Cell::new(false),
             interactive_trust_prompted: Rc::new(
                 RefCell::new(std::collections::HashSet::new()),
             ),

@@ -1483,6 +1483,70 @@ fn build_content_blocks_with_prefixes_and_caps_ref(
     }
 }
 
+/// The `[Image #N]` numbers whose image rides in `blocks`, read from each image block's display-number meta.
+pub fn sent_image_display_numbers(blocks: &[agent_client_protocol::ContentBlock]) -> Vec<usize> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            agent_client_protocol::ContentBlock::Image(img) => {
+                fuigo_shared::placeholder_images::display_number_from_meta(img.meta.as_ref())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Decoded length of standard base64 `data`, from its unpadded length (exact for valid input), so a payload of exactly
+/// the cap is not refused for its padding.
+fn base64_decoded_len(data: &str) -> usize {
+    let pad = data.bytes().rev().take(2).take_while(|&b| b == b'=').count();
+    let n = data.len() - pad;
+    n / 4 * 3 + n % 4 * 3 / 4
+}
+
+/// Decode a sent block's inline base64 with `decode`, refusing it from its length before decoding when it would exceed
+/// `cap` bytes, and again after decoding. `None` when empty, over `cap` or not decodable.
+fn decode_sent_inline(
+    data: &str,
+    cap: usize,
+    decode: impl FnOnce(&str) -> Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    if data.is_empty() || base64_decoded_len(data) > cap {
+        return None;
+    }
+    decode(data).filter(|b| !b.is_empty() && b.len() <= cap)
+}
+
+/// Rebuild an image the user sent from its stored user-message block (a resumed session), so `/rewind` can re-attach it.
+/// Only the block's inline bytes are used, and only when they are a real image within the send limit (the paste checks).
+/// The block's `uri` is never read: a stored session is not trusted to name a file, and a file can change after the send.
+/// `None` when the block names no `[Image #N]` or its inline bytes are missing or not a valid image.
+pub fn pasted_image_from_sent_block(img: &agent_client_protocol::ImageContent) -> Option<PastedImage> {
+    use base64::Engine as _;
+    let display_number =
+        fuigo_shared::placeholder_images::display_number_from_meta(img.meta.as_ref())?;
+    let bytes = decode_sent_inline(&img.data, MAX_SEND_BYTES, |d| {
+        base64::engine::general_purpose::STANDARD.decode(d).ok()
+    })?;
+    let mime_type = fuigo_shared::clipboard::mime_from_bytes(&bytes);
+    if mime_type == "application/octet-stream" {
+        return None;
+    }
+    let dimensions = decode_image_dimensions(&bytes)?;
+    Some(PastedImage {
+        element_id: ElementId::from_raw(0),
+        display_number,
+        mime_type: mime_type.to_owned(),
+        dimensions: Some(dimensions),
+        byte_len: bytes.len(),
+        encoded_bytes: Some(Arc::from(bytes)),
+        source_path: None,
+        staged_temp_path: None,
+        session_image_path: None,
+        preview: PromptImagePreview::default(),
+    })
+}
+
 /// Scan `text` for `[Image #N: <path>]` placeholders that lack a matching [`PastedImage`] and attempt to recover them from disk.
 ///
 /// Returns `(rewritten_text, recovered_images)`:
@@ -3813,6 +3877,75 @@ mod tests {
         } else {
             panic!("expected Image block");
         }
+    }
+
+    /// A stored block rebuilds only from its validated inline bytes; its `file://` uri is never opened.
+    #[test]
+    fn pasted_image_from_sent_block_uses_only_valid_inline_bytes() {
+        use agent_client_protocol::ImageContent;
+        use base64::Engine as _;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let png = make_test_png(16, 12);
+        let dir = tempfile::tempdir().unwrap();
+        // An external file the crafted block names: a valid image, so only the never-read rule keeps it out
+        let external = dir.path().join("secret.png");
+        std::fs::write(&external, make_test_png(20, 20)).unwrap();
+        let meta = Some(fuigo_shared::placeholder_images::display_number_meta(2));
+        let uri = Some(format!("file://{}", external.display()));
+        let block = |data: &str, uri: Option<String>, meta| ImageContent::new(data, "image/png").uri(uri).meta(meta);
+
+        // Valid inline bytes: restored from them alone, never from the named file
+        let restored = pasted_image_from_sent_block(&block(&b64(&png), uri.clone(), meta.clone())).unwrap();
+        assert_eq!(restored.display_number, 2);
+        assert_eq!(restored.encoded_bytes.as_deref(), Some(png.as_slice()));
+        assert!(restored.session_image_path.is_none() && restored.source_path.is_none());
+        assert_eq!(restored.dimensions, Some((16, 12)));
+        assert_eq!(restored.mime_type, "image/png");
+        assert_eq!(load_for_send(&restored).map(|(b, _)| b), Some(png.clone()));
+
+        // A same-length replacement of the file changes nothing: the stored bytes are what come back
+        let mut same_len = make_test_png(16, 12);
+        let at = same_len.len() - 20;
+        same_len[at] ^= 0xff;
+        std::fs::write(&external, &same_len).unwrap();
+        let again = pasted_image_from_sent_block(&block(&b64(&png), uri.clone(), meta.clone())).unwrap();
+        assert_eq!(again.encoded_bytes.as_deref(), Some(png.as_slice()));
+
+        // Crafted: empty inline data naming an external file -> nothing attached
+        assert!(pasted_image_from_sent_block(&block("", uri.clone(), meta.clone())).is_none());
+        // Inline bytes that are not an image (or not base64) -> nothing attached
+        assert!(pasted_image_from_sent_block(&block("AQID", uri.clone(), meta.clone())).is_none());
+        assert!(pasted_image_from_sent_block(&block("not base64!", uri.clone(), meta.clone())).is_none());
+        // No `[Image #N]` number -> nothing to re-attach
+        assert!(pasted_image_from_sent_block(&block(&b64(&png), None, None)).is_none());
+    }
+
+    /// The inline size cap: a real PNG of exactly `cap` bytes passes, one byte over does not, and a payload whose base64
+    /// length alone exceeds the cap never reaches the decoder.
+    #[test]
+    fn decode_sent_inline_enforces_cap_before_and_after_decode() {
+        use base64::Engine as _;
+        let std_decode = |d: &str| base64::engine::general_purpose::STANDARD.decode(d).ok();
+        // A real PNG whose base64 is padded, so a padded-length estimate would wrongly refuse the exact-cap case
+        let png = (1..).map(|w| make_test_png(w, 12)).find(|p| p.len() % 3 != 0).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        assert_eq!(base64_decoded_len(&b64), png.len());
+        assert_eq!(decode_sent_inline(&b64, png.len(), std_decode).as_deref(), Some(png.as_slice()));
+        assert!(decode_sent_inline(&b64, png.len() - 1, std_decode).is_none());
+
+        // Over the cap from its length alone: refused without calling the decoder
+        let mut calls = 0;
+        let over = decode_sent_inline(&b64, png.len() - 1, |d| {
+            calls += 1;
+            std_decode(d)
+        });
+        assert!(over.is_none());
+        assert_eq!(calls, 0, "the decoder must not run for a payload over the cap");
+
+        // Within the cap by its length (one byte) but decoding to more: refused after decoding too
+        assert_eq!(base64_decoded_len("AA=="), 1);
+        assert!(decode_sent_inline("AA==", 2, |_| Some(vec![1, 2, 3])).is_none());
+        assert_eq!(decode_sent_inline("AA==", 3, |_| Some(vec![1, 2, 3])), Some(vec![1, 2, 3]));
     }
 
     #[test]

@@ -2700,6 +2700,30 @@ impl PromptWidget {
         std::mem::take(&mut self.images)
     }
 
+    /// Send-now payload: the trimmed text, the drained images, and the chips with ranges re-based onto that text.
+    /// The chips let a cancel or a failed send put the prompt back as it was typed.
+    pub fn drain_send_now_payload(
+        &mut self,
+    ) -> (String, Vec<PastedImage>, Vec<crate::app::agent::ChipElement>) {
+        let images = self.drain_images();
+        let raw = self.text();
+        let lead = raw.len() - raw.trim_start().len();
+        let text = raw.trim().to_string();
+        let end = lead + text.len();
+        let chips = self
+            .textarea
+            .elements()
+            .iter()
+            .filter(|e| e.range.start >= lead && e.range.end <= end)
+            .map(|e| crate::app::agent::ChipElement {
+                range: e.range.start - lead..e.range.end - lead,
+                kind: e.kind,
+                display: e.display.clone(),
+            })
+            .collect();
+        (text, images, chips)
+    }
+
     #[cfg(test)]
     pub(crate) fn push_image_undo_stash_for_test(&mut self, image: PastedImage) {
         self.image_undo_stash.push(image);

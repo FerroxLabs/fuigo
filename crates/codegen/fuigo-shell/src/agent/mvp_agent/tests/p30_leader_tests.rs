@@ -1637,10 +1637,12 @@ fn the_relay_gets_every_agent_line_on_its_own_path() {
     assert_eq!(flat.matches("agent_to_ipc_tx_clone.send(msg)").count(), 1, "one IPC hand-off");
     assert!(
         flat.contains(
-            "let maybe_tx = agent_to_ws_tx_clone.lock(); if let Some(ref tx) = *maybe_tx { let _ = tx.send(msg.clone()); } \
+            "let maybe_tx = agent_to_ws_tx_clone.lock(); // P1 (1.0.40): the reopen notice is for one opted-in local connection, never the relay. \
+             if let Some(ref tx) = *maybe_tx && !crate::leader::server::is_folder_trust_reopen_notice_line(&msg) { let _ = tx.send(msg.clone()); } \
              drop(maybe_tx); let _ = agent_to_ipc_tx_clone.send(msg);"
         ),
-        "every agent line is copied to the relay (no session or method filter) before the IPC hand-off"
+        "every agent line is copied to the relay (no session or method filter; the one exemption is the per-connection \
+         folder-trust reopen notice, a transient notification, never a request) before the IPC hand-off"
     );
     assert!(
         flat.contains("let msg = crate::leader::server::stamp_relay_connection_identity_with(&msg, &relay_driver_board);"),

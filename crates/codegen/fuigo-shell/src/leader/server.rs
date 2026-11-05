@@ -118,6 +118,9 @@ struct ClientState {
     /// P148 (B19): the `startupHints` this client sent on its own `initialize`. The agent keeps only the first
     /// client's `initialize`, so they are carried onto this client's session requests that name none.
     init_startup_hints: Option<serde_json::Value>,
+    /// P1 (1.0.40): this client advertised `fuigo/folderTrust.reopenNotice` on its own `initialize`. The agent sees every
+    /// client's `initialize` (last one wins), so the per-connection opt-in is held here.
+    folder_trust_reopen_notice: bool,
 }
 #[derive(Debug, Clone)]
 pub struct LeaderServerMetadata {
@@ -885,6 +888,40 @@ fn initialize_startup_hints(json: &serde_json::Value) -> Option<serde_json::Valu
         .filter(|hints| hints.is_object())
         .cloned()
 }
+/// P1 (1.0.40): whether an `initialize` opts its client in to the folder-trust reopen notice
+/// (`clientCapabilities._meta["fuigo/folderTrust"].reopenNotice == true`); `None` for any other message.
+fn initialize_folder_trust_reopen_notice(json: &serde_json::Value) -> Option<bool> {
+    if json.get("method").and_then(|m| m.as_str()) != Some(AGENT_METHOD_NAMES.initialize) {
+        return None;
+    }
+    Some(
+        json.pointer("/params/clientCapabilities/_meta/fuigo~1folderTrust/reopenNotice")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    )
+}
+/// P1 (1.0.40): whether a payload is the post-grant folder-trust reopen notice (a `config_notice` session notification
+/// carrying exactly [`crate::agent::mvp_agent::FOLDER_TRUST_REOPEN_NOTICE`]). It is for one opted-in connection only,
+/// so it is never fanned out to subscribers or the relay.
+pub(crate) fn is_folder_trust_reopen_notice(json: &serde_json::Value) -> bool {
+    method_of(json) == Some("fuigo/session_notification")
+        && interaction_inner_params(json)
+            .and_then(|p| p.get("update"))
+            .is_some_and(|u| {
+                u.get("sessionUpdate").and_then(|v| v.as_str()) == Some("config_notice")
+                    && u.get("message").and_then(|v| v.as_str())
+                        == Some(crate::agent::mvp_agent::FOLDER_TRUST_REOPEN_NOTICE)
+            })
+}
+/// P1 (1.0.40): whether a payload is the agent's `fuigo/folder_trust/request` (wrapped or direct).
+fn is_folder_trust_request(json: &serde_json::Value) -> bool {
+    method_of(json) == Some("fuigo/folder_trust/request")
+}
+/// [`is_folder_trust_reopen_notice`] for a raw agent line (cheap substring check first).
+pub(crate) fn is_folder_trust_reopen_notice_line(line: &str) -> bool {
+    line.contains(crate::agent::mvp_agent::FOLDER_TRUST_REOPEN_NOTICE)
+        && serde_json::from_str::<serde_json::Value>(line).is_ok_and(|json| is_folder_trust_reopen_notice(&json))
+}
 /// P148 (B19): carry the requesting client's own `initialize` `startupHints` onto its `session/new`, `session/load` or
 /// `session/resume` that names none. The agent keeps only the first `initialize` it saw, so on a shared leader a later
 /// client's initialize-only hints (an app that embeds Fuigo non-interactively) would otherwise be replaced by the first
@@ -1525,14 +1562,20 @@ fn request_key(json: &serde_json::Value) -> Option<String> {
     json.get("id").filter(|id| !id.is_null()).map(|id| id.to_string())
 }
 /// The agent marks every request it sends for a session as not yet delivered, before the line is fanned out to the relay
-/// and the server loop, so no answer counts until the leader has delivered it to the session's owner.
+/// and the server loop, so no answer counts until the leader has delivered it to the session's owner. A folder-trust
+/// request is also registered, in the same step, as the session's latest one: its first admitted answer (the relay's
+/// included) is the one the reopen notice follows.
 pub(crate) fn note_agent_request(line: &str, board: &super::drivers::OwnerBoard) {
     if !(line.contains("\"method\"") && line.contains("\"id\"")) {
         return;
     }
     let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else { return };
     if let (Some(key), Some(session_id)) = (request_key(&json), extract_session_id(&json)) {
-        board.note_request(&key, &session_id);
+        if is_folder_trust_request(&json) {
+            board.note_folder_trust_request(&key, &session_id);
+        } else {
+            board.note_request(&key, &session_id);
+        }
     }
 }
 /// What [`drop_unadmitted_answers`] did to a message.
@@ -2542,6 +2585,7 @@ pub async fn run_leader_server(
                             patch_initialize_request_id: None,
                             registered: false,
                             init_startup_hints: None,
+                            folder_trust_reopen_notice: false,
                         },
                     );
                     spawn_client_handler(
@@ -2880,6 +2924,9 @@ pub async fn run_leader_server(
                         }
                         if let Some(hints) = initialize_startup_hints(json) {
                             client.init_startup_hints = Some(hints);
+                        }
+                        if let Some(opted_in) = initialize_folder_trust_reopen_notice(json) {
+                            client.folder_trust_reopen_notice = opted_in;
                         }
                         payload_mutated |=
                             stamp_inbound_client_identity(json, &client.client_type, id);
@@ -3301,6 +3348,29 @@ pub async fn run_leader_server(
                         .entry(sid.clone())
                         .or_default()
                         .insert(tcid, payload.clone());
+                }
+                // P1 (1.0.40): the folder-trust reopen notice goes only to the client whose answer to the session's latest trust
+                // request was admitted first (recorded by request id, `OwnerBoard::take_folder_trust_answerer`), while it is
+                // still connected and only when it opted in on its own `initialize`. Never the session's current owner or
+                // fallback in its place (the answerer may have left and another been promoted), never the relay, never
+                // broadcast, held or replayed: every other client's frames are unchanged. The agent emits it under the
+                // leader whatever its last `initialize` said.
+                if let Some(ref sid) = session_id
+                    && json.as_ref().is_some_and(is_folder_trust_reopen_notice)
+                {
+                    let target = match driver_board.take_folder_trust_answerer(sid) {
+                        Some(super::drivers::Claimer::Client(c)) => Some(c),
+                        _ => None,
+                    };
+                    match target.and_then(|c| clients.get(&c).map(|client| (c, client))) {
+                        Some((cid, client)) if client.folder_trust_reopen_notice => {
+                            if let Err(e) = client.tx.send(ClientOutbound::Acp(payload.clone())) {
+                                warn!(client_id = cid.0, session_id = sid.as_str(), error = %e, "Failed to send folder-trust reopen notice (channel closed)");
+                            }
+                        }
+                        _ => trace!(session_id = sid.as_str(), "Dropping folder-trust reopen notice: its answerer is gone, did not opt in, or is the relay"),
+                    }
+                    continue;
                 }
                 // Driver-only messages (every reverse request, the interaction modals included, and scheduled-task prompts)
                 // go to ONE client: the session's owner when it is connected, else (not for an interaction, and never while

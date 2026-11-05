@@ -190,6 +190,7 @@ fn send_prompt_now_clears_credit_limit_stash() {
         Action::SendPromptNow {
             text: "steer it".into(),
             images: Vec::new(),
+            chip_elements: Vec::new(),
             image_notice: None,
         },
         &mut app,

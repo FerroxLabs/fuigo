@@ -937,14 +937,22 @@ pub(super) fn dispatch_send_prompt_inner(
             } else {
                 None
             };
-            let images = agent.prompt.drain_images();
+            let (drained_text, images, chips) = agent.prompt.drain_send_now_payload();
+            // Chip ranges fit the composer text; keep them only when that is the text being sent
+            let chip_elements = if drained_text == text { chips } else { Vec::new() };
             if consume_input {
                 agent.prompt.set_text("");
                 agent.note_draft_consumed();
             }
             // A new prompt is taking over (same contract as the immediate-send branch below)
             agent.clear_follow_ups();
-            return interject::dispatch_send_prompt_now(app, text, images, image_notice);
+            return interject::dispatch_send_prompt_now(
+                app,
+                text,
+                images,
+                chip_elements,
+                image_notice,
+            );
         }
 
         if immediate_server_send {
