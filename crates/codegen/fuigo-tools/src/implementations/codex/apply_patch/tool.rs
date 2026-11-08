@@ -210,6 +210,7 @@ fn first_unjudged_path<'a>(changes: &'a [FileChange], judged: &[PathBuf]) -> Opt
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 /// Create parent directories for a file path if they don't exist.
+#[allow(clippy::disallowed_methods, reason = "file tool write of a model/user-chosen path (user content); not inside a session folder")]
 async fn ensure_parent_dirs(path: &std::path::Path) -> Result<(), fuigo_tool_runtime::ToolError> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -605,6 +606,7 @@ impl fuigo_tool_runtime::Tool for ApplyPatchTool {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -353,6 +353,21 @@ impl TrustStore {
             .contains_key(canonical.to_string_lossy().as_ref())
     }
 
+    /// F11 (`/trust` screens): every folder the store records as trusted, in path order, with whether the record is
+    /// current ([`CONSENT_V`]: settings and commands) or Legacy (settings only, asked once more). Read-only. Over-broad
+    /// keys (home, root, relative) are left out as on every read, and an unreadable store lists nothing (fail closed).
+    pub fn trusted_records(&self) -> Vec<(PathBuf, bool)> {
+        if !self.disk_readable {
+            return Vec::new();
+        }
+        self.doc
+            .folders
+            .iter()
+            .filter(|(folder, record)| record.trusted && !is_unsafe_trust_root(Path::new(folder.as_str())))
+            .map(|(folder, record)| (PathBuf::from(folder), record.consent >= CONSENT_V))
+            .collect()
+    }
+
     // ── Internal ──────────────────────────────────────────────────────
 
     /// Shared write path for [`Self::set_trusted`] / [`Self::set_untrusted`].
@@ -1460,6 +1475,28 @@ mod tests {
             store.is_trusted(&canonical_real),
             "set_trusted must store the canonical path so canonical lookups match"
         );
+    }
+
+    /// F11: the `/trust` list shows trusted records only (a "no" is not listed), marks a pre-1.0.35 record as settings
+    /// only, and lists nothing from an unreadable store.
+    #[test]
+    fn f11_trusted_records_lists_trusted_folders_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join(TRUST_FILE_NAME);
+        let [a, b, c] = ["a", "b", "c"].map(|n| {
+            let dir = tmp.path().join(n);
+            std::fs::create_dir_all(&dir).unwrap();
+            canonicalize_or_owned(&dir)
+        });
+        let mut store = TrustStore::load_from(store_path.clone());
+        store.grant(&a).unwrap();
+        store.set_trusted_legacy(&b).unwrap();
+        store.set_untrusted(&c).unwrap();
+        let reloaded = TrustStore::load_from(store_path.clone());
+        assert_eq!(reloaded.trusted_records(), vec![(a, true), (b, false)]);
+
+        std::fs::write(&store_path, "not = [valid").unwrap();
+        assert!(TrustStore::load_from(store_path).trusted_records().is_empty(), "unreadable store lists nothing");
     }
 
     #[test]

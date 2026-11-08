@@ -94,9 +94,9 @@ pub use paths::{
     claude_managed_settings_path, claude_managed_settings_probe_path, create_dir_all_owner_only,
     create_file_owner_only, owner_only_file_options, tighten_file_owner_only, tighten_own_regular_file_owner_only,
     write_file_owner_only,
-    decode_cwd_from_dirname, default_fuigo_home, encode_cwd_dirname, ensure_sessions_cwd_dir,
+    decode_cwd_from_dirname, default_fuigo_home, disable_session_persistence, encode_cwd_dirname, ensure_sessions_cwd_dir,
     ensure_sessions_cwd_dir_in, fuigo_application, fuigo_application_in, fuigo_home, sessions_cwd_dir,
-    sessions_cwd_dir_in, set_dir_owner_only, system_config_dir, user_fuigo_home,
+    session_persistence_disabled, sessions_cwd_dir_in, set_dir_owner_only, system_config_dir, user_fuigo_home,
 };
 #[cfg(feature = "test-seams")]
 pub use paths::admin_root_override;

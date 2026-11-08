@@ -322,6 +322,7 @@ static SEEDED_MOCK_FRONT: std::sync::OnceLock<session_front::SessionFront> =
 /// The trust set is installed the way a real boot installs it — by loading the config the home now holds —
 /// before anything can begin a fetch. Call it once per binary, first in the test, before anything builds an
 /// HTTP client or loads TLS roots (both latch the proxy/CA variables the front sets).
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[allow(dead_code)]
 pub async fn start_seeded_mock(home: &std::path::Path) -> fuigo_test_support::MockInferenceServer {
     let server = fuigo_test_support::MockInferenceServer::start()

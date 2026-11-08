@@ -23,6 +23,7 @@ use crate::session::storage::{
     filter_rewind_by, rewind_step_for_line, truncate_for_prompt_by,
 };
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "copy_tests.rs"]
 mod tests;
@@ -174,6 +175,7 @@ struct UpdateLineWriter<'a> {
 }
 
 impl<'a> UpdateLineWriter<'a> {
+    #[allow(clippy::disallowed_methods, reason = "fork staging dir sessions/<cwd>/.fork-staging-*, beside any session folder (F5-A comments at copy.rs:1187); both copy_updates_streaming callers pass a staged path; not inside a session folder")]
     fn try_new(
         target: &Path,
         source: &'a Path,
@@ -293,13 +295,37 @@ fn copy_updates_streaming(
 }
 
 impl JsonlStorageAdapter {
-    /// Fully synchronous implementation of `copy_session_data`, for use on a blocking thread; every caller reaches it through `spawn_blocking`.
+    /// [`Self::copy_session_data_as_sync`] as a writer of the target claimed here without waiting (design F5 §5.5): a
+    /// target open in this process is refused with `This session is open. Close it first.`, nothing written.
     pub(crate) fn copy_session_data_sync(
         &self,
         source_info: &Info,
         target_info: &Info,
         options: CopySessionOptions,
     ) -> io::Result<CopySessionResult> {
+        let target = fuigo_session_writer::SessionWriter::try_claim(target_info.id.0.to_string(), self.session_dir(target_info))
+            .map_err(|_busy| io::Error::other(crate::session::session_writer_lock::OPEN_HERE))?;
+        self.copy_session_data_as_sync(source_info, target_info, options, &target)
+    }
+
+    /// Fully synchronous implementation of `copy_session_data`, for use on a blocking thread; every caller reaches it
+    /// through `spawn_blocking`. Every write into the target is a method of `target`, the target's writer.
+    pub(crate) fn copy_session_data_as_sync(
+        &self,
+        source_info: &Info,
+        target_info: &Info,
+        options: CopySessionOptions,
+        target: &fuigo_session_writer::SessionWriter,
+    ) -> io::Result<CopySessionResult> {
+        // F5 (design §5.3, §5.5): every write into the target goes through the target's writer. Its folder must be
+        // the one this adapter names for the target, or the copy would write somewhere the writer does not own.
+        if target.dir() != self.session_dir(target_info) {
+            return Err(io::Error::other(format!(
+                "fork target writer is for {}, not {}",
+                target.dir().display(),
+                self.session_dir(target_info).display()
+            )));
+        }
         let source_summary = self.read_summary_sync(source_info)?;
         let chat_format_version = source_summary.chat_format_version;
         let source_permission_policy = source_summary.permission_policy.clone();
@@ -324,7 +350,12 @@ impl JsonlStorageAdapter {
         let chat_bytes_seen = snapshot.chat_bytes;
         let chat_seen = chat_bytes_seen.as_deref().map(chat_fingerprint_of);
         let (mut chat_to_copy, mut skipped_chat_lines): (Vec<ConversationItem>, usize) = match chat_bytes_seen.as_deref() {
-            Some(bytes) => self.read_chat_history_counting_from_bytes(&source_chat_path, bytes, chat_format_version)?,
+            // The source is read as an unowned reader (design F5 §5.7): its `.corrupt` copy is made only when no live
+            // writer owns it (a resident parent's own actor does that).
+            Some(bytes) => {
+                let repair = super::super::Access::Reader.repair_writer(&source_info.id.0, &self.session_dir(source_info));
+                self.read_chat_history_counting_from_bytes(&source_chat_path, bytes, chat_format_version, repair.as_deref())?
+            }
             None => (Vec::new(), 0),
         };
         #[cfg(test)]
@@ -422,18 +453,18 @@ impl JsonlStorageAdapter {
             ));
         }
 
-        // Canonical creator: the fork target chain is born owner-only.
-        let target_dir = self.create_session_dir_owner_only(target_info)?;
+        // The target's writer creates its folder owner-only (design F5 §5.2) with the first write, the claim below.
+        let target_dir = target.dir().to_path_buf();
         // The target id may be the caller's (`newSessionId`). A session already stored under it is never overwritten:
         // the copy claims the target by creating its summary exclusively, so of two copies to one id only one proceeds,
         // and a refused copy has written nothing (P111, Astra r4).
-        self.claim_copy_target(target_info)?;
+        self.claim_copy_target(target_info, target)?;
 
         let copied_updates = if options.fork_filter {
-            super::super::owner_only::write(&self.updates_file(target_info), b"")?;
+            target.replace_atomic_sync(rel_in(target, &self.updates_file(target_info))?, b"")?;
             CopiedUpdates::default()
         } else if let Some((staging, staged_updates, copied)) = staged_cut {
-            move_staged_file(&staged_updates, &self.updates_file(target_info))?;
+            target.move_in_sync(&staged_updates, rel_in(target, &self.updates_file(target_info))?)?;
             drop(staging);
             copied
         } else {
@@ -444,14 +475,14 @@ impl JsonlStorageAdapter {
             fork_filter_chat(&mut chat_to_copy);
         }
 
-        for target in [
+        for stale in [
             self.workflows_dir(target_info),
             self.goal_mode_state_file(target_info)
                 .parent()
                 .expect("goal state has a parent")
                 .to_path_buf(),
         ] {
-            match std::fs::remove_dir_all(&target) {
+            match target.remove_tree_sync(rel_in(target, &stale)?) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
@@ -483,12 +514,12 @@ impl JsonlStorageAdapter {
             .unwrap_or(0);
 
         {
-            let mut writer = BufWriter::new(super::super::owner_only::create(&self.chat_file(target_info))?);
+            let mut bytes = Vec::new();
             for item in &chat_to_copy {
-                serde_json::to_writer(&mut writer, item).map_err(invalid_data)?;
-                writer.write_all(b"\n")?;
+                serde_json::to_writer(&mut bytes, item).map_err(invalid_data)?;
+                bytes.push(b'\n');
             }
-            writer.flush()?;
+            target.replace_atomic_sync(rel_in(target, &self.chat_file(target_info))?, &bytes)?;
         }
         drop(chat_to_copy);
         let checkpoint_files = copied_updates.checkpoint_files;
@@ -506,19 +537,22 @@ impl JsonlStorageAdapter {
             },
         );
         let summary_bytes = serde_json::to_vec_pretty(&target_summary).map_err(invalid_data)?;
-        super::super::owner_only::write(&self.summary_file(target_info), summary_bytes)?;
+        target.replace_atomic_sync(rel_in(target, &self.summary_file(target_info))?, &summary_bytes)?;
 
         let plan_copied = copy_sidecar_file(
+            target,
             options.copy_plan_state,
             &self.plan_file(source_info),
             &self.plan_file(target_info),
         )?;
         let signals_copied = copy_sidecar_file(
+            target,
             options.copy_signals,
             &self.signals_file(source_info),
             &self.signals_file(target_info),
         )?;
         let usage_copied = copy_sidecar_file(
+            target,
             options.copy_usage,
             &self.usage_file(source_info),
             &self.usage_file(target_info),
@@ -526,35 +560,40 @@ impl JsonlStorageAdapter {
         if let Some(max_turn) = options.target_prompt_index.map(|i| (i + 1) as u32) {
             if usage_copied {
                 restamp_copied_usage(
+                    target,
                     &self.usage_file(target_info),
                     &target_info.id,
                     Some(max_turn),
                 )?;
             }
             if usage_copied && signals_copied {
-                clip_copied_signals_turns(&self.signals_file(target_info), max_turn)?;
+                clip_copied_signals_turns(target, &self.signals_file(target_info), max_turn)?;
             }
         } else if usage_copied {
-            restamp_copied_usage(&self.usage_file(target_info), &target_info.id, None)?;
+            restamp_copied_usage(target, &self.usage_file(target_info), &target_info.id, None)?;
         }
         if usage_copied && !signals_copied {
             // Resume copies billed history without signals, so the child would start at turn 0 and fold new work into inherited rows
             seed_signals_turn_from_usage(
+                target,
                 &self.usage_file(target_info),
                 &self.signals_file(target_info),
             )?;
         }
         let plan_mode_state_copied = copy_sidecar_file(
+            target,
             options.copy_plan_mode_state,
             &self.plan_mode_state_file(source_info),
             &self.plan_mode_state_file(target_info),
         )?;
         let tool_state_copied = copy_sidecar_file(
+            target,
             options.copy_tool_state,
             &self.session_dir(source_info).join("tool_state.json"),
             &self.session_dir(target_info).join("tool_state.json"),
         )?;
         let announcement_state_copied = copy_sidecar_file(
+            target,
             options.copy_announcement_state,
             &self.announcement_state_file(source_info),
             &self.announcement_state_file(target_info),
@@ -566,7 +605,7 @@ impl JsonlStorageAdapter {
         if announcement_state_copied
             && (options.target_prompt_index.is_some() || options.fork_filter)
         {
-            clear_announced_failure_episodes(&self.announcement_state_file(target_info))?;
+            clear_announced_failure_episodes(target, &self.announcement_state_file(target_info))?;
         }
 
         // Title-refresh watermark: only a managed parent (one with a watermark) passes managed state to the child
@@ -583,10 +622,10 @@ impl JsonlStorageAdapter {
             } else {
                 0
             };
-            crate::session::helpers::session_summary::save_title_refresh_watermark(
-                &self.session_dir(target_info),
-                child_idx,
-            );
+            let watermark = crate::session::helpers::session_summary::TITLE_REFRESH_WATERMARK_FILE;
+            if let Err(error) = target.replace_atomic_sync(watermark, child_idx.to_string().as_bytes()) {
+                tracing::warn!(%error, "failed to persist the fork's title refresh watermark");
+            }
         }
 
         // Copied verbatim: the archive is immutable, so no cwd rewrite.
@@ -596,14 +635,11 @@ impl JsonlStorageAdapter {
                 .join(fuigo_compaction_transcript::COMPACTION_DIR);
             let mut copied = 0usize;
             if src_dir.is_dir() {
-                let dst_dir = self
-                    .session_dir(target_info)
-                    .join(fuigo_compaction_transcript::COMPACTION_DIR);
-                std::fs::create_dir_all(&dst_dir)?;
+                let dst_dir = Path::new(fuigo_compaction_transcript::COMPACTION_DIR);
                 for entry in std::fs::read_dir(&src_dir)? {
                     let entry = entry?;
                     if entry.file_type()?.is_file() {
-                        super::super::owner_only::copy(&entry.path(), &dst_dir.join(entry.file_name()))?;
+                        target.copy_in_sync(&entry.path(), dst_dir.join(entry.file_name()))?;
                         copied += 1;
                     }
                 }
@@ -614,6 +650,7 @@ impl JsonlStorageAdapter {
         };
 
         let compaction_checkpoints_copied = copy_referenced_checkpoints(
+            target,
             &checkpoint_files,
             &self.session_dir(source_info),
             &target_dir,
@@ -661,17 +698,20 @@ impl JsonlStorageAdapter {
     fn snapshot_source(&self, source_info: &Info, with_transcript: bool) -> io::Result<SourceSnapshot> {
         let chat_path = self.chat_file(source_info);
         let updates_path = self.updates_file(source_info);
+        // The source's lock sidecars open through the source's writer (design F5 §5.5, §5.6; box B6).
+        let source_writer = self.source_writer(source_info);
         let mut held = Vec::new();
         if with_transcript {
             // The turn-start lock first: no prompt is between its transcript echo and its chat item while it is held.
             let pair = crate::session::storage::snapshot_lock::lock_path(&self.session_dir(source_info));
-            if let Some(lock) = crate::session::storage::snapshot_lock::acquire_blocking(&pair, &updates_path)? {
+            let opener = crate::session::storage::snapshot_lock::Opener::Source(source_writer.as_ref());
+            if let Some(lock) = crate::session::storage::snapshot_lock::acquire_blocking_as(opener, &pair, &updates_path)? {
                 held.push(lock);
             }
         }
         let locked: &[&std::path::PathBuf] = if with_transcript { &[&chat_path, &updates_path] } else { &[&chat_path] };
         for path in locked {
-            if let Some(lock) = lock_append_for_snapshot(path)? {
+            if let Some(lock) = lock_append_for_snapshot(source_writer.as_ref(), path)? {
                 held.push(lock);
             }
         }
@@ -687,6 +727,7 @@ impl JsonlStorageAdapter {
         let chat_len = len_of(&chat_path)?;
         let updates_len = if with_transcript { len_of(&updates_path)?.unwrap_or(0) } else { 0 };
         drop(held);
+        drop(source_writer);
         #[cfg(test)]
         if let Some(hook) = AFTER_SNAPSHOT_LOCKS_RELEASED.with(|hook| hook.borrow_mut().take()) {
             hook();
@@ -708,17 +749,36 @@ impl JsonlStorageAdapter {
         };
         Ok(SourceSnapshot { chat_bytes, updates_len })
     }
+
+    /// The writer a fork's snapshot opens its source's lock sidecars with (design F5 §5.5, §5.6): this adapter's own;
+    /// else the source's live writer in this process (the session is open in another adapter); else, when no writer in
+    /// this process holds the source, a reader claim held only for the snapshot. `None` when the id is held here for
+    /// another folder or its writer is going away: the sidecars are then opened read-only, only if they exist.
+    fn source_writer(&self, source_info: &Info) -> Option<fuigo_session_writer::SessionWriter> {
+        if let Some(writer) = self.held_writer(source_info) {
+            return Some(writer);
+        }
+        let dir = self.session_dir(source_info);
+        let id = source_info.id.to_string();
+        if let Some(writer) = fuigo_session_writer::SessionWriter::resident(&id) {
+            return (writer.dir() == dir).then_some(writer);
+        }
+        fuigo_session_writer::SessionWriter::try_claim_reader(id, dir).ok()
+    }
 }
 
 /// Take `path`'s append lock exclusively, waiting at most [`SNAPSHOT_LOCK_WAIT`]. `Ok(None)` when the lock file cannot be
-/// opened at all.
-fn lock_append_for_snapshot(path: &Path) -> io::Result<Option<super::HeldLock>> {
+/// opened at all. The source's sidecar opens through `writer` ([`snapshot_lock::open_source_sidecar`]).
+///
+/// [`snapshot_lock::open_source_sidecar`]: crate::session::storage::snapshot_lock::open_source_sidecar
+fn lock_append_for_snapshot(
+    writer: Option<&fuigo_session_writer::SessionWriter>,
+    path: &Path,
+) -> io::Result<Option<super::HeldLock>> {
     let lock_path = path.with_extension("jsonl.lock");
-    let lock = match crate::session::storage::owner_only::open(
-        std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false),
-        &lock_path,
-    ) {
+    let lock = match crate::session::storage::snapshot_lock::open_source_sidecar(writer, &lock_path) {
         Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
         Err(error) => {
             tracing::debug!(%error, path = %lock_path.display(), "fork snapshot taken without the append lock");
             return Ok(None);
@@ -755,7 +815,7 @@ impl JsonlStorageAdapter {
     ///
     /// The claim is the exclusive creation of the target's (still empty) `summary.json`; the copy writes the summary
     /// itself last. Any of the files a session is made of already being there means the id is taken.
-    fn claim_copy_target(&self, target_info: &Info) -> io::Result<()> {
+    fn claim_copy_target(&self, target_info: &Info, target: &fuigo_session_writer::SessionWriter) -> io::Result<()> {
         let taken = |path: &Path| {
             io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -773,11 +833,8 @@ impl JsonlStorageAdapter {
             }
         }
         let summary = self.summary_file(target_info);
-        match crate::session::storage::owner_only::open(
-            std::fs::OpenOptions::new().write(true).create_new(true),
-            &summary,
-        ) {
-            Ok(_) => Ok(()),
+        match target.create_new_sync(rel_in(target, &summary)?, b"") {
+            Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(taken(&summary)),
             Err(error) => Err(error),
         }
@@ -1042,9 +1099,10 @@ struct ForkStaging {
 struct CreatedCwdDir(Option<PathBuf>);
 
 impl Drop for CreatedCwdDir {
+    #[allow(clippy::disallowed_methods, reason = "an empty cwd directory this fork made, not a session folder")]
     fn drop(&mut self) {
         if let Some(dir) = self.0.take() {
-            let _ = std::fs::remove_dir(&dir);
+            let _ = std::fs::remove_dir(&dir); // F5-A: an empty cwd directory this fork made, not a session folder
         }
     }
 }
@@ -1052,6 +1110,7 @@ impl Drop for CreatedCwdDir {
 /// Create `dir` and say whether THIS call made `dir`: parents first (owner-only ones for the sessions tree, plain ones
 /// for a caller-owned explicit directory, whose ancestors keep their permissions), then one exclusive `create_dir`, so
 /// a directory another process makes first is never claimed.
+#[allow(clippy::disallowed_methods, reason = "the cwd directory `sessions/<cwd>/` holds session folders; it is not one.; claim_cwd_dir creates the cwd dir sessions/<cwd>/ or an explicit dir's ancestors; parents of session folders; not inside a session folder")]
 fn claim_cwd_dir(dir: &Path, owner_only_parents: bool) -> io::Result<bool> {
     if let Some(parent) = dir.parent() {
         if owner_only_parents {
@@ -1060,6 +1119,7 @@ fn claim_cwd_dir(dir: &Path, owner_only_parents: bool) -> io::Result<bool> {
             std::fs::create_dir_all(parent)?;
         }
     }
+    // F5-A: the cwd directory `sessions/<cwd>/` holds session folders; it is not one.
     match std::fs::create_dir(dir) {
         Ok(()) => {
             crate::util::fuigo_home::set_dir_owner_only(dir);
@@ -1110,6 +1170,7 @@ impl JsonlStorageAdapter {
 /// when it is old AND its lock file opens AND its lock is free: a live copy holds its lock for as long as it runs,
 /// however long that is (a suspended process included). One without a lock file is kept (its copy may not have made
 /// it yet).
+#[allow(clippy::disallowed_methods, reason = "a dead copy's staging directory in `sessions/<cwd>/`, not a session folder.")]
 fn remove_stale_fork_staging(parent: &Path) {
     let Ok(entries) = std::fs::read_dir(parent) else {
         return;
@@ -1133,6 +1194,7 @@ fn remove_stale_fork_staging(parent: &Path) {
             continue;
         }
         drop(super::HeldLock::new(lock));
+        // F5-A: a dead copy's staging directory in `sessions/<cwd>/`, not a session folder.
         if let Err(error) = std::fs::remove_dir_all(entry.path()) {
             tracing::warn!(path = %entry.path().display(), %error, "could not remove a stale fork staging directory");
         }
@@ -1141,6 +1203,7 @@ fn remove_stale_fork_staging(parent: &Path) {
 
 /// A private directory in `parent` for a staged cut, locked for as long as the returned guard lives: the transcript is
 /// session content, so other local users must not be able to read it while it is staged (owner-only on Unix).
+#[allow(clippy::disallowed_methods, reason = "fork staging in `sessions/<cwd>/`, beside (never inside) any session folder: no session's writer owns it, and the target folder must not exist before the coherence check (P111). Moved in by `move_in` (§5.3).")]
 fn private_staging_dir(parent: &Path) -> io::Result<ForkStaging> {
     let mut builder = tempfile::Builder::new();
     builder.prefix(FORK_STAGING_PREFIX);
@@ -1149,31 +1212,29 @@ fn private_staging_dir(parent: &Path) -> io::Result<ForkStaging> {
         use std::os::unix::fs::PermissionsExt;
         builder.permissions(std::fs::Permissions::from_mode(0o700));
     }
+    // F5-A: fork staging in `sessions/<cwd>/`, beside (never inside) any session folder: no session's writer owns
+    // it, and the target folder must not exist before the coherence check (P111). Moved in by `move_in` (§5.3).
     let dir = builder.tempdir_in(parent)?;
     // The lock is taken under another name and only then renamed to `.lock` (the lock stays with the open file), so a
     // `.lock` a sweep can open is always one its copy has locked at some point: a copy suspended before it holds its
     // lock has no `.lock` yet, and the sweep keeps its directory (P114 r3 #2).
     let initializing = dir.path().join(FORK_STAGING_LOCK_INIT);
+    // F5-A: the staging directory's own lock, outside any session folder.
     let lock = fuigo_config::owner_only_file_options(
         std::fs::OpenOptions::new().read(true).write(true).create_new(true),
     )
     .open(&initializing)?;
     fs2::FileExt::lock_exclusive(&lock)?;
     let lock = super::HeldLock::new(lock);
-    std::fs::rename(&initializing, dir.path().join(FORK_STAGING_LOCK))?;
+    std::fs::rename(&initializing, dir.path().join(FORK_STAGING_LOCK))?; // F5-A: staging lock, outside any session folder
     Ok(ForkStaging { _lock: lock, dir, _created_cwd_dir: CreatedCwdDir(None) })
 }
 
-/// Move the staged cut into the new session: a rename (the staging directory is on the target's filesystem), with a
-/// copy as the fallback should the rename still fail.
-fn move_staged_file(staged: &Path, target: &Path) -> io::Result<()> {
-    match std::fs::rename(staged, target) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            super::super::owner_only::copy(staged, target)?;
-            Ok(())
-        }
-    }
+/// `path` relative to `target`'s folder: every write into the fork target names its file this way (design F5 §5.3).
+fn rel_in<'p>(target: &fuigo_session_writer::SessionWriter, path: &'p Path) -> io::Result<&'p Path> {
+    path.strip_prefix(target.dir()).map_err(|_| {
+        io::Error::other(format!("{} is outside the fork target {}", path.display(), target.dir().display()))
+    })
 }
 
 /// Counters produced by this copy that feed the fork target's summary, named so the same-typed counts cannot transpose.
@@ -1281,7 +1342,7 @@ fn fork_summary(
 
 /// Remove `announced_failed_servers` from a copied `announcement_state.json`, preserving every other field (including ones this build doesn't know).
 /// A file that doesn't parse is left as copied: the next persist rewrites it.
-fn clear_announced_failure_episodes(path: &Path) -> io::Result<()> {
+fn clear_announced_failure_episodes(target: &fuigo_session_writer::SessionWriter, path: &Path) -> io::Result<()> {
     let bytes = std::fs::read(path)?;
     let Ok(mut state) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return Ok(());
@@ -1292,13 +1353,13 @@ fn clear_announced_failure_episodes(path: &Path) -> io::Result<()> {
     if fields.remove("announced_failed_servers").is_none() {
         return Ok(());
     }
-    crate::session::storage::write_bytes_atomic(
-        path,
+    target.replace_atomic_sync(
+        rel_in(target, path)?,
         &serde_json::to_vec(&state).map_err(invalid_data)?,
     )
 }
 
-fn clip_copied_signals_turns(path: &Path, max_turn: u32) -> io::Result<()> {
+fn clip_copied_signals_turns(target: &fuigo_session_writer::SessionWriter, path: &Path, max_turn: u32) -> io::Result<()> {
     let data = match std::fs::read(path) {
         Ok(data) => data,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -1317,13 +1378,17 @@ fn clip_copied_signals_turns(path: &Path, max_turn: u32) -> io::Result<()> {
     if signals.assistant_message_count > max_turn {
         signals.assistant_message_count = max_turn;
     }
-    crate::session::storage::write_bytes_atomic(
-        path,
+    target.replace_atomic_sync(
+        rel_in(target, path)?,
         &serde_json::to_vec(&signals).map_err(invalid_data)?,
     )
 }
 
-fn seed_signals_turn_from_usage(usage_path: &Path, signals_path: &Path) -> io::Result<()> {
+fn seed_signals_turn_from_usage(
+    target: &fuigo_session_writer::SessionWriter,
+    usage_path: &Path,
+    signals_path: &Path,
+) -> io::Result<()> {
     let data = match std::fs::read(usage_path) {
         Ok(data) => data,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -1341,13 +1406,14 @@ fn seed_signals_turn_from_usage(usage_path: &Path, signals_path: &Path) -> io::R
         user_message_count: max_turn,
         ..Default::default()
     };
-    crate::session::storage::write_bytes_atomic(
-        signals_path,
+    target.replace_atomic_sync(
+        rel_in(target, signals_path)?,
         &serde_json::to_vec(&signals).map_err(invalid_data)?,
     )
 }
 
 fn restamp_copied_usage(
+    target: &fuigo_session_writer::SessionWriter,
     path: &Path,
     session_id: &acp::SessionId,
     max_turn: Option<u32>,
@@ -1366,15 +1432,20 @@ fn restamp_copied_usage(
     if let Some(max_turn) = max_turn {
         file.retain_turns_through(max_turn);
     }
-    crate::session::storage::write_bytes_atomic(
-        path,
+    target.replace_atomic_sync(
+        rel_in(target, path)?,
         &serde_json::to_vec_pretty(&file).map_err(invalid_data)?,
     )
 }
 
 /// Copy one optional sidecar file (plan, signals, tool state, ...) when enabled and present; reports whether a copy happened.
 /// A sidecar that exists but is not a regular file is skipped with a warning rather than failing the fork.
-fn copy_sidecar_file(enabled: bool, src: &Path, dst: &Path) -> io::Result<bool> {
+fn copy_sidecar_file(
+    target: &fuigo_session_writer::SessionWriter,
+    enabled: bool,
+    src: &Path,
+    dst: &Path,
+) -> io::Result<bool> {
     if !enabled {
         return Ok(false);
     }
@@ -1387,7 +1458,7 @@ fn copy_sidecar_file(enabled: bool, src: &Path, dst: &Path) -> io::Result<bool> 
         }
         return Ok(false);
     }
-    super::super::owner_only::copy(src, dst)?;
+    target.copy_in_sync(src, rel_in(target, dst)?)?;
     Ok(true)
 }
 
@@ -1395,6 +1466,7 @@ fn copy_sidecar_file(enabled: bool, src: &Path, dst: &Path) -> io::Result<bool> 
 /// Records are user-editable data, so only the exact path shape this feature writes may resolve and symlinks are never followed.
 /// Dangling references are skipped rather than failing the fork (otherwise every /rewind in the target session would fail).
 fn copy_referenced_checkpoints(
+    target: &fuigo_session_writer::SessionWriter,
     checkpoint_files: &BTreeSet<String>,
     source_session_dir: &Path,
     target_dir: &Path,
@@ -1476,10 +1548,7 @@ fn copy_referenced_checkpoints(
             Err(error) => return Err(error),
         };
         let dst = target_dir.join(relative);
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        super::super::owner_only::write(&dst, &bytes)?;
+        target.replace_atomic_sync(rel_in(target, &dst)?, &bytes)?;
         copied += 1;
     }
     Ok(copied)

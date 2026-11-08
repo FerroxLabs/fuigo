@@ -83,6 +83,7 @@ fn is_valid_nonce(nonce: &str) -> bool {
 }
 
 /// Read the installation nonce, creating it atomically (no clobber) when absent.
+#[allow(clippy::disallowed_methods, reason = "installation nonce file under FUIGO_HOME; not inside a session folder")]
 pub(crate) fn load_or_create_nonce(path: &std::path::Path) -> std::io::Result<String> {
     let read = read_nonce;
     match read(path) {
@@ -401,6 +402,7 @@ pub fn is_greeting(text: &str) -> bool {
     GREETINGS.contains(&trimmed)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,6 +767,7 @@ mod tests {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "memory_context_p91_tests.rs"]
 mod p91_tests;

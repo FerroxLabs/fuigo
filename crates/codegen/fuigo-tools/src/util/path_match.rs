@@ -320,6 +320,7 @@ pub fn path_pattern_matches(path: &str, pattern: &glob::Pattern, base: Option<&R
         .any(|text| pattern.matches_with(text, path_glob_options()))
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod bounded_alias_tests {
     use std::time::{Duration, Instant};

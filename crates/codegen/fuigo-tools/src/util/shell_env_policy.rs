@@ -445,6 +445,7 @@ pub fn apply_shell_environment_policy(
     install_policy_base_env(cmd, Some(policy).filter(|p| !p.is_noop()));
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 pub(crate) fn t05_fresh_process(test_name: &str) -> bool {
     if std::env::var("T05_CHILD_TEST").as_deref() == Ok(test_name) {
@@ -502,6 +503,7 @@ pub(crate) const P86_CHILD_CHECK: &str = "test \"$P86_BENIGN\" = kept && test -z
 /// so the login-capture and persistent routes see an rc-only credential too.
 /// The parent asserts the child ran exactly one test, so a filter that matched nothing cannot
 /// pass vacuously.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 pub(crate) fn p86_parent_env(test_name: &str) -> bool {
     if std::env::var("P86_CHILD_TEST").as_deref() == Ok(test_name) {

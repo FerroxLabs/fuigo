@@ -41,6 +41,7 @@ fn worktree_dir_count() -> usize {
 }
 
 /// Creates dirs in nested groups of 100 so the tree has width and depth.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn make_nested_dirs(base: &Path, count: usize) {
     for i in 0..count {
         let dir = base.join(format!("g{}", i / 100)).join(format!("d{i}"));
@@ -56,6 +57,7 @@ struct Fixture {
 }
 
 /// Project with a real skill and a fat `.claude/worktrees` tree.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn build_fixture(worktree_dirs: usize) -> Fixture {
     let root = TempDir::new().unwrap();
     let project = root.path().join("project");

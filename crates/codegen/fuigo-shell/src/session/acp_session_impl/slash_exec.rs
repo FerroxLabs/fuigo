@@ -83,7 +83,8 @@ impl SessionActor {
             }
             BuiltinAction::ContextInfo => ok_end_turn(0, None),
             BuiltinAction::HooksTrust => {
-                let msg = match Self::do_hooks_trust_project(&self.session_info.cwd) {
+                let (result, grant) = Self::do_hooks_trust_project(&self.session_info.cwd);
+                let msg = match result {
                     Ok((root, note)) => {
                         fuigo_telemetry::session_ctx::log_event(
                             fuigo_telemetry::events::HookTrusted { success: true },
@@ -101,6 +102,7 @@ impl SessionActor {
                     }
                 };
                 self.send_host_turn_slash_command_output(&msg).await;
+                self.report_folder_trust_grant(grant);
                 ok_end_turn(0, None)
             }
             BuiltinAction::HooksList => {

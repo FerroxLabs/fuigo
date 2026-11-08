@@ -144,6 +144,11 @@ async fn spawn_session(
         ..Default::default()
     };
 
+    let session_writer = fuigo_session_writer::SessionWriter::try_claim(
+        session_info.id.0.to_string(),
+        crate::session::persistence::session_dir(&session_info),
+    )
+    .expect("claim the session's writer");
     let (handle, permission_rx, _system_prompt, thread) = spawn_session_on_thread(
         session_info,
         gateway,
@@ -264,6 +269,7 @@ async fn spawn_session(
         false,
         None,
         None,
+        session_writer,
     )
     .await
     .expect("session spawns");
@@ -399,5 +405,67 @@ fn p42_spawn_memory_reindex_withholds_session_token_from_refused_embeddings() {
                 .any(|o| o.authorization.as_deref().is_some_and(|a| a.contains(TOKEN))),
             "the session token reached a refused /embeddings destination via the spawn-time memory reindex: {embeds:?}"
         );
+    });
+}
+
+/// The open descriptors of this process that point at one of `paths`.
+#[cfg(target_os = "linux")]
+fn open_fds_to(paths: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    let wanted: Vec<std::path::PathBuf> =
+        paths.iter().map(|p| dunce::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
+    std::fs::read_dir("/proc/self/fd")
+        .map(|entries| {
+            entries.flatten().filter_map(|entry| std::fs::read_link(entry.path()).ok()).filter(|t| wanted.contains(t)).collect()
+        })
+        .unwrap_or_default()
+}
+
+/// F5-B5, box B4 (design F5 §6.1: free means everything is released). On the real spawn path, a session shut down and
+/// reaped frees its writer only after every handle of the session is closed: paused at the free (the writer's drop
+/// seam), `/proc/self/fd` holds no `events.jsonl`, `turn_owner.lock` or `session_writer.lock` of it. Before B5 the
+/// session thread's OS hold and the actor's turn-owner lock closed after the free.
+#[cfg(target_os = "linux")]
+#[test]
+fn f5b5_a_freed_session_writer_leaves_no_session_handle_open() {
+    if !child("f5b5_a_freed_session_writer_leaves_no_session_handle_open") {
+        return;
+    }
+    run(async {
+        crate::agent::config::Config::install_test_trusted_origins();
+        let (_auth_dir, am) = manager();
+        let cwd = tempfile::tempdir().unwrap();
+        let id = format!("f5b5-free-{}", uuid::Uuid::now_v7());
+        let gate = fuigo_session_writer::seams::arm(&format!("drop:{id}"));
+        let session = spawn_session(
+            &id,
+            cwd.path(),
+            "http://127.0.0.1:9",
+            BYOK,
+            am,
+            crate::config::MemoryConfig::default(),
+        )
+        .await;
+        let dir = crate::session::persistence::session_dir(&SessionInfo {
+            id: acp::SessionId::new(id.clone()),
+            cwd: cwd.path().to_string_lossy().into_owned(),
+        });
+        let files: Vec<std::path::PathBuf> =
+            ["events.jsonl", "turn_owner.lock", "session_writer.lock"].iter().map(|name| dir.join(name)).collect();
+        let live = open_fds_to(&files);
+        assert!(live.len() >= 2, "fixture: the live session holds its lock handles open: {live:?}");
+        let Spawned { _handle: handle, _thread: thread, .. } = session;
+        let _ = handle.cmd_tx.send(crate::session::SessionCommand::Shutdown(crate::session::ShutdownKind::Graceful));
+        drop(handle);
+        let (reached, open) = tokio::task::spawn_blocking(move || {
+            let reached = gate.wait_reached(std::time::Duration::from_secs(60));
+            let open = open_fds_to(&files);
+            gate.open();
+            (reached, open)
+        })
+        .await
+        .unwrap();
+        assert!(reached, "the session's writer was never freed after its shutdown");
+        assert!(open.is_empty(), "a handle of the session was still open when its writer was freed: {open:?}");
+        drop(thread);
     });
 }

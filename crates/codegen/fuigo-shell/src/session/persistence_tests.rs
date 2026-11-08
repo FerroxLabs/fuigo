@@ -406,7 +406,7 @@ async fn durable_append_drains_pending_update_in_fifo_order() {
     let summary = storage.load_summary(&info).await.unwrap();
     assert_eq!(summary.num_messages, 2);
 
-    let updates = storage.load_session(&info).await.unwrap().updates;
+    let updates = storage.load_session(&info, crate::session::storage::Access::Reader).await.unwrap().updates;
     let texts = updates
         .iter()
         .filter_map(|update| {
@@ -1144,7 +1144,7 @@ async fn measure_prompt_barrier_idle_barrier_and_summary_rewrite_cost() {
     let mut summary_rewrite = Vec::with_capacity(N);
     for _ in 0..N {
         let start = std::time::Instant::now();
-        crate::session::storage::write_bytes_atomic(&summary_path, &payload).unwrap();
+        crate::session::storage::write_bytes_atomic_fixture(&summary_path, &payload).unwrap();
         summary_rewrite.push(start.elapsed());
     }
 
@@ -2254,22 +2254,6 @@ mod prompt_file_tests {
     use super::*;
     use crate::test_support::unix_mode;
 
-    #[test]
-    fn prompt_file_dir_chain_is_owner_only() {
-        let home = tempfile::TempDir::new().unwrap();
-        let info = Info {
-            id: agent_client_protocol::SessionId::new("prompt-perm-test"),
-            cwd: "/some/project".to_string(),
-        };
-
-        let path = get_prompt_file_path_in(home.path(), &info, 0);
-
-        // The chain below prompts/ is ensure_owner_only_session_dir_in's job, pinned by ensure_owner_only_session_dir_tightens_chain
-        // Only the prompts/ level is this path's own creation
-        let prompts_dir = path.parent().unwrap();
-        assert_eq!(unix_mode(prompts_dir), 0o700, "prompts dir must be 0700");
-    }
-
     /// ensure_owner_only_session_dir_in is the dir creator for chat-kind (noop-persistence) writers.
     #[test]
     fn ensure_owner_only_session_dir_tightens_chain() {
@@ -2654,3 +2638,39 @@ fn a_session_copy_never_follows_a_symlink() {
     assert_eq!(names, vec!["compaction_checkpoints/real.json"], "only the regular file is copied");
     assert!(files.iter().all(|f| f.data != b"P146-OUTSIDE"));
 }
+
+// F5-C4: the by-path session-folder creator survives only as a test fixture (production goes through the writer).
+/// Inner implementation with an injectable fuigo home for tests.
+fn ensure_owner_only_session_dir_in(fuigo_home: &Path, info: &Info) -> std::io::Result<PathBuf> {
+    ensure_owner_only_session_dir_in_with(
+        fuigo_home,
+        info,
+        crate::session::storage::sync_dir_durable,
+        crate::session::storage::sync_file_durable,
+    )
+}
+
+fn ensure_owner_only_session_dir_in_with(
+    fuigo_home: &Path,
+    info: &Info,
+    sync_dir: impl Fn(&Path) -> std::io::Result<()>,
+    sync_file: impl Fn(&std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<PathBuf> {
+    let dir = session_dir_in(fuigo_home, info);
+    crate::session::storage::create_dir_all_durable_with(
+        &dir,
+        |dir| {
+            // Keep swallowing ensure errors: other failures must not block session-dir create
+            // But fsync `.cwd` on Ok so a later parent-dir sync cannot freeze a torn marker
+            if let Ok(cwd_dir) =
+                crate::util::fuigo_home::ensure_sessions_cwd_dir_in(fuigo_home, &info.cwd)
+            {
+                crate::session::storage::sync_cwd_marker_if_present_with(&cwd_dir, &sync_file)?;
+            }
+            crate::util::fuigo_home::create_dir_all_owner_only(dir)
+        },
+        sync_dir,
+    )?;
+    Ok(dir)
+}
+

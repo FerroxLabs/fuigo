@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use agent_client_protocol as acp;
@@ -24,9 +23,9 @@ pub struct TerminalRunRequest {
     /// - `true`: Agent tool calls (streaming updates, killable via fuigo/terminal/kill)
     /// - `false`: Extension methods, git helpers (no updates, not killable)
     pub stream: bool,
-    /// When Some, the streaming loop writes output to this file as it arrives.
-    /// Background tasks use it to retrieve the full output after the in-memory buffer truncates.
-    pub output_file: Option<PathBuf>,
+    /// When Some, the streaming loop appends output to this session log as it arrives, through the session's writer
+    /// (design F5 §5.4.2). Background tasks use it to retrieve the full output after the in-memory buffer truncates.
+    pub output_log: Option<fuigo_session_writer::SessionAppend>,
 }
 
 pub struct TerminalRunResult {

@@ -37,6 +37,7 @@ fn running_meta(id: &str, parent: &str) -> SubagentMeta {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn write_meta(dir: &std::path::Path, meta: &SubagentMeta) {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(
@@ -159,12 +160,15 @@ async fn live_session_with_running_meta(
     (agent, parent, sub_dir, cmd_rx)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 async fn list_running_subagents_finalizes_orphan_on_live_session() {
     if fuigo_test_support::env::rerun_in_own_process() {
         return;
     }
     let _home = fuigo_test_support::FuigoHome::new();
+    // The fixture stands in for the parent actor (no writer), so its records stage by path.
+    let _by_path = crate::agent::subagent::records_by_path_in_tests();
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -190,6 +194,7 @@ async fn list_running_subagents_finalizes_orphan_on_live_session() {
         .await;
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 async fn list_running_subagents_skips_live_coordinator_child() {
     if fuigo_test_support::env::rerun_in_own_process() {

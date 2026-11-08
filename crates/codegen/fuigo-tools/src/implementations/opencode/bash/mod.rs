@@ -350,6 +350,11 @@ impl fuigo_tool_runtime::Tool for BashTool {
         let session_cwd = crate::types::tool_metadata::resolve_cwd(&ctx, &resources).await?;
         let tool_call_id = ctx.call_id.as_str().to_owned();
         let session_folder = resources.lock().await.require::<SessionFolder>()?.0.clone();
+        let session_writer = resources
+            .lock()
+            .await
+            .get::<crate::types::resources::SessionFolderWriter>()
+            .map(|w| w.0.clone());
         let env = resources
             .lock()
             .await
@@ -381,9 +386,10 @@ impl fuigo_tool_runtime::Tool for BashTool {
         let timeout = Self::effective_timeout(input.timeout);
 
         // --- Build output file path ---
-        let output_file = session_folder
-            .join("terminal")
-            .join(format!("{}.log", tool_call_id));
+        let output_rel = std::path::PathBuf::from("terminal").join(format!("{}.log", tool_call_id));
+        let output_file = session_folder.join(&output_rel);
+        let output_log =
+            crate::computer::types::OutputLog::open(session_writer.as_ref(), output_rel).await;
 
         // --- Foreground execution ---
         let request = TerminalRunRequest {
@@ -397,6 +403,7 @@ impl fuigo_tool_runtime::Tool for BashTool {
             timeout,
             output_byte_limit,
             output_file: output_file.clone(),
+            output_log,
             notification_handle: notification_handle.clone(),
             tool_call_id: tool_call_id.clone(),
             display_command: None, // OpenCode doesn't use isolation wrapping

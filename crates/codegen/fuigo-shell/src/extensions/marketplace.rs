@@ -580,6 +580,7 @@ async fn handle_install(
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "marketplace tree under FUIGO_HOME; not inside a session folder")]
 async fn handle_uninstall(
     agent: &MvpAgent,
     sid: &acp::SessionId,
@@ -1230,6 +1231,7 @@ fn set_marketplace_bool_flag_in_toml(content: &str, key: &str) -> std::io::Resul
 /// Set `[marketplace] <key> = true`, reading and renaming under
 /// `fuigo_config::fs_atomic`'s `config.toml.lock` so a concurrent writer that
 /// also takes that lock cannot drop the flag by renaming its own document over it.
+#[allow(clippy::disallowed_methods, reason = "marketplace tree under FUIGO_HOME; not inside a session folder")]
 fn set_marketplace_bool_flag(config_path: &std::path::Path, key: &str) -> std::io::Result<()> {
     if let Some(parent) = config_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -1283,6 +1285,7 @@ fn lock_is_contended(e: &std::io::Error) -> bool {
 /// It serializes first-run auto-register across processes.
 /// Only `WouldBlock` retries; other I/O errors return early.
 /// The lock file is intentionally never removed (flock releases on exit).
+#[allow(clippy::disallowed_methods, reason = "marketplace tree under FUIGO_HOME; not inside a session folder")]
 fn acquire_init_lock(fuigo_home: &std::path::Path) -> std::io::Result<std::fs::File> {
     use fs2::FileExt;
     let _ = std::fs::create_dir_all(fuigo_home);
@@ -1350,6 +1353,7 @@ pub(crate) fn purge_default_skills_installs(fuigo_home: &std::path::Path) {
     });
 }
 
+#[allow(clippy::disallowed_methods, reason = "marketplace tree under FUIGO_HOME; not inside a session folder")]
 fn purge_default_skills_installs_impl(
     fuigo_home: &std::path::Path,
     load_registry: impl FnOnce() -> Result<
@@ -1440,6 +1444,7 @@ fn purge_default_skills_installs_impl(
 /// it must not inspect or mutate any persisted marketplace state.
 pub(crate) fn ensure_official_marketplace_source(_fuigo_home: &std::path::Path) {}
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod init_lock_tests {
     use super::*;
@@ -1455,6 +1460,7 @@ mod init_lock_tests {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod official_source_tests {
     use super::*;
@@ -1757,6 +1763,7 @@ mod official_source_tests {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod default_skills_purge_tests {
     use super::*;

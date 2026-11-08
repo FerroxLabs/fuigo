@@ -19,6 +19,11 @@ async fn resumed_session_reminder_lists_loops_subagents_and_workflows() {
             actor.session_info.id = acp::SessionId::new(format!("resume-status-{unique}"));
             let session_dir = crate::session::persistence::session_dir(&actor.session_info);
             std::fs::create_dir_all(&session_dir).unwrap();
+            // The resumed actor owns its folder (design F5 §5.5): the consume is that writer's removal.
+            std::sync::Arc::get_mut(&mut actor.rebuild_spec).expect("the test actor's spec is unshared").session_writer = Some(
+                fuigo_session_writer::SessionWriter::try_claim(actor.session_info.id.0.to_string(), session_dir.clone())
+                    .expect("claim"),
+            );
             let snapshot_path = session_dir.join("resume_status.json");
             std::fs::write(
                 &snapshot_path,

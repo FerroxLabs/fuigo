@@ -155,7 +155,7 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
     // not "elsewhere"). Held for the local writes only, not the cloud sync after them.
     let writer_lock = crate::session::session_writer_lock::acquire(&crate::session::persistence::session_dir(&info))
         .await
-        .map_err(crate::session::session_writer_lock::HeldElsewhere::into_acp_error)?;
+        .map_err(|_| crate::session::session_writer_lock::rename_held_elsewhere_error())?;
 
     // Update the session title in local storage
     let storage = JsonlStorageAdapter::default();
@@ -163,6 +163,9 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
         .update_session_title(&info, req.title.clone())
         .await
         .map_err(|e| {
+            if crate::session::session_writer_lock::is_held_elsewhere(&e) {
+                return crate::session::session_writer_lock::rename_held_elsewhere_error();
+            }
             crate::acp_error::session_storage(format!("failed to update session title: {e}"))
         })?;
 
@@ -179,10 +182,17 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
             .send(crate::session::commands::SessionCommand::TitleRenamed { manual: true });
     } else {
         // Dormant session: no actor to freeze it, so persist the frozen watermark directly for the next resume
-        crate::session::helpers::session_summary::save_title_refresh_watermark(
-            &crate::session::persistence::session_dir(&info),
-            crate::session::helpers::session_summary::TITLE_REFRESH_TURNS.len(),
-        );
+        // F5-C6: written as the session's writer; Busy means it just became resident and its actor persists it.
+        match fuigo_session_writer::SessionWriter::try_claim(
+            info.id.to_string(),
+            crate::session::persistence::session_dir(&info),
+        ) {
+            Ok(writer) => crate::session::helpers::session_summary::save_title_refresh_watermark(
+                Some(&writer),
+                crate::session::helpers::session_summary::TITLE_REFRESH_TURNS.len(),
+            ),
+            Err(_busy) => tracing::debug!("session became resident; its actor persists the title refresh watermark"),
+        }
     }
     drop(writer_lock);
 
@@ -255,10 +265,13 @@ async fn reset_session_title_to_auto(
     // not "elsewhere"). Held for the local writes only, not the cloud sync after them.
     let writer_lock = crate::session::session_writer_lock::acquire(&crate::session::persistence::session_dir(&info))
         .await
-        .map_err(crate::session::session_writer_lock::HeldElsewhere::into_acp_error)?;
+        .map_err(|_| crate::session::session_writer_lock::rename_held_elsewhere_error())?;
 
     let storage = JsonlStorageAdapter::default();
     let cleared = storage.reset_title_to_auto(&info).await.map_err(|e| {
+        if crate::session::session_writer_lock::is_held_elsewhere(&e) {
+            return crate::session::session_writer_lock::rename_held_elsewhere_error();
+        }
         crate::acp_error::session_storage(format!("failed to reset session title: {e}"))
     })?;
 
@@ -272,10 +285,17 @@ async fn reset_session_title_to_auto(
                 .send(crate::session::commands::SessionCommand::TitleRenamed { manual: false });
         } else {
             // Dormant session: persist the reopened watermark directly so the whole-conversation retitle can run on the next resume
-            crate::session::helpers::session_summary::save_title_refresh_watermark(
-                &crate::session::persistence::session_dir(&info),
-                0,
-            );
+            // F5-C6: written as the session's writer; Busy means it just became resident and its actor persists it.
+            match fuigo_session_writer::SessionWriter::try_claim(
+                info.id.to_string(),
+                crate::session::persistence::session_dir(&info),
+            ) {
+                Ok(writer) => crate::session::helpers::session_summary::save_title_refresh_watermark(
+                    Some(&writer),
+                    0,
+                ),
+                Err(_busy) => tracing::debug!("session became resident; its actor persists the title refresh watermark"),
+            }
         }
         drop(writer_lock);
         // Non-resident sessions have no persistence actor / RemoteSync.
@@ -514,11 +534,12 @@ async fn handle_session_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
 
     // Always drain: even a non-resident session can still have coordinator children finishing after an earlier fire-and-forget TeardownSession
     // That happens on e.g. idle unload. hard_stop / kill_all no-op when not resident.
-    agent.teardown_live_session_before_delete(&session_id).await;
+    let deadline = agent.teardown_live_session_before_delete(&session_id).await;
 
     // Shared delete: remote-first, then local disk and FTS eviction
-    // Mirrored by the `fuigo sessions delete <id>` CLI path.
-    crate::session::persistence::delete_session_history(
+    // Mirrored by the `fuigo sessions delete <id>` CLI path. The writer claim waits at most to `deadline`.
+    crate::session::persistence::delete_session_history_by(
+        deadline,
         &req.session_id,
         req.cwd.as_deref(),
         needs_remote,

@@ -51,10 +51,21 @@ pub struct PresentationHints {
 
 const HINTS_FILE: &str = "tool-presentation.json";
 
-pub(crate) async fn persist_hints(dir: &std::path::Path, hints: &PresentationHints) -> std::io::Result<()> {
-    crate::session::storage::write_bytes_atomic_async(
-        &dir.join(HINTS_FILE), serde_json::to_vec(hints).map_err(std::io::Error::other)?,
+/// Persist `hints` in the session folder, as its writer (F5-C6).
+pub(crate) async fn persist_hints_as(
+    writer: &fuigo_session_writer::SessionWriter, hints: &PresentationHints,
+) -> std::io::Result<()> {
+    crate::session::storage::write_bytes_atomic_as_async(
+        writer, &writer.dir().join(HINTS_FILE), serde_json::to_vec(hints).map_err(std::io::Error::other)?,
     ).await
+}
+
+/// Tests: [`persist_hints_as`] with a writer claimed for `dir`.
+#[cfg(test)]
+pub(crate) async fn persist_hints(dir: &std::path::Path, hints: &PresentationHints) -> std::io::Result<()> {
+    let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+        .map_err(|_busy| std::io::Error::other("busy"))?;
+    persist_hints_as(&writer, hints).await
 }
 
 /// The advertised list for an enabled projection: deferred schemas stay hidden unless selected (or `full`),
@@ -196,6 +207,7 @@ pub(crate) fn present(tools: &mut [ToolSpec], compact: bool) {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

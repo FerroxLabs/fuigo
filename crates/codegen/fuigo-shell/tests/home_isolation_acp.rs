@@ -16,6 +16,7 @@ mod acp_harness;
 
 use acp_harness::{AutoApproveClient, connect_and_auth, new_session, prompt_turn, run_agent_test};
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn harness_isolates_home_from_the_hosts_mcp_configuration() {
     // Kept alive for the whole test: dropping it would delete the poisoned home

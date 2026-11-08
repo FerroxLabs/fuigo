@@ -1,0 +1,20 @@
+---
+source: crates/codegen/fuigo-pager/src/views/trust_modal_tests.rs
+expression: render(&mut state)
+---
+              ┌─ Folder trust ─────────────────────────────────────────────────────────── [✗] ─┐
+              │  This folder  Trusted folders                                                  │
+              │────────────────────────────────────────────────────────────────────────────────│
+              │  No trusted folders yet.                                                       │
+              │                                                                                │
+              │  Folders in your ~/.fuigo/config.toml [folder_trust] trusted_folders are       │
+              │  managed there.                                                                │
+              │                                                                                │
+              │                                                                                │
+              │                                                                                │
+              │                                                                                │
+              │                                                                                │
+              │                                                                                │
+              │                                                                                │
+              │                            Tab switch  |  Esc close                            │
+              └────────────────────────────────────────────────────────────────────────────────┘

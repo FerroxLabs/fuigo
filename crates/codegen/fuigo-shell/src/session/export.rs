@@ -194,7 +194,7 @@ impl ExportedSession {
 
     pub(crate) async fn from_local_session(info: &Info) -> std::io::Result<Self> {
         let storage = JsonlStorageAdapter::new();
-        let data = storage.load_session(info).await?;
+        let data = storage.load_session(info, crate::session::storage::Access::Reader).await?;
         Ok(Self::from_persisted_data(info, &data))
     }
 

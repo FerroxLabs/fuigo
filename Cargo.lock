@@ -3683,6 +3683,7 @@ dependencies = [
  "fuigo-dirs",
  "fuigo-hooks",
  "fuigo-sampling-types",
+ "fuigo-session-writer",
  "fuigo-token-estimation",
  "fuigo-tool-types",
  "fuigo-tools",
@@ -4138,6 +4139,7 @@ dependencies = [
  "filetime",
  "fuigo-auth",
  "fuigo-circuit-breaker",
+ "fuigo-config",
  "fuigo-dirs",
  "fuigo-extra-ca",
  "fuigo-test-utils",
@@ -4245,6 +4247,7 @@ dependencies = [
 name = "fuigo-hooks"
 version = "0.1.0"
 dependencies = [
+ "dunce",
  "fastrand",
  "fuigo-auth",
  "fuigo-config",
@@ -4926,6 +4929,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "fuigo-secrets",
+ "fuigo-session-writer",
  "serde",
  "serde_json",
  "strum 0.27.2",
@@ -4953,6 +4957,19 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "fuigo-session-writer"
+version = "0.1.0"
+dependencies = [
+ "dunce",
+ "fuigo-config",
+ "fuigo-secrets",
+ "libc",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5052,6 +5069,7 @@ dependencies = [
  "fuigo-secrets",
  "fuigo-session-events",
  "fuigo-session-search",
+ "fuigo-session-writer",
  "fuigo-shared",
  "fuigo-shell-base",
  "fuigo-shell-session-support",
@@ -5195,6 +5213,7 @@ dependencies = [
  "fuigo-config",
  "fuigo-paths",
  "fuigo-sandbox",
+ "fuigo-session-writer",
  "fuigo-tools",
  "fuigo-tty-utils",
  "fuigo-workspace",
@@ -5436,6 +5455,7 @@ dependencies = [
  "fuigo-peer",
  "fuigo-sandbox",
  "fuigo-secrets",
+ "fuigo-session-writer",
  "fuigo-test-support",
  "fuigo-test-utils",
  "fuigo-token-estimation",
@@ -5597,7 +5617,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.40"
+version = "1.0.41"
 dependencies = [
  "semver",
 ]

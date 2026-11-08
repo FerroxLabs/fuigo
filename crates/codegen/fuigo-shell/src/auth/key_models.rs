@@ -52,6 +52,7 @@ pub fn cached_model_ids(home: &Path, provider_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
 pub fn write_cached_model_ids(home: &Path, provider_id: &str, ids: &[String]) -> std::io::Result<()> {
     let path = cache_path(home, provider_id);
     if let Some(dir) = path.parent() {
@@ -307,6 +308,7 @@ pub fn model_overrides(
     out
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

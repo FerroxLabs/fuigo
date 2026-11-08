@@ -142,6 +142,9 @@ impl McpDumpKind {
 pub struct McpTruncateContext {
     pub(crate) max_output_bytes: usize,
     pub(crate) session_folder: Option<PathBuf>,
+    /// The session's writer: the dump goes through it (design F5 §5.4.2). Without one the dump is skipped (F5-C4):
+    /// a session folder is never written by path.
+    pub(crate) session_writer: Option<fuigo_session_writer::SessionWriter>,
     pub(crate) shell_tool: String,
     pub(crate) call_id: String,
 }
@@ -160,6 +163,9 @@ impl McpTruncateContext {
                 let session_folder = guard
                     .get::<crate::types::resources::SessionFolder>()
                     .map(|f| f.0.clone());
+                let session_writer = guard
+                    .get::<crate::types::resources::SessionFolderWriter>()
+                    .map(|w| w.0.clone());
                 let shell_tool = guard
                     .get::<crate::types::template_renderer::TemplateRenderer>()
                     .and_then(|r| r.tool_for_kind(ToolKind::Execute))
@@ -168,6 +174,7 @@ impl McpTruncateContext {
                 Self {
                     max_output_bytes,
                     session_folder,
+                    session_writer,
                     shell_tool,
                     call_id,
                 }
@@ -175,6 +182,7 @@ impl McpTruncateContext {
             Err(_) => Self {
                 max_output_bytes: resolved_default,
                 session_folder: None,
+                session_writer: None,
                 shell_tool: "bash".to_string(),
                 call_id,
             },
@@ -207,25 +215,27 @@ async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
     let total_bytes = text.len();
     let kind = McpDumpKind::classify(text.as_str());
 
-    let output_file_path = trunc_ctx.session_folder.as_ref().map(|folder| {
-        folder.join("mcp").join(format!(
-            "{}.{}",
-            sanitized_stem(&trunc_ctx.call_id),
-            kind.extension()
-        ))
-    });
+    let dump_rel = PathBuf::from("mcp").join(format!(
+        "{}.{}",
+        sanitized_stem(&trunc_ctx.call_id),
+        kind.extension()
+    ));
+    let output_file_path = trunc_ctx.session_folder.as_ref().map(|folder| folder.join(&dump_rel));
 
     let file_hint = if let Some(ref path) = output_file_path {
-        // The full MCP output is session content: `<session>/mcp/` 0700 and the dump 0600 (P150, S14).
-        let (dump, bytes) = (path.clone(), text.as_bytes().to_vec());
-        let written = tokio::task::spawn_blocking(move || {
-            if let Some(parent) = dump.parent() {
-                let _ = fuigo_config::create_dir_all_owner_only(parent);
-            }
-            fuigo_config::write_file_owner_only(&dump, bytes)
-        })
-        .await
-        .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+        // The full MCP output is session content: `<session>/mcp/` 0700 and the dump 0600 (P150, S14). It replaces a
+        // dump of the same call, as before.
+        let bytes = text.as_bytes().to_vec();
+        let written = if let Some(writer) = &trunc_ctx.session_writer {
+            writer.replace_atomic(dump_rel, bytes).await
+        } else {
+            // Never written by path: the dump is skipped (warned below) and the output stays inline-truncated.
+            drop(bytes);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "no session writer: refusing to write the session folder by path",
+            ))
+        };
         match written {
             Ok(()) => format!(" Full output written to: {}.", path.to_string_lossy()),
             Err(e) => {
@@ -296,6 +306,9 @@ mod tests {
     fn cfg_with_folder(folder: PathBuf, max: usize) -> McpTruncateContext {
         McpTruncateContext {
             max_output_bytes: max,
+            session_writer: Some(
+                fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), &folder).unwrap(),
+            ),
             session_folder: Some(folder),
             shell_tool: "bash".to_string(),
             call_id: "call-test".to_string(),
@@ -450,6 +463,9 @@ mod tests {
         let cfg = McpTruncateContext {
             max_output_bytes: 100,
             session_folder: Some(dir.path().to_path_buf()),
+            session_writer: Some(
+                fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir.path()).unwrap(),
+            ),
             shell_tool: "bash".to_string(),
             call_id: "../../evil".to_string(),
         };
@@ -474,6 +490,7 @@ mod tests {
         let cfg = McpTruncateContext {
             max_output_bytes: 1,
             session_folder: None,
+            session_writer: None,
             shell_tool: "bash".to_string(),
             call_id: "call-test".to_string(),
         };
@@ -580,6 +597,7 @@ mod tests {
         let cfg = McpTruncateContext {
             max_output_bytes: 20_000,
             session_folder: None,
+            session_writer: None,
             shell_tool: "bash".to_string(),
             call_id: "call-img".to_string(),
         };
@@ -693,5 +711,44 @@ mod tests {
         assert!(!text.contains("data:image"));
         assert!(!text.contains(&payload));
         assert!(text.contains("[MCP output truncated:"));
+    }
+
+    /// Through the session's writer (design F5 §5.4.2): the dump lands owner-only under `mcp/`, and once the writer
+    /// released the folder for a delete a dump writes nothing, recreates nothing and gives no file hint (1.0.40's
+    /// by-path dump recreated the deleted folder).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dump_through_the_session_writer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = "mcp-truncate-through-the-writer";
+        let folder = tmp.path().join(id);
+        let writer = fuigo_session_writer::SessionWriter::try_claim(id, &folder).unwrap();
+        let mut ctx = cfg_with_folder(folder.clone(), 16);
+        ctx.session_writer = Some(writer.clone());
+        let mut text = "x".repeat(64);
+        truncate_mcp_text(&mut text, &ctx).await;
+        assert!(text.contains("Full output written to"), "{text}");
+        let dumps: Vec<_> = std::fs::read_dir(folder.join("mcp")).unwrap().collect();
+        assert_eq!(dumps.len(), 1);
+
+        writer.delete_tree().await.unwrap();
+        let mut late = "y".repeat(64);
+        truncate_mcp_text(&mut late, &ctx).await;
+        assert!(!late.contains("Full output written to"), "{late}");
+        assert!(!folder.exists(), "a dump after the delete recreated the session folder");
+    }
+
+    /// F5-C4: with no session writer the full-output dump is skipped (nothing written by path, no folder created, no
+    /// file hint) and the output is still truncated inline.
+    #[tokio::test]
+    async fn dump_without_a_writer_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("session");
+        let mut ctx = cfg_with_folder(folder.clone(), 16);
+        ctx.session_writer = None;
+        let mut text = "x".repeat(64);
+        truncate_mcp_text(&mut text, &ctx).await;
+        assert!(text.contains("[MCP output truncated:"), "{text}");
+        assert!(!text.contains("Full output written to"), "{text}");
+        assert!(!folder.exists(), "a writer-less dump created the session folder");
     }
 }

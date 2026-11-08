@@ -941,6 +941,7 @@ fn timeout_test_options(total_timeout: Option<std::time::Duration>) -> super::He
         memory_flush: false,
         peer: false,
         memory_enabled_override: None,
+        no_session_persistence: false,
     }
 }
 
@@ -4651,4 +4652,28 @@ fn headless_accepts_every_other_permission_mode() {
     for mode in [None, Some("default"), Some("acceptEdits"), Some("auto"), Some("dontAsk"), Some("bypassPermissions")] {
         super::reject_headless_plan_mode(mode).unwrap_or_else(|e| panic!("{mode:?} must be accepted: {e}"));
     }
+}
+
+/// 74.B22: a `session/load` the agent refuses for a reason keeps that reason; only a genuinely missing session says so.
+#[tokio::test]
+async fn a_failed_session_load_reports_the_agents_reason() {
+    let tmp = tempfile::tempdir().expect("tmp cwd");
+    let (tx, _log) = spawn_fake_agent(
+        serde_json::json!({"result": {}}),
+        Err("session history is unreadable: bad checksum"),
+    );
+    let msg = match super::open_session(
+        &tx,
+        tmp.path(),
+        Some("sess-resume-2"),
+        None,
+        super::RunDeadline::start(None),
+    )
+    .await
+    {
+        Ok(_) => panic!("the agent refused the load"),
+        Err(e) => e.to_string(),
+    };
+    assert!(msg.contains("bad checksum"), "the reason must survive: {msg}");
+    assert!(!msg.contains("Session does not exist"), "{msg}");
 }

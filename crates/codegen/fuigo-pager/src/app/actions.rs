@@ -761,6 +761,10 @@ pub enum Action {
     ShareSession,
     /// Show session info (auth, ID, cwd, model, context usage) instantly.
     ShowSessionInfo,
+    /// F11: open the folder trust screens (`/trust`) for the active session's folder.
+    OpenFolderTrust,
+    /// F11: stop trusting another listed folder (the `/trust` list); the startup question's writer, never a new one.
+    DeclineFolderTrust(std::path::PathBuf),
     /// Show release notes in a modal.
     ShowReleaseNotes {
         title: String,
@@ -1555,6 +1559,17 @@ pub enum Effect {
         chat_kind: bool,
         /// The agent's load attempt this task belongs to, echoed on its result ([`AgentView::begin_load_attempt`]).
         attempt: u64,
+    },
+    /// F5-P: close the session a durable folder-trust grant owes a reload, within
+    /// [`crate::app::folder_trust_reload::CLOSE_WAIT`].
+    FolderTrustClose { agent_id: AgentId, session_id: acp::SessionId },
+    /// F5-P: load the closed session again, cold and trusted, inside reload window `generation`.
+    FolderTrustLoad {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        cwd: std::path::PathBuf,
+        meta: serde_json::Value,
+        generation: u64,
     },
     /// Scan enabled foreign session stores without delaying the native list.
     ScanForeignSessions {
@@ -2411,6 +2426,7 @@ impl TaskResult {
             self,
             TaskResult::SessionCreated { .. }
                 | TaskResult::SessionLoaded { .. }
+                | TaskResult::FolderTrustReloadOwed { .. }
                 | TaskResult::WorktreeSessionCreated { .. }
                 | TaskResult::WorktreeForked { .. }
         )
@@ -2513,6 +2529,21 @@ pub enum TaskResult {
         scheduler_background_loops: Option<bool>,
         /// The load attempt that produced this result; a result of a superseded attempt is ignored.
         attempt: u64,
+    },
+    /// A load whose response says a folder-trust reload is still owed (`_meta["fuigo/folderTrustReload"].owed`).
+    FolderTrustReloadOwed { loaded: Box<TaskResult> },
+    /// [`Effect::FolderTrustClose`] finished: the close outcome, or why there was none.
+    FolderTrustClosed {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        outcome: Result<String, String>,
+    },
+    /// [`Effect::FolderTrustLoad`] finished.
+    FolderTrustLoaded {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        generation: u64,
+        result: Result<(), String>,
     },
     /// Session load (resume) failed.
     SessionLoadFailed {

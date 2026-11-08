@@ -20,6 +20,7 @@ use serde_json::json;
 
 const AUTH_KEY: &str = "p148-authenticate-key-FAKE";
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn an_authenticated_key_resolves_trusted_key_references_in_the_same_process() {
     run_agent_test(|cwd, _mock| async move {

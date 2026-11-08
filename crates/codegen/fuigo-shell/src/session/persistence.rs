@@ -485,6 +485,9 @@ pub enum PersistenceMsg {
     CopyFile {
         one_shot: tokio::sync::oneshot::Sender<anyhow::Result<SessionStateCopy>>,
     },
+    /// F5-C5 (design F5 §6.1): the session ended or closed. The task writes what is queued before this message, drops
+    /// its writer clone and ends, even while other handles to it are still held; later messages are not written.
+    ReleaseWriter,
 }
 
 /// Scripted compaction fixtures retain their observation channel while using
@@ -1063,6 +1066,7 @@ pub(crate) async fn write_permission_policy_marker(
     info: &Info,
     binding: fuigo_workspace::permission::launch_policy::PolicyBinding,
 ) -> std::io::Result<()> {
+    // F5-A: summary RMW under `summary.json.lock` (design F5 §5.6 "Summary RMW", §5.5 rename row).
     crate::session::storage::JsonlStorageAdapter::with_root(fuigo_home())
         .apply_summary_patch(
             info,
@@ -1074,44 +1078,16 @@ pub(crate) async fn write_permission_policy_marker(
         .await
 }
 
-/// Owner-only and durable session dir for writers that bypass `init_session` (chat-kind, pre-init fork stamp).
-/// A later occupied `init_session` will not re-sync the encoded-cwd direntry.
-pub(crate) fn ensure_owner_only_session_dir(info: &Info) -> std::io::Result<PathBuf> {
-    ensure_owner_only_session_dir_in(&fuigo_home(), info)
-}
-
-/// Inner implementation with an injectable fuigo home for tests.
-fn ensure_owner_only_session_dir_in(fuigo_home: &Path, info: &Info) -> std::io::Result<PathBuf> {
-    ensure_owner_only_session_dir_in_with(
-        fuigo_home,
-        info,
-        crate::session::storage::sync_dir_durable,
-        crate::session::storage::sync_file_durable,
-    )
-}
-
-fn ensure_owner_only_session_dir_in_with(
-    fuigo_home: &Path,
-    info: &Info,
-    sync_dir: impl Fn(&Path) -> std::io::Result<()>,
-    sync_file: impl Fn(&std::fs::File) -> std::io::Result<()>,
-) -> std::io::Result<PathBuf> {
-    let dir = session_dir_in(fuigo_home, info);
-    crate::session::storage::create_dir_all_durable_with(
-        &dir,
-        |dir| {
-            // Keep swallowing ensure errors: other failures must not block session-dir create
-            // But fsync `.cwd` on Ok so a later parent-dir sync cannot freeze a torn marker
-            if let Ok(cwd_dir) =
-                crate::util::fuigo_home::ensure_sessions_cwd_dir_in(fuigo_home, &info.cwd)
-            {
-                crate::session::storage::sync_cwd_marker_if_present_with(&cwd_dir, &sync_file)?;
-            }
-            crate::util::fuigo_home::create_dir_all_owner_only(dir)
-        },
-        sync_dir,
-    )?;
-    Ok(dir)
+/// Owner-only and durable session dir for writers that bypass `init_session` (pre-init fork stamp), made by the
+/// session's writer (F5-C4); the `<encoded-cwd>` parent (many sessions' folder) as before.
+pub(crate) fn ensure_owner_only_session_dir(writer: &fuigo_session_writer::SessionWriter) -> std::io::Result<PathBuf> {
+    if let Some(cwd_dir) = writer.dir().parent()
+        && cwd_dir.is_dir()
+    {
+        crate::session::storage::sync_cwd_marker_if_present_with(cwd_dir, crate::session::storage::sync_file_durable)?;
+    }
+    writer.ensure_folder_sync()?;
+    Ok(writer.dir().to_path_buf())
 }
 
 /// `session_dir` with an injectable fuigo home (pure path computation).
@@ -1120,7 +1096,7 @@ fn session_dir_in(fuigo_home: &Path, info: &Info) -> PathBuf {
 }
 
 /// Get file path for storing a large prompt.
-/// Creates the prompts subdirectory if it doesn't exist.
+/// Pure path computation (F5-C4): the session writer that writes the file creates `prompts/` owner-only.
 /// Path format: `{session_dir}/prompts/prompt_{prompt_index}.txt`
 pub(crate) fn get_prompt_file_path(info: &Info, prompt_index: usize) -> PathBuf {
     get_prompt_file_path_in(&fuigo_home(), info, prompt_index)
@@ -1128,11 +1104,7 @@ pub(crate) fn get_prompt_file_path(info: &Info, prompt_index: usize) -> PathBuf 
 
 /// Inner implementation with an injectable fuigo home for tests.
 fn get_prompt_file_path_in(fuigo_home: &Path, info: &Info, prompt_index: usize) -> PathBuf {
-    // Best-effort; failures surface on the prompt-file write itself.
-    let _ = ensure_owner_only_session_dir_in(fuigo_home, info);
-    let prompts_dir = session_dir_in(fuigo_home, info).join("prompts");
-    let _ = crate::util::fuigo_home::create_dir_all_owner_only(&prompts_dir);
-    prompts_dir.join(format!("prompt_{}.txt", prompt_index))
+    session_dir_in(fuigo_home, info).join("prompts").join(format!("prompt_{}.txt", prompt_index))
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -1929,22 +1901,25 @@ impl SessionPersistence {
         }
     }
 
+    /// The session's snapshot lock (P123), opened through this task's session writer (design F5 §5.6). No writer: no
+    /// lock (the turn start is then written without it, as when the lock file cannot be opened).
+    async fn acquire_snapshot_lock(&self) -> Option<crate::session::storage::jsonl::HeldLock> {
+        match self.storage.session_writer(&self.info) {
+            Ok(writer) => crate::session::storage::snapshot_lock::acquire_async(&writer).await,
+            Err(error) => {
+                tracing::debug!(%error, "no snapshot lock: no session writer");
+                None
+            }
+        }
+    }
+
     async fn probe_writable(&self) -> io::Result<()> {
-        let dir = self
-            .storage
-            .updates_file_path(&self.info)
-            .and_then(|path| path.parent().map(Path::to_path_buf))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "session directory is unknown; cannot probe disk space",
-                )
-            })?;
+        // F5-C6: the probe file is a session-folder write, so it goes through the session's writer.
+        let writer = self.storage.session_writer(&self.info)?;
         tokio::task::spawn_blocking(move || {
-            std::fs::create_dir_all(&dir)?;
-            let probe = dir.join(".disk_ok");
-            fuigo_config::write_file_owner_only(&probe, b"ok")?;
-            let _ = std::fs::remove_file(&probe);
+            writer.ensure_folder_sync()?;
+            writer.with_append_file(".disk_ok", |file| std::io::Write::write_all(file, b"ok"))??;
+            let _ = writer.remove_sync(".disk_ok");
             io::Result::Ok(())
         })
         .await
@@ -1969,7 +1944,7 @@ impl SessionPersistence {
         }
         // Flush the merge-pending notification so the backfill re-reads it.
         let _ = self.flush_pending().await;
-        let persisted = match self.storage.load_session(&self.info).await {
+        let persisted = match self.storage.load_session(&self.info, crate::session::storage::Access::Reader).await {
             Ok(persisted) => persisted,
             Err(error) => {
                 tracing::warn!(%error, "writeback upgrade: failed to load session for backfill");
@@ -2245,7 +2220,10 @@ impl SessionPersistence {
             }
             match msg {
                 PersistenceMsg::PresentationHints { hints, respond_to } => {
-                    let result = crate::session::tool_presentation::persist_hints(&session_dir(&self.info), &hints).await;
+                    let result = match self.storage.session_writer(&self.info) {
+                        Ok(writer) => crate::session::tool_presentation::persist_hints_as(&writer, &hints).await,
+                        Err(error) => Err(error),
+                    };
                     let _ = respond_to.send(result);
                 }
                 PersistenceMsg::UpgradeToWriteback { auth_manager } => {
@@ -2253,6 +2231,11 @@ impl SessionPersistence {
                 }
                 PersistenceMsg::Flush => {
                     let _ = self.flush_pending().await;
+                }
+                PersistenceMsg::ReleaseWriter => {
+                    let _ = self.flush_pending().await;
+                    self.storage.release_writer();
+                    break;
                 }
                 PersistenceMsg::FlushAndAck { respond_to } => {
                     let result = self.flush_and_sync().await;
@@ -2271,7 +2254,8 @@ impl SessionPersistence {
                         let _ = self.flush_pending().await;
                         self.turn_start_guard = None;
                     }
-                    self.turn_start_guard = crate::session::storage::snapshot_lock::acquire_async(&session_dir(&self.info))
+                    self.turn_start_guard = self
+                        .acquire_snapshot_lock()
                         .await
                         .map(|file| crate::session::storage::snapshot_lock::SnapshotHold::new(turn_id, file, alive));
                 }
@@ -2346,7 +2330,7 @@ impl SessionPersistence {
                         let guard = if self.turn_start_guard.is_some() {
                             None
                         } else {
-                            crate::session::storage::snapshot_lock::acquire_async(&session_dir(&self.info)).await
+                            self.acquire_snapshot_lock().await
                         };
                         let _ = self.flush_pending().await;
                         guard
@@ -2713,7 +2697,10 @@ impl SessionPersistence {
                     }
                 }
                 PersistenceMsg::ExecutionState { mutation, respond_to } => {
-                    let result = crate::session::execution_state::apply(&session_dir(&self.info), mutation).await;
+                    let result = match self.storage.session_writer(&self.info) {
+                        Ok(writer) => crate::session::execution_state::apply_as(&writer, mutation).await,
+                        Err(error) => Err(error),
+                    };
                     let _ = respond_to.send(result);
                 }
                 PersistenceMsg::CompactionCheckpoint(checkpoint) => {
@@ -3072,13 +3059,17 @@ fn init_remote_sync(
 
 /// Pull a session from the backend if not found locally.
 /// Returns the pulled session's [`Info`] (cwd may differ from caller's on different machines), or `None` if not found or on error.
-async fn try_pull_from_remote(info: &Info, client: &crate::remote::BackendClient) -> Option<Info> {
+async fn try_pull_from_remote(
+    info: &Info,
+    client: &crate::remote::BackendClient,
+    owner: Option<&fuigo_session_writer::SessionWriter>,
+) -> Option<Info> {
     // BackendClient resolves auth internally via its auth_manager.
     client.auth_manager.as_ref()?;
 
     tracing::info!(session_id = %info.id, "Session not found locally, trying backend");
 
-    match crate::remote::pull_session_to_local(&info.id.0, client).await {
+    match crate::remote::pull_session_to_local(&info.id.0, client, owner).await {
         Ok(crate::remote::PullResult::Hydrated(pulled_info)) => {
             tracing::info!(
                 session_id = %info.id,
@@ -3205,6 +3196,7 @@ pub(crate) async fn new(
     info: &Info,
     model_id: acp::ModelId,
     deps: SessionDeps,
+    session_writer: fuigo_session_writer::SessionWriter,
 ) -> io::Result<PersistenceHandle> {
     let SessionDeps {
         title_policy,
@@ -3218,8 +3210,17 @@ pub(crate) async fn new(
         search_index,
         session_kind,
     } = deps;
+    // F12: with persistence off the session gets the chat kind's no-op actor: nothing is stored, nothing to resume.
+    if fuigo_session_writer::persistence_disabled() {
+        return Ok(PersistenceHandle::noop());
+    }
     let root_dir = fuigo_home();
-    let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir));
+    if let Some(relay) = &relay_sync {
+        relay.attach_writer(session_writer.clone());
+    }
+    // F5-C4 (design §5.5): the persistence task writes as a clone of the session's live writer; the clone drops with
+    // the task (the session's end), inside the close budget (§6.1).
+    let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir).with_writer(session_writer));
 
     let mut summary = storage.init_session(info, model_id.clone()).await?;
     touch_worktree_for_session(info).await;
@@ -3297,10 +3298,16 @@ pub(crate) async fn new_with_explicit_dir(
     model_id: acp::ModelId,
     sampling_client: OaiCompatClient,
     session_summary_model: String,
+    session_writer: fuigo_session_writer::SessionWriter,
 ) -> io::Result<PersistenceHandle> {
-    let summary_path = target_dir.join("summary.json");
+    // F12: a subagent of an unpersisted run is not stored either.
+    if fuigo_session_writer::persistence_disabled() {
+        return Ok(PersistenceHandle::noop());
+    }
+    // F5-C4: the child's writer (design §5.5 subagent row); its clone lives in the persistence task.
+    let summary_writer = session_writer.clone();
     let storage: Box<dyn StorageAdapter> =
-        Box::new(JsonlStorageAdapter::with_explicit_session_dir(target_dir));
+        Box::new(JsonlStorageAdapter::with_explicit_session_dir(target_dir).with_writer(session_writer));
 
     let mut summary = storage.init_session(info, model_id.clone()).await?;
     touch_worktree_for_session(info).await;
@@ -3316,7 +3323,8 @@ pub(crate) async fn new_with_explicit_dir(
     }
     let summary_json = serde_json::to_vec_pretty(&summary)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&summary_path, summary_json)?;
+    summary_writer.replace_atomic_sync("summary.json", &summary_json)?;
+    drop(summary_writer);
 
     if summary.current_model_id != model_id {
         storage.update_current_model(info, &model_id).await?;
@@ -3394,11 +3402,12 @@ async fn pull_on_miss(
     info: &Info,
     client: &crate::remote::BackendClient,
     err: io::Error,
+    owner: Option<&fuigo_session_writer::SessionWriter>,
 ) -> io::Result<Info> {
     if err.kind() != io::ErrorKind::NotFound {
         return Err(err);
     }
-    try_pull_from_remote(info, client).await.ok_or(err)
+    try_pull_from_remote(info, client, owner).await.ok_or(err)
 }
 
 /// Resume never depends on the latest compaction checkpoint (see [`load_light`]), but a rewind past that compaction
@@ -3437,10 +3446,15 @@ async fn warn_on_unreadable_compaction_checkpoint(
 
 /// Load a session without reading updates into memory.
 /// Instead, provides the path to the updates file for streaming reads.
+///
+/// `access` (design F5 §5.7, §6.2): a cold load passes `Owner` with the writer it claimed before this read, so every
+/// load-time repair (history rebuild, `.corrupt` copy, load repair, a backend pull) runs as that writer, exactly when
+/// 1.0.40 ran it; a resident load passes `Reader`.
 pub(crate) async fn load_light(
     info: &Info,
     backend: Option<&crate::remote::BackendClient>,
     deps: SessionDeps,
+    access: crate::session::storage::Access<'_>,
 ) -> io::Result<(PersistedInfo, PersistenceHandle)> {
     let SessionDeps {
         title_policy,
@@ -3464,14 +3478,24 @@ pub(crate) async fn load_light(
     // through had already replaced, which startup would then write back. It also runs before the repair below, which
     // may rewrite chat_history.jsonl, the file that tells whether the rewind went through. A session only on the
     // backend has no leftover here.
-    let rewind_notice = jsonl_storage.reconcile_interrupted_rewind(info).await;
-    let (mut persisted, loaded_info) = match storage.load_session_without_updates(info).await {
-        Ok(p) => (p, info.clone()),
+    let owner = match access {
+        crate::session::storage::Access::Owner(writer) => Some(writer),
+        crate::session::storage::Access::Reader => None,
+    };
+    // F5-C3 (design F5 §5.5, §5.7): the reconcile writes as the load's own writer; a reader skips it.
+    let rewind_notice = jsonl_storage.reconcile_interrupted_rewind_as(info, owner).await;
+    let (mut persisted, loaded_info, access) = match storage.load_session_without_updates(info, access).await {
+        Ok(p) => (p, info.clone(), access),
         Err(e) => match backend {
             Some(client) => {
-                let pulled = pull_on_miss(info, client, e).await?;
-                let p = storage.load_session_without_updates(&pulled).await?;
-                (p, pulled)
+                let pulled = pull_on_miss(info, client, e, owner).await?;
+                // The owner's writer covers the pulled session only when it names the folder the pull landed in.
+                let pulled_access = match owner {
+                    Some(writer) if writer.dir() == session_dir(&pulled) => access,
+                    _ => crate::session::storage::Access::Reader,
+                };
+                let p = storage.load_session_without_updates(&pulled, pulled_access).await?;
+                (p, pulled, pulled_access)
             }
             None => return Err(e),
         },
@@ -3492,7 +3516,7 @@ pub(crate) async fn load_light(
     // the checkpoint's projection and those later items instead (P111, DI-03; `load_session_without_updates`), and
     // counts their unreadable lines, so the repair below covers the recovered history too; spawn persists it.
     let repair_notice = jsonl_storage
-        .repair_after_corrupt_load(&loaded_info, &mut persisted)
+        .repair_after_corrupt_load(&loaded_info, &mut persisted, access)
         .await
         .map(|repair| repair.notice());
     let history_repair_notice = match (rewind_notice, repair_notice) {
@@ -3531,7 +3555,19 @@ pub(crate) async fn load_light(
 
     let (handle, rx, summary_tx, disk_full_tx, retry_status_mirror) = actor_channel();
 
-    let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
+    // F5-C4 (design §5.5): a cold load's persistence task writes as a clone of the load's writer (moved on into the
+    // actor); a resident load, or a pull that landed in another folder, gets none and writes nothing.
+    drop(storage);
+    let persistence_storage = match owner.filter(|writer| writer.dir() == session_dir(&loaded_info)) {
+        Some(writer) => {
+            if let Some(relay) = &relay_sync {
+                relay.attach_writer(writer.clone());
+            }
+            jsonl_storage.with_writer(writer.clone())
+        }
+        None => jsonl_storage,
+    };
+    let storage: Arc<dyn StorageAdapter> = Arc::new(persistence_storage);
     let remote_sync = init_remote_sync(&persisted_info.summary, storage_mode, auth_manager)?;
 
     let has_title = !persisted_info.summary.display_title().is_empty();
@@ -3603,6 +3639,10 @@ pub enum DeleteSessionError {
     /// remote copy nor the local folder was touched.
     #[error("{}", crate::session::session_writer_lock::HELD_ELSEWHERE)]
     HeldElsewhere,
+    /// A writer of the session in this process did not finish in time (design F5 §6.3): nothing was touched, locally
+    /// or remotely.
+    #[error("{}", crate::session::session_writer_lock::STILL_CLOSING)]
+    StillClosing,
 }
 
 /// A remote delete that has been built but not started: [`delete_session_history_in`] only polls it after the local
@@ -3645,12 +3685,26 @@ pub async fn delete_session_history(
     auth_manager: Arc<crate::auth::AuthManager>,
     search_index: Option<&fuigo_session_search::SearchIndexManager>,
 ) -> Result<SessionDeletion, DeleteSessionError> {
+    let deadline = tokio::time::Instant::now() + crate::session::session_writer_lock::CLAIM_WAIT;
+    delete_session_history_by(deadline, session_id, cwd, needs_remote, auth_manager, search_index).await
+}
+
+/// [`delete_session_history`] whose writer claim (design F5 §6.3 step 1) waits at most until `claim_deadline`, then
+/// answers `still closing` with nothing touched: the agent's delete passes what is left of its total budget.
+pub(crate) async fn delete_session_history_by(
+    claim_deadline: tokio::time::Instant,
+    session_id: &str,
+    cwd: Option<&str>,
+    needs_remote: bool,
+    auth_manager: Arc<crate::auth::AuthManager>,
+    search_index: Option<&fuigo_session_search::SearchIndexManager>,
+) -> Result<SessionDeletion, DeleteSessionError> {
     let remote: Option<RemoteDelete> = needs_remote.then(|| {
         let client = crate::remote::client::BackendClient::new().with_auth_manager(auth_manager);
         let session_id = session_id.to_owned();
         Box::pin(async move { client.delete_session_data(&session_id).await }) as RemoteDelete
     });
-    delete_session_history_in(&fuigo_home(), session_id, cwd, remote, search_index).await
+    delete_session_history_in_by(&fuigo_home(), session_id, cwd, remote, search_index, claim_deadline).await
 }
 
 /// Prefix of the name a session folder is moved to (next to it, in its cwd folder) while it is being deleted:
@@ -3666,31 +3720,14 @@ const DELETING_PREFIX: &str = ".fuigo-deleting-";
 /// hold released and the tombstone removed, so Windows has no open handle of ours in the folder being removed. If the
 /// rename is refused (on Windows, a file inside open without share-delete), the folder is removed in place after the
 /// hold is released, as before. A session live in this same process keeps its actor's hold (the lock is counted).
-/// `after_rename` is a test window between the rename and the release.
-async fn delete_local_session(
-    storage: &JsonlStorageAdapter,
-    info: &Info,
-    session_dir: &Path,
-    writer_lock: Option<crate::session::session_writer_lock::SessionWriterLock>,
-    after_rename: impl FnOnce(&Path),
-) -> io::Result<()> {
-    let tombstone = session_dir.file_name().and_then(|name| {
-        let name = format!("{DELETING_PREFIX}{}-{}", name.to_string_lossy(), std::process::id());
-        session_dir.parent().map(|parent| parent.join(name))
-    });
-    if let Some(tombstone) = tombstone
-        && std::fs::rename(session_dir, &tombstone).is_ok()
-    {
-        after_rename(&tombstone);
-        drop(writer_lock);
-        return match tokio::fs::remove_dir_all(&tombstone).await {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        };
-    }
-    drop(writer_lock);
-    storage.delete_session(info).await
+///
+/// F5 (design §6.3): this is the session writer's `delete_tree`, which keeps exactly that order (rename while held,
+/// release with the state `ReleasedForWipe`, wipe; release then remove in place when the rename is refused). Any later
+/// write through a clone of the writer answers `Gone` and recreates nothing. The writer drops after the wipe.
+async fn delete_local_session(session_writer: fuigo_session_writer::SessionWriter) -> io::Result<()> {
+    let result = session_writer.delete_tree().await;
+    drop(session_writer);
+    result
 }
 
 /// [`delete_session_history`] against an explicit Fuigo home, with the remote delete (when there is one) passed in
@@ -3702,6 +3739,18 @@ async fn delete_session_history_in(
     cwd: Option<&str>,
     remote: Option<RemoteDelete>,
     search_index: Option<&fuigo_session_search::SearchIndexManager>,
+) -> Result<SessionDeletion, DeleteSessionError> {
+    let deadline = tokio::time::Instant::now() + crate::session::session_writer_lock::CLAIM_WAIT;
+    delete_session_history_in_by(root, session_id, cwd, remote, search_index, deadline).await
+}
+
+async fn delete_session_history_in_by(
+    root: &Path,
+    session_id: &str,
+    cwd: Option<&str>,
+    remote: Option<RemoteDelete>,
+    search_index: Option<&fuigo_session_search::SearchIndexManager>,
+    claim_deadline: tokio::time::Instant,
 ) -> Result<SessionDeletion, DeleteSessionError> {
     let sid = acp::SessionId::new(Arc::from(session_id));
 
@@ -3722,10 +3771,23 @@ async fn delete_session_history_in(
     // A `404` means the copy is already gone, so deletion stays idempotent and falls through to local cleanup
     // The local session's writer lock comes first (1.0.30 P30-DIRECT): a session open in another window is refused
     // before the cloud copy is touched, so a refused delete leaves both copies as they were
-    let writer_lock = match &local_info {
-        Some(info) => crate::session::session_writer_lock::acquire(&session_dir_in(root, info))
+    // F5 (design §6.3 step 1): that hold is the session's writer, claimed with the eager OS attach. A writer of the id
+    // still in this process (an actor whose teardown has not finished): wait until `claim_deadline` (what is left of the
+    // agent's 8 s delete budget; 10 s from the CLI), then `still closing`, with nothing touched. A failed remote delete
+    // drops the writer, which releases the hold cleanly.
+    let session_writer = match &local_info {
+        Some(info) => Some(
+            fuigo_session_writer::SessionWriter::claim(
+                info.id.0.to_string(),
+                session_dir_in(root, info),
+                claim_deadline,
+            )
             .await
-            .map_err(|crate::session::session_writer_lock::HeldElsewhere| DeleteSessionError::HeldElsewhere)?,
+            .map_err(|error| match error {
+                fuigo_session_writer::ClaimError::HeldElsewhere => DeleteSessionError::HeldElsewhere,
+                fuigo_session_writer::ClaimError::StillClosing => DeleteSessionError::StillClosing,
+            })?,
+        ),
         None => None,
     };
 
@@ -3734,14 +3796,12 @@ async fn delete_session_history_in(
         None => false,
     };
 
-    let removed = match local_info {
-        Some(info) => {
-            delete_local_session(&storage, &info, &session_dir_in(root, &info), writer_lock, |_| {})
-                .await
-                .map_err(DeleteSessionError::Local)?;
+    let removed = match (local_info, session_writer) {
+        (Some(info), Some(session_writer)) => {
+            delete_local_session(session_writer).await.map_err(DeleteSessionError::Local)?;
             Some(info)
         }
-        None => None,
+        _ => None,
     };
     let local_removed = removed.is_some();
 
@@ -3779,10 +3839,12 @@ fn classify_remote_delete(
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "persistence_tests.rs"]
 mod durable_update_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "persistence_delete_held_elsewhere_tests.rs"]
 mod delete_held_elsewhere_tests;
@@ -3791,6 +3853,7 @@ mod delete_held_elsewhere_tests;
 #[path = "persistence_delete_session_history_tests.rs"]
 mod delete_session_history_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "persistence_worktree_stamp_tests.rs"]
 mod worktree_stamp_tests;
@@ -3827,6 +3890,10 @@ const SWEPT_BLOB_DIRS: [&str; 4] = ["images", "videos", "downloads", archive_log
 /// It then runs on the thread pool and never competes with the agent's single-threaded `LocalSet`.
 #[tracing::instrument(skip_all)]
 pub(crate) fn cleanup_stale_sessions(live_session_dir: &Path) {
+    // F12: an unpersisted run neither stores nor removes session state.
+    if fuigo_session_writer::persistence_disabled() {
+        return;
+    }
     CLEANUP_SESSIONS_ONCE.call_once(|| {
         let ttl_days = resolve_cleanup_ttl_days();
         let sessions_root = fuigo_home().join("sessions");
@@ -3954,6 +4021,7 @@ async fn mark_session_live_waiting(
     mark_session_live_with(session_dir, wait_limit, &touch_nofollow).await
 }
 
+/// F5-A: liveness mark — mtime only, opens without create, writes no bytes, under the sweep lock, runs before the writer is claimed on load (both the summary.json bump and the updates.jsonl fallback).
 /// `touch` bumps one file's mtime (tests inject one that fails, as a read-only file or a Windows sharing violation
 /// does).
 async fn mark_session_live_with(
@@ -3994,6 +4062,9 @@ async fn mark_session_live_with(
     // summary is bumped under the same lock; when it cannot be taken (a writer holds it past the limit, a planted
     // link) the transcript is bumped instead, which the repair never touches.
     // Only a lock actually taken excludes a repair (Astra r2); it is held to the end of the mark.
+    // rb/re marks for B-F5 (design F5 §9.4): the liveness bump is a sanctioned summary section under the summary lock;
+    // declared before the lock so the lock closes inside the marks.
+    let _rmw_marks = fuigo_session_writer::trace::sanctioned_rmw_guard(&[session_dir.join(SUMMARY_LOCK_FILE).as_path(), summary.as_path()]);
     let summary_lock = match open_lock_nofollow(session_dir, SUMMARY_LOCK_FILE) {
         Some(lock) if take_lock_waiting(&lock, true, wait_limit).await == LockWait::Taken => Some(crate::session::storage::jsonl::HeldLock::new(lock)),
         _ => None,
@@ -4078,9 +4149,11 @@ async fn take_lock_waiting(lock: &std::fs::File, exclusive: bool, wait_limit: st
 
 /// Sets `path`'s mtime to now without following a link at that path and without writing anything. Fails on a missing,
 /// non-regular or unwritable file.
+#[allow(clippy::disallowed_methods, reason = "liveness mark — mtime only, opens without create, writes no bytes, under the sweep lock, runs before the writer is claimed on load")]
 fn touch_nofollow(path: &Path) -> io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     // Write access is required for `set_modified` on Windows; nothing is written
+    // F5-A: liveness mark — mtime only, opens without create, writes no bytes, under the sweep lock, runs before the writer is claimed on load
     options.write(true);
     #[cfg(unix)]
     {
@@ -4502,6 +4575,16 @@ fn cleanup_pinned_session(
     ) else {
         return stats;
     };
+    // F5 §5.6: a writer another process claimed since the first look (a rename's summary patch holds only
+    // `session_writer.lock`, not `turn_owner.lock`) keeps the session; looked at again with both locks held
+    if crate::session::session_writer_lock::dir_open_elsewhere(session_dir) {
+        tracing::debug!(
+            target: "fuigo_shell::session::persistence",
+            dir = %session_dir.display(),
+            "SESSION_CLEANUP_SKIPPED: session was opened in another process during the sweep"
+        );
+        return stats;
+    }
     drop(turn_owner);
     // Released before the rename: on Windows it would refuse it
     drop(session_pin);
@@ -4695,10 +4778,11 @@ fn prune_pinned_blob_dir(session: &sweep_pin::PinnedDir, dir_name: &str, ttl_day
 /// Opens (creating, owner-only) the lock file `name` in `session_dir` without ever following a link at that path:
 /// `O_NOFOLLOW` on Unix, `FILE_FLAG_OPEN_REPARSE_POINT` on Windows (a link is then opened itself and refused as not a
 /// regular file). `None` when it cannot be opened that way (a missing folder, a planted link).
+#[allow(clippy::disallowed_methods, reason = "lock sidecar (§5.6): summary.json.lock in the folder; the sweep lock is a sibling outside it")]
 fn open_lock_nofollow(session_dir: &Path, name: &str) -> Option<std::fs::File> {
     let path = session_dir.join(name);
     let mut options = std::fs::OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
+    options.read(true).write(true).create(true).truncate(false); // F5-A: lock sidecar (§5.6): summary.json.lock in the folder; the sweep lock is a sibling outside it
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -4850,6 +4934,7 @@ fn is_stale(mtime: std::time::SystemTime, ttl_days: u32) -> bool {
     mtime.elapsed().is_ok_and(|age| age > ttl)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "persistence_cleanup_stale_sessions_tests.rs"]
 mod cleanup_stale_sessions_tests;
@@ -4858,34 +4943,42 @@ mod cleanup_stale_sessions_tests;
 #[path = "persistence_agent_name_persistence_tests.rs"]
 mod agent_name_persistence_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "persistence_collect_session_files_tests.rs"]
 mod collect_session_files_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "persistence_session_exists_tests.rs"]
 mod session_exists_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "persistence_find_summary_by_session_id_tests.rs"]
 mod find_summary_by_session_id_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "persistence_resumed_sandbox_profile_tests.rs"]
 mod resumed_sandbox_profile_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "persistence_session_exists_for_cwd_tests.rs"]
 mod session_exists_for_cwd_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "persistence_find_local_child_tests.rs"]
 mod find_local_child_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "persistence_resolve_local_session_tests.rs"]
 mod resolve_local_session_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "persistence_repo_wide_resolution_tests.rs"]
 mod repo_wide_resolution_tests;

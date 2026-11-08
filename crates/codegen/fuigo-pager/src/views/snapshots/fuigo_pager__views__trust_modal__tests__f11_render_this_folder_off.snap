@@ -1,0 +1,20 @@
+---
+source: crates/codegen/fuigo-pager/src/views/trust_modal_tests.rs
+expression: "render(&mut TrustModalState::new(snap(TrustStatus::Off, &[])))"
+---
+              ┌─ Folder trust ─────────────────────────────────────────────────────────── [✗] ─┐
+              │  This folder  Trusted folders                                                  │
+              │────────────────────────────────────────────────────────────────────────────────│
+              │  Folder     /work/app/src                                                      │
+              │  Trust key  /work/app                                                          │
+              │  Status     Folder trust is off (config, FUIGO_FOLDER_TRUST=0, or a local      │
+              │  build): every folder is trusted.                                              │
+              │                                                                                │
+              │  Trust covers the folder's settings (MCP servers, hooks, skills, rules) and    │
+              │  its shell commands.                                                           │
+              │                                                                                │
+              │                                                                                │
+              │                                                                                │
+              │                                                                                │
+              │                            Tab switch  |  Esc close                            │
+              └────────────────────────────────────────────────────────────────────────────────┘

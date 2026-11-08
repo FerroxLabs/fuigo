@@ -42,18 +42,27 @@ struct Harness {
 
 impl Harness {
     async fn new() -> Self {
-        Self::build(false, None).await
+        Self::build(false, None, None).await
     }
 
     async fn subagent() -> Self {
-        Self::build(true, None).await
+        Self::build(true, None, None).await
     }
 
     async fn with_hook_workspace() -> Self {
-        Self::build(false, Some(tempfile::TempDir::new().expect("hook cwd"))).await
+        Self::build(false, Some(tempfile::TempDir::new().expect("hook cwd")), None).await
     }
 
-    async fn build(is_subagent: bool, hook_workspace: Option<tempfile::TempDir>) -> Self {
+    /// A hook workspace plus a session process scope, as a resident session has.
+    async fn with_hook_workspace_and_scope(scope: fuigo_tools::util::ProcessScope) -> Self {
+        Self::build(false, Some(tempfile::TempDir::new().expect("hook cwd")), Some(scope)).await
+    }
+
+    async fn build(
+        is_subagent: bool,
+        hook_workspace: Option<tempfile::TempDir>,
+        scope: Option<fuigo_tools::util::ProcessScope>,
+    ) -> Self {
         let (gateway_tx, gateway) = tokio::sync::mpsc::unbounded_channel();
         let (persistence_tx, mut persistence) =
             tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
@@ -64,6 +73,9 @@ impl Harness {
             create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
         if let Some(dir) = hook_workspace.as_ref() {
             actor.hook_resolved_workspace_root = dir.path().to_string_lossy().into_owned();
+        }
+        if scope.is_some() {
+            actor.tool_context.process_scope = scope;
         }
         actor.startup_hints.is_subagent = is_subagent;
         if is_subagent {
@@ -1136,6 +1148,136 @@ async fn ctrl_c_pauses_the_active_goal() {
         })
         .await
         .expect("Ctrl+C must pause the active goal");
+    })
+    .await;
+}
+
+/// F13 harness: a real `run_session` whose session has a process scope and one SessionEnd command hook.
+/// `close` reproduces what close, idle-unload and delete do: `take_session` closes the scope, then the actor drains
+/// `Shutdown`. Returns the command channel (closed once the actor has returned) and when `Shutdown` was sent.
+async fn f13_end_session(
+    script: &str,
+    timeout_ms: u64,
+    close: bool,
+) -> (Harness, tokio::sync::mpsc::UnboundedSender<SessionCommand>, std::time::Instant) {
+    let scope = fuigo_tools::util::ProcessScope::new();
+    let mut h = Harness::with_hook_workspace_and_scope(scope.clone()).await;
+    *h.actor.hook_registry.borrow_mut() = Some(Arc::new(
+        super::client_hooks_tests::file_registry_with_timeout(HookEventName::SessionEnd, script, timeout_ms),
+    ));
+    let (cmd_tx, _fired) = h.spawn_loop().await;
+    if close {
+        scope.kill_all();
+    }
+    let sent = std::time::Instant::now();
+    cmd_tx
+        .send(SessionCommand::Shutdown(crate::session::ShutdownKind::CancelRunningTurn))
+        .unwrap();
+    (h, cmd_tx, sent)
+}
+
+async fn f13_wait_for(path: &std::path::Path, limit: std::time::Duration) -> bool {
+    tokio::time::timeout(limit, async {
+        while !path.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// F13: ACP `session/close` (and idle-unload, delete) closes the session's process scope before the actor drains
+/// `Shutdown`. The SessionEnd command hook must still run its command; it writes to its own path, outside the session.
+/// It sleeps first, as a real hook does work: a bare `echo` can finish in the spawn-to-register window even unfixed.
+#[tokio::test(flavor = "current_thread")]
+async fn f13_session_end_hook_runs_after_close_closed_the_scope() {
+    run(async {
+        let out = tempfile::TempDir::new().unwrap();
+        let marker = out.path().join("session-end-ran");
+        let (_h, _cmd_tx, _sent) =
+            f13_end_session(&format!("sleep 1; echo ran > '{}'", marker.display()), 5000, true).await;
+        assert!(
+            f13_wait_for(&marker, std::time::Duration::from_secs(10)).await,
+            "the SessionEnd hook never ran its command after close closed the session's process scope"
+        );
+    })
+    .await;
+}
+
+/// F13: close does not wait on a SessionEnd hook. The actor returns (so the writer frees and close answers inside its
+/// budget) while the hook is still running, and the hook then finishes on its own.
+#[tokio::test(flavor = "current_thread")]
+async fn f13_close_does_not_wait_on_a_running_session_end_hook() {
+    run(async {
+        let out = tempfile::TempDir::new().unwrap();
+        let marker = out.path().join("session-end-done");
+        let (_h, cmd_tx, sent) =
+            f13_end_session(&format!("sleep 4; echo done > '{}'", marker.display()), 20_000, true).await;
+        let returned = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !cmd_tx.is_closed() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let elapsed = sent.elapsed();
+        assert!(returned.is_ok(), "the actor never returned");
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "the actor returned {elapsed:?} after Shutdown: it waited on the SessionEnd hook"
+        );
+        assert!(!marker.exists(), "the hook cannot have finished before the actor returned");
+        assert!(
+            f13_wait_for(&marker, std::time::Duration::from_secs(10)).await,
+            "the SessionEnd hook did not finish after the actor returned"
+        );
+    })
+    .await;
+}
+
+/// F13 keeps ebbc99037's guarantee: a SessionEnd hook that runs past its own timeout is killed with its whole process
+/// group, so a grandchild it backgrounded does not survive.
+#[tokio::test(flavor = "current_thread")]
+async fn f13_a_session_end_hook_past_its_timeout_is_killed_with_its_grandchild() {
+    run(async {
+        let out = tempfile::TempDir::new().unwrap();
+        let started = out.path().join("started");
+        let leaked = out.path().join("leaked");
+        let script = format!(
+            "sh -c 'sleep 3 && echo alive > {}' & echo up > '{}'; sleep 30",
+            leaked.display(),
+            started.display()
+        );
+        let (_h, _cmd_tx, _sent) = f13_end_session(&script, 1000, true).await;
+        assert!(
+            f13_wait_for(&started, std::time::Duration::from_secs(10)).await,
+            "the SessionEnd hook never ran its command after close"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        assert!(
+            !leaked.exists(),
+            "the timed-out SessionEnd hook's backgrounded grandchild survived: its group was not killpg'd"
+        );
+    })
+    .await;
+}
+
+/// F13 leaves process exit alone: `/exit`, Ctrl+D and headless `-p` end flush a session whose scope is still open,
+/// and there the hook still finishes before the actor returns (the process exits right after).
+#[tokio::test(flavor = "current_thread")]
+async fn f13_process_exit_flush_still_runs_the_session_end_hook_inline() {
+    run(async {
+        let out = tempfile::TempDir::new().unwrap();
+        let marker = out.path().join("session-end-inline");
+        let (_h, cmd_tx, _sent) =
+            f13_end_session(&format!("sleep 1; echo ran > '{}'", marker.display()), 5000, false).await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !cmd_tx.is_closed() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the actor never returned");
+        assert!(marker.exists(), "the flushed session returned before its SessionEnd hook finished");
     })
     .await;
 }

@@ -64,6 +64,7 @@ mod peer_auth_tests;
 pub(crate) mod drivers;
 pub mod protocol;
 pub(crate) mod server;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 pub(crate) mod test_support;
 mod transport;
@@ -2246,6 +2247,7 @@ fn spawn_leader_process(mut cmd: Command) -> std::io::Result<std::process::Child
     #[allow(clippy::disallowed_methods)]
     cmd.spawn()
 }
+#[allow(clippy::disallowed_methods, reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder")]
 fn spawn_leader_subprocess(env_urls: &LeaderEnvUrls) -> Result<u32, ConnectionError> {
     let exe = resolve_exe_for_spawn()?;
     let mut cmd = Command::new(exe);
@@ -2332,6 +2334,7 @@ pub(crate) async fn wait_for_socket_connectable(
         None => Err(ConnectionError::Timeout),
     }
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     #[test]

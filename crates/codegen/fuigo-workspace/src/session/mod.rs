@@ -1081,7 +1081,7 @@ pub(crate) fn get_or_open_session_writer(
         );
         return EventWriter::noop();
     }
-    let writer = EventWriter::open(&dir);
+    let writer = EventWriter::open_at(&dir);
     writers
         .entry(session_id.to_owned())
         .or_insert(writer)

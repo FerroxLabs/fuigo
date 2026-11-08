@@ -114,19 +114,24 @@ fn read_witness(path: &Path) -> io::Result<Option<CompactionWitness>> {
     }
 }
 
-fn write_witness(path: &Path, witness: &CompactionWitness) -> io::Result<()> {
+fn write_witness(writer: &fuigo_session_writer::SessionWriter, path: &Path, witness: &CompactionWitness) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(witness).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    crate::session::storage::write_bytes_atomic(path, &bytes)
+    crate::session::storage::write_bytes_atomic_as(writer, path, &bytes)
 }
 
 /// Make `chat_history.jsonl` durable as it is, then durably add the witness entry for `checkpoint`.
 /// Blocking. The caller (the compaction commit) appends the activation marker only after this succeeded.
-pub(crate) fn write_compaction_witness_sync(session_dir: &Path, checkpoint: &CompactionCheckpointFile) -> io::Result<()> {
+/// F5-C4: as the session's writer (`writer`'s folder is `session_dir`).
+pub(crate) fn write_compaction_witness_sync(
+    writer: &fuigo_session_writer::SessionWriter,
+    session_dir: &Path,
+    checkpoint: &CompactionCheckpointFile,
+) -> io::Result<()> {
     let chat_path = session_dir.join(crate::session::storage::CHAT_HISTORY_FILE);
-    // The fingerprint must describe what a crash leaves on disk, so the chat file is flushed first.
-    // Write access without truncation: Windows flushes a file only through a handle that may write to it.
-    match std::fs::OpenOptions::new().write(true).open(&chat_path) {
-        Ok(file) => crate::session::storage::sync_file_durable(&file)?,
+    // The fingerprint must describe what a crash leaves on disk, so the chat file is flushed first (the writer opens
+    // it with write access without truncation: Windows flushes a file only through a handle that may write to it).
+    match writer.sync_existing_sync(crate::session::storage::CHAT_HISTORY_FILE) {
+        Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
@@ -154,7 +159,7 @@ pub(crate) fn write_compaction_witness_sync(session_dir: &Path, checkpoint: &Com
     if witness.entries.len() > KEPT_ENTRIES {
         evict_excess_entries(session_dir, &mut witness);
     }
-    write_witness(&path, &witness)
+    write_witness(writer, &path, &witness)
 }
 
 /// Drop the oldest entries until [`KEPT_ENTRIES`] remain, never the one the latest committed marker names: its
@@ -187,29 +192,44 @@ fn evict_excess_entries(session_dir: &Path, witness: &mut CompactionWitness) {
 
 /// The marker of `checkpoint_id` is committed: entries of earlier compactions (and of attempts that never activated)
 /// are no longer needed. Best effort: a stale entry only costs a check.
-pub(crate) fn compaction_activated_sync(session_dir: &Path, checkpoint_id: &str) {
+pub(crate) fn compaction_activated_sync(writer: &fuigo_session_writer::SessionWriter, session_dir: &Path, checkpoint_id: &str) {
     let path = session_dir.join(COMPACTION_WITNESS_FILE);
     let Ok(Some(mut witness)) = read_witness(&path) else {
         return;
     };
     witness.entries.retain(|entry| entry.checkpoint_id == checkpoint_id);
     witness.evicted.clear();
-    if let Err(error) = write_witness(&path, &witness) {
+    if let Err(error) = write_witness(writer, &path, &witness) {
         tracing::warn!(path = %path.display(), %error, "could not prune the compaction witness");
     }
 }
 
-/// `chat_history.jsonl` in `session_dir` was rewritten as a whole with `written` (`None`: rebuilt from the transcript)
-/// and the rewrite landed. Unless that was a compaction's own rewrite (its bytes are the rewrite an entry expects; the
-/// rewrite fingerprint then tells it apart), no compaction rewrite is outstanding any more and the witness is removed.
-/// Best effort.
-pub(crate) fn clear_after_chat_rewrite(session_dir: &Path, written: Option<&[u8]>) {
-    let path = session_dir.join(COMPACTION_WITNESS_FILE);
-    if !path.exists() {
+/// `chat_history.jsonl` was rewritten as a whole with `written` (`None`: rebuilt from the transcript) and the rewrite
+/// landed. Unless that was a compaction's own rewrite (its bytes are the rewrite an entry expects; the rewrite
+/// fingerprint then tells it apart), no compaction rewrite is outstanding any more and the witness is removed, through
+/// the session's writer (design F5 §5.3; F5-C4: the by-path variant is gone). Best effort.
+pub(crate) fn clear_after_chat_rewrite_through(
+    session_writer: &fuigo_session_writer::SessionWriter,
+    written: Option<&[u8]>,
+) {
+    let path = session_writer.dir().join(COMPACTION_WITNESS_FILE);
+    if !witness_outlived_rewrite(&path, written) {
         return;
     }
+    match session_writer.remove_sync(COMPACTION_WITNESS_FILE) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(path = %path.display(), %error, "could not remove the compaction witness"),
+    }
+}
+
+/// Whether the witness at `path` exists and the rewrite `written` was not a compaction's own.
+fn witness_outlived_rewrite(path: &Path, written: Option<&[u8]>) -> bool {
+    if !path.exists() {
+        return false;
+    }
     if let Some(written) = written
-        && let Ok(Some(witness)) = read_witness(&path)
+        && let Ok(Some(witness)) = read_witness(path)
     {
         let len = written.len() as u64;
         let mut sha = None;
@@ -217,14 +237,10 @@ pub(crate) fn clear_after_chat_rewrite(session_dir: &Path, written: Option<&[u8]
             entry.rewrite.len == len && *sha.get_or_insert_with(|| sha256_hex(written)) == entry.rewrite.sha256
         });
         if is_a_compaction_rewrite {
-            return;
+            return false;
         }
     }
-    match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => tracing::warn!(path = %path.display(), %error, "could not remove the compaction witness"),
-    }
+    true
 }
 
 /// Whether `bytes` (the start of the chat file, read up to `len`) has SHA-256 `sha256`.
@@ -467,9 +483,15 @@ pub(crate) fn unapplied_compaction_projection(session_dir: &Path) -> Option<Vec<
     recover_unapplied_compaction(session_dir).map(|recovered| recovered.history)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A writer of the test folder `dir` (F5-C4: the witness is written only as a session writer).
+    fn test_writer(dir: &Path) -> fuigo_session_writer::SessionWriter {
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).unwrap()
+    }
 
     fn checkpoint_line(id: &str, at: usize) -> String {
         let update = crate::session::storage::SessionUpdate::Fuigo(Box::new(
@@ -518,7 +540,10 @@ mod tests {
     }
 
     fn chat(dir: &Path, items: &[ConversationItem]) {
-        crate::session::storage::write_jsonl_atomic(&dir.join("chat_history.jsonl"), items).unwrap();
+        let bytes = crate::session::storage::to_jsonl_bytes(items).unwrap();
+        crate::session::storage::write_bytes_atomic_reporting_as(&test_writer(dir), &dir.join("chat_history.jsonl"), &bytes)
+            .map_err(crate::session::storage::AtomicWriteError::into_io)
+            .unwrap();
     }
 
     fn texts(items: &[ConversationItem]) -> Vec<String> {
@@ -534,7 +559,7 @@ mod tests {
         let projection = vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY")];
         chat(dir, &old);
         let c1 = write_checkpoint(dir, "c1", projection.clone());
-        write_compaction_witness_sync(dir, &c1).unwrap();
+        write_compaction_witness_sync(&test_writer(dir), dir, &c1).unwrap();
 
         // Witness written, marker not appended (the commit stopped before its commit point): nothing to recover.
         std::fs::write(dir.join("updates.jsonl"), "").unwrap();
@@ -591,19 +616,19 @@ mod tests {
         let old = vec![ConversationItem::system("SYS"), ConversationItem::user("P0")];
         chat(dir, &old);
         let c1 = write_checkpoint(dir, "c1", vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY1")]);
-        write_compaction_witness_sync(dir, &c1).unwrap();
+        write_compaction_witness_sync(&test_writer(dir), dir, &c1).unwrap();
         std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c1", 1)).unwrap();
         let mut appended = old.clone();
         appended.push(ConversationItem::user("P1"));
         std::fs::write(dir.join("chat_history.jsonl"), raw(&appended)).unwrap();
         let c2 = write_checkpoint(dir, "c2", vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY2")]);
-        write_compaction_witness_sync(dir, &c2).unwrap();
+        write_compaction_witness_sync(&test_writer(dir), dir, &c2).unwrap();
 
         let got = unapplied_compaction_projection(dir).expect("c1 is still recoverable");
         assert_eq!(texts(&got), ["SYS", "SUMMARY1", "P1"]);
 
         // c2 activates and its rewrite never lands either: c2's projection, then what came after it.
-        compaction_activated_sync(dir, "c2");
+        compaction_activated_sync(&test_writer(dir), dir, "c2");
         let mut updates = checkpoint_line("c1", 1);
         updates.push_str(&checkpoint_line("c2", 2));
         std::fs::write(dir.join("updates.jsonl"), updates).unwrap();
@@ -625,7 +650,7 @@ mod tests {
         let projection = vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY")];
         chat(dir, &head);
         let c1 = write_checkpoint(dir, "c1", projection.clone());
-        write_compaction_witness_sync(dir, &c1).unwrap();
+        write_compaction_witness_sync(&test_writer(dir), dir, &c1).unwrap();
         std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c1", 1)).unwrap();
 
         // Landed, the witness not yet removed (a crash in between), then a later message appended.
@@ -651,13 +676,13 @@ mod tests {
         let old = vec![ConversationItem::system("SYS"), ConversationItem::user("P0")];
         chat(dir, &old);
         let c1 = write_checkpoint(dir, "c1", vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY1")]);
-        write_compaction_witness_sync(dir, &c1).unwrap();
+        write_compaction_witness_sync(&test_writer(dir), dir, &c1).unwrap();
         std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c1", 1)).unwrap();
-        compaction_activated_sync(dir, "c1");
+        compaction_activated_sync(&test_writer(dir), dir, "c1");
         for attempt in 0..3 * KEPT_ENTRIES {
             let id = format!("attempt-{attempt}");
             let attempt = write_checkpoint(dir, &id, vec![ConversationItem::user("never activated")]);
-            write_compaction_witness_sync(dir, &attempt).unwrap();
+            write_compaction_witness_sync(&test_writer(dir), dir, &attempt).unwrap();
         }
         let witness = read_witness(&dir.join(COMPACTION_WITNESS_FILE)).unwrap().unwrap();
         assert!(witness.entries.len() <= KEPT_ENTRIES);
@@ -677,9 +702,9 @@ mod tests {
         chat(dir, &old);
         let c0_projection = vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY0")];
         let c0 = write_checkpoint(dir, "c0", c0_projection.clone());
-        write_compaction_witness_sync(dir, &c0).unwrap();
+        write_compaction_witness_sync(&test_writer(dir), dir, &c0).unwrap();
         std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c0", 1)).unwrap();
-        compaction_activated_sync(dir, "c0");
+        compaction_activated_sync(&test_writer(dir), dir, "c0");
         // c0's own rewrite lands (the witness is kept: the bytes are a compaction rewrite).
         chat(dir, &c0_projection);
         let mut history = c0_projection.clone();
@@ -687,18 +712,18 @@ mod tests {
         std::fs::write(dir.join("chat_history.jsonl"), raw(&history)).unwrap();
 
         let c1 = write_checkpoint(dir, "c1", vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY1")]);
-        write_compaction_witness_sync(dir, &c1).unwrap();
+        write_compaction_witness_sync(&test_writer(dir), dir, &c1).unwrap();
         let mut updates = checkpoint_line("c0", 1);
         updates.push_str(&checkpoint_line("c1", 1));
         std::fs::write(dir.join("updates.jsonl"), updates).unwrap();
-        // No `compaction_activated_sync(dir, "c1")`: its pruning failed. No rewrite: it failed too.
+        // No `compaction_activated_sync(&test_writer(dir), dir, "c1")`: its pruning failed. No rewrite: it failed too.
         history.push(ConversationItem::user("P2"));
         std::fs::write(dir.join("chat_history.jsonl"), raw(&history)).unwrap();
 
         for attempt in 0..2 * KEPT_ENTRIES {
             let id = format!("attempt-{attempt}");
             let attempt = write_checkpoint(dir, &id, vec![ConversationItem::user("never activated")]);
-            write_compaction_witness_sync(dir, &attempt).unwrap();
+            write_compaction_witness_sync(&test_writer(dir), dir, &attempt).unwrap();
         }
         let witness = read_witness(&dir.join(COMPACTION_WITNESS_FILE)).unwrap().unwrap();
         assert!(witness.entries.len() <= KEPT_ENTRIES);
@@ -725,7 +750,7 @@ mod tests {
         write_checkpoint(dir, "c1", projection.clone());
         std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c1", 1)).unwrap();
         let attempt = write_checkpoint(dir, "attempt", vec![ConversationItem::user("never activated")]);
-        write_compaction_witness_sync(dir, &attempt).unwrap();
+        write_compaction_witness_sync(&test_writer(dir), dir, &attempt).unwrap();
         let witness = read_witness(&dir.join(COMPACTION_WITNESS_FILE)).unwrap().unwrap();
         assert_eq!(witness.entries.len(), 1);
         assert!(unapplied_compaction_projection(dir).is_none(), "no evidence of an evicted entry: the file decides");
@@ -743,7 +768,7 @@ mod tests {
         let mut landed = projection.clone();
         landed.push(ConversationItem::user("P1"));
         std::fs::write(dir.join("chat_history.jsonl"), raw(&landed)).unwrap();
-        write_compaction_witness_sync(dir, &attempt).unwrap();
+        write_compaction_witness_sync(&test_writer(dir), dir, &attempt).unwrap();
         assert!(unapplied_compaction_projection(dir).is_none());
     }
 
@@ -757,11 +782,11 @@ mod tests {
         chat(dir, &[ConversationItem::system("SYS"), ConversationItem::user("P0")]);
         std::fs::write(dir.join("updates.jsonl"), "").unwrap();
         let c1 = write_checkpoint(dir, "c1", vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY1")]);
-        write_compaction_witness_sync(dir, &c1).unwrap();
+        write_compaction_witness_sync(&test_writer(dir), dir, &c1).unwrap();
         for attempt in 0..KEPT_ENTRIES {
             let id = format!("attempt-{attempt}");
             let attempt = write_checkpoint(dir, &id, vec![ConversationItem::user("never activated")]);
-            write_compaction_witness_sync(dir, &attempt).unwrap();
+            write_compaction_witness_sync(&test_writer(dir), dir, &attempt).unwrap();
         }
         let witness = read_witness(&dir.join(COMPACTION_WITNESS_FILE)).unwrap().unwrap();
         assert_eq!(witness.evicted, ["c1"]);
@@ -780,7 +805,7 @@ mod tests {
         let old = vec![ConversationItem::system("SYS"), ConversationItem::user("P0")];
         chat(dir, &old);
         let c1 = write_checkpoint(dir, "c1", vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY")]);
-        write_compaction_witness_sync(dir, &c1).unwrap();
+        write_compaction_witness_sync(&test_writer(dir), dir, &c1).unwrap();
         std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c1", 1)).unwrap();
         let mut bytes = raw(&old);
         bytes.extend_from_slice(b"{\"torn\n");
@@ -800,5 +825,36 @@ mod tests {
         write_checkpoint(dir, "c1", vec![ConversationItem::user("SUMMARY")]);
         std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c1", 1)).unwrap();
         assert!(unapplied_compaction_projection(dir).is_none());
+    }
+
+    /// CT-B3 (design §9.2, parity guard): a cold load, holding the session's writer, of a session whose latest
+    /// compaction committed while its `chat_history.jsonl` rewrite never landed resumes the compaction's projection and
+    /// what came after it, as 1.0.40 does.
+    #[tokio::test]
+    async fn f5c_ct_b3_cold_load_recovers_an_unapplied_compaction_as_its_own_writer() {
+        use crate::session::storage::StorageAdapter as _;
+        let root = tempfile::tempdir().unwrap();
+        let adapter = super::super::JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let info = crate::session::info::Info {
+            id: agent_client_protocol::SessionId::new("f5c-ct-b3"),
+            cwd: "/work".to_string(),
+        };
+        adapter.init_session(&info, crate::session::persistence::default_model_id()).await.unwrap();
+        let dir = adapter.session_dir(&info);
+        let old = vec![ConversationItem::system("SYS"), ConversationItem::user("P0")];
+        chat(&dir, &old);
+        let c1 = write_checkpoint(&dir, "c1", vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY")]);
+        write_compaction_witness_sync(&test_writer(&dir), &dir, &c1).unwrap();
+        std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c1", 1)).unwrap();
+        let mut appended = old.clone();
+        appended.push(ConversationItem::user("P1"));
+        std::fs::write(dir.join("chat_history.jsonl"), raw(&appended)).unwrap();
+
+        let writer = fuigo_session_writer::SessionWriter::try_claim("f5c-ct-b3", &dir).unwrap();
+        let loaded = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Owner(&writer))
+            .await
+            .unwrap();
+        assert_eq!(texts(&loaded.chat_history), ["SYS", "SUMMARY", "P1"]);
     }
 }

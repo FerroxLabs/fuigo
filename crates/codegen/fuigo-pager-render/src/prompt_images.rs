@@ -1247,6 +1247,7 @@ pub fn persist_to_session(
 /// Derive the `images/` directory for a session.
 ///
 /// Returns `None` if session identity is not yet known.
+#[allow(clippy::disallowed_methods, reason = "independently named, write-once pasted-image asset: a fresh UUID-v4 name per paste, published by temp file + rename; creates only images/ and its own image-<uuid>.* files; never touches the session journal (chat_history.jsonl, updates.jsonl, events.jsonl, summary.json) or any name another writer uses (design F5 5.4.3, 5.6)")]
 pub fn session_images_dir(
     session_id: Option<&agent_client_protocol::SessionId>,
     cwd: &std::path::Path,
@@ -1264,6 +1265,7 @@ pub fn session_images_dir(
 /// Mirrors [`session_images_dir`]: rendered diagram PNGs live alongside the session's other artifacts (`events.jsonl`, `images/`).
 /// They are owned by the session and torn down with it.
 /// Returns `None` until session identity is known (no diagrams are cached on disk before then).
+#[allow(clippy::disallowed_methods, reason = "content-addressed mermaid render cache, write-once per key; creates only mermaid/ and its own files; never the session journal (design F5 5.4.3, 5.6)")]
 pub fn session_mermaid_dir(
     session_id: Option<&agent_client_protocol::SessionId>,
     cwd: &std::path::Path,

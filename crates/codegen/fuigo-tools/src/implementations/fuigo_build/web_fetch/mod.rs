@@ -48,7 +48,6 @@ impl WebFetchConfig {
 
 use crate::types::output::WebFetchOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
-use crate::types::resources::SessionFolder;
 use crate::types::tool::{ToolKind, ToolNamespace};
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -170,7 +169,7 @@ impl fuigo_tool_runtime::Tool for WebFetchTool {
         let (client, session_folder, read_tool_name, execute_tool_name) = {
             let res = resources.lock().await;
             let client = res.require::<WebFetchClient>()?.clone();
-            let session_folder = res.get::<SessionFolder>().map(|folder| folder.0.clone());
+            let session_folder = crate::implementations::fuigo_build::storage::SessionFiles::from_resources(&res);
             let renderer = res.get::<crate::types::template_renderer::TemplateRenderer>();
             let read_tool_name = renderer
                 .and_then(|renderer| renderer.tool_for_kind(ToolKind::Read))
@@ -184,7 +183,7 @@ impl fuigo_tool_runtime::Tool for WebFetchTool {
         let output = client
             .fetch(
                 &input.url,
-                session_folder.as_deref(),
+                session_folder.as_ref(),
                 read_tool_name.as_deref(),
                 execute_tool_name.as_deref(),
             )

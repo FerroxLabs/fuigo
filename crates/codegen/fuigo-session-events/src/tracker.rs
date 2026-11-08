@@ -62,9 +62,21 @@ impl std::fmt::Debug for EventTracker {
 }
 
 impl EventTracker {
-    pub fn new(session_dir: &Path) -> Self {
+    /// The tracker for a session folder: its log goes through the session's writer ([`EventWriter::open`]).
+    pub fn new(session_writer: &fuigo_session_writer::SessionWriter) -> Self {
+        Self::with_writer(EventWriter::open(session_writer))
+    }
+
+    /// A tracker whose log is `dir/events.jsonl` by path ([`EventWriter::open_at`]): for a directory that is not a
+    /// session folder, and tests.
+    #[allow(clippy::disallowed_methods, reason = "EventTracker::new_at: a tracker for a directory that is not a session folder (workspace tree, tests), through EventWriter::open_at")]
+    pub fn new_at(dir: &Path) -> Self {
+        Self::with_writer(EventWriter::open_at(dir))
+    }
+
+    fn with_writer(writer: EventWriter) -> Self {
         Self {
-            writer: EventWriter::open(session_dir),
+            writer,
             turn_ended_emitted: Cell::new(false),
             turn_begun: Cell::new(false),
             active_tool: RefCell::new(None),
@@ -227,6 +239,7 @@ impl EventTracker {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,7 +247,7 @@ mod tests {
     #[test]
     fn prior_interrupt_markers_are_one_shot_and_survive_begin_turn() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let t = EventTracker::new(dir.path());
+        let t = EventTracker::new_at(dir.path());
 
         // Defaults: nothing recorded.
         assert_eq!(t.take_prior_interrupt_category(), None);
@@ -299,7 +312,7 @@ mod tests {
     #[test]
     fn close_open_turn_closes_only_a_begun_open_turn() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let t = EventTracker::new(dir.path());
+        let t = EventTracker::new_at(dir.path());
 
         t.close_open_turn(TurnOutcomeLabel::Error, None, None);
         assert_eq!(

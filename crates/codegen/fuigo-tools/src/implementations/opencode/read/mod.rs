@@ -517,6 +517,7 @@ async fn not_found_with_suggestions(path: &std::path::Path) -> ReadFileOutput {
 
 // ─── Tests ──────────────────────────────────────────────────────────
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

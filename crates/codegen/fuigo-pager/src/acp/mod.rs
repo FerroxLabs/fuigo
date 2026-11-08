@@ -602,6 +602,7 @@ fn client_capabilities_meta(flags: &ConnectFlags) -> serde_json::Value {
     });
     meta[fuigo_status_line::STATUS_LINE_CAPABILITY] = flags.status_line.into();
     meta[fuigo_shell::session::USER_MESSAGE_ECHO_CAPABILITY] = true.into();
+    meta[crate::app::folder_trust_reload::CAPABILITY] = crate::app::folder_trust_reload::capability_value();
     meta
 }
 
@@ -1278,6 +1279,12 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(blank["fuigo/hunkTracker"]["mode"], "off");
+    }
+
+    #[test]
+    fn client_capabilities_meta_advertises_folder_trust_reload() {
+        let meta = client_capabilities_meta(&ConnectFlags::default());
+        assert_eq!(meta["fuigo/folderTrust"]["reload"], serde_json::json!(true));
     }
 
     #[test]

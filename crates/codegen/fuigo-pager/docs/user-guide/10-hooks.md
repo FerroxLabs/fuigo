@@ -585,6 +585,8 @@ In the TUI pager, the individual `/hooks-*` commands do not appear in the slash-
 
 Enable or disable an individual hook at runtime by pressing `Space` in the Hooks tab. The change takes effect immediately, without restarting the session.
 
+Disabling a project hook applies to that folder only. Fuigo records the disable against the repository the hook came from, so a hook with the same name in another repository (a guard hook, say) keeps running there. Disables for user and global hooks are not tied to a folder. A project-hook disable saved by an earlier version, which was only a name, is left as it is and keeps applying to every repository, as before, so no disable is lost. Disabling that hook in a repository writes a disable for that repository; enabling it removes the old name-only entry too. The entries live in `~/.fuigo/disabled-hooks`.
+
 ### Mid-Session Reload
 
 Press `r` in the Hooks tab to reload all hooks from disk. Fuigo re-reads every hook source, so this picks up changes you made to hook files during the session.

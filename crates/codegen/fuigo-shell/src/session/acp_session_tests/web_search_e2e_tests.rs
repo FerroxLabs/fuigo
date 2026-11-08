@@ -97,6 +97,7 @@ async fn web_search_uses_model_override_from_config_end_to_end() {
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
+        session_writer: None,
         state_path: std::env::temp_dir().join("fuigo-web-search-e2e/state.json"),
         memory_backend: None,
         web_search_config: fuigo_tools::implementations::web_search::WebSearchConfig::Enabled {
@@ -178,6 +179,7 @@ async fn web_search_errors_when_configured_model_cannot_be_resolved() {
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
+        session_writer: None,
         state_path: std::env::temp_dir().join("fuigo-web-search-disabled/state.json"),
         memory_backend: None,
         web_search_config: fuigo_tools::implementations::web_search::WebSearchConfig::Disabled,

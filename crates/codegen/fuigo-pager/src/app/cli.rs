@@ -751,6 +751,13 @@ pub struct PagerArgs {
     /// When resuming (`--resume` / `--continue`), create a new session ID instead of reusing the original (optionally set via `--session-id`).
     #[arg(long = "fork-session")]
     pub fork_session: bool,
+    /// Headless only (`-p`, `--prompt-json`, `--prompt-file`): save nothing under the sessions directory (no session
+    /// folder, prompt history or search index entry), so the run cannot be resumed. Ignored, with a warning, elsewhere.
+    #[arg(
+        long = "no-session-persistence",
+        conflicts_with_all = ["resume_session", "load_session", "continue_last_session"]
+    )]
+    pub no_session_persistence: bool,
     /// Start the session in a new git worktree, optionally named.
     /// With `--resume` of a remote session, pass `--restore-code` to apply the snapshot codebase (conversation is restored either way).
     /// Headless (`-p`) creates the worktree too and runs the prompt inside it.
@@ -1020,7 +1027,9 @@ impl PagerArgs {
     }
     /// Parse CLI arguments without applying side effects.
     pub fn parse_cli() -> Self {
-        let bin_name = std::env::args()
+        // `args_os`: `args()` panics on an argument that is not valid UTF-8. Path-valued flags (`--cwd`) take the bytes
+        // as they are; a text-valued one (`-p`) gets clap's usage error (exit 2).
+        let bin_name = std::env::args_os()
             .next()
             .as_deref()
             .map(std::path::Path::new)
@@ -1029,7 +1038,9 @@ impl PagerArgs {
             .filter(|n| *n == "fuigo" || *n == "agent")
             .unwrap_or("fuigo")
             .to_owned();
-        match Self::try_parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1))) {
+        match Self::try_parse_from(
+            std::iter::once(std::ffi::OsString::from(bin_name)).chain(std::env::args_os().skip(1)),
+        ) {
             Ok(args) => args,
             Err(e) => {
                 // clap prints an offending value (and help prints env values) raw, so its error is rendered to a

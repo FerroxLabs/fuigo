@@ -109,8 +109,24 @@ pub(crate) async fn handle_import(args: &acp::ExtRequest) -> ExtResult {
         // Write the `.cwd` sidecar for hash-based (long-path) dirs so the session stays recoverable by id, not just by (id, cwd)
         crate::util::fuigo_home::ensure_sessions_cwd_dir(&request.cwd)
             .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
-        write_import(&dir, &request.state, &request.updates, &request.session_id)
-            .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
+        // F5 (design §5.5): the import claims the id without waiting and writes only through that writer. Open in this
+        // process: `This session is open...`; open in another: `held elsewhere`. Either way nothing is written.
+        let writer = crate::session::session_writer_lock::try_claim_writer(&request.session_id, dir.clone())?;
+        match write_import(&writer, &request.state, &request.updates, &request.session_id) {
+            Ok(()) => {}
+            // Made meanwhile: 1.0.40's answer for a session that exists, nothing written.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && fuigo_session_writer::refusal(&e).is_none() => {
+                return super::to_raw_response(&json!({ "imported": false }));
+            }
+            Err(e) => {
+                return Err(match fuigo_session_writer::refusal(&e) {
+                    Some(fuigo_session_writer::Refusal::HeldElsewhere) => {
+                        crate::session::session_writer_lock::held_elsewhere_error()
+                    }
+                    _ => crate::acp_error::internal_error(e.to_string()),
+                });
+            }
+        }
     }
     super::to_raw_response(&json!({ "imported": !has_local_session }))
 }
@@ -162,36 +178,43 @@ fn set_or_remove(obj: &mut serde_json::Map<String, Value>, key: &str, value: Opt
 
 /// Writes summary.json last, and each file to a temporary name first.
 /// An interrupted import therefore leaves an incomplete session that load treats as absent.
+/// F5 (design §5.3): every write is a method of the import's writer; the clears are its `remove`s. The folder may
+/// already exist (a failed earlier import), so the writer makes it owner-only too, not only when it creates it.
 fn write_import(
-    dir: &Path,
+    writer: &fuigo_session_writer::SessionWriter,
     state: &std::collections::HashMap<String, Value>,
     updates: &[Value],
     session_id: &str,
 ) -> std::io::Result<()> {
-    crate::util::fuigo_home::create_dir_all_owner_only(dir)?;
+    writer.ensure_folder_owner_only_sync()?;
+    // The writer now holds the id (design F5 §9.4 B6): a session made after the caller's existence check (and closed before
+    // the claim) is seen here, before anything of it is removed, and left unchanged as the check would have left it.
+    if writer.dir().join(st::SUMMARY_FILE).exists() {
+        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "the session exists"));
+    }
 
     // Clear every file this import owns so a leftover from a failed attempt can't merge with the new snapshot; this import is authoritative
-    let _ = std::fs::remove_file(dir.join(st::CHAT_HISTORY_FILE));
-    let _ = std::fs::remove_file(dir.join(st::UPDATES_FILE));
+    let _ = writer.remove_sync(st::CHAT_HISTORY_FILE);
+    let _ = writer.remove_sync(st::UPDATES_FILE);
     for (_, rel) in COLUMNS {
-        let _ = std::fs::remove_file(dir.join(rel));
+        let _ = writer.remove_sync(rel);
     }
 
     if !updates.is_empty() {
-        st::write_jsonl_atomic(&dir.join(st::UPDATES_FILE), updates)?;
+        writer.replace_atomic_sync(st::UPDATES_FILE, &st::to_jsonl_bytes(updates)?)?;
     }
 
     for (column, rel) in COLUMNS {
         if let Some(value) = state.get(*column) {
-            write_column(dir, rel, value)?;
+            write_column(writer, rel, value)?;
         }
     }
-    restamp_imported_usage(dir, session_id)?;
+    restamp_imported_usage(writer, session_id)?;
     Ok(())
 }
 
-fn restamp_imported_usage(dir: &Path, session_id: &str) -> std::io::Result<()> {
-    let path = dir.join(st::USAGE_FILE);
+fn restamp_imported_usage(writer: &fuigo_session_writer::SessionWriter, session_id: &str) -> std::io::Result<()> {
+    let path = writer.dir().join(st::USAGE_FILE);
     let data = match std::fs::read(&path) {
         Ok(data) => data,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -203,19 +226,16 @@ fn restamp_imported_usage(dir: &Path, session_id: &str) -> std::io::Result<()> {
         return Ok(());
     };
     file.session_id = session_id.to_string();
-    st::write_bytes_atomic(
-        &path,
+    writer.replace_atomic_sync(
+        st::USAGE_FILE,
         &serde_json::to_vec_pretty(&file)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
     )
 }
 
-fn write_column(dir: &Path, rel: &str, value: &Value) -> std::io::Result<()> {
-    let path = dir.join(rel);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    st::write_bytes_atomic(&path, value.to_string().as_bytes())
+/// The writer creates `rel`'s parent directories (e.g. `goal/`) owner-only.
+fn write_column(writer: &fuigo_session_writer::SessionWriter, rel: &str, value: &Value) -> std::io::Result<()> {
+    writer.replace_atomic_sync(rel, value.to_string().as_bytes())
 }
 
 /// The session's directory, or `None` when it isn't found on this host.
@@ -234,8 +254,13 @@ fn resolve_session_dir(session_id: &str, cwd: &str) -> Option<PathBuf> {
         .filter(|found| found.join(st::SUMMARY_FILE).is_file())
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
+    /// A writer for `dir` under a fresh id (the import writes only through one).
+    fn test_writer(dir: &std::path::Path) -> fuigo_session_writer::SessionWriter {
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).expect("claim")
+    }
     use super::*;
     use serde_json::json;
 
@@ -299,7 +324,7 @@ mod tests {
             json!({ "method": "session/update", "params": { "b": 2 } }),
         ];
 
-        write_import(dir, &state, &updates, "s1").unwrap();
+        write_import(&test_writer(dir), &state, &updates, "s1").unwrap();
 
         #[cfg(unix)]
         assert_eq!(
@@ -333,6 +358,27 @@ mod tests {
         );
     }
 
+    /// design F5 §9.4 B6: a session made after the import's existence check is seen under the import's writer, before
+    /// anything is removed, and left byte-identical.
+    #[test]
+    fn write_import_leaves_a_session_made_after_the_check_unchanged() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("summary.json"), b"{\"racer\":1}").unwrap();
+        std::fs::write(dir.join("chat_history.jsonl"), b"racer chat").unwrap();
+        std::fs::write(dir.join("updates.jsonl"), b"racer updates").unwrap();
+        let mut state = std::collections::HashMap::new();
+        state.insert("summary".to_string(), json!({ "info": { "id": "s1", "cwd": "/work" } }));
+        let updates = vec![json!({ "method": "session/update", "params": { "a": 1 } })];
+
+        let error = write_import(&test_writer(dir), &state, &updates, "s1").unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(dir.join("summary.json")).unwrap(), b"{\"racer\":1}");
+        assert_eq!(std::fs::read(dir.join("chat_history.jsonl")).unwrap(), b"racer chat");
+        assert_eq!(std::fs::read(dir.join("updates.jsonl")).unwrap(), b"racer updates");
+    }
+
     #[test]
     fn write_import_restamps_usage_session_id() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -350,7 +396,7 @@ mod tests {
                 "turns": [{ "turnNumber": 1, "inputTokens": 10 }]
             }),
         );
-        write_import(dir, &state, &[], "imported-id").unwrap();
+        write_import(&test_writer(dir), &state, &[], "imported-id").unwrap();
         let usage: crate::session::usage_file::SessionUsageFile =
             serde_json::from_slice(&std::fs::read(dir.join("usage.json")).unwrap()).unwrap();
         assert_eq!(usage.session_id, "imported-id");

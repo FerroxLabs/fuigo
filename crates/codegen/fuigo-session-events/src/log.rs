@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
+use fuigo_session_writer::{SessionAppend, SessionWriter};
 use serde::Serialize;
 
 use crate::types::Event;
@@ -20,14 +21,26 @@ const EVENTS_FILE: &str = "events.jsonl";
 
 /// Writes events to `events.jsonl`.
 /// Clones share one file, and the writer is `Send + Sync` so background tasks can hold one.
+///
+/// Opened in a session folder ([`EventWriter::open`]), the log is a [`SessionAppend`]: every clone holds the session's
+/// [`SessionWriter`] until it drops, so the session's writer is not free while any clone can still write (design F5
+/// §5.4.2, CT-W3c).
 #[derive(Clone)]
 pub struct EventWriter {
     inner: Arc<EventWriterInner>,
 }
 
 struct EventWriterInner {
-    file: Mutex<Option<File>>,
+    file: Mutex<Option<Sink>>,
     error_logged: AtomicBool,
+}
+
+/// Where an [`EventWriter`] appends.
+enum Sink {
+    /// A session folder's log, through its writer.
+    Session(SessionAppend),
+    /// A log outside any session folder ([`EventWriter::open_at`]).
+    File(File),
 }
 
 /// Open the event log owner-only (P120): created 0600 on Unix, and tightened to 0600 when it already exists with a
@@ -36,6 +49,7 @@ struct EventWriterInner {
 /// The tightening is best effort (P134): on a filesystem without Unix modes (vfat, exFAT, some FUSE and SMB mounts)
 /// `fchmod` answers EPERM, ENOTSUP or EINVAL, and 1.0.20 wrote the log there. A refusal is logged once per process and
 /// the log is still opened.
+#[allow(clippy::disallowed_methods, reason = "EventWriter::open_at only (Sink::File): events.jsonl in a directory that is not a session folder (workspace tree, tests); a session folder log goes through SessionAppend (EventWriter::open)")]
 fn open_owner_only(options: &mut std::fs::OpenOptions, path: &Path) -> std::io::Result<File> {
     #[cfg(unix)]
     {
@@ -93,17 +107,39 @@ fn open_owner_only_with(
 }
 
 impl EventWriter {
-    pub fn open(session_dir: &Path) -> Self {
-        let path = session_dir.join(EVENTS_FILE);
+    /// Open the session's `events.jsonl` through its writer (owner-only, created if missing). Every clone of the
+    /// returned writer holds a clone of `writer` until it drops.
+    pub fn open(writer: &SessionWriter) -> Self {
+        let sink = writer
+            .open_append(EVENTS_FILE)
+            .map_err(|e| {
+                tracing::warn!(session = writer.id(), error = %e, "failed to open {EVENTS_FILE}");
+                e
+            })
+            .ok()
+            .map(Sink::Session);
+        Self::with_sink(sink)
+    }
+
+    /// Open `dir/events.jsonl` where `dir` is **not** a session folder: the workspace daemon's own tree
+    /// (`<fuigo_home>/workspace/sessions/`), and tests. A session folder is opened with [`EventWriter::open`].
+    #[allow(clippy::disallowed_methods, reason = "EventWriter::open_at: events.jsonl in a directory that is not a session folder (<fuigo_home>/workspace/sessions/, tests); session folders use EventWriter::open(&SessionWriter) (design F5 5.4.2)")]
+    pub fn open_at(dir: &Path) -> Self {
+        let path = dir.join(EVENTS_FILE);
         let file = open_owner_only(std::fs::OpenOptions::new().create(true).append(true), &path)
             .map_err(|e| {
                 tracing::warn!(path = %path.display(), error = %e, "failed to open {EVENTS_FILE}");
                 e
             })
-            .ok();
+            .ok()
+            .map(Sink::File);
+        Self::with_sink(file)
+    }
+
+    fn with_sink(sink: Option<Sink>) -> Self {
         Self {
             inner: Arc::new(EventWriterInner {
-                file: Mutex::new(file),
+                file: Mutex::new(sink),
                 error_logged: AtomicBool::new(false),
             }),
         }
@@ -119,19 +155,19 @@ impl EventWriter {
     }
 
     pub fn emit(&self, event: Event) {
-        let entry = EventEntry {
-            ts: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            event,
-        };
-        let Ok(line) = encode_line(&entry) else {
+        let Ok(line) = encode_line(&event_entry(event)) else {
             return;
         };
 
         let Ok(mut guard) = self.inner.file.lock() else {
             return;
         };
-        if let Some(ref mut f) = *guard
-            && let Err(e) = f.write_all(&line)
+        let written = match guard.as_mut() {
+            Some(Sink::Session(log)) => log.write_all(&line),
+            Some(Sink::File(f)) => f.write_all(&line),
+            None => Ok(()),
+        };
+        if let Err(e) = written
             && !self.inner.error_logged.swap(true, Ordering::Relaxed)
         {
             tracing::warn!(error = %e, "{EVENTS_FILE} write failed");
@@ -176,33 +212,19 @@ fn encode_line(entry: &EventEntry) -> serde_json::Result<Vec<u8>> {
     Ok(line)
 }
 
-/// Appends one event to `session_dir/events.jsonl` and reports whether it landed, for callers that must not assume it did.
-/// A torn last line (a writer that died mid-line) would swallow the appended event into one unparseable line,
-/// so a missing trailing newline is written first. The data is synced before this returns.
-pub fn append_event_checked(session_dir: &Path, event: Event) -> std::io::Result<()> {
-    use std::io::{Read, Seek, SeekFrom};
+/// Appends one event to the session's `events.jsonl` through its writer and reports whether it landed, for callers
+/// that must not assume it did. A torn last line (a writer that died mid-line) would swallow the appended event into
+/// one unparseable line, so a missing trailing newline is written first. The data is synced before this returns.
+pub fn append_event_checked(writer: &SessionWriter, event: Event) -> std::io::Result<()> {
+    let line = encode_line(&event_entry(event)).map_err(std::io::Error::other)?;
+    writer.append_line_checked_sync(EVENTS_FILE, &line)
+}
 
-    let entry = EventEntry {
+fn event_entry(event: Event) -> EventEntry {
+    EventEntry {
         ts: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         event,
-    };
-    let mut line = encode_line(&entry).map_err(std::io::Error::other)?;
-    let mut file = open_owner_only(
-        std::fs::OpenOptions::new().read(true).append(true).create(true),
-        &session_dir.join(EVENTS_FILE),
-    )?;
-    let len = file.metadata()?.len();
-    if len > 0 {
-        file.seek(SeekFrom::Start(len - 1))?;
-        let mut last = [0u8; 1];
-        file.read_exact(&mut last)?;
-        if last[0] != b'\n' {
-            line.insert(0, b'\n');
-        }
     }
-    // Append mode: the write lands at the end whatever the read position.
-    file.write_all(&line)?;
-    file.sync_data()
 }
 
 impl std::fmt::Debug for EventWriter {
@@ -211,6 +233,7 @@ impl std::fmt::Debug for EventWriter {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     /// P134: a filesystem that refuses `fchmod` must not stop the event log from opening.
@@ -231,6 +254,15 @@ mod tests {
     }
 
     use super::*;
+
+    /// Tests: [`append_event_checked`] on a folder, through a writer claimed for it under a fresh id (the by-path
+    /// variant is gone, design F5 §5.4.2).
+    fn append_event_checked_at(dir: &Path, event: Event) -> std::io::Result<()> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = format!("events-test-{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        let writer = SessionWriter::try_claim(id, dir).expect("claim");
+        append_event_checked(&writer, event)
+    }
     use crate::types::{
         EVENT_SCHEMA_VERSION, Event, SessionRelationship, ToolOutcome, TurnOutcomeLabel,
     };
@@ -248,12 +280,12 @@ mod tests {
         const KEY: &str = "p113-FAKE-session-events-key-91c2";
         fuigo_secrets::sent_credentials::record(KEY);
         let dir = tempfile::tempdir().unwrap();
-        EventWriter::open(dir.path()).emit(Event::McpTransportDecodeError {
+        EventWriter::open_at(dir.path()).emit(Event::McpTransportDecodeError {
             server_name: "s".into(),
             error: format!("bad {KEY}"),
             sample: format!("printed {KEY}"),
         });
-        append_event_checked(
+        append_event_checked_at(
             dir.path(),
             Event::TurnEnded {
                 outcome: TurnOutcomeLabel::Completed,
@@ -262,7 +294,7 @@ mod tests {
             },
         )
         .unwrap();
-        append_event_checked(
+        append_event_checked_at(
             dir.path(),
             Event::TurnEnded {
                 outcome: TurnOutcomeLabel::Completed,
@@ -296,7 +328,7 @@ mod tests {
             "%70%31%36%33%2D%46%41%4B%45%2D%65%76%65%6E%74%73%2D%6B%65%79%2D%37%64%31%65";
         fuigo_secrets::sent_credentials::record(KEY);
         let dir = tempfile::tempdir().unwrap();
-        append_event_checked(
+        append_event_checked_at(
             dir.path(),
             Event::McpTransportDecodeError {
                 server_name: "s".into(),
@@ -341,7 +373,7 @@ mod tests {
         }
         fuigo_secrets::sent_credentials::record("turn_ended");
         let dir = tempfile::tempdir().unwrap();
-        append_event_checked(
+        append_event_checked_at(
             dir.path(),
             Event::TurnEnded {
                 outcome: TurnOutcomeLabel::Completed,
@@ -360,7 +392,7 @@ mod tests {
     #[test]
     fn test_emit_writes_jsonl() {
         let dir = tempfile::tempdir().unwrap();
-        let writer = EventWriter::open(dir.path());
+        let writer = EventWriter::open_at(dir.path());
 
         writer.emit(Event::TurnStarted {
             session_id: "test-session".into(),
@@ -428,7 +460,7 @@ mod tests {
         )
         .unwrap();
 
-        append_event_checked(
+        append_event_checked_at(
             dir.path(),
             Event::TurnEnded {
                 outcome: TurnOutcomeLabel::Interrupted,
@@ -450,8 +482,8 @@ mod tests {
     #[test]
     fn append_event_checked_adds_no_blank_line_and_creates_the_file() {
         let dir = tempfile::tempdir().unwrap();
-        append_event_checked(dir.path(), Event::FirstToken).unwrap();
-        append_event_checked(dir.path(), Event::FirstToken).unwrap();
+        append_event_checked_at(dir.path(), Event::FirstToken).unwrap();
+        append_event_checked_at(dir.path(), Event::FirstToken).unwrap();
         let text = std::fs::read_to_string(dir.path().join("events.jsonl")).unwrap();
         assert_eq!(text.lines().count(), 2);
         assert!(text.lines().all(|l| !l.is_empty()));
@@ -460,7 +492,7 @@ mod tests {
     #[test]
     fn cloned_writer_shares_file() {
         let dir = tempfile::tempdir().unwrap();
-        let w1 = EventWriter::open(dir.path());
+        let w1 = EventWriter::open_at(dir.path());
         let w2 = w1.clone();
 
         w1.emit(Event::FirstToken);
@@ -485,14 +517,69 @@ mod tests {
         };
         std::fs::write(&path, b"").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let writer = EventWriter::open(dir.path());
+        let writer = EventWriter::open_at(dir.path());
         writer.emit(event());
         assert_eq!(mode(), 0o600, "EventWriter::open tightens an existing file");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        append_event_checked(dir.path(), event()).unwrap();
+        append_event_checked_at(dir.path(), event()).unwrap();
         assert_eq!(mode(), 0o600, "append_event_checked tightens an existing file");
         std::fs::remove_file(&path).unwrap();
-        append_event_checked(dir.path(), event()).unwrap();
+        append_event_checked_at(dir.path(), event()).unwrap();
         assert_eq!(mode(), 0o600, "a new file is created owner-only");
+    }
+
+    /// CT-W3c, `EventWriter` half (design F5 §9.1): an `EventWriter` clone moved into a task holds the session's
+    /// writer, so the slot is not free until every clone has dropped. 1.0.40's `EventWriter::open(&Path)` held none.
+    #[test]
+    fn ct_w3c_event_writer_clones_hold_the_session_writer() {
+        use fuigo_session_writer::SessionWriter;
+        let dir = tempfile::tempdir().unwrap();
+        let id = "ct-w3c-event-writer-clone";
+        let folder = dir.path().join(id);
+        let writer = SessionWriter::try_claim(id, &folder).unwrap();
+        let events = EventWriter::open(&writer);
+        drop(writer);
+        assert!(!SessionWriter::is_free(id), "the EventWriter holds the writer");
+
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let in_task = events.clone();
+        let task = std::thread::spawn(move || {
+            in_task.emit(Event::FirstToken);
+            reached_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            in_task.emit(Event::FirstToken);
+        });
+        reached_rx.recv().unwrap();
+        drop(events);
+        assert!(!SessionWriter::is_free(id), "a clone in a running task still holds the writer");
+        release_tx.send(()).unwrap();
+        task.join().unwrap();
+        assert!(SessionWriter::is_free(id), "the last clone's drop frees the writer");
+
+        let text = std::fs::read_to_string(folder.join(EVENTS_FILE)).unwrap();
+        assert_eq!(text.lines().count(), 2, "{text}");
+    }
+
+    /// `append_event_checked` through the writer keeps the torn-tail repair, creates the log owner-only, and writes
+    /// nothing once the writer released the folder for a delete.
+    #[test]
+    fn append_event_checked_through_the_writer() {
+        use fuigo_session_writer::SessionWriter;
+        let dir = tempfile::tempdir().unwrap();
+        let id = "append-event-checked-through-the-writer";
+        let folder = dir.path().join(id);
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join(EVENTS_FILE), b"{\"type\":\"first_token\"").unwrap();
+        let writer = SessionWriter::try_claim(id, &folder).unwrap();
+        append_event_checked(&writer, Event::FirstToken).unwrap();
+        let text = std::fs::read_to_string(folder.join(EVENTS_FILE)).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "the torn line is ended, not swallowed: {text}");
+        assert!(serde_json::from_str::<serde_json::Value>(lines[1]).is_ok(), "{text}");
+
+        writer.delete_tree_sync().unwrap();
+        assert!(append_event_checked(&writer, Event::FirstToken).is_err());
+        assert!(!folder.exists(), "nothing recreated the deleted folder");
     }
 }

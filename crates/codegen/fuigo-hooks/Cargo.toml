@@ -22,6 +22,8 @@ tracing = { workspace = true }
 url = { workspace = true }
 fuigo-config = { workspace = true }
 fuigo-dirs = { workspace = true }
+# project_scope canonicalises a repo folder the way folder-trust does (no verbatim paths on Windows).
+dunce = { workspace = true }
 # P118: a key late-bound into a hook child is recorded for the sent-credential scrub.
 fuigo-secrets = { workspace = true }
 # Child-network restriction on hook command spawns; enforce is feature-unified

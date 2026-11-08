@@ -3079,7 +3079,7 @@ async fn try_call_tool_http_mcperror_recovers_then_retry_succeeds() {
     let client = fake_http_client(&url, 5);
     let tool = fake_echo_tool();
     let tmp = tempfile::tempdir().unwrap();
-    let ew = fuigo_session_events::EventWriter::open(tmp.path());
+    let ew = fuigo_session_events::EventWriter::open_at(tmp.path());
 
     let mut reconnect = false;
     let mut is_timeout = false;
@@ -4815,7 +4815,7 @@ async fn inconclusive_oauth_probe_connects_plain_interactively() {
 async fn inconclusive_oauth_probe_emits_timeout_and_verdict_events() {
     let (url, _handles) = spawn_fake_streamable_http(axum::http::StatusCode::OK).await;
     let tmp = tempfile::tempdir().unwrap();
-    let event_writer = fuigo_session_events::EventWriter::open(tmp.path());
+    let event_writer = fuigo_session_events::EventWriter::open_at(tmp.path());
     let ctx = probe_ctx(&event_writer, OauthInteractivity::NonInteractive);
     let decision =
         decide_http_auth_over_network("fake", &url, &[], &ctx, TEST_DISCOVERY_TIMEOUT).await;
@@ -6046,7 +6046,7 @@ async fn p113_decode_error_sample_with_a_sent_key_is_persisted_redacted() {
     assert_eq!(resolved, expanded, "control: the text is handed on as is");
 
     let dir = tempfile::tempdir().unwrap();
-    let events = fuigo_session_events::EventWriter::open(dir.path());
+    let events = fuigo_session_events::EventWriter::open_at(dir.path());
     let (mut server_out, client_in) = tokio::io::duplex(64 * 1024);
     let mut transport =
         ResilientRwTransport::new(client_in, tokio::io::sink(), "p113".to_string(), events);

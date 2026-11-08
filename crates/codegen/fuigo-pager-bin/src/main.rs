@@ -1656,7 +1656,11 @@ async fn run_agent_command(
             .default_model_override
             .clone()
             .or(agent_config.models.default.clone());
-        let client_type = std::env::args().collect::<Vec<_>>().join(" ");
+        // Display text only: a non-UTF-8 argument is shown lossily (`std::env::args()` would panic on it).
+        let client_type = std::env::args_os()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
         let capabilities = ClientCapabilities {
             yolo_mode: launch_yolo.yolo,
             auto_mode: agent_config.default_auto_mode && !launch_yolo.yolo,
@@ -2642,6 +2646,17 @@ async fn async_main(args: PagerArgs) -> Result<HeadlessOutcome> {
             }
         }
     }
+    // F12: a headless run without session persistence turns the switch on before the sandbox installs, since
+    // installing flushes the sandbox event log under FUIGO_HOME/sessions (headless.rs sets it again; idempotent).
+    if args.no_session_persistence
+        && args.command.is_none()
+        && (args.single.is_some()
+            || args.prompt_json.is_some()
+            || args.prompt_file.is_some()
+            || args.memory_flush)
+    {
+        fuigo_shell::session::disable_session_persistence();
+    }
     fuigo_shell::config::apply_sandbox(
         None,
         sandbox_profile_arg.as_deref(),
@@ -2949,9 +2964,16 @@ async fn async_main(args: PagerArgs) -> Result<HeadlessOutcome> {
                 memory_flush,
                 peer,
                 memory_enabled_override,
+                no_session_persistence: args.no_session_persistence,
             },
         )
         .await;
+    }
+    if args.no_session_persistence {
+        // Warn, don't refuse: an interactive session is saved as usual.
+        fuigo_tty_utils::cli_eprintln!(
+            "fuigo: warning: --no-session-persistence only applies to headless runs (-p); this session is saved as usual"
+        );
     }
     enforce_version_policy_or_exit();
     let _otel_guard = fuigo_telemetry::otel_layer::otel_guard();

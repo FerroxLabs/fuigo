@@ -106,6 +106,22 @@ pub(super) async fn fire_session_end_hooks(
     let registry = session.hook_registry.borrow().clone();
     if let Some(registry) = registry {
         let _dispatch = session_end::timed_child(timer, Phase::HooksDispatch, span.span());
+        if session
+            .tool_context
+            .process_scope
+            .as_ref()
+            .is_some_and(fuigo_tools::util::ProcessScope::is_closed)
+        {
+            detach_session_end_hooks(
+                registry,
+                envelope,
+                session.session_info.id.0.to_string(),
+                session.hook_resolved_workspace_root.clone(),
+            );
+            let _stop = session_end::timed_child(timer, Phase::HooksStop, span.span());
+            session.dispatch_session_end_stop(reason).await;
+            return;
+        }
         let ctx = session.hook_run_ctx();
         let results = fuigo_hooks::dispatcher::dispatch_non_blocking(
             &registry,
@@ -120,6 +136,52 @@ pub(super) async fn fire_session_end_hooks(
     }
     let _stop = session_end::timed_child(timer, Phase::HooksStop, span.span());
     session.dispatch_session_end_stop(reason).await;
+}
+/// F13: run SessionEnd command hooks for a session that has already left residency.
+///
+/// Close, idle-unload and delete take the session out of residency first, and that closes its
+/// process scope (`take_session` killpg's every tree in it) before the actor drains `Shutdown`. A
+/// hook enrolled in the closed scope is killed on the spot, so it never ran. These hooks run instead
+/// on their own thread, enrolled in the process-global scope: each is still bounded by its own
+/// timeout (the runner killpg's its group then), the process-exit reaper still killpg's one that is
+/// running, and the actor returns at once, so close keeps its budget and its answers. The thread
+/// holds no session state, the session writer least of all: a hook is a user command that writes
+/// to paths the user chose.
+fn detach_session_end_hooks(
+    registry: Arc<fuigo_hooks::discovery::HookRegistry>,
+    envelope: fuigo_hooks::event::HookEventEnvelope,
+    session_id: String,
+    workspace_root: String,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("fuigo-session-end-hooks".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::warn!(%error, "SessionEnd hooks not run: no runtime for the detached dispatch");
+                    return;
+                }
+            };
+            runtime.block_on(async {
+                let ctx = fuigo_hooks::runner::RunContext {
+                    session_id: &session_id,
+                    workspace_root: &workspace_root,
+                    process_scope: Some(fuigo_tools::util::global_process_scope().clone()),
+                };
+                let results = fuigo_hooks::dispatcher::dispatch_non_blocking(
+                    &registry,
+                    fuigo_hooks::event::HookEventName::SessionEnd,
+                    &envelope,
+                    &ctx,
+                )
+                .await;
+                tracing::debug!(session_id = %session_id, hooks = results.len(), "detached SessionEnd hooks finished");
+            });
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "SessionEnd hooks not run: the detached dispatch thread did not start");
+    }
 }
 /// Cancel the feedback sync loop, drain/sync under exit budgets, persist background-task state, and drop scratch.
 /// Owns the single final signal sync via [`FeedbackManager::shutdown`]; the sync loop cancel arm does not sync.
@@ -1404,6 +1466,13 @@ pub(super) async fn run_session(
                         }
                         SessionCommand::ForgetConfigNotice { notice } => {
                             told_config_notices.remove(&notice);
+                        }
+                        SessionCommand::WriteSubagentRecord { rel, bytes } => {
+                            crate::agent::subagent::write_routed_subagent_record(
+                                session.rebuild_spec.session_writer.as_ref(),
+                                &rel,
+                                &bytes,
+                            );
                         }
                         SessionCommand::CopyFile { respond_to } => {
                             // Flush the actor-owned replay buffer first

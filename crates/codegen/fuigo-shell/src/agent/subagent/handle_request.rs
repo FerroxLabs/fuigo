@@ -309,6 +309,7 @@ pub(crate) async fn run_shell_child(
         reporter,
         queued_for,
         session_running,
+        parent_writer,
     } = run;
     let start = std::time::Instant::now();
     let spawn_timer = fuigo_telemetry::subagent_spawn::SubagentSpawnTimer::new_shared();
@@ -787,14 +788,39 @@ pub(crate) async fn run_shell_child(
         cwd: effective_cwd,
     };
     let child_session_dir = session::persistence::session_dir(&child_session_info);
-    if let Err(e) = crate::util::fuigo_home::ensure_sessions_cwd_dir(&child_session_info.cwd) {
+    // F12: with session persistence off the child writes nothing, so its cwd bucket is not made either.
+    if !fuigo_session_writer::persistence_disabled()
+        && let Err(e) = crate::util::fuigo_home::ensure_sessions_cwd_dir(&child_session_info.cwd)
+    {
         tracing::warn!(?e, "failed to ensure sessions cwd dir for subagent session");
     }
     let parent_session_dir = session::persistence::session_dir(&SessionInfo {
         id: acp::SessionId::new(ctx.parent_session_id.clone()),
         cwd: ctx.parent_cwd.to_string_lossy().to_string(),
     });
-    let subagent_meta_dir = parent_session_dir.join("subagents").join(&subagent_id);
+    // F5 (design §5.5, Fable M3): the records in the parent's folder go through the parent's writer from the envelope
+    // when it is that session's, else to the parent actor; never by path. The clone drops after the last record write.
+    let subagent_records = super::SubagentRecords::new(
+        &parent_session_dir,
+        &request.parent_session_id,
+        &subagent_id,
+        parent_writer,
+        ctx.parent_cmd_tx.as_ref(),
+    );
+    // F5 (design §5.5): the child's writer, claimed before `bootstrap_initial_context` and before `SubagentSpawned`,
+    // then moved into the child's thread. A wake of a child still closing here waits up to 10 s, then fails the spawn.
+    let child_writer = match crate::session::session_writer_lock::claim_writer(
+        &child_session_info.id.0,
+        child_session_dir.clone(),
+    )
+    .await
+    {
+        Ok(writer) => writer,
+        Err(error) => {
+            tracing::warn!(subagent_id = %request.id, error = %error.message, "subagent child session is not free");
+            return child_run_output(failure_result(&request, &error.message), completion_data, None);
+        }
+    };
     let InitialContext {
         source: context_source,
         copy_error: fork_copy_error,
@@ -808,6 +834,7 @@ pub(crate) async fn run_shell_child(
         &ctx,
         &child_session_info,
         &child_session_dir,
+        Some(&child_writer),
         effective_model_id.0.as_ref(),
         super::resume_window::ResumeWindowPolicy {
             context_window: effective_sampling_config.context_window,
@@ -873,7 +900,7 @@ pub(crate) async fn run_shell_child(
         snapshot_ref: None,
         effective_model_id: Some(effective_model_id.0.to_string()),
     };
-    write_subagent_meta(&subagent_meta_dir, &subagent_meta);
+    write_subagent_meta(&subagent_records, &subagent_meta);
     if let (Some(bucket_url), Some(upload_method)) = (&ctx.gcs_bucket_url, &ctx.gcs_upload_method) {
         let gcs_meta = SubagentSessionMetadata::from_meta(
             &subagent_meta,
@@ -961,7 +988,7 @@ pub(crate) async fn run_shell_child(
                 &msg,
                 &subagent_id,
                 &child_session_id,
-                &subagent_meta_dir,
+                &subagent_records,
                 0,
                 &early_gcs_ctx,
             );
@@ -974,6 +1001,7 @@ pub(crate) async fn run_shell_child(
         effective_model_id.clone(),
         sampling_client,
         effective_sampling_config.model.clone(),
+        child_writer.clone(),
     )
     .await
     {
@@ -984,7 +1012,7 @@ pub(crate) async fn run_shell_child(
                 &msg,
                 &subagent_id,
                 &child_session_id,
-                &subagent_meta_dir,
+                &subagent_records,
                 0,
                 &early_gcs_ctx,
             );
@@ -1458,6 +1486,7 @@ pub(crate) async fn run_shell_child(
             parent: spawn_phase_parent,
         }),
         Some(ctx.subagent_sampling_semaphore.clone()),
+        child_writer,
     )
     .await;
     crate::waterfall::mark(&request.id, crate::waterfall::stage::SESSION_UP);
@@ -1478,7 +1507,7 @@ pub(crate) async fn run_shell_child(
                 &msg,
                 &subagent_id,
                 &child_session_id,
-                &subagent_meta_dir,
+                &subagent_records,
                 start.elapsed().as_millis() as u64,
                 &gcs_upload_ctx,
             );
@@ -1566,7 +1595,7 @@ pub(crate) async fn run_shell_child(
             &ctx.workspace_ops,
             &subagent_id,
             &child_session_id,
-            &subagent_meta_dir,
+            &subagent_records,
             worktree_path.as_deref(),
             worktree_freshly_created,
             start.elapsed().as_millis() as u64,
@@ -1855,8 +1884,8 @@ pub(crate) async fn run_shell_child(
             }
         }
     }
-    completion_data.set_persisted_output_dir(persist_subagent_output(&subagent_meta_dir, &result));
-    persist_subagent_completion(&subagent_meta_dir, &result, &gcs_upload_ctx);
+    completion_data.set_persisted_output_dir(persist_subagent_output(&subagent_records, &result));
+    persist_subagent_completion(&subagent_records, &result, &gcs_upload_ctx);
     let final_status = result.status().to_string();
     let snapshot_dispose_enabled = ctx.resolve_subagent_worktree_snapshot_enabled();
     let telemetry_tokens = if result.tool_calls > 0 || result.success {
@@ -1995,7 +2024,7 @@ pub(crate) async fn run_shell_child(
             let disposal = dispose_worktree_after_completion(
                 wt_path,
                 &resolve_subagent_source_repo(&ctx),
-                &subagent_meta_dir,
+                &subagent_records,
                 &final_status,
                 &request.id,
             )
@@ -2010,6 +2039,8 @@ pub(crate) async fn run_shell_child(
             );
         }
     }
+    // The last record write of this run is behind us: the parent's writer clone goes now, not with the task.
+    drop(subagent_records);
     if worktree_removed {
         result.worktree_path = None;
     }
@@ -2071,7 +2102,7 @@ impl Disposal {
 pub(crate) async fn dispose_worktree_after_completion(
     worktree: &std::path::Path,
     source_repo: &std::path::Path,
-    meta_dir: &std::path::Path,
+    records: &super::SubagentRecords,
     final_status: &str,
     subagent_id: &str,
 ) -> Disposal {
@@ -2137,7 +2168,7 @@ pub(crate) async fn dispose_worktree_after_completion(
             return Disposal::Kept;
         }
     }
-    if !update_subagent_meta_snapshot_ref(meta_dir, &snapshot_ref, final_status) {
+    if !update_subagent_meta_snapshot_ref(records, &snapshot_ref, final_status) {
         tracing::warn!(
             subagent_id = %subagent_id,
             worktree_path = %worktree.display(),

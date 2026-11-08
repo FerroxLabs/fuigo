@@ -222,6 +222,9 @@ impl<C: acp::Agent + 'static> AcpGatewayReceiver<acp::ClientSide, C> {
                 AcpAgentMessage::SetSessionModel(args) => {
                     handle!(args, self.tracing, conn, set_session_model, spawn, on_meta);
                 }
+                AcpAgentMessage::CloseSession(args) => {
+                    handle!(args, self.tracing, conn, close_session, spawn, on_meta);
+                }
             }
         }
         if self.tracing {
@@ -517,6 +520,13 @@ impl acp::Agent for AcpGatewaySender<acp::ClientSide> {
     }
 
     async fn ext_notification(&self, args: acp::ExtNotification) -> AcpResult<()> {
+        self.forward(args).await
+    }
+
+    async fn close_session(
+        &self,
+        args: acp::CloseSessionRequest,
+    ) -> AcpResult<acp::CloseSessionResponse> {
         self.forward(args).await
     }
 }

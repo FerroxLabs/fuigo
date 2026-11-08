@@ -38,6 +38,16 @@ jobs:
           echo "3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a  $RUNNER_TEMP/protoc.zip" | sha256sum -c -
           unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
           echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
+      # The process tests drive the Linux sandbox, which re-execs under bubblewrap and refuses to start without it.
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor, and bwrap needs them.
+      - name: Install bubblewrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --unshare-all --die-with-parent --ro-bind / / true
       - uses: Swatinem/rust-cache@v2
         with:
           key: binary-driven

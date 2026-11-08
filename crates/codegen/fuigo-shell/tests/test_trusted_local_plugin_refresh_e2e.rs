@@ -24,11 +24,13 @@ use fuigo_test_support::*;
 use serial_test::serial;
 use tempfile::TempDir;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn write_minimal_plugin(dir: &Path, name: &str) {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(dir.join("plugin.json"), format!(r#"{{"name":"{name}"}}"#)).unwrap();
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn write_agent(dir: &Path, file_stem: &str, name: &str, description: &str) {
     std::fs::create_dir_all(dir.join("agents")).unwrap();
     let body = format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n");
@@ -101,6 +103,7 @@ impl Drop for EnvVarGuard {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 #[serial]
 fn trusted_local_refresh_surfaces_new_agent_via_discovery() {
@@ -198,6 +201,7 @@ fn trusted_local_refresh_surfaces_new_agent_via_discovery() {
 }
 
 /// Runs the real binary end to end: session start refreshes the snapshot, then writes session JSON.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test]
 #[ignore = "requires pre-built fuigo binary; run with --ignored"]
 #[serial]

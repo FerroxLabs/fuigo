@@ -24,12 +24,14 @@ fn test_home() -> &'static PathBuf {
     })
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn reset_config_files(home: &std::path::Path) {
     let _ = fs::remove_file(home.join("config.toml"));
     let _ = fs::remove_file(home.join("requirements.toml"));
     let _ = fs::remove_file(home.join("managed_config.toml"));
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test]
 #[serial]
 async fn update_config_does_not_leak_requirements_into_user_config() {
@@ -85,6 +87,7 @@ async fn update_config_does_not_leak_requirements_into_user_config() {
     assert_eq!(user_cfg.models.default.as_deref(), Some("grok-3"));
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test]
 #[serial]
 async fn update_config_preserves_none_when_only_requirements_sets_value() {
@@ -123,6 +126,7 @@ async fn update_config_preserves_none_when_only_requirements_sets_value() {
     );
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test]
 #[serial]
 async fn update_config_does_not_leak_managed_config_values() {

@@ -24,7 +24,6 @@ use crate::types::api_key_provider::{CredentialPurpose, CredentialRequest};
 
 use crate::types::output::{MediaGenOutput, ToolOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
-use crate::types::resources::SessionFolder;
 use crate::types::tool::{ToolKind, ToolNamespace};
 
 /// Default Imagine model for `image_gen`. Used unless an explicit
@@ -535,7 +534,7 @@ impl fuigo_tool_runtime::Tool for ImageGenTool {
 
         let session_folder = {
             let res = resources.lock().await;
-            res.require::<SessionFolder>()?.0.clone()
+            crate::implementations::fuigo_build::storage::SessionFiles::require(&res)?
         };
 
         let absolute_path = client

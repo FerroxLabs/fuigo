@@ -246,6 +246,7 @@ fn mcp_server_ref_name(entry: &McpServerRef) -> &str {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "agent_mcp_tests.rs"]
 mod tests;

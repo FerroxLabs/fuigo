@@ -64,6 +64,7 @@ fn make_request(command: &str, timeout_secs: u64) -> TerminalRunRequest {
         timeout: Duration::from_secs(timeout_secs),
         output_byte_limit: 1024 * 1024,
         output_file,
+        output_log: Default::default(),
         notification_handle: ToolNotificationHandle::noop(),
         tool_call_id: format!("cgroup-test-{}", uuid::Uuid::now_v7()),
         display_command: None,

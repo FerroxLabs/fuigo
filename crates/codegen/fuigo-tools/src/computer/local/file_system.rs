@@ -56,6 +56,7 @@ fn is_test_transient_write_lock_error(e: &io::Error) -> bool {
 /// Replace the file's contents without ever exposing a truncated one: the new bytes go to a temp file beside it, which
 /// is renamed over the target only once written. A write that fails (disk full, size limit, permission) leaves the previous
 /// file exactly as it was. Symlinks are written through and the existing mode is kept (see `fuigo_config::write_through`).
+#[allow(clippy::disallowed_methods, reason = "file tool replace of a model/user-chosen path (user content, design F5 5.6); not a session-folder write by Fuigo")]
 async fn replace_file(path: &Path, data: &[u8]) -> io::Result<()> {
     let path = path.to_path_buf();
     let data = data.to_vec();
@@ -183,6 +184,7 @@ impl AsyncFileSystem for LocalFs {
     }
 
     #[tracing::instrument(name = "fs.write_file", skip_all)]
+    #[allow(clippy::disallowed_methods, reason = "file tool write of a model/user-chosen path (user content); not inside a session folder")]
     async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError> {
         // implicitly creates the missing directories if any
         if let Some(dir) = path.parent()
@@ -212,6 +214,7 @@ impl AsyncFileSystem for LocalFs {
     }
 
     #[tracing::instrument(name = "fs.delete_file", skip_all)]
+    #[allow(clippy::disallowed_methods, reason = "file tool write of a model/user-chosen path (user content); not inside a session folder")]
     async fn delete_file(&self, path: &Path) -> Result<(), ComputerError> {
         if let Err(e) = fs::remove_file(path).await {
             if is_permission_error(&e) {
@@ -223,6 +226,7 @@ impl AsyncFileSystem for LocalFs {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

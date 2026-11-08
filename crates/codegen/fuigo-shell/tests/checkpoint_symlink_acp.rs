@@ -11,7 +11,7 @@
 mod acp_harness;
 
 use acp_harness::{
-    AutoApproveClient, RPC_TIMEOUT, connect_client, ext_method, new_session, prompt_turn, run_agent_test,
+    AutoApproveClient, RPC_TIMEOUT, close_and_release, connect_client, ext_method, new_session, prompt_turn, run_agent_test,
     spawn_agent_local_with_config,
 };
 use agent_client_protocol::{self as acp, Agent as _};
@@ -85,6 +85,7 @@ fn tree_text(dir: &Path) -> String {
     text
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(unix)]
 #[test]
 fn a_symlinked_compaction_checkpoint_is_never_followed() {
@@ -103,6 +104,7 @@ fn a_symlinked_compaction_checkpoint_is_never_followed() {
         .await;
         let live = turn(&a, &mock, &session, "Second prompt.", "Second answer.").await;
         assert!(live.contains(SUMMARY_PREAMBLE), "fixture: the compacted session's request carries the summary: {live}");
+        close_and_release(&a, &[&session]).await;
         drop(a);
 
         // ── Damage: the checkpoint becomes a symlink to a copy outside the session that carries the sentinel, and

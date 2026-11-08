@@ -1083,13 +1083,19 @@ fn fork_context_normalized(source: &InitialContextSource, verbatim_fork: bool) -
 /// Stamp `subagent_fork` / `forked` on the child summary (live path; disk copy already stamps).
 fn stamp_live_fork_session_metadata(
     child_session_info: &SessionInfo,
+    child_writer: Option<&fuigo_session_writer::SessionWriter>,
     parent_session_id: &str,
     parent_prompt_id: Option<String>,
     model_id: &str,
     inherited_prefix_len: Option<usize>,
     fork_context_source: &str,
 ) {
-    let dir = match session::persistence::ensure_owner_only_session_dir(child_session_info) {
+    // F5-C4: the stamp is the child writer's work; without one nothing is written.
+    let Some(child_writer) = child_writer else {
+        tracing::warn!("live fork: no child session writer; metadata stamp skipped");
+        return;
+    };
+    let dir = match session::persistence::ensure_owner_only_session_dir(child_writer) {
         Ok(dir) => dir,
         Err(e) => {
             tracing::warn!(error = %e, "live fork: could not create child session dir for metadata stamp");
@@ -1114,7 +1120,7 @@ fn stamp_live_fork_session_metadata(
     summary.inherited_prefix_len = inherited_prefix_len;
     summary.forked_at = Some(chrono::Utc::now());
     if let Ok(bytes) = serde_json::to_vec_pretty(summary)
-        && let Err(e) = fuigo_config::write_file_owner_only(&summary_path, bytes)
+        && let Err(e) = child_writer.replace_atomic_sync("summary.json", &bytes)
     {
         tracing::warn!(error = %e, "live fork: failed to write forked session summary");
     }
@@ -1126,6 +1132,7 @@ enum BootstrapInitialContext {
 }
 /// Phase 3: resume (fail-closed on copy error) > fork (live then disk, fail-open) > New.
 /// Unresolved non-empty resume is aborted by the caller before this runs.
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 async fn bootstrap_initial_context(
     request: &SubagentRequest,
@@ -1133,6 +1140,7 @@ async fn bootstrap_initial_context(
     ctx: &SubagentSpawnContext,
     child_session_info: &SessionInfo,
     child_session_dir: &std::path::Path,
+    child_writer: Option<&fuigo_session_writer::SessionWriter>,
     effective_model_id: &str,
     window: resume_window::ResumeWindowPolicy,
 ) -> BootstrapInitialContext {
@@ -1188,14 +1196,20 @@ async fn bootstrap_initial_context(
         let copy_result = if is_same_session {
             Ok(None)
         } else {
-            storage
-                .copy_session_data(&source_session_info, child_session_info, copy_options)
-                .await
-                .map(Some)
+            match child_writer {
+                Some(writer) => storage
+                    .copy_session_data_as(&source_session_info, child_session_info, copy_options, writer)
+                    .await
+                    .map(Some),
+                None => storage
+                    .copy_session_data(&source_session_info, child_session_info, copy_options)
+                    .await
+                    .map(Some),
+            }
         };
         return match copy_result {
             Ok(result) => {
-                let conversation = match storage.load_chat_history_from_dir(child_session_dir) {
+                let conversation = match storage.load_chat_history_from_dir(child_session_dir, child_writer) {
                     Ok(items) if !items.is_empty() => items,
                     Ok(_) => {
                         return BootstrapInitialContext::ResumeAbort(format!(
@@ -1301,6 +1315,7 @@ async fn bootstrap_initial_context(
             };
             stamp_live_fork_session_metadata(
                 child_session_info,
+                child_writer,
                 &ctx.parent_session_id,
                 request.parent_prompt_id.clone(),
                 effective_model_id,
@@ -1329,9 +1344,11 @@ async fn bootstrap_initial_context(
             ..Default::default()
         };
         use crate::session::storage::StorageAdapter as _;
-        return match storage
-            .copy_session_data(parent_info, child_session_info, copy_options)
-            .await
+        let copied = match child_writer {
+            Some(writer) => storage.copy_session_data_as(parent_info, child_session_info, copy_options, writer).await,
+            None => storage.copy_session_data(parent_info, child_session_info, copy_options).await,
+        };
+        return match copied
         {
             Ok(result) => {
                 tracing::info!(
@@ -1342,7 +1359,7 @@ async fn bootstrap_initial_context(
                     "Fork-copied parent session data into child (disk fallback)"
                 );
                 let items = storage
-                    .load_chat_history_from_dir(child_session_dir)
+                    .load_chat_history_from_dir(child_session_dir, child_writer)
                     .unwrap_or_else(|e| {
                         tracing::warn!(
                             error = %e,
@@ -1929,7 +1946,7 @@ fn fail_subagent(
     error: &str,
     subagent_id: &str,
     child_session_id: &acp::SessionId,
-    subagent_meta_dir: &Path,
+    subagent_records: &SubagentRecords,
     duration_ms: u64,
     gcs_ctx: &GcsUploadContext,
 ) -> SubagentResult {
@@ -1941,7 +1958,7 @@ fn fail_subagent(
         duration_ms,
         ..Default::default()
     };
-    persist_subagent_completion(subagent_meta_dir, &result, gcs_ctx);
+    persist_subagent_completion(subagent_records, &result, gcs_ctx);
     result
 }
 /// Why an unpromoted child is being torn down.
@@ -1985,7 +2002,7 @@ async fn cancel_pending_shell_child(
     workspace_ops: &fuigo_workspace::WorkspaceOps,
     subagent_id: &str,
     child_session_id: &acp::SessionId,
-    subagent_meta_dir: &Path,
+    subagent_records: &SubagentRecords,
     worktree_path: Option<&Path>,
     worktree_freshly_created: bool,
     duration_ms: u64,
@@ -2000,7 +2017,7 @@ async fn cancel_pending_shell_child(
     let thread_exited = await_session_thread_exit(&child_thread, thread_exit_timeout).await;
     let fate = UnpromotedResourceFate::from_thread_exit(thread_exited);
     let result = disposition.result(subagent_id, child_session_id.0.as_ref(), duration_ms);
-    persist_subagent_completion(subagent_meta_dir, &result, gcs_ctx);
+    persist_subagent_completion(subagent_records, &result, gcs_ctx);
     if !fate.should_release() {
         tracing::warn!(
             subagent_id,
@@ -2316,22 +2333,150 @@ impl SubagentSessionMetadata {
         }
     }
 }
-/// Write via a same-directory temp file and rename, so a crash mid-write cannot leave a torn `meta.json` or `output.json`.
-fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
-    })?;
-    // `<session>/subagents/<id>/` sits in the session folder: owner-only folders like it (P150, S14). The file is a
-    // `NamedTempFile`, created 0600.
-    fuigo_config::create_dir_all_owner_only(parent)?;
-    let tmp = tempfile::NamedTempFile::new_in(parent)?;
-    std::fs::write(tmp.path(), contents)?;
-    tmp.persist(path)?;
-    Ok(())
+/// Where a subagent's records in its parent's folder (`<parent>/subagents/<id>/`: `meta.json`, `output.json`) are
+/// written (design F5 §5.5, Fable M3). Never by path:
+///
+/// - through the parent session's own writer, carried on the spawn envelope, when its id is the request's parent session
+///   id (the clone drops with the last record write of the run);
+/// - otherwise (a reparented nested spawn, a harness-internal spawn, a reconcile outside the actor) routed to the
+///   top-level parent actor, whose writer owns the folder, over its command channel (FIFO, so the records land in
+///   order);
+/// - otherwise (the parent is not resident) skipped with a warning, as 1.0.39's records were best-effort.
+///
+/// Each record is replaced atomically and durably (`replace_atomic`), and the writer makes `subagents/<id>/` owner-only
+/// (P150, S14).
+#[derive(Clone)]
+pub(crate) struct SubagentRecords {
+    dir: PathBuf,
+    rel_dir: PathBuf,
+    sink: RecordSink,
+}
+#[derive(Clone)]
+enum RecordSink {
+    Writer(fuigo_session_writer::SessionWriter),
+    Parent(mpsc::UnboundedSender<SessionCommand>),
+    Unreachable,
+    /// Unit-test fixtures only: stage records by path, as 1.0.40 did ([`records_by_path_in_tests`]).
+    #[cfg(test)]
+    Fixture,
+}
+#[cfg(test)]
+thread_local! {
+    static FIXTURE_RECORDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// While the guard lives, records on this thread that would route or skip are staged by path instead (the reconcile
+/// unit tests, which stand in for the parent actor).
+#[cfg(test)]
+pub(crate) fn records_by_path_in_tests() -> impl Drop {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FIXTURE_RECORDS.with(|f| f.set(false));
+        }
+    }
+    FIXTURE_RECORDS.with(|f| f.set(true));
+    Reset
+}
+/// `write_subagent_meta` at a path, for unit-test fixtures.
+#[cfg(test)]
+pub(crate) fn write_subagent_meta_at(dir: &Path, meta: &SubagentMeta) -> bool {
+    write_subagent_meta(&SubagentRecords::fixture(dir), meta)
+}
+impl SubagentRecords {
+    /// Records of `subagent_id` in `parent_session_dir`, the folder of `parent_session_id`.
+    pub(crate) fn new(
+        parent_session_dir: &Path,
+        parent_session_id: &str,
+        subagent_id: &str,
+        writer: Option<fuigo_session_writer::SessionWriter>,
+        parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
+    ) -> Self {
+        let rel_dir = Path::new("subagents").join(subagent_id);
+        let sink = match writer {
+            Some(writer) if writer.id() == parent_session_id && writer.dir() == parent_session_dir => {
+                RecordSink::Writer(writer)
+            }
+            _ => parent_cmd_tx.map_or(RecordSink::Unreachable, |tx| RecordSink::Parent(tx.clone())),
+        };
+        #[cfg(test)]
+        let sink = if FIXTURE_RECORDS.with(std::cell::Cell::get) && !matches!(sink, RecordSink::Writer(_)) {
+            RecordSink::Fixture
+        } else {
+            sink
+        };
+        Self { dir: parent_session_dir.join(&rel_dir), rel_dir, sink }
+    }
+    /// Unit-test fixture records at `subagent_dir`, staged by path.
+    #[cfg(test)]
+    pub(crate) fn fixture(subagent_dir: &Path) -> Self {
+        Self { dir: subagent_dir.to_path_buf(), rel_dir: PathBuf::new(), sink: RecordSink::Fixture }
+    }
+    /// The records of the subagent whose folder is `subagent_dir` (`<parent>/subagents/<id>`).
+    pub(crate) fn for_subagent_dir(
+        subagent_dir: &Path,
+        parent_session_id: &str,
+        writer: Option<&fuigo_session_writer::SessionWriter>,
+        parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
+    ) -> Self {
+        let id = subagent_dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let parent_dir = subagent_dir.parent().and_then(Path::parent).unwrap_or(subagent_dir);
+        Self::new(parent_dir, parent_session_id, id, writer.cloned(), parent_cmd_tx)
+    }
+    /// The records' folder, for reads.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+    #[cfg(test)]
+    pub(crate) fn holds_writer(&self) -> bool {
+        matches!(self.sink, RecordSink::Writer(_))
+    }
+    /// Replace the record `file` with `contents`.
+    #[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+    fn replace(&self, file: &str, contents: &str) -> std::io::Result<()> {
+        let rel = self.rel_dir.join(file);
+        match &self.sink {
+            RecordSink::Writer(writer) => writer.replace_atomic_sync(&rel, contents.as_bytes()),
+            RecordSink::Parent(tx) => tx
+                .send(SessionCommand::WriteSubagentRecord { rel, bytes: contents.as_bytes().to_vec() })
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::NotConnected, "the parent session is not resident")),
+            RecordSink::Unreachable => Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "no writer for the parent session's folder (the parent is not resident); record skipped",
+            )),
+            #[cfg(test)]
+            RecordSink::Fixture => {
+                // F5-A: unit-test fixture staging by path (cfg(test) only), not a product write.
+                fuigo_config::create_dir_all_owner_only(&self.dir)?;
+                let tmp = tempfile::NamedTempFile::new_in(&self.dir)?;
+                std::fs::write(tmp.path(), contents)?;
+                tmp.persist(self.dir.join(file))?;
+                Ok(())
+            }
+        }
+    }
+}
+/// The parent actor's half of the route ([`SessionCommand::WriteSubagentRecord`]): write the record as the actor's own
+/// writer. Only `subagents/...` paths take this route; without a writer the record is skipped with a warning.
+pub(crate) fn write_routed_subagent_record(
+    writer: Option<&fuigo_session_writer::SessionWriter>,
+    rel: &Path,
+    bytes: &[u8],
+) {
+    if !rel.starts_with("subagents") {
+        tracing::warn!(rel = %rel.display(), "routed subagent record outside subagents/; skipped");
+        return;
+    }
+    let Some(writer) = writer else {
+        tracing::warn!(rel = %rel.display(), "parent session holds no writer; subagent record skipped");
+        return;
+    };
+    if let Err(error) = writer.replace_atomic_sync(rel, bytes) {
+        tracing::warn!(rel = %rel.display(), %error, "failed to write routed subagent record");
+    }
 }
 /// Write `meta.json`.
 /// Returns `true` on success so callers on the resume-pointer path can gate worktree disposal on a durable write.
-fn write_subagent_meta(dir: &Path, meta: &SubagentMeta) -> bool {
+fn write_subagent_meta(records: &SubagentRecords, meta: &SubagentMeta) -> bool {
     let json = match serde_json::to_string_pretty(meta) {
         Ok(json) => json,
         Err(e) => {
@@ -2339,7 +2484,7 @@ fn write_subagent_meta(dir: &Path, meta: &SubagentMeta) -> bool {
             return false;
         }
     };
-    if let Err(e) = atomic_write(&dir.join("meta.json"), &json) {
+    if let Err(e) = records.replace("meta.json", &json) {
         tracing::warn!(error = %e, "failed to write subagent meta");
         return false;
     }
@@ -2352,7 +2497,7 @@ struct SubagentOutputFileRef<'a> {
     output: &'a str,
 }
 const SUBAGENT_OUTPUT_SCHEMA_VERSION: u32 = 1;
-fn write_subagent_output(dir: &Path, output: &str) -> bool {
+fn write_subagent_output(records: &SubagentRecords, output: &str) -> bool {
     let file = SubagentOutputFileRef {
         schema_version: SUBAGENT_OUTPUT_SCHEMA_VERSION,
         output,
@@ -2364,7 +2509,7 @@ fn write_subagent_output(dir: &Path, output: &str) -> bool {
             return false;
         }
     };
-    if let Err(e) = atomic_write(&dir.join("output.json"), &json) {
+    if let Err(e) = records.replace("output.json", &json) {
         tracing::warn!(error = %e, "failed to write subagent output");
         return false;
     }
@@ -2403,8 +2548,8 @@ struct GcsUploadContext {
 /// The caller then keeps the worktree rather than removing it without a recoverable ref.
 /// Also re-asserts the terminal `status`.
 /// A failed `persist_subagent_completion` write otherwise leaves a non-terminal record that `resumable_source_for` rejects once the worktree is gone.
-fn update_subagent_meta_snapshot_ref(dir: &Path, snapshot_ref: &str, status: &str) -> bool {
-    let meta_path = dir.join("meta.json");
+fn update_subagent_meta_snapshot_ref(records: &SubagentRecords, snapshot_ref: &str, status: &str) -> bool {
+    let meta_path = records.dir().join("meta.json");
     let mut meta = match std::fs::read_to_string(&meta_path) {
         Ok(data) => match serde_json::from_str::<SubagentMeta>(&data) {
             Ok(meta) => meta,
@@ -2420,15 +2565,15 @@ fn update_subagent_meta_snapshot_ref(dir: &Path, snapshot_ref: &str, status: &st
     };
     meta.snapshot_ref = Some(snapshot_ref.to_string());
     meta.status = status.to_string();
-    write_subagent_meta(dir, &meta)
+    write_subagent_meta(records, &meta)
 }
 #[must_use]
-fn persist_subagent_output(dir: &Path, result: &SubagentResult) -> Option<PathBuf> {
-    (result.success && !result.output.is_empty() && write_subagent_output(dir, &result.output))
-        .then(|| dir.to_path_buf())
+fn persist_subagent_output(records: &SubagentRecords, result: &SubagentResult) -> Option<PathBuf> {
+    (result.success && !result.output.is_empty() && write_subagent_output(records, &result.output))
+        .then(|| records.dir().to_path_buf())
 }
-fn persist_subagent_completion(dir: &Path, result: &SubagentResult, gcs_ctx: &GcsUploadContext) {
-    let meta_path = dir.join("meta.json");
+fn persist_subagent_completion(records: &SubagentRecords, result: &SubagentResult, gcs_ctx: &GcsUploadContext) {
+    let meta_path = records.dir().join("meta.json");
     if let Ok(data) = std::fs::read_to_string(&meta_path)
         && let Ok(mut meta) = serde_json::from_str::<SubagentMeta>(&data)
     {
@@ -2442,7 +2587,7 @@ fn persist_subagent_completion(dir: &Path, result: &SubagentResult, gcs_ctx: &Gc
             .error
             .clone()
             .map(fuigo_telemetry::sent_credentials::scrub_owned);
-        write_subagent_meta(dir, &meta);
+        write_subagent_meta(records, &meta);
         if let (Some(bucket), Some(method)) = (&gcs_ctx.bucket_url, &gcs_ctx.upload_method) {
             let gcs_meta = SubagentSessionMetadata::from_meta(
                 &meta,
@@ -2490,13 +2635,13 @@ fn cancelled_orphan_finish(
 /// Flip a stale `running` meta to `cancelled` and emit the missing finish.
 /// On meta-write failure returns `false` and skips the notify, so a reload re-heals.
 fn finalize_orphaned_subagent(
-    subagent_meta_dir: &Path,
+    subagent_records: &SubagentRecords,
     mut meta: SubagentMeta,
     gateway: &GatewaySender,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
     reason: &str,
 ) -> bool {
-    if !is_on_disk_meta_running(subagent_meta_dir) {
+    if !is_on_disk_meta_running(subagent_records.dir()) {
         return false;
     }
     let completed_at = chrono::Utc::now();
@@ -2507,7 +2652,7 @@ fn finalize_orphaned_subagent(
     meta.tool_calls = Some(0);
     meta.turns = Some(0);
     meta.error = Some(reason.to_owned());
-    if !write_subagent_meta(subagent_meta_dir, &meta) {
+    if !write_subagent_meta(subagent_records, &meta) {
         return false;
     }
     emit_subagent_notification(
@@ -2521,7 +2666,7 @@ fn finalize_orphaned_subagent(
 /// Persist a coordinator-held terminal outcome over a stale `running` meta.
 /// Same write-then-emit durability as [`finalize_orphaned_subagent`].
 fn persist_running_meta_as_finish(
-    subagent_meta_dir: &Path,
+    subagent_records: &SubagentRecords,
     mut meta: SubagentMeta,
     finish: &SessionUpdate,
 ) -> bool {
@@ -2536,7 +2681,7 @@ fn persist_running_meta_as_finish(
     else {
         return false;
     };
-    if !is_on_disk_meta_running(subagent_meta_dir) {
+    if !is_on_disk_meta_running(subagent_records.dir()) {
         return false;
     }
     meta.status = status.clone();
@@ -2545,7 +2690,7 @@ fn persist_running_meta_as_finish(
     meta.tool_calls = Some(*tool_calls);
     meta.turns = Some(*turns);
     meta.error = error.clone();
-    write_subagent_meta(subagent_meta_dir, &meta)
+    write_subagent_meta(subagent_records, &meta)
 }
 fn is_on_disk_meta_running(subagent_meta_dir: &Path) -> bool {
     let Ok(data) = std::fs::read_to_string(subagent_meta_dir.join("meta.json")) else {
@@ -2603,6 +2748,7 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
     parent_session_id: &str,
     gateway: &GatewaySender,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
+    parent_writer: Option<&fuigo_session_writer::SessionWriter>,
     orphan_reason: &str,
     heal_lock: Arc<tokio::sync::Mutex<()>>,
 ) {
@@ -2632,6 +2778,8 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             continue;
         }
         let subagent_dir = subagents_dir.join(&subagent_id);
+        let records =
+            SubagentRecords::for_subagent_dir(&subagent_dir, parent_session_id, parent_writer, parent_cmd_tx);
         let meta = std::fs::read_to_string(subagent_dir.join("meta.json"))
             .ok()
             .and_then(|data| serde_json::from_str::<SubagentMeta>(&data).ok());
@@ -2642,7 +2790,7 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
                     .as_ref()
                     .and_then(completed_finish_from_inspection)
                 {
-                    if persist_running_meta_as_finish(&subagent_dir, m, &finish) {
+                    if persist_running_meta_as_finish(&records, m, &finish) {
                         tracing::info!(
                             subagent_id = %subagent_id,
                             parent_session_id,
@@ -2662,7 +2810,7 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
                         "Reconciling orphaned subagent left running by a previous process"
                     );
                     finalize_orphaned_subagent(
-                        &subagent_dir,
+                        &records,
                         m,
                         gateway,
                         parent_cmd_tx,
@@ -2728,6 +2876,7 @@ pub(crate) async fn reconcile_live_orphaned_subagents(
     parent_session_id: &str,
     gateway: &GatewaySender,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
+    parent_writer: Option<&fuigo_session_writer::SessionWriter>,
     heal_lock: Arc<tokio::sync::Mutex<()>>,
 ) {
     reconcile_orphaned_subagents_with_backend(
@@ -2737,6 +2886,7 @@ pub(crate) async fn reconcile_live_orphaned_subagents(
         parent_session_id,
         gateway,
         parent_cmd_tx,
+        parent_writer,
         LIVE_ORPHAN_RECONCILE_REASON,
         heal_lock,
     )
@@ -2755,9 +2905,60 @@ fn p150_subagent_folder_and_files_are_owner_only() {
     use std::os::unix::fs::PermissionsExt as _;
     let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
     let tmp = tempfile::tempdir().unwrap();
+    let id = format!("p150-{}", std::process::id());
+    let writer = fuigo_session_writer::SessionWriter::try_claim(&id, tmp.path()).unwrap();
+    let records = SubagentRecords::new(tmp.path(), &id, "sa-p150", Some(writer), None);
     let dir = tmp.path().join("subagents").join("sa-p150");
-    assert!(write_subagent_output(&dir, "done"));
+    assert!(write_subagent_output(&records, "done"));
     assert_eq!(mode(&tmp.path().join("subagents")), 0o700);
     assert_eq!(mode(&dir), 0o700);
     assert_eq!(mode(&dir.join("output.json")), 0o600);
+}
+#[cfg(test)]
+fn c3_parent(tag: &str) -> (tempfile::TempDir, PathBuf, String, fuigo_session_writer::SessionWriter) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let tmp = tempfile::tempdir().unwrap();
+    let id = format!("c3-{tag}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed));
+    let dir = tmp.path().join(&id);
+    let writer = fuigo_session_writer::SessionWriter::try_claim(&id, &dir).unwrap();
+    writer.append_sync("updates.jsonl", b"").unwrap();
+    (tmp, dir, id, writer)
+}
+/// F5-C3 (design F5 §5.5, Fable M3): a record goes through the parent's writer, never by path. A writer that has let
+/// go of the folder for a delete writes nothing, where 1.0.40's by-path write recreated the deleted folder.
+#[test]
+fn c3_records_write_through_the_parent_writer_never_by_path() {
+    let (_tmp, dir, id, writer) = c3_parent("w");
+    let records = SubagentRecords::new(&dir, &id, "sa-1", Some(writer.clone()), None);
+    assert!(records.holds_writer(), "the matching writer is used");
+    assert!(write_subagent_output(&records, "done"));
+    assert!(dir.join("subagents/sa-1/output.json").is_file());
+    writer.delete_tree_sync().unwrap();
+    assert!(!dir.exists());
+    assert!(!write_subagent_output(&records, "late"), "a released writer refuses the record");
+    assert!(!dir.exists(), "the record write recreated a deleted session folder by path");
+}
+/// A writer for another session (a reparented nested spawn's envelope) is not used: the record routes to the parent
+/// actor, which writes it as its own writer; with no parent reachable it is skipped.
+#[test]
+fn c3_records_route_to_the_parent_actor_or_skip() {
+    let (_tmp, dir, id, writer) = c3_parent("r");
+    let (_otmp, _odir, _oid, other) = c3_parent("other");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let records = SubagentRecords::new(&dir, &id, "sa-2", Some(other.clone()), Some(&tx));
+    assert!(!records.holds_writer(), "a writer of another session must not write this folder");
+    assert!(write_subagent_output(&records, "routed"));
+    assert!(!dir.join("subagents").exists(), "the spawn side wrote by itself");
+    let Ok(SessionCommand::WriteSubagentRecord { rel, bytes }) = rx.try_recv() else {
+        panic!("the record was not routed to the parent actor");
+    };
+    assert_eq!(rel, Path::new("subagents/sa-2/output.json"));
+    write_routed_subagent_record(Some(&writer), &rel, &bytes);
+    assert!(read_subagent_output(&dir.join("subagents/sa-2")).is_some_and(|o| o == "routed"));
+    write_routed_subagent_record(Some(&writer), Path::new("summary.json"), b"{}");
+    assert!(!dir.join("summary.json").exists(), "the route carries subagent records only");
+    let unreachable = SubagentRecords::new(&dir, &id, "sa-3", Some(other), None);
+    assert!(!write_subagent_output(&unreachable, "lost"), "no writer and no parent: skipped");
+    assert!(!dir.join("subagents/sa-3").exists());
 }

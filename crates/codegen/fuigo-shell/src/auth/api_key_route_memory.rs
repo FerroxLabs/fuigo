@@ -211,6 +211,7 @@ impl RouteMemory {
     /// The advisory lock on `api-key-probe-state.lock`, next to the file, so two Fuigo processes cannot lose each
     /// other's update. A short bounded wait; if the lock file cannot be opened or the lock is not free in time this
     /// returns `None` and the caller goes on without it (a lost update is possible, a block never is).
+    #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
     fn lock(&self) -> Option<HeldFlock> {
         use fs2::FileExt as _;
         self.path.file_name()?; // an empty path (bookkeeping switched off) has no lock either
@@ -249,6 +250,7 @@ impl RouteMemory {
     }
 
     /// Writes the file; true when it was written.
+    #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
     fn save(&self, mut store: Store, now: u64) -> bool {
         store.unsupported.retain(|e| live(e.t, now, UNSUPPORTED_TTL_SECS));
         store.verdicts.retain(|e| live(e.t, now, VERDICT_TTL_SECS));
@@ -495,5 +497,6 @@ pub(crate) mod test_clock {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests;

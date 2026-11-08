@@ -55,6 +55,7 @@ impl acp::Client for TrustingClient {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn a_trust_grant_tells_the_session_about_a_refused_key_reference_once() {
     run_agent_test(|cwd, _mock| async move {

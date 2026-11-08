@@ -139,6 +139,7 @@ impl AgentView {
             last_seen_event_seq: None,
             deferred_subagent_finishes: HashMap::new(),
             session_reload: None,
+            folder_trust_reload: None,
             unexpected_replay_drops: 0,
             late_replay_until: None,
             replayed_terminal_prompts: HashSet::new(),
@@ -591,6 +592,10 @@ impl AgentView {
     /// Open a reconnect reload window: stash the current transcript/tracker and point the live fields at fresh state for the `session/load` replay.
     /// The transcript is NOT cleared; it stays recoverable until [`finish_session_reload`](Self::finish_session_reload) decides the outcome.
     pub(crate) fn begin_session_reload(&mut self, generation: u64) {
+        self.begin_session_reload_labeled(generation, "Reloading session after reconnect...");
+    }
+    /// [`begin_session_reload`](Self::begin_session_reload) with the placeholder text shown while the replay runs.
+    pub(crate) fn begin_session_reload_labeled(&mut self, generation: u64, label: &str) {
         // A reconnect load takes the agent over: a still-running `LoadSession` task of an earlier attempt is now stale
         self.begin_load_attempt();
         self.dismiss_jump_picker();
@@ -628,9 +633,9 @@ impl AgentView {
             saw_todo_update: false,
             replayed_expiry_notices: Vec::new(),
         });
-        self.loading_placeholder_id = Some(self.scrollback.push_block(
-            crate::scrollback::block::RenderBlock::system("Reloading session after reconnect..."),
-        ));
+        self.loading_placeholder_id = Some(
+            self.scrollback.push_block(crate::scrollback::block::RenderBlock::system(label)),
+        );
         self.scrollback.begin_batch();
         self.begin_replay_window();
     }

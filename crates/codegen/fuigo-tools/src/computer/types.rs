@@ -106,7 +106,11 @@ pub struct TerminalRunRequest {
     /// File path to write output incrementally as it arrives.
     /// This ensures full output is always available even after in-memory buffer is truncated.
     /// For background tasks, this allows retrieval of output after the agent has moved on.
+    /// With [`OutputLog::Session`] it is the log's path for display, and the backend writes through the handle.
     pub output_file: PathBuf,
+
+    /// How the backend writes [`Self::output_file`] (design F5 §5.4.2): by path, or through the session's writer.
+    pub output_log: OutputLog,
 
     /// Notification handle for streaming output chunks during execution.
     /// The backend sends `BashOutputChunk` notifications every ~100ms.
@@ -159,6 +163,43 @@ pub struct TerminalRunRequest {
     pub owner_session_id: Option<String>,
     /// Model-supplied label for task UI / snapshots.
     pub description: Option<String>,
+}
+
+/// How a terminal backend writes a command's output log (design F5 §5.4.2).
+#[derive(Debug, Default)]
+pub enum OutputLog {
+    /// By path at `output_file`, for a caller whose folder is not a session folder (tests; the default). A session
+    /// without a writer gets [`OutputLog::Unavailable`] from [`OutputLog::open`], never this.
+    #[default]
+    ByPath,
+    /// Through the session's writer. The handle owns a writer clone, so the session's writer is not free while the
+    /// log can still be written (the backend's process entry, or a detached watcher, holds it).
+    Session(fuigo_session_writer::SessionAppend),
+    /// The session has a writer but the log could not be opened through it (its folder is gone, or open in another
+    /// process): no log is written, and nothing is written by path either.
+    Unavailable,
+}
+
+impl OutputLog {
+    /// Open `rel` (relative to the session folder) for appending through `writer` when the session has one, on the
+    /// blocking pool; [`OutputLog::Unavailable`] without one.
+    pub async fn open(writer: Option<&fuigo_session_writer::SessionWriter>, rel: PathBuf) -> Self {
+        let Some(writer) = writer.cloned() else {
+            // F5-C4: a session without a writer is never written by path.
+            tracing::warn!("no session writer: terminal output log not written");
+            return Self::Unavailable;
+        };
+        let opened = tokio::task::spawn_blocking(move || writer.open_append(&rel))
+            .await
+            .unwrap_or_else(|error| Err(std::io::Error::other(error)));
+        match opened {
+            Ok(log) => Self::Session(log),
+            Err(error) => {
+                tracing::warn!(%error, "terminal output log could not be opened through the session writer");
+                Self::Unavailable
+            }
+        }
+    }
 }
 
 /// Distinguishes different types of background tasks.

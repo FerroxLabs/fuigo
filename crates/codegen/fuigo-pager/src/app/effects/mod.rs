@@ -461,7 +461,8 @@ pub(crate) fn execute(
                             let running_prompt_id = parse_session_load_running_prompt_id(
                                 resp.meta.as_ref(),
                             );
-                            TaskResult::SessionLoaded {
+                            let reload_owed = super::folder_trust_reload::owed_in_meta(resp.meta.as_ref());
+                            let loaded = TaskResult::SessionLoaded {
                                 agent_id,
                                 session_id: acp_session_id,
                                 models: resp.models,
@@ -473,6 +474,11 @@ pub(crate) fn execute(
                                     resp.meta.as_ref(),
                                 ),
                                 attempt,
+                            };
+                            if reload_owed {
+                                TaskResult::FolderTrustReloadOwed { loaded: Box::new(loaded) }
+                            } else {
+                                loaded
                             }
                         }
                         Err(e) => {
@@ -493,6 +499,35 @@ pub(crate) fn execute(
                         }
                     }
                 });
+        }
+        Effect::FolderTrustClose { agent_id, session_id } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let close = acp_send(acp::CloseSessionRequest::new(session_id.clone()), &tx);
+                let outcome = match tokio::time::timeout(super::folder_trust_reload::CLOSE_WAIT, close).await {
+                    Ok(Ok(resp)) => Ok(super::folder_trust_reload::close_outcome(resp.meta.as_ref())),
+                    Ok(Err(e)) => Err(acp_error_user_text(&e)),
+                    Err(_elapsed) => Err(super::folder_trust_reload::CLOSE_NO_ANSWER.to_owned()),
+                };
+                TaskResult::FolderTrustClosed { agent_id, session_id, outcome }
+            });
+        }
+        Effect::FolderTrustLoad { agent_id, session_id, cwd, meta, generation } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let mcp_servers = discover_mcp_servers(cwd.clone()).await;
+                let result = helpers::acp_send_bounded(
+                    acp::LoadSessionRequest::new(session_id.clone(), cwd)
+                        .mcp_servers(mcp_servers)
+                        .meta(meta.as_object().cloned()),
+                    &tx,
+                    "Session reload",
+                )
+                .await
+                .map(|_| ())
+                .map_err(|e| acp_error_user_text(&e));
+                TaskResult::FolderTrustLoaded { agent_id, session_id, generation, result }
+            });
         }
         Effect::ScanForeignSessions { cwd, compat, fuigo_home, coordinator, seq } => {
             if coordinator.latest_seq() != seq {
@@ -1023,6 +1058,7 @@ pub(crate) fn execute(
                                 id: acp::SessionId::new(session_id),
                                 cwd,
                             };
+                            #[allow(clippy::disallowed_methods, reason = "read-only: reads chat_history.jsonl for the session card stats")]
                             let history_path = fuigo_shell::session::persistence::session_dir(
                                     &info,
                                 )
@@ -4397,6 +4433,7 @@ pub(crate) fn execute(
                         id: session_id,
                         cwd: cwd.to_string_lossy().to_string(),
                     };
+                    #[allow(clippy::disallowed_methods, reason = "read-only: reads summary.json for the session title")]
                     let path = fuigo_shell::session::persistence::session_dir(&info)
                         .join("summary.json");
                     type DiskTitle = (Option<(String, bool)>, Option<String>);
@@ -4762,11 +4799,6 @@ async fn session_rename_rpc(
     tx: &AcpAgentTx,
     request: actions::RenameSessionRequest,
 ) -> Result<(), String> {
-    let verb = if request.reset_to_auto {
-        "reset session title"
-    } else {
-        "rename session"
-    };
     let ext = acp::ExtRequest::new(
         "fuigo/session/rename",
         serde_json::value::to_raw_value(&request)
@@ -4786,8 +4818,13 @@ async fn session_rename_rpc(
             }
             Ok(())
         }
-        Err(e) => Err(sanitize_user_error(&format!("couldn't {verb}: {}", acp_error_text(&e)))),
+        Err(e) => Err(session_rename_error_text(&e)),
     }
+}
+/// The reason a failed `fuigo/session/rename` reports. The line that shows it already says what failed ("Couldn't
+/// rename session: ..." / "Couldn't reset session title: ..."), so this is the reason alone.
+pub(crate) fn session_rename_error_text(error: &acp::Error) -> String {
+    sanitize_user_error(&acp_error_text(error))
 }
 /// Session title from local persistence: loads only this session's summary, never the all-sessions list.
 /// `cwd` comes from the `fuigo/session/info` response.

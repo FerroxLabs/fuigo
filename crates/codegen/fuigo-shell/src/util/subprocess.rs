@@ -373,6 +373,7 @@ mod tests {
 
 /// P120: the external sign-in command and the identity command are user-configured programs; they must not inherit
 /// Fuigo's own secrets.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(all(test, unix))]
 mod p120_tests {
     use super::*;

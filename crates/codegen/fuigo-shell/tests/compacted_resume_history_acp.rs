@@ -16,7 +16,7 @@
 mod acp_harness;
 
 use acp_harness::{
-    AutoApproveClient, RPC_TIMEOUT, connect_client, ext_method, new_session, prompt_turn,
+    AutoApproveClient, RPC_TIMEOUT, close_and_release, connect_client, ext_method, new_session, prompt_turn,
     run_agent_test, spawn_agent_local_with_config,
 };
 use agent_client_protocol::{self as acp, Agent as _};
@@ -259,6 +259,7 @@ fn first_difference(expected: &Value, actual: &Value) -> Option<String> {
     ))
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn a_resumed_session_sends_the_model_the_history_it_had() {
     run_agent_test(|cwd, mock| async move {
@@ -303,6 +304,8 @@ fn a_resumed_session_sends_the_model_the_history_it_had() {
         // Compacted twice, then forked at its first prompt (before both compactions).
         let point_fork_source = new_session(&a, &cwd).await;
         run_script(&a, &mock, &point_fork_source, &files, 2).await;
+        let built: Vec<&acp::SessionId> = resumed.iter().chain(&once_twins).chain([&point_fork_source]).collect();
+        close_and_release(&a, &built).await;
         drop(a);
         let [fork_source, missing_checkpoint, corrupt_checkpoint, resumed_by_1017, chat_missing] =
             <[acp::SessionId; 5]>::try_from(once_twins).expect("five twins");
@@ -464,6 +467,7 @@ fn a_resumed_session_sends_the_model_the_history_it_had() {
             }
             Err(e) => failures.push(format!("resumed by 1.0.17: {e}")),
         }
+        close_and_release(&b, &[&resumed_by_1017]).await;
         drop(b);
 
         // ── Agent C: load the 1.0.17-resumed session again. ──

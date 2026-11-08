@@ -15,6 +15,7 @@ use fuigo_test_support::{
 const CANARY: &str = "MARMALADE-7-CANARY";
 const TEST_VERSION: (&str, &str) = ("FUIGO_TEST_VERSION", "1.0.31-p31");
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn plant_agents_md(sandbox: &TestSandbox) {
     std::fs::write(
         sandbox.workspace().join("AGENTS.md"),
@@ -173,6 +174,7 @@ async fn stdio_git_repo_trusted_admits_agents_md() {
 const NESTED_CANARY: &str = "KUMQUAT-9-NESTED-CANARY";
 const READ_SENTINEL: &str = "READ-BODY-SENTINEL-31";
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn plant_nested(sandbox: &TestSandbox) {
     let sub = sandbox.workspace().join("sub");
     std::fs::create_dir_all(&sub).expect("mkdir sub");

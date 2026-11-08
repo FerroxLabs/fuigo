@@ -540,6 +540,7 @@ fn validate_verification_uri(uri: &str) -> anyhow::Result<()> {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 pub(crate) mod tests {
     /// P43 hostile: the device-token poll (`complete_device_code_login`, its own gate) sends a

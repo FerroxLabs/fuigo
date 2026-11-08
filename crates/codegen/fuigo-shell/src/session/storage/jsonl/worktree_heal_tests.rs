@@ -242,11 +242,8 @@ async fn repair_keeps_summary_untagged_when_locked_write_fails() {
     summary.source_workspace_dir = None;
     let missing_dir = home.path().join("does-not-exist");
 
-    crate::session::storage::summary_write::repair_untagged_worktree_summary(
-        &mut summary,
-        &missing_dir.join("summary.json"),
-        &missing_dir.join("summary.json.lock"),
-    );
+    let writer = fuigo_session_writer::SessionWriter::try_claim("unwritable-repair", &missing_dir).unwrap();
+    crate::session::storage::summary_write::repair_untagged_worktree_summary(&mut summary, |_| Some(writer));
 
     assert!(summary.session_kind.is_none());
     assert!(summary.worktree_label.is_none());
@@ -270,11 +267,8 @@ async fn repair_adopts_kinded_summary_when_mtime_restore_fails() {
     let mut summary = read_summary_from(&session_dir);
     crate::session::storage::summary_write::fail_next_restore_summary_mtime();
 
-    crate::session::storage::summary_write::repair_untagged_worktree_summary(
-        &mut summary,
-        &session_dir.join("summary.json"),
-        &session_dir.join("summary.json.lock"),
-    );
+    let writer = adapter.owner(&info).unwrap();
+    crate::session::storage::summary_write::repair_untagged_worktree_summary(&mut summary, |_| Some(writer));
 
     assert_eq!(summary.session_kind.as_deref(), Some("worktree"));
     assert_eq!(summary.worktree_label.as_deref(), Some("fix-bug"));
@@ -502,4 +496,75 @@ async fn list_sessions_heal_does_not_evict_recent_sessions_from_mtime_window() {
     let window = adapter.list_sessions_recent(1).await.unwrap();
     assert_eq!(window.len(), 1);
     assert_eq!(window[0].info.id.0.to_string(), "recent-untagged");
+}
+
+/// Review r2 H1: listing an untagged legacy worktree session heals its summary AS the session's writer (the claim is
+/// visible while the rewrite runs and is gone after). Before, the heal rewrote `summary.json` by path with no writer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn r2h1_a_listing_heal_runs_as_a_session_writer() {
+    use fuigo_session_writer::{SessionWriter, seams};
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let home = TempDir::new().unwrap();
+    let _env = EnvGuard::set("FUIGO_HOME", home.path());
+    let info = Info { id: acp::SessionId::new("r2h1-listing-heal"), cwd: worktree_cwd_under(home.path()) };
+    let adapter = JsonlStorageAdapter::with_root(home.path().to_path_buf());
+    let session_dir = adapter.session_dir(&info);
+    write_untagged_summary(&session_dir, &info);
+    let id = info.id.to_string();
+    let gate = seams::arm(&format!("summary:{id}"));
+    let listing = tokio::spawn({
+        let adapter = adapter.clone();
+        async move { adapter.list_sessions(None).await }
+    });
+    let reached = tokio::task::spawn_blocking({
+        let gate = gate.clone();
+        move || gate.wait_reached(std::time::Duration::from_secs(10))
+    })
+    .await
+    .unwrap();
+    let held_during = !SessionWriter::is_free(&id);
+    gate.open();
+    let rows = listing.await.unwrap().expect("the listing succeeds");
+    assert!(reached, "the heal did not run as a session writer (no summary RMW through a writer)");
+    assert!(held_during, "no writer held the session during the heal");
+    assert!(SessionWriter::is_free(&id), "the heal's writer was kept");
+    assert_eq!(rows[0].worktree_label.as_deref(), Some("fix-bug"));
+    assert_eq!(read_summary_from(&session_dir).worktree_label.as_deref(), Some("fix-bug"));
+}
+
+/// Review r2 H1: a session another writer holds is not healed by a listing: the heal is skipped (and retried by a
+/// later listing), the listing neither blocks nor fails, and `summary.json` is not touched. A writer is "elsewhere"
+/// here when the id's slot is held on another folder, the in-process stand-in for a second process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn r2h1_a_listing_skips_the_heal_of_a_session_held_elsewhere_and_heals_it_later() {
+    use fuigo_session_writer::SessionWriter;
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let home = TempDir::new().unwrap();
+    let _env = EnvGuard::set("FUIGO_HOME", home.path());
+    let info = Info { id: acp::SessionId::new("r2h1-held-elsewhere"), cwd: worktree_cwd_under(home.path()) };
+    let adapter = JsonlStorageAdapter::with_root(home.path().to_path_buf());
+    let session_dir = adapter.session_dir(&info);
+    write_untagged_summary(&session_dir, &info);
+    let bytes_before = std::fs::read(session_dir.join("summary.json")).unwrap();
+    let elsewhere = home.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let holder = SessionWriter::try_claim(info.id.to_string(), &elsewhere).unwrap();
+
+    let rows = tokio::time::timeout(std::time::Duration::from_secs(5), adapter.list_sessions(None))
+        .await
+        .expect("a listing never blocks on a held session")
+        .expect("a listing never fails on a held session");
+
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].session_kind.is_none(), "the held session was healed");
+    assert_eq!(std::fs::read(session_dir.join("summary.json")).unwrap(), bytes_before, "summary.json was rewritten");
+    drop(holder);
+    let rows = adapter.list_sessions(None).await.unwrap();
+    assert_eq!(rows[0].worktree_label.as_deref(), Some("fix-bug"), "a later listing heals it");
 }

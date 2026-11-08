@@ -833,6 +833,7 @@ pub fn exited(hook: Option<&dyn SandboxLaunch>, call: &CallId) {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "sandbox_launch_tests.rs"]
 mod tests;

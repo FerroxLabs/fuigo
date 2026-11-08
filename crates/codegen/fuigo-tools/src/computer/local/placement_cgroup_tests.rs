@@ -72,6 +72,7 @@ fn request(command: &str) -> TerminalRunRequest {
         timeout: Duration::from_secs(30),
         output_byte_limit: 10000,
         output_file,
+        output_log: Default::default(),
         notification_handle: ToolNotificationHandle::noop(),
         tool_call_id: "p189c".to_string(),
         display_command: None,

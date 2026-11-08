@@ -154,6 +154,7 @@ fn has_user_message(body: &Value, tail: &str) -> bool {
     user_messages(body).iter().any(|c| c.contains(tail))
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn inherited_parent_pool_keeps_the_mcp_meta_tools_reachable_from_the_child() {
     // One test per binary; set before any agent or mock thread exists.

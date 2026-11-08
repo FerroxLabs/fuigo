@@ -57,6 +57,7 @@ fn pump(
 }
 
 /// A session whose previous process died mid-turn.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 async fn seed_crashed_session(cwd: &std::path::Path, id: &str) {
     let info = Info {
         id: acp::SessionId::new(id),

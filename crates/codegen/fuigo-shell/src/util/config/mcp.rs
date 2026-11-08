@@ -2180,6 +2180,7 @@ pub(crate) fn session_registry_local_override(root: Option<&TomlValue>) -> Optio
     session_registry_local_override_sourced(root).map(|(v, _)| v)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3065,6 +3066,7 @@ enabled = false
     }
 
     /// Nested project configs both sticky-disable the same server; enable unstick must rewrite cwd-nearest only (not the shadowed ancestor).
+    #[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
     #[tokio::test]
     async fn enable_unstick_only_touches_nearest_project_definition() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3249,6 +3251,7 @@ enabled = false
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "mcp_write_tests.rs"]
 mod write_tests;
@@ -3257,10 +3260,12 @@ mod write_tests;
 #[path = "mcp_p113_tests.rs"]
 mod p113_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "mcp_p118_tests.rs"]
 mod p118_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "mcp_bearer_file_tests.rs"]
 mod bearer_file_tests;

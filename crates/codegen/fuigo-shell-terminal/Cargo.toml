@@ -29,6 +29,8 @@ tracing = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 fuigo-acp-lib = { workspace = true }
 fuigo-config = { workspace = true }
+# F5: terminal logs and the background-task manifest are written through the session's writer.
+fuigo-session-writer = { workspace = true }
 fuigo-paths = { path = "../fuigo-paths" }
 fuigo-sandbox = { path = "../fuigo-sandbox", default-features = false }
 fuigo-tools = { workspace = true }

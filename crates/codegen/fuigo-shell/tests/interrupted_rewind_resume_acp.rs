@@ -123,6 +123,7 @@ async fn load(conn: &acp::ClientSideConnection, session: &acp::SessionId, cwd: &
 }
 
 /// Ends `session` in the agent that ran it and waits until its actor is gone: a killed process holds no lock.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 async fn close_and_release(conn: &acp::ClientSideConnection, session: &acp::SessionId, cwd: &Path) {
     ext_method(conn, "fuigo/session/close", json!({ "sessionId": session.to_string() })).await;
     let lock_path = session_dir(session, cwd).join("turn_owner.lock");
@@ -171,6 +172,7 @@ impl Kill {
 }
 
 /// One scenario; returns what is wrong with it.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 async fn scenario(cwd: &Path, mock: &MockInferenceServer, kill: Kill) -> Vec<String> {
     let mut failures = Vec::new();
     let label = format!("{kill:?}");

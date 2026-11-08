@@ -6,6 +6,7 @@ use agent_client_protocol as acp;
 
 use super::build_minimal_agent_for_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 async fn the_session_entry_keeps_a_forwarded_user_server_s_key_reference() {
     if fuigo_test_support::env::rerun_in_own_process() {

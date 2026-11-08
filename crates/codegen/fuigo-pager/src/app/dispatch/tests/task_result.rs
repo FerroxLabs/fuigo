@@ -2114,6 +2114,35 @@ fn rename_session_failed_keeps_local_display_name_and_pushes_system_block() {
     );
 }
 
+/// Review r1: renaming a session that is open in another Fuigo window is refused, and the line the user sees names the
+/// reason and where to rename it instead, once (not "Couldn't rename session: couldn't rename session: ...").
+#[test]
+fn r1rn_rename_of_a_session_open_elsewhere_says_why_and_where_to_rename_it() {
+    let mut app = test_app_with_agent();
+    // What the shell answers (`session_writer_lock::rename_held_elsewhere_error`), through the RPC's error mapping.
+    let wire = fuigo_shell::acp_error::session_unavailable_headline(
+        "This session is open in another Fuigo window. Rename it there.",
+    );
+    let error = crate::app::effects::session_rename_error_text(&wire);
+    let _effects = dispatch_task_result(
+        TaskResult::RenameSessionFailed {
+            agent_id: AgentId(0),
+            error,
+        },
+        &mut app,
+    );
+    let scrollback = &app.agents[&AgentId(0)].scrollback;
+    let last = scrollback.entry(scrollback.len() - 1).expect("last entry");
+    let text = match &last.block {
+        crate::scrollback::block::RenderBlock::System(b) => b.text.clone(),
+        other => panic!("expected System block, got {other:?}"),
+    };
+    assert_eq!(
+        text,
+        "Couldn't rename session: This session is open in another Fuigo window. Rename it there."
+    );
+}
+
 #[test]
 fn reset_session_title_failed_restores_pin_and_pushes_system_block() {
     let mut app = test_app_with_agent();

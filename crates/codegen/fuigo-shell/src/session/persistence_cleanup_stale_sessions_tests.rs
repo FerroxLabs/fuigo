@@ -1406,3 +1406,35 @@ fn a_released_sweep_lock_is_free_although_a_copy_of_its_descriptor_lives_on() {
     drop(inherited);
     assert!(again.is_some(), "the released sweep lock stayed held by an inherited descriptor");
 }
+
+/// 1.0.41 r3 (design F5 §5.6): a writer another process claims between the sweep's first look and its locks keeps
+/// the session; the sweep looks again once it holds both exclusive locks.
+#[test]
+fn a_writer_claimed_between_the_first_look_and_the_locks_keeps_the_session() {
+    let tmp = sessions_tmp();
+    let idle = write_session(tmp.path(), "cwd", "idle", days_ago(40));
+    // The lock file exists from an earlier run (old, unheld), so the first look finds nothing held
+    write(&idle.join(fuigo_session_writer::lock::SESSION_WRITER_LOCK_FILE), days_ago(40));
+    let mut holder = None;
+    let stats = cleanup_session_dir_with(
+        &idle,
+        TTL_DAYS,
+        &StdRename,
+        || {
+            // Another process's hold, as a rename of a dormant session's summary patch takes: its own open file
+            // description, so the sweep's check sees it held
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(idle.join(fuigo_session_writer::lock::SESSION_WRITER_LOCK_FILE))
+                .unwrap();
+            file.try_lock().expect("take the hold");
+            holder = Some(file);
+        },
+        || {},
+        |_| {},
+    );
+    assert_eq!(0, stats.sessions_removed, "{stats:?}");
+    assert!(idle.join("summary.json").is_file(), "the session survives");
+    drop(holder);
+}

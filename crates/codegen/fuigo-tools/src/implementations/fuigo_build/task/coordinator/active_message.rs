@@ -610,7 +610,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         let running = self.session_running_count(&wake_request.parent_session_id);
         match self.admission.admit(&wake_request, running) {
             AdmissionDecision::Start => {
-                self.start_child(wake_request, None, None, StartOrigin::Direct);
+                self.start_child(wake_request, None, None, StartOrigin::Direct, None);
             }
             AdmissionDecision::Enqueue => {
                 self.notify_limit(
@@ -622,6 +622,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 self.queued.push_back(QueuedSpawn {
                     request: Box::new(wake_request),
                     queued_at: tokio::time::Instant::now(),
+                    parent_writer: None,
                     caller: QueuedCaller::Backgrounded,
                 });
             }

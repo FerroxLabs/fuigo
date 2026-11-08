@@ -506,7 +506,7 @@ impl WorkflowManager {
         let tracker = Arc::new(parking_lot::Mutex::new(WorkflowTracker::default()));
         let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
         let (persist_tx, _persist_rx) = mpsc::unbounded_channel();
-        let store = WorkflowRunStore::new(session_dir.clone(), persist_tx.clone());
+        let store = WorkflowRunStore::new(crate::session::workflow::store::test_writer_for(session_dir.clone()), persist_tx.clone());
         let notify = super::notify::WorkflowNotifySender::new(
             agent_client_protocol::SessionId::new("test-session"),
             fuigo_acp_lib::AcpAgentGatewaySender::new(gateway_tx),
@@ -926,6 +926,7 @@ fn run_ended_status(
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1167,7 +1168,7 @@ mod tests {
             }
         });
         let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
-        let store = WorkflowRunStore::new(session_dir.clone(), persist_tx.clone());
+        let store = WorkflowRunStore::new(crate::session::workflow::store::test_writer_for(session_dir.clone()), persist_tx.clone());
         let notify = WorkflowNotifySender::new(
             agent_client_protocol::SessionId::new("test-session"),
             fuigo_acp_lib::AcpAgentGatewaySender::new(gateway_tx),

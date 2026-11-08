@@ -4,6 +4,7 @@ mod common;
 
 use fuigo_shell::agent::models::startup_prefetch;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn prefetch_never_starts_while_policy_repair_is_pending() {
     let home = common::isolated_home();

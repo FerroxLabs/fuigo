@@ -956,6 +956,7 @@ pub(crate) fn terminal_run_request(
         timeout: TEST_TASK_TIMEOUT,
         output_byte_limit: 4096,
         output_file: out_dir.join(format!("{tool_call_id}.out")),
+        output_log: Default::default(),
         notification_handle: fuigo_tools::notification::ToolNotificationHandle::noop(),
         tool_call_id: tool_call_id.to_string(),
         display_command: None,

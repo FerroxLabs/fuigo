@@ -3,8 +3,9 @@
 //! The in-memory `output` is truncated past `output_byte_limit`; `output_file` holds the full output on disk.
 
 use chrono::{DateTime, Utc};
+use fuigo_session_writer::SessionWriter;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, RwLock};
 
@@ -224,15 +225,15 @@ pub struct BackgroundTaskManifestEntry {
 
 /// Only writes a file when `entries` is non-empty.
 /// Session shutdown calls this when background tasks are intentionally left alive.
-pub fn persist_manifest(session_dir: &Path, entries: Vec<BackgroundTaskManifestEntry>) {
+/// Written through the session's writer (design F5 §5.4.2), atomically and owner-only (P150, S14).
+pub fn persist_manifest(session_writer: &SessionWriter, entries: Vec<BackgroundTaskManifestEntry>) {
     if entries.is_empty() {
         return;
     }
-    let path = session_dir.join(MANIFEST_FILENAME);
     match serde_json::to_vec(&entries) {
         Ok(data) => {
-            // A session file (the commands left running): owner-only (P150, S14).
-            if let Err(e) = fuigo_config::write_file_owner_only(&path, data) {
+            // A session file (the commands left running).
+            if let Err(e) = session_writer.replace_atomic_sync(MANIFEST_FILENAME, &data) {
                 tracing::warn!(%e, "failed to write background task manifest");
             }
         }
@@ -242,15 +243,15 @@ pub fn persist_manifest(session_dir: &Path, entries: Vec<BackgroundTaskManifestE
     }
 }
 
-/// Returns an empty vec if the manifest doesn't exist or can't be parsed.
-pub fn load_and_clear_manifest(session_dir: &Path) -> Vec<BackgroundTaskManifestEntry> {
-    let path = session_dir.join(MANIFEST_FILENAME);
-    let data = match std::fs::read(&path) {
+/// Returns an empty vec if the manifest doesn't exist or can't be parsed. The manifest is removed through the
+/// session's writer (design F5 §5.4.2).
+pub fn load_and_clear_manifest(session_writer: &SessionWriter) -> Vec<BackgroundTaskManifestEntry> {
+    let data = match std::fs::read(session_writer.dir().join(MANIFEST_FILENAME)) {
         Ok(d) => d,
         Err(_) => return Vec::new(),
     };
     // Delete regardless of parse success; stale manifests should not accumulate
-    let _ = std::fs::remove_file(&path);
+    let _ = session_writer.remove_sync(MANIFEST_FILENAME);
     serde_json::from_slice(&data).unwrap_or_default()
 }
 
@@ -301,6 +302,7 @@ fn format_duration_ago(now: std::time::SystemTime, start: std::time::SystemTime)
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,11 +531,12 @@ mod tests {
     #[test]
     fn manifest_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
+        let w = SessionWriter::try_claim("bg-manifest-manifest_roundtrip", dir.path()).unwrap();
         let entries = vec![
             make_manifest_entry("task-a", 3600),
             make_manifest_entry("task-b", 120),
         ];
-        persist_manifest(dir.path(), entries);
+        persist_manifest(&w, entries);
         // P150 (S14): the manifest is a session file, owner-only.
         #[cfg(unix)]
         {
@@ -546,38 +549,41 @@ mod tests {
             assert_eq!(mode, 0o600);
         }
 
-        let loaded = load_and_clear_manifest(dir.path());
+        let loaded = load_and_clear_manifest(&w);
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].task_id, "task-a");
         assert_eq!(loaded[1].task_id, "task-b");
         assert_eq!(loaded[0].command, "rsync -aP src:task-a /data/");
 
         // File is deleted after load
-        let again = load_and_clear_manifest(dir.path());
+        let again = load_and_clear_manifest(&w);
         assert!(again.is_empty());
     }
 
     #[test]
     fn manifest_empty_entries_no_file() {
         let dir = tempfile::tempdir().unwrap();
-        persist_manifest(dir.path(), Vec::new());
+        let w = SessionWriter::try_claim("bg-manifest-manifest_empty_entries_no_file", dir.path()).unwrap();
+        persist_manifest(&w, Vec::new());
         assert!(!dir.path().join(MANIFEST_FILENAME).exists());
     }
 
     #[test]
     fn manifest_missing_file_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let loaded = load_and_clear_manifest(dir.path());
+        let w = SessionWriter::try_claim("bg-manifest-manifest_missing_file_returns_empty", dir.path()).unwrap();
+        let loaded = load_and_clear_manifest(&w);
         assert!(loaded.is_empty());
     }
 
     #[test]
     fn manifest_malformed_json_returns_empty_and_deletes() {
         let dir = tempfile::tempdir().unwrap();
+        let w = SessionWriter::try_claim("bg-manifest-manifest_malformed_json_returns_empty_and_deletes", dir.path()).unwrap();
         let path = dir.path().join(MANIFEST_FILENAME);
         std::fs::write(&path, b"not valid json {{{").unwrap();
 
-        let loaded = load_and_clear_manifest(dir.path());
+        let loaded = load_and_clear_manifest(&w);
         assert!(loaded.is_empty());
         assert!(!path.exists());
     }
@@ -585,11 +591,12 @@ mod tests {
     #[test]
     fn manifest_partial_json_missing_fields_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
+        let w = SessionWriter::try_claim("bg-manifest-manifest_partial_json_missing_fields_returns_empty", dir.path()).unwrap();
         let path = dir.path().join(MANIFEST_FILENAME);
         // Valid JSON array but missing required fields
         std::fs::write(&path, br#"[{"task_id": "x"}]"#).unwrap();
 
-        let loaded = load_and_clear_manifest(dir.path());
+        let loaded = load_and_clear_manifest(&w);
         assert!(loaded.is_empty());
         assert!(!path.exists());
     }
@@ -633,11 +640,12 @@ mod tests {
     #[test]
     fn manifest_roundtrip_preserves_kind() {
         let dir = tempfile::tempdir().unwrap();
+        let w = SessionWriter::try_claim("bg-manifest-manifest_roundtrip_preserves_kind", dir.path()).unwrap();
         let mut entry = make_manifest_entry("mon-1", 60);
         entry.kind = fuigo_tools::computer::types::TaskKind::Monitor;
-        persist_manifest(dir.path(), vec![entry]);
+        persist_manifest(&w, vec![entry]);
 
-        let loaded = load_and_clear_manifest(dir.path());
+        let loaded = load_and_clear_manifest(&w);
         assert_eq!(loaded.len(), 1);
         assert_eq!(
             loaded[0].kind,
@@ -688,5 +696,26 @@ mod tests {
             format_duration_ago(now, now + Duration::from_secs(100)),
             "0s ago"
         );
+    }
+
+    /// A corrupt manifest is removed through the writer (1.0.40's by-path behaviour, design F5 §5.4.2), and a
+    /// manifest load after the writer released the folder for a delete removes nothing and recreates nothing.
+    #[test]
+    fn manifest_by_path_and_after_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MANIFEST_FILENAME);
+        std::fs::write(&path, b"not valid json").unwrap();
+        let live = SessionWriter::try_claim("bg-manifest-corrupt", dir.path()).unwrap();
+        assert!(load_and_clear_manifest(&live).is_empty());
+        assert!(!path.exists());
+        drop(live);
+
+        let folder = dir.path().join("deleted");
+        let w = SessionWriter::try_claim("bg-manifest-after-delete", &folder).unwrap();
+        persist_manifest(&w, vec![make_manifest_entry("task-a", 60)]);
+        w.delete_tree_sync().unwrap();
+        persist_manifest(&w, vec![make_manifest_entry("task-b", 60)]);
+        assert!(load_and_clear_manifest(&w).is_empty());
+        assert!(!folder.exists(), "nothing recreated the deleted folder");
     }
 }

@@ -18,13 +18,17 @@ pub(crate) mod driver;
 pub(crate) mod host;
 #[cfg(unix)]
 mod inbox;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(all(test, unix))]
 mod inbox_tests;
 mod locator;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod locator_tests;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(all(test, unix))]
 mod host_tests;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(all(test, unix))]
 mod hardening_tests;
 #[cfg(unix)]
@@ -36,6 +40,7 @@ mod watch_tests;
 pub(crate) mod tool_host;
 #[cfg(test)]
 mod tool_host_tests;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(all(test, unix))]
 mod uid_tests;
 #[cfg(windows)]

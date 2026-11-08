@@ -47,6 +47,7 @@ pub(crate) async fn materialize_descriptors_for_clients(
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "mcps_root is a workspace-level descriptor dir; both callers (mcp.rs cursor_mcps_root, prompt_build.rs workspace_mcps_root) return None in this build, so it never runs; not inside a session folder")]
 pub(crate) async fn materialize_descriptors_for_gateway_tools(
     mcps_root: &Path,
     tools: Vec<GatewayToolDescriptor>,
@@ -155,6 +156,7 @@ pub(crate) async fn materialize_descriptors_for_gateway_tools(
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "mcps_root is a workspace-level descriptor dir; both callers (mcp.rs cursor_mcps_root, prompt_build.rs workspace_mcps_root) return None in this build, so it never runs; not inside a session folder")]
 fn remove_gateway_owned_tool_descriptors(tools_dir: &Path) -> std::io::Result<()> {
     let entries = std::fs::read_dir(tools_dir)?;
     for entry in entries.flatten() {
@@ -182,6 +184,7 @@ fn is_gateway_owned_descriptor(path: &Path) -> bool {
         == Some(true)
 }
 
+#[allow(clippy::disallowed_methods, reason = "mcps_root is a workspace-level descriptor dir; both callers (mcp.rs cursor_mcps_root, prompt_build.rs workspace_mcps_root) return None in this build, so it never runs; not inside a session folder")]
 fn prune_stale_gateway_tool_descriptors(
     tools_dir: &Path,
     admitted: &BTreeSet<String>,
@@ -223,6 +226,7 @@ fn prune_stale_gateway_tool_descriptors(
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

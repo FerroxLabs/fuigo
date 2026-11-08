@@ -100,6 +100,8 @@ pub struct HeadlessOptions {
     pub peer: bool,
     /// CLI `--experimental-memory` / `--no-memory` override for the headless agent.
     pub memory_enabled_override: Option<bool>,
+    /// `--no-session-persistence` (F12): nothing under `FUIGO_HOME/sessions` is written; the session id is still reported.
+    pub no_session_persistence: bool,
 }
 
 /// Process exit code for a run that ended because a permission was denied.
@@ -1353,7 +1355,14 @@ async fn open_session(
                 if let Some(message) = unavailable {
                     anyhow::bail!(message);
                 }
-                anyhow::bail!("Session does not exist");
+                // Say why: the agent's own reason (unreadable history, a failed migration, a refused path) is what
+                // the operator needs. Only an empty or generic refusal falls back to the missing-session text.
+                let reason = e.to_string();
+                let reason = reason.trim();
+                if reason.is_empty() {
+                    anyhow::bail!("Session does not exist");
+                }
+                anyhow::bail!("{reason}");
             }
         }
     }
@@ -2177,6 +2186,10 @@ async fn run_single_turn_inner(
         );
     }
 
+    // F12: before the agent exists, so no session write (or index bootstrap) can start ahead of it.
+    if options.no_session_persistence {
+        fuigo_shell::session::disable_session_persistence();
+    }
     let t_spawn = Instant::now();
     let (raw_config, campaign_free_config) =
         fuigo_shell::config::load_effective_config_with_campaign_free()
@@ -2363,8 +2376,11 @@ async fn run_single_turn_inner(
         has_worktree: worktree.is_some(),
     })
     .map_err(|e| anyhow::anyhow!("{e}"))
-    .inspect_err(|_| {
+    .inspect_err(|e| {
         PendingStartup::finish_held(&mut pending_startup, crate::acp::StartupOutcome::Error);
+        // A resume, continue or fork that fails before the session opens is one terminal error in the output format
+        // (one JSON object for `json`), like a failure while opening it.
+        emitter.on_error(&e.to_string(), None);
     })?;
 
     let cwd_str = cwd.to_string_lossy().to_string();
@@ -2378,8 +2394,9 @@ async fn run_single_turn_inner(
         &cwd_str,
     )
     .await
-    .inspect_err(|_| {
+    .inspect_err(|e| {
         PendingStartup::finish_held(&mut pending_startup, crate::acp::StartupOutcome::Error);
+        emitter.on_error(&format!("{e:#}"), None);
     })?;
 
     let restore_code = match &materialized {

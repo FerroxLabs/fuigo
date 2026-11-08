@@ -2,7 +2,9 @@
 //! conversion, URL validation, and SSRF protection.
 
 use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+use crate::implementations::fuigo_build::storage::SessionFiles;
 use std::sync::Arc;
 
 use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, CONTENT_TYPE, USER_AGENT};
@@ -74,10 +76,10 @@ impl WebFetchClient {
     /// same-host redirects, HTML-to-markdown conversion, truncation, and
     /// caching. On transport errors, the HTTP client is invalidated so
     /// the next call gets a fresh connection pool (see [`HttpClient`]).
-    pub async fn fetch(
+    pub(crate) async fn fetch(
         &self,
         raw_url: &str,
-        session_folder: Option<&Path>,
+        session_folder: Option<&SessionFiles>,
         read_tool_name: Option<&str>,
         execute_tool_name: Option<&str>,
     ) -> Result<WebFetchOutput, WebFetchError> {
@@ -240,7 +242,7 @@ impl WebFetchClient {
         &self,
         body: &[u8],
         content_type: &str,
-        session_folder: Option<&Path>,
+        session_folder: Option<&SessionFiles>,
         tools: RecoveryTools<'_>,
     ) -> ProcessedText {
         let raw_content = String::from_utf8_lossy(body);
@@ -470,7 +472,9 @@ fn is_same_host(a: &Url, b: &Url) -> bool {
 // Content Processing
 // ───────────────────────────────────────────────────────────────────────────
 
-fn require_media_session_folder(session_folder: Option<&Path>) -> Result<&Path, WebFetchError> {
+fn require_media_session_folder(
+    session_folder: Option<&SessionFiles>,
+) -> Result<&SessionFiles, WebFetchError> {
     session_folder.ok_or_else(|| {
         WebFetchError::IoError(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -597,7 +601,7 @@ fn is_binary_content_type(content_type: &str) -> bool {
 /// `WebFetchOutput` pointing the model at the saved file.
 async fn save_pdf(
     writer: &SessionFileWriter,
-    session_folder: &Path,
+    session_folder: &SessionFiles,
     body: &[u8],
     final_url: String,
     content_type: String,
@@ -640,7 +644,7 @@ async fn save_pdf(
 /// `WebFetchOutput` pointing the model at the saved file.
 async fn save_image(
     writer: &SessionFileWriter,
-    session_folder: &Path,
+    session_folder: &SessionFiles,
     body: &[u8],
     final_url: String,
     content_type: String,
@@ -685,7 +689,7 @@ async fn save_image(
 /// `WebFetchOutput` pointing the model at the saved file.
 async fn save_video(
     writer: &SessionFileWriter,
-    session_folder: &Path,
+    session_folder: &SessionFiles,
     body: &[u8],
     final_url: String,
     content_type: String,
@@ -945,7 +949,7 @@ mod tests {
             .process_text_content(
                 html.as_bytes(),
                 "text/html; charset=utf-8",
-                Some(tmp.path()),
+                Some(&SessionFiles::at(tmp.path())),
                 RecoveryTools {
                     read: Some("ReadAsset"),
                     execute: Some("ExecuteAsset"),

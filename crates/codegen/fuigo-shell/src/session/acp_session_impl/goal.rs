@@ -2130,6 +2130,7 @@ impl SessionActor {
         GoalRoundDecision::Continue(plan.directive)
     }
 
+    #[allow(clippy::disallowed_methods, reason = "classifier details file in the goal scratch root under system temp; not inside a session folder")]
     async fn account_not_achieved_without_sampler(
         &self,
         policy: &GoalClassifierPolicy,

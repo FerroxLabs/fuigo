@@ -5,6 +5,7 @@ mod common;
 use fuigo_shell::agent::models::startup_prefetch;
 use fuigo_shell::util::config::RemoteSettings;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn bootstrap_discards_prefetch_when_repair_disables_remote_fetch() {
     let home = common::isolated_home();

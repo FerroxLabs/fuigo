@@ -165,7 +165,7 @@ fn closing_the_events_turn_makes_the_next_load_quiet() {
     let summary = summary_with_open_turn(dir.path());
 
     let turn = detect_interrupted_turn(dir.path(), &summary).expect("interrupted turn detected");
-    turn.close_events_turn(dir.path())
+    turn.close_events_turn(&test_session_writer(dir.path()))
         .expect("close the events turn");
 
     assert!(
@@ -315,7 +315,7 @@ async fn recover_with(
     let appends = Arc::clone(appends);
     recorded(
         recover_interrupted_turn(
-            dir,
+            &test_session_writer(dir),
             Some(&dir.join("updates.jsonl")),
             &summary,
             &session_id(),
@@ -585,7 +585,12 @@ fn a_failed_closure_is_reported() {
         started_at: None,
     };
     assert!(
-        turn.close_events_turn(&dir.path().join("gone")).is_err(),
+        {
+            // F5: a closure through a writer whose folder was deleted lands nowhere and reports it (`Gone`).
+            let writer = test_session_writer(dir.path());
+            writer.delete_tree_sync().expect("delete");
+            turn.close_events_turn(&writer).is_err()
+        },
         "a closure that did not land must be reported"
     );
 }
@@ -637,7 +642,7 @@ async fn the_recovered_marker_names_the_running_turn_not_the_queued_prompt() {
 
     let recovered = recorded(
         recover_interrupted_turn(
-            dir.path(),
+            &test_session_writer(dir.path()),
             Some(&dir.path().join("updates.jsonl")),
             &summary,
             &session_id(),
@@ -660,7 +665,7 @@ async fn storage_without_an_updates_file_declares_nothing() {
 
     let counter = Arc::clone(&appends);
     let recovered = recover_interrupted_turn(
-        dir.path(),
+        &test_session_writer(dir.path()),
         None,
         &summary,
         &session_id(),
@@ -692,7 +697,7 @@ async fn a_stuck_marker_append_downgrades_the_lock_at_the_bound() {
     let outcome = tokio::time::timeout(
         crate::session::turn_owner_lock::RECOVERY_APPEND_TIMEOUT * 3,
         recover_interrupted_turn(
-            dir.path(),
+            &test_session_writer(dir.path()),
             Some(&dir.path().join("updates.jsonl")),
             &summary,
             &session_id(),
@@ -819,7 +824,7 @@ fn lands_after(
 async fn recover_late(dir: &std::path::Path, appends: &Arc<AtomicUsize>) -> DeferredRecovery {
     let summary = summary_with_open_turn(dir);
     match recover_interrupted_turn(
-        dir,
+        &test_session_writer(dir),
         Some(&dir.join("updates.jsonl")),
         &summary,
         &session_id(),
@@ -859,7 +864,7 @@ fn interrupted_markers_on_disk(dir: &std::path::Path) -> usize {
 
 /// Turn C as the actor writes it: the pre-turn hook, then its `turn_started`.
 fn start_turn_c(dir: &std::path::Path) {
-    close_deferred_turn_before_new_turn(dir);
+    close_deferred_turn_before_new_turn(&test_session_writer(dir));
     append_event_line(dir, TURN_STARTED_C);
 }
 fn end_turn_c(dir: &std::path::Path) {
@@ -1026,7 +1031,7 @@ async fn a_deferred_recovery_dropped_unfinished_leaves_the_turn_open() {
 
     drop(recover_late(dir.path(), &appends).await);
     let before = read_events(dir.path());
-    close_deferred_turn_before_new_turn(dir.path());
+    close_deferred_turn_before_new_turn(&test_session_writer(dir.path()));
     assert_eq!(read_events(dir.path()), before);
     assert!(recoverable_now(dir.path()));
 }
@@ -1136,7 +1141,7 @@ async fn deferred_from(
 ) -> DeferredRecovery {
     let summary = summary_with_open_turn(dir);
     match recover_interrupted_turn(
-        dir,
+        &test_session_writer(dir),
         Some(&dir.join("updates.jsonl")),
         &summary,
         &session_id(),
@@ -1331,7 +1336,7 @@ async fn a_failed_late_marker_after_the_hook_closed_the_turn_does_not_claim_it_s
     let (logs, _guard) = capture_warnings();
     let deferred = deferred_from(dir.path(), fails_late(LATE)).await;
 
-    close_deferred_turn_before_new_turn(dir.path());
+    close_deferred_turn_before_new_turn(&test_session_writer(dir.path()));
     assert!(deferred.finish().await.is_none());
 
     let text = logs.text();
@@ -1353,4 +1358,9 @@ async fn a_failed_late_marker_with_no_hook_says_the_turn_stays_open() {
     let text = logs.text();
     assert!(text.contains("the turn stays open for the next load"), "{text}");
     assert!(!text.contains("pre-turn hook"), "{text}");
+}
+
+/// A writer for `dir` under a fresh id (design F5: the recovery and its closures write only through one).
+fn test_session_writer(dir: &std::path::Path) -> fuigo_session_writer::SessionWriter {
+    fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).expect("claim")
 }

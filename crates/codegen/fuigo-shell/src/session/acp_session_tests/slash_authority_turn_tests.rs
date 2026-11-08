@@ -162,6 +162,22 @@ async fn actor_with_sampler_in(
     tokio::sync::mpsc::UnboundedReceiver<()>,
     std::rc::Rc<PolicyRecorder>,
 ) {
+    actor_with_sampler_opts(server, terminal, is_subagent, permission_yolo, false).await
+}
+
+/// [`actor_with_sampler_in`]; `with_writer` gives the actor the session writer every production actor carries.
+async fn actor_with_sampler_opts(
+    server: &MockInferenceServer,
+    terminal: Arc<dyn crate::terminal::AsyncTerminalRunner>,
+    is_subagent: bool,
+    permission_yolo: Option<bool>,
+    with_writer: bool,
+) -> (
+    Arc<SessionActor>,
+    tokio::sync::mpsc::UnboundedReceiver<()>,
+    tokio::sync::mpsc::UnboundedReceiver<()>,
+    std::rc::Rc<PolicyRecorder>,
+) {
     let sampling_config = fuigo_sampler::SamplerConfig {
         api_key: Some("test-key".into()),
         base_url: server.url(),
@@ -191,6 +207,9 @@ async fn actor_with_sampler_in(
         create_test_actor_with_terminal(0, 256_000, 85, gateway_tx, persistence_tx, terminal).await;
     actor.sampler_handle = sampler_handle;
     actor.startup_hints.is_subagent = is_subagent;
+    if with_writer {
+        super::support::give_test_writer(&mut actor);
+    }
     if let Some(yolo) = permission_yolo {
         install_permission_manager(
             &mut actor,
@@ -1542,9 +1561,13 @@ fn subagent_task_prompt_skips_orphan_image_placeholder_recovery_but_a_user_promp
         let mut recovered = Vec::new();
         for as_task in [false, true] {
             let server = MockInferenceServer::start().await.expect("mock inference server");
-            let (actor, _hook_rx, _chunks, _recorder) = actor_with_sampler(
+            // The turn saves the recovered image into the session folder through the actor's writer.
+            let (actor, _hook_rx, _chunks, _recorder) = actor_with_sampler_opts(
                 &server,
                 Arc::new(RecordingTerminal { calls: Arc::new(AtomicUsize::new(0)) }),
+                false,
+                None,
+                true,
             )
             .await;
             let cwd = std::path::PathBuf::from(&actor.session_info.cwd);

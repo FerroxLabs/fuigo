@@ -86,6 +86,8 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 acp::ModelId::new("test-model"),
                 sampling_client,
                 crate::test_support::TEST_MODEL.to_owned(),
+                fuigo_session_writer::SessionWriter::try_claim(session_info.id.0.to_string(), session_dir.clone())
+                    .expect("claim the session writer"),
             )
             .await
             .expect("persistence actor should start");
@@ -335,7 +337,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 hook_load_errors: std::cell::RefCell::new(Vec::new()),
                 plugin_registry: std::cell::RefCell::new(None),
                 plugin_registry_handle: None,
-                events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
+                events: crate::session::events::EventTracker::new_at(std::path::Path::new("/tmp")),
                 _turn_owner_lock: None,
                 observability_bridge: noop_observability_bridge(),
                 current_turn_number: std::cell::Cell::new(0),
@@ -394,7 +396,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 session_dir,
             );
             let loaded = storage
-                .load_session_without_updates(&actor.session_info)
+                .load_session_without_updates(&actor.session_info, crate::session::storage::Access::Reader)
                 .await
                 .unwrap();
             assert!(
@@ -544,6 +546,8 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                     acp::ModelId::new("test-model"),
                     sampling_client,
                     crate::test_support::TEST_MODEL.to_owned(),
+                    fuigo_session_writer::SessionWriter::try_claim(session_info.id.0.to_string(), session_dir.path())
+                        .expect("claim the session writer"),
                 )
                 .await
                 .expect("persistence actor should start");
@@ -610,7 +614,7 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                 .unwrap();
             flush_rx.await.unwrap().unwrap();
             let loaded = storage
-                .load_session_without_updates(&session_info)
+                .load_session_without_updates(&session_info, crate::session::storage::Access::Reader)
                 .await
                 .unwrap();
             assert!(matches!(loaded.chat_history.first(), Some(ConversationItem::System(sys)) if sys.content.contains("Persist this memory reminder.")));
@@ -690,6 +694,8 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 acp::ModelId::new("test-model"),
                 sampling_client,
                 crate::test_support::TEST_MODEL.to_owned(),
+                fuigo_session_writer::SessionWriter::try_claim(session_info.id.0.to_string(), session_dir.path())
+                    .expect("claim the session writer"),
             )
             .await
             .expect("persistence actor should start");
@@ -964,7 +970,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 hook_load_errors: std::cell::RefCell::new(Vec::new()),
                 plugin_registry: std::cell::RefCell::new(None),
                 plugin_registry_handle: None,
-                events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
+                events: crate::session::events::EventTracker::new_at(std::path::Path::new("/tmp")),
                 _turn_owner_lock: None,
                 observability_bridge: noop_observability_bridge(),
                 current_turn_number: std::cell::Cell::new(0),
@@ -1016,7 +1022,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 session_dir.path().to_path_buf(),
             );
             let loaded = storage
-                .load_session_without_updates(&session_info)
+                .load_session_without_updates(&session_info, crate::session::storage::Access::Reader)
                 .await
                 .unwrap();
             assert!(
@@ -1287,7 +1293,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 hook_load_errors: std::cell::RefCell::new(Vec::new()),
                 plugin_registry: std::cell::RefCell::new(None),
                 plugin_registry_handle: None,
-                events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
+                events: crate::session::events::EventTracker::new_at(std::path::Path::new("/tmp")),
                 _turn_owner_lock: None,
                 observability_bridge: noop_observability_bridge(),
                 current_turn_number: std::cell::Cell::new(0),
@@ -2860,7 +2866,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 hook_load_errors: std::cell::RefCell::new(Vec::new()),
                 plugin_registry: std::cell::RefCell::new(None),
                 plugin_registry_handle: None,
-                events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
+                events: crate::session::events::EventTracker::new_at(std::path::Path::new("/tmp")),
                 _turn_owner_lock: None,
                 observability_bridge: noop_observability_bridge(),
                 current_turn_number: std::cell::Cell::new(0),

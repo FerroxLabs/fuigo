@@ -674,6 +674,14 @@ impl MvpAgent {
                 .unwrap_or_else(|| self.models_manager.current_model_id()),
         };
         let session_model_id = model_id.clone();
+        // F5 (design §5.5): `session/new` claims the writer at the start of setup with the waiting claim, chat kind
+        // included, before the persistence task exists. A fresh id has nothing to wait for; a reused id still closing
+        // here waits up to 10 s, then `still closing`. The task gets a clone and the claim moves into the actor at spawn.
+        let new_session_writer = crate::session::session_writer_lock::claim_writer(
+            &session_id.0,
+            crate::session::persistence::session_dir(&session_info),
+        )
+        .await?;
         let persistence = if is_chat_kind {
             crate::session::persistence::PersistenceHandle::noop()
         } else {
@@ -706,6 +714,7 @@ impl MvpAgent {
                     search_index: self.search_index_cell(),
                     session_kind: client_session_kind,
                 },
+                new_session_writer.clone(),
             )
             .await
             .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?
@@ -736,6 +745,7 @@ impl MvpAgent {
                         model_agent_type.as_deref(),
                         session_model_id,
                         session_yolo_mode,
+                        new_session_writer,
                     )
                 }
             } else {
@@ -771,6 +781,7 @@ impl MvpAgent {
                     is_headless,
                     is_chat_kind: false,
                     launch_policy: session_policy.clone(),
+                    session_writer: new_session_writer,
                 }
             };
             let mut spawn_timer = crate::instrumentation_timer!("session.spawn");
@@ -1129,9 +1140,6 @@ impl MvpAgent {
             .map_err(launch_policy::PolicyError::into_acp_error)?;
         self.refuse_policy_claim_on_leader(&policy_claim)?;
         self.sweep_dead_sessions();
-        if !self.is_resident(&arguments.session_id) {
-            self.drain_old_session_thread(&arguments.session_id).await;
-        }
         // P70: metadata only, as for `session/new` (MCP headers and env values carry credentials).
         tracing::debug!(
             session_id = %arguments.session_id,
@@ -1249,6 +1257,25 @@ impl MvpAgent {
             .for_attachment(
                 startup_hints_from_meta(request_meta.as_ref(), init.meta.as_ref()).non_interactive,
             );
+        // F5 (design §5.5, §6.2, §5.7): a cold load claims the session's writer, with the eager OS attach, before it
+        // reads anything; its storage reads and repairs run as that writer (`Access::Owner`), its interrupted-turn
+        // recovery writes through it, and the actor it spawns takes it over. A previous writer of the id still in this
+        // process: wait up to 10 s, then `still closing`. A resident load reads as an unowned reader.
+        let mut load_writer = if session_exists {
+            None
+        } else {
+            Some(
+                crate::session::session_writer_lock::claim_writer(
+                    &session_id.0,
+                    crate::session::persistence::session_dir(&session_info),
+                )
+                .await?,
+            )
+        };
+        let load_access = match &load_writer {
+            Some(writer) => crate::session::storage::Access::Owner(writer),
+            None => crate::session::storage::Access::Reader,
+        };
         let (persistence_info, persistence) = crate::session::persistence::load_light(
             &session_info,
             backend.as_ref(),
@@ -1264,6 +1291,7 @@ impl MvpAgent {
                 search_index: self.search_index_cell(),
                 session_kind: None,
             },
+            load_access,
         )
         .await
         .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?;
@@ -1366,7 +1394,7 @@ impl MvpAgent {
             self.record_interrupted_turn(
                 &session_id,
                 &summary,
-                &crate::session::persistence::session_dir(&session_info),
+                load_writer.as_ref(),
                 updates_file_path.as_deref(),
                 &persistence,
             )
@@ -1442,6 +1470,11 @@ impl MvpAgent {
                 session_id = %session_id.0,
                 "load_session: spawning new session actor (session not in memory)"
             );
+            // Design F5 §6.2: resident at the start (so no claim was taken) but gone at this re-check: its writer is
+            // still letting go, and this load never writes without one.
+            let Some(session_writer) = load_writer.take() else {
+                return Err(crate::session::session_writer_lock::still_closing_error());
+            };
             let mut spawn_timer = crate::instrumentation_timer!("session.spawn");
             spawn_timer.with_field("session_id", session_id.0.as_ref());
             spawn_timer.with_subphase(fuigo_telemetry::startup::Subphase::SessionSpawn);
@@ -1484,6 +1517,7 @@ impl MvpAgent {
                     is_headless: summary.is_headless(),
                     is_chat_kind: false,
                     launch_policy: cold_policy,
+                    session_writer,
                 },
             )
             .await?;
@@ -1596,6 +1630,11 @@ impl MvpAgent {
                 None => response_meta = serde_json::json!({ launch_policy::META_ACK: ack }),
             }
         }
+        if let Some(owed) = self.folder_trust_reload_owed_meta(&session_id, session_exists)
+            && let Some(obj) = response_meta.as_object_mut()
+        {
+            obj.insert(super::FOLDER_TRUST_RELOAD_OWED_META.to_owned(), owed);
+        }
         fuigo_telemetry::unified_log::info("session loaded", Some(session_id.0.as_ref()), None);
         let config_options = self.acp_config_options(Some(&session_id), &model_state);
         let modes = self.advertised_session_modes(&session_id, persisted_plan_state);
@@ -1644,14 +1683,17 @@ impl MvpAgent {
         &self,
         session_id: &acp::SessionId,
         summary: &crate::session::persistence::Summary,
-        events_dir: &std::path::Path,
+        session_writer: Option<&fuigo_session_writer::SessionWriter>,
         updates_file_path: Option<&std::path::Path>,
         persistence: &crate::session::persistence::PersistenceHandle,
     ) -> Option<crate::session::interrupted_turn::RecoveryOutcome> {
+        // Only a cold load recovers, and it holds the session's writer (design F5 §5.5). A load that found the session
+        // resident has none: the live actor owns the session, so there is nothing to recover.
+        let session_writer = session_writer?;
         // Owned, so an append that outlives the recovery's bound can be finished after this load returns.
         let persistence = persistence.clone();
         let outcome = crate::session::interrupted_turn::recover_interrupted_turn(
-            events_dir,
+            session_writer,
             updates_file_path,
             summary,
             session_id,
@@ -2090,6 +2132,8 @@ impl MvpAgent {
                 session_id.0.as_ref(),
                 &self.gateway,
                 Some(&parent_cmd_tx),
+                // The agent holds no writer for the resident parent: its records route to the parent actor.
+                None,
                 crate::agent::subagent::ORPHAN_RECONCILE_REASON,
                 self.session_registry.live_orphan_heal_lock(&session_id),
             )
@@ -2381,7 +2425,7 @@ impl MvpAgent {
         let mut meta = acp::Meta::new();
         meta.insert(
             "fuigo/closeOutcome".to_string(),
-            serde_json::json!(outcome.wire_str()),
+            serde_json::json!(outcome.wire_str_for(self.close_timeout_client())),
         );
         Ok(acp::CloseSessionResponse::new().meta(meta))
     }

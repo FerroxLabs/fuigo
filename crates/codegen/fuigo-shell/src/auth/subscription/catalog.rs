@@ -86,6 +86,7 @@ pub fn cached_model_ids(home: &Path, provider: SubscriptionProvider) -> Vec<Stri
         .unwrap_or_default()
 }
 
+#[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
 pub fn write_cached_model_ids(
     home: &Path,
     provider: SubscriptionProvider,
@@ -239,6 +240,7 @@ pub(crate) async fn test_sign_in(
     write_cached_model_ids(home, provider, &ids).expect("fixture cache written");
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -95,6 +95,7 @@ impl fuigo_tool_runtime::Tool for WriteTool {
     }
 
     #[tracing::instrument(name = "tool.write", skip_all)]
+    #[allow(clippy::disallowed_methods, reason = "file tool write of a model/user-chosen path (user content); not inside a session folder")]
     async fn run(
         &self,
         ctx: fuigo_tool_runtime::ToolCallContext,
@@ -213,6 +214,7 @@ impl fuigo_tool_runtime::Tool for WriteTool {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use crate::types::tool_metadata::test_ctx;

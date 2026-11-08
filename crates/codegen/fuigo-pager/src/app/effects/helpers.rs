@@ -477,6 +477,7 @@ pub(crate) struct EffectMeta {
 /// Extract the first user prompt text from a session's `chat_history.jsonl`.
 ///
 /// Returns the first line of the `<user_query>` content (if present), or the first line of the raw user message text.
+#[allow(clippy::disallowed_methods, reason = "read-only: reads chat_history.jsonl for the first-prompt preview")]
 pub(super) fn extract_first_user_prompt(
     info: &fuigo_shell::session::info::Info,
 ) -> Option<String> {

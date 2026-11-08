@@ -17,6 +17,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             mut request,
             result_tx,
             mut registered_tx,
+            parent_writer,
         } = command;
         // `loop_task_id` is lineage and reparent copies it onto nested Tasks.
         // Only the scheduler actor's own fire (already tagged before reparent)
@@ -66,6 +67,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 Some(result_tx),
                 registered_tx,
                 StartOrigin::Direct,
+                parent_writer,
             ),
             AdmissionDecision::Enqueue => {
                 debug_assert!(
@@ -92,6 +94,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 self.queued.push_back(QueuedSpawn {
                     request,
                     queued_at: tokio::time::Instant::now(),
+                    parent_writer,
                     caller: QueuedCaller::Awaiting {
                         result_tx,
                         deadline,

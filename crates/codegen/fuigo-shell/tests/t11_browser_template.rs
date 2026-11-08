@@ -40,6 +40,7 @@ fn invoke_and_read(script: &Path, output: &Path, target: &str) -> Vec<String> {
         .collect()
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn browser_template_keeps_arguments_separate() {
     let _env = BrowserEnvGuard(std::env::var_os("BROWSER"));

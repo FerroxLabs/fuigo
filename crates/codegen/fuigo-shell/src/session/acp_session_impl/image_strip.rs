@@ -246,7 +246,7 @@ impl SessionActor {
         // Only `Applied` may also claim the stored conversation changed (a failed or missed write leaves the image on disk)
         // While a load-time history repair owes its backup the history file is not rewritten, so whatever the outcome says,
         // the saved history still holds the image: the note says so and why (P123, K14).
-        let not_saved = crate::session::storage::jsonl::load_repair::image_strip_not_saved_note(&self.session_info);
+        let not_saved = crate::session::storage::jsonl::load_repair::image_strip_not_saved_note(&self.session_info, self.rebuild_spec.session_writer.as_ref());
         let notes = match outcome {
             _ if not_saved.is_some() => vec![format!(
                 "The server could not process an image, so it was left out of this request. {}",

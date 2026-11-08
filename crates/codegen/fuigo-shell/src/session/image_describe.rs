@@ -275,15 +275,16 @@ pub(crate) struct PersistedImage {
 ///
 /// Each file is written as `image-<uuid>.<ext>` where `<ext>` is inferred from `mime_type` (falling back to `png`).
 /// Returns one [`PersistedImage`] per input, in input order, so callers can render the `<image_files>` list deterministically.
+///
+/// F5-C4: written as the session's writer (`assets/` and each file owner-only, write-once).
 pub(crate) fn persist_user_images(
-    session_dir: &Path,
+    writer: &fuigo_session_writer::SessionWriter,
     images: &[ImageContent],
 ) -> std::io::Result<Vec<PersistedImage>> {
     if images.is_empty() {
         return Ok(Vec::new());
     }
-    let assets_dir = session_assets_dir(session_dir);
-    crate::util::fuigo_home::create_dir_all_owner_only(&assets_dir)?;
+    let assets_dir = session_assets_dir(writer.dir());
     let mut out = Vec::with_capacity(images.len());
     for img in images {
         let bytes = base64::engine::general_purpose::STANDARD
@@ -292,7 +293,7 @@ pub(crate) fn persist_user_images(
         let ext = mime_to_extension(&img.mime_type);
         let filename = format!("image-{}.{ext}", uuid::Uuid::new_v4());
         let path = assets_dir.join(&filename);
-        fuigo_config::write_file_owner_only(&path, &bytes)?;
+        writer.create_new_sync(writer.rel_of(&path)?, &bytes)?;
         let mime_type = img.mime_type.clone();
         out.push(PersistedImage {
             path,
@@ -398,11 +399,11 @@ pub(crate) fn render_image_user_message(
 /// Used by other harnesses that still pass images inline as
 /// multimodal parts — persistence is independent of vision describe.
 pub(crate) fn persist_and_prepend_image_files(
-    session_dir: &Path,
+    writer: &fuigo_session_writer::SessionWriter,
     images: &[ImageContent],
     original_user_message: &str,
 ) -> std::io::Result<String> {
-    let persisted = persist_user_images(session_dir, images)?;
+    let persisted = persist_user_images(writer, images)?;
     let image_paths: Vec<String> = persisted
         .iter()
         .map(|p| p.path.to_string_lossy().into_owned())
@@ -414,6 +415,9 @@ pub(crate) fn persist_and_prepend_image_files(
 }
 #[cfg(test)]
 mod tests {
+    fn test_writer(dir: &std::path::Path) -> fuigo_session_writer::SessionWriter {
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).unwrap()
+    }
     use super::*;
     use fuigo_sampling_types::conversation::{ConversationItem, UserItem};
     #[test]
@@ -427,7 +431,7 @@ mod tests {
             0xd4, 0xef, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
         ]);
         let img = ImageContent::new(png, "image/png");
-        let msg = persist_and_prepend_image_files(dir.path(), &[img], "hello").unwrap();
+        let msg = persist_and_prepend_image_files(&test_writer(dir.path()), &[img], "hello").unwrap();
         assert!(msg.contains("<image_files>"));
         assert!(msg.contains("/assets/image-"));
         assert!(msg.ends_with("hello") || msg.contains("\n\nhello"));
@@ -444,7 +448,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode([0u8; 4]),
             "image/png",
         );
-        persist_user_images(dir.path(), &[img]).unwrap();
+        persist_user_images(&test_writer(dir.path()), &[img]).unwrap();
         let mode = std::fs::metadata(dir.path().join("assets"))
             .unwrap()
             .permissions()
@@ -640,7 +644,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(png_bytes),
             "image/png".to_owned(),
         );
-        let persisted = persist_user_images(dir.path(), &[img]).unwrap();
+        let persisted = persist_user_images(&test_writer(dir.path()), &[img]).unwrap();
         assert_eq!(persisted.len(), 1);
         let p = &persisted[0];
         assert!(p.path.starts_with(dir.path().join("assets")));
@@ -658,14 +662,14 @@ mod tests {
             "image/png".to_owned(),
         )
         .uri(Some("https://example.com/x.png".to_owned()));
-        let persisted = persist_user_images(dir.path(), &[img]).unwrap();
+        let persisted = persist_user_images(&test_writer(dir.path()), &[img]).unwrap();
         assert_eq!(persisted[0].raw_bytes, vec![0u8]);
         assert_eq!(persisted[0].mime_type, "image/png");
     }
     #[test]
     fn persist_user_images_empty_input_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let out = persist_user_images(dir.path(), &[]).unwrap();
+        let out = persist_user_images(&test_writer(dir.path()), &[]).unwrap();
         assert!(out.is_empty());
         assert!(!dir.path().join("assets").exists());
     }

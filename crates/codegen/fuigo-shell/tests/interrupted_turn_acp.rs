@@ -66,15 +66,22 @@ async fn session_dir(id: &str) -> PathBuf {
 const PROMPT_ID: &str = "prompt-lost-with-its-process";
 
 /// A session whose previous process died mid-turn: `summary` names the turn and `events.jsonl` never closed it.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 async fn seed_crashed_session(cwd: &Path, id: &str) -> PathBuf {
     let info = Info {
         id: acp::SessionId::new(id),
         cwd: cwd.to_string_lossy().into_owned(),
     };
-    JsonlStorageAdapter::new()
+    // A session folder is written only by its writer (design F5 §5.5); the seed holds it until it returns.
+    let storage = JsonlStorageAdapter::new();
+    let writer = fuigo_session_writer::SessionWriter::try_claim(info.id.0.to_string(), storage.session_dir(&info))
+        .expect("claim the seed's session writer");
+    let storage = storage.with_writer(writer);
+    storage
         .init_session(&info, acp::ModelId::new("test-model"))
         .await
         .expect("init session");
+    drop(storage);
     let dir = session_dir(id).await;
     let summary_path = dir.join("summary.json");
     let mut summary: Value =
@@ -149,6 +156,7 @@ fn png_base64() -> String {
     base64::engine::general_purpose::STANDARD.encode(&png)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn a_turn_lost_with_its_process_is_recorded_and_reported_once() {
     run_agent_test(|cwd, _server| async move {

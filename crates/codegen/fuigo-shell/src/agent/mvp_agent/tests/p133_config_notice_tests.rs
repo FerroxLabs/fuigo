@@ -86,3 +86,38 @@ async fn announcing_to_an_absent_session_closes_the_scope() {
     scope.run(|| record_refusal("/p138/gone/later.toml"));
     assert!(scope.notes().is_empty(), "the scope stayed open after the announce found no session");
 }
+
+/// 75.F1: a session opened in a folder whose `.claude/settings.json` does not parse is told so, once, naming the file.
+/// Without the notice the file's deny rules would silently not apply.
+#[tokio::test(flavor = "current_thread")]
+async fn an_unloadable_permission_file_is_announced_to_the_session() {
+    let agent = build_minimal_agent_for_tests();
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::create_dir(repo.path().join(".git")).unwrap();
+    std::fs::create_dir(repo.path().join(".claude")).unwrap();
+    std::fs::write(repo.path().join(".claude/settings.json"), "{ \"permissions\": ").unwrap();
+    crate::agent::folder_trust::record_for_test(repo.path(), true);
+    let mut handle = make_test_handle("m", false, None);
+    handle.info.cwd = repo.path().display().to_string();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    handle.cmd_tx = tx;
+    let sid = acp::SessionId::new("f1-announce");
+    agent.insert_resident(&sid, handle);
+
+    agent
+        .announce_config_notices(&sid, fuigo_config::key_naming::NoticeScope::new())
+        .await;
+
+    let mut notices = Vec::new();
+    while let Ok(cmd) = rx.try_recv() {
+        if let SessionCommand::NotifyConfigNotice { notice } = cmd {
+            notices.push(notice);
+        }
+    }
+    let mine: Vec<_> = notices
+        .iter()
+        .filter(|n| n.contains(&repo.path().display().to_string()))
+        .collect();
+    assert_eq!(mine.len(), 1, "{notices:?}");
+    assert!(mine[0].contains("settings.json") && mine[0].contains("not valid JSON"), "{mine:?}");
+}

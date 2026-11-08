@@ -72,7 +72,7 @@ async fn observe(agent: &crate::agent::mvp_agent::MvpAgentHandle, cwd: &std::pat
     handle.cmd_tx.send(crate::session::SessionCommand::GetToolOverrides { respond_to: barrier_tx }).expect("actor alive");
     barrier_rx.await.expect("actor answered the barrier");
     let hooks = !handle.snapshot_client_hooks().await.is_empty();
-    let saved = JsonlStorageAdapter::new().load_session(&info(cwd, id)).await.expect("reload").chat_history;
+    let saved = JsonlStorageAdapter::new().load_session(&info(cwd, id), crate::session::storage::Access::Reader).await.expect("reload").chat_history;
     let head_item = handle.chat_state_handle.get_conversation_item_at(0).await;
     let carries = |item: &ConversationItem| matches!(item, ConversationItem::System(s) if s.content.to_string().contains(LOADER_PROMPT));
     Applied {

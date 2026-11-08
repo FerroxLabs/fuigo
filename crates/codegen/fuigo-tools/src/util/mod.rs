@@ -15,8 +15,10 @@ pub mod path_match;
 pub mod path_suggestions;
 pub mod read_deny;
 pub mod rg_json;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 pub(crate) mod rg_json_tests;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[cfg(unix)]
 mod search_proof_tests;
@@ -28,6 +30,7 @@ pub mod shell_env_policy;
 pub mod spawn;
 pub mod truncate;
 pub mod unicode_confusables;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(any(bundle_rg, bundle_fd, bundle_bfs, bundle_ugrep, test))]
 pub(crate) mod vendor;
 

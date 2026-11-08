@@ -153,8 +153,12 @@ fn is_replay_bash_execute(update: &acp::SessionUpdate) -> bool {
 
 pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
     let state_changed = handle_inner(msg, app);
+    // F5-P: an owed folder-trust reload starts once this view is idle (R3); the event loop runs the close.
+    let reload = crate::app::folder_trust_reload::poll(app);
+    let reload_started = !reload.is_empty();
+    app.pending_effects.extend(reload);
     let flushed = app.flush_image_notices_if_root();
-    state_changed || flushed
+    state_changed || flushed || reload_started
 }
 
 fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
@@ -584,6 +588,9 @@ fn queue_open_workflows_modal_refresh(app: &mut AppView, agent_id: AgentId) {
 }
 
 fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    if let Some(session_id) = crate::app::folder_trust_reload::reload_notification_session(notif) {
+        return crate::app::folder_trust_reload::handle_reload_notification(app, &session_id);
+    }
     let method = notif.method.as_ref();
     if crate::acp::is_session_update_ext_method(method) {
         return handle_session_notification(notif, app);

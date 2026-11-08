@@ -389,8 +389,11 @@ pub(crate) async fn run_goal_planner(
         model_id: inputs.model_id.to_string(),
     });
 
+    // F5-C5: the caller creates `goal/` through the session's writer; a missing one fails closed here.
     if let Some(parent) = inputs.plan_file.parent()
-        && let Err(err) = tokio::fs::create_dir_all(parent).await
+        && let Err(err) = tokio::fs::metadata(parent)
+            .await
+            .and_then(|meta| if meta.is_dir() { Ok(()) } else { Err(std::io::Error::from(std::io::ErrorKind::NotADirectory)) })
     {
         tracing::warn!(
             parent = %parent.display(),
@@ -500,6 +503,7 @@ fn record_fail_closed(
 
 // Tests
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1273,7 +1277,7 @@ mod tests {
     #[tokio::test]
     async fn fail_open_retry_emits_spawn_failed_event() {
         let dir = tempfile::tempdir().unwrap();
-        let writer = fuigo_session_events::EventWriter::open(dir.path());
+        let writer = fuigo_session_events::EventWriter::open_at(dir.path());
         let ov = RoleSpawnOverride {
             model: Some("m".into()),
             agent_type: Some("t".into()),

@@ -2454,6 +2454,22 @@ fn delete_session_action_emits_delete_effect() {
         }] if source == "local" && session_id == "s1" && cwd == "/repo"
     ));
 }
+/// 72.B2: the /delete confirmation opens on Cancel, so a reflex Enter keeps the session. Delete stays option 1.
+#[test]
+fn delete_current_session_confirmation_starts_on_cancel() {
+    let mut app = test_app_with_agent();
+    {
+        let a = app.agents.get_mut(&AgentId(0)).unwrap();
+        a.session.session_id = Some(acp::SessionId::new("sess-current"));
+        a.session.cwd = std::path::PathBuf::from("/repo");
+    }
+    assert!(dispatch(Action::DeleteCurrentSession, &mut app).is_empty());
+    let qv = app.agents[&AgentId(0)].question_view.as_ref().unwrap();
+    let options = &qv.questions[0].options;
+    assert_eq!(options[0].label, "Delete", "press 1 to delete");
+    assert_eq!(options[qv.cursor()].label, "Cancel", "Enter must not delete");
+}
+
 #[test]
 fn delete_current_session_confirm_emits_effect() {
     use crate::app::actions::AfterSessionDelete;

@@ -105,6 +105,8 @@ pub(crate) fn build_screen_mode_relaunch_args(
                 | "-c"
                 | "--fork-session"
                 | "--restore-code"
+                // F12: ignored outside headless, and it conflicts with the `--resume` appended below.
+                | "--no-session-persistence"
         ) {
             continue;
         }
@@ -430,6 +432,21 @@ mod tests {
         assert_eq!(
             as_strs(&out),
             vec!["--no-leader", "--resume", "abc", "--fullscreen"]
+        );
+    }
+
+    /// F12: `--no-session-persistence` (ignored in an interactive session) must not survive the rebuild: with the
+    /// appended `--resume` it is a clap conflict, and the relaunched process would exit at once.
+    #[test]
+    fn strips_no_session_persistence() {
+        let out = build_screen_mode_relaunch_args(
+            args(&["fuigo", "--no-session-persistence", "--no-leader"]),
+            "abc",
+            true,
+        );
+        assert_eq!(
+            as_strs(&out),
+            vec!["--no-leader", "--resume", "abc", "--minimal"]
         );
     }
 

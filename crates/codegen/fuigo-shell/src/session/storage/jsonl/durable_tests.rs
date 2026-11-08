@@ -4,6 +4,11 @@ use crate::session::info::Info;
 use crate::session::persistence::default_model_id;
 use crate::session::storage::{SessionUpdate, StorageAdapter};
 
+/// A writer for `dir` under a fresh id (F5-C4: appends go through one).
+fn test_writer(dir: &std::path::Path) -> fuigo_session_writer::SessionWriter {
+    fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).expect("claim")
+}
+
 fn info() -> Info {
     Info {
         id: acp::SessionId::new("durable-jsonl"),
@@ -236,6 +241,7 @@ fn directory_barrier_failure_is_retried_even_after_file_exists() {
     };
     assert!(
         JsonlStorageAdapter::append_jsonl_line_sync_with(
+            &test_writer(dir.path()),
             &path,
             b"{\"record\":1}\n".to_vec(),
             AppendDurability::Durable,
@@ -245,6 +251,7 @@ fn directory_barrier_failure_is_retried_even_after_file_exists() {
         .is_err()
     );
     JsonlStorageAdapter::append_jsonl_line_sync_with(
+        &test_writer(dir.path()),
         &path,
         b"{\"record\":1}\n".to_vec(),
         AppendDurability::Durable,
@@ -260,6 +267,7 @@ fn file_barrier_error_after_write_is_committed_and_keeps_the_line() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("updates.jsonl");
     let error = JsonlStorageAdapter::append_jsonl_line_sync_with(
+        &test_writer(dir.path()),
         &path,
         b"{\"record\":1}\n".to_vec(),
         AppendDurability::Durable,
@@ -289,6 +297,7 @@ fn cwd_switch_retry_after_post_append_barrier_failure_is_already_present() {
 
     assert!(matches!(
         JsonlStorageAdapter::append_cwd_switch_line_sync_with(
+            &test_writer(dir.path()),
             &path,
             line.clone(),
             3,
@@ -302,6 +311,7 @@ fn cwd_switch_retry_after_post_append_barrier_failure_is_already_present() {
     ));
     assert!(matches!(
         JsonlStorageAdapter::append_cwd_switch_line_sync_with(
+            &test_writer(dir.path()),
             &path,
             line,
             3,
@@ -545,7 +555,7 @@ fn darwin_fullfsync_seam_reports_invalid_descriptor() {
 #[cfg(target_os = "macos")]
 #[test]
 fn darwin_durable_sync_is_one_full_flush_per_descriptor() {
-    use super::super::{FULLFSYNC_CALLS, sync_dir_durable, sync_file_durable, write_bytes_atomic};
+    use super::super::{FULLFSYNC_CALLS, sync_dir_durable, sync_file_durable, write_bytes_atomic_fixture};
     let flushes = || FULLFSYNC_CALLS.with(std::cell::Cell::get);
     let dir = tempfile::tempdir().unwrap();
     let file = std::fs::File::create(dir.path().join("probe")).unwrap();
@@ -559,6 +569,25 @@ fn darwin_durable_sync_is_one_full_flush_per_descriptor() {
     assert_eq!(flushes() - start, 1, "one directory sync is one full flush");
 
     let start = flushes();
-    write_bytes_atomic(&dir.path().join("atomic.json"), b"{}").unwrap();
+    write_bytes_atomic_fixture(&dir.path().join("atomic.json"), b"{}").unwrap();
     assert_eq!(flushes() - start, 2, "an atomic write is one flush for the file and one for its parent");
+}
+
+/// F5-C8 (design F5 §6.1, F5-C4): once close releases the persistence adapter's writer, every later write is refused
+/// with nothing written, even when no one holds the folder: the adapter never falls back to writing by path.
+#[tokio::test]
+async fn c8_a_released_adapter_refuses_every_write_and_never_writes_by_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = dir.path().join("released");
+    let info = info();
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(session.clone()).with_writer(test_writer(&session));
+    adapter.init_session(&info, default_model_id()).await.expect("the held writer creates the session");
+    adapter.append_update(&info, &update(&info, "held".into())).await.expect("the held writer writes");
+    let updates = session.join("updates.jsonl");
+    let before = std::fs::read(&updates).unwrap();
+    adapter.release_writer_slot();
+    let error = adapter.append_update(&info, &update(&info, "late".into())).await.expect_err("released: refused");
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied, "{error}");
+    assert!(adapter.session_writer(&info).is_err(), "a released adapter hands out no writer");
+    assert_eq!(std::fs::read(&updates).unwrap(), before, "a released adapter wrote by path");
 }

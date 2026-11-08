@@ -378,6 +378,29 @@ impl AgentView {
             }
         }
 
+        // F11: folder trust. Its own handler owns Esc (a pending confirm cancels before the modal closes).
+        if let ActiveModal::FolderTrust { state } = modal {
+            use crate::views::trust_modal::{self, TrustKeyOutcome};
+            return match trust_modal::handle_trust_key(state, key) {
+                TrustKeyOutcome::Unchanged => InputOutcome::Unchanged,
+                TrustKeyOutcome::Changed => InputOutcome::Changed,
+                TrustKeyOutcome::Close => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                // A grant is the shell's `/hooks-trust`, sent as typed: one grant path (settle_session_grant, F5 reload).
+                TrustKeyOutcome::Grant => {
+                    self.active_modal = None;
+                    InputOutcome::Action(Action::SendSlashCommandPreservingDraft(trust_modal::GRANT_COMMAND.to_owned()))
+                }
+                TrustKeyOutcome::RevokeCurrent => {
+                    self.active_modal = None;
+                    InputOutcome::Action(Action::SendSlashCommandPreservingDraft(trust_modal::REVOKE_COMMAND.to_owned()))
+                }
+                TrustKeyOutcome::RevokeOther(folder) => InputOutcome::Action(Action::DeclineFolderTrust(folder)),
+            };
+        }
+
         // MemoryBrowser: route through ModalWindow chrome, then delegate.
         if let ActiveModal::MemoryBrowser { state } = modal {
             // When the filter input is focused, Esc exits filter mode instead of closing the modal
@@ -528,6 +551,7 @@ impl AgentView {
             | ActiveModal::DocViewer { .. }
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
+            | ActiveModal::FolderTrust { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::UsageInfo { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
@@ -1598,6 +1622,18 @@ impl AgentView {
             }
         }
 
+        // F11: folder trust. The chrome handles the close button and tab clicks; nothing else is clickable.
+        if let Some(ActiveModal::FolderTrust { state }) = &mut self.active_modal {
+            return match mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row) {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                ModalWindowOutcome::Unhandled => InputOutcome::Unchanged,
+                _ => InputOutcome::Changed,
+            };
+        }
+
         // MemoryBrowser: route through ModalWindow chrome, then delegate.
         if let Some(ActiveModal::MemoryBrowser { state }) = &mut self.active_modal {
             let outcome =
@@ -2495,6 +2531,8 @@ impl AgentView {
                     compact,
                     &theme,
                 );
+            } else if let modal::ActiveModal::FolderTrust { state } = active_modal {
+                crate::views::trust_modal::render_trust_modal(buf, area, state, compact);
             } else if let modal::ActiveModal::MemoryBrowser { state: mem_state } = active_modal {
                 crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);
             } else if let modal::ActiveModal::Settings {

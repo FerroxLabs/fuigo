@@ -73,6 +73,7 @@ fn agent_config() -> fuigo_shell::agent::config::Config {
     config
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn responses_profile_keeps_the_tool_list_identical_on_every_request_including_finalize() {
     // Three model calls per execution: two tool rounds, then the third call is the finalize slot.

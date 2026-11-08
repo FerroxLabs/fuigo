@@ -368,6 +368,7 @@ fn ci_starts_with(name: &str, prefix_lower: &str) -> bool {
     prefix_lower.chars().all(|p| folded.next() == Some(p))
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

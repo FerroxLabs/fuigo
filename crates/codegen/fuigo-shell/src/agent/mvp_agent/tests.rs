@@ -1151,6 +1151,7 @@ async fn file_toolset_override_e2e_to_finalized_toolset() {
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
+        session_writer: None,
         state_path: tmp.path().join("state.json"),
         memory_backend: None,
         web_search_config: fuigo_tools::implementations::web_search::WebSearchConfig::default(),
@@ -2606,6 +2607,12 @@ async fn t04_build_agent_from_spawn_inputs(
     inputs.api_key_provider = Some(api_key_provider);
     inputs.image_gen_config = image_gen_config;
     inputs.web_search_config = web_search_config;
+    // Design F5 §5.5: the session's writer is cloned into its `SessionContext`; spawn builds the production spec with
+    // `session_writer: Some`. The toolset's session folder is the state path's parent, the working directory here.
+    inputs.session_writer = Some(
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), working_directory)
+            .expect("claim the T04 session writer"),
+    );
     let mut definition = fuigo_agent::config::AgentDefinition::default_fuigo_build();
     definition.discover_skills = false;
     definition.agents_md = false;
@@ -3151,6 +3158,7 @@ mod u35_modes_tests;
 mod u36_browser_mode_acp_tests;
 mod u36_launch_policy_tests;
 mod p30_direct_lock_tests;
+mod f5t_load_delete_tests;
 mod subagent_spawn_context_tests;
 mod u39_plugin_registry_tests;
 mod u39_scheduler_spawn_tests;
@@ -4756,6 +4764,11 @@ fn chat_session_spawn_options_matches_thin_profile() {
         None,
         acp::ModelId::new(std::sync::Arc::from("test-model")),
         false,
+        fuigo_session_writer::SessionWriter::try_claim(
+            "00000000-0000-0000-0000-000000000099",
+            std::env::temp_dir().join("chat-spawn-options-writer"),
+        )
+        .expect("claim"),
     );
     assert!(opts.mcp_servers.is_empty());
     assert!(opts.initial_client_mcp_servers.is_empty());

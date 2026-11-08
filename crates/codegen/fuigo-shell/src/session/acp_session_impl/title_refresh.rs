@@ -66,10 +66,7 @@ impl SessionActor {
             0
         };
         self.next_title_refresh_idx.set(idx);
-        session_summary::save_title_refresh_watermark(
-            &crate::session::persistence::session_dir(&self.session_info),
-            idx,
-        );
+        session_summary::save_title_refresh_watermark(self.rebuild_spec.session_writer.as_ref(), idx);
     }
 
     /// Bumps the generation so a task that finishes after the abort neither persists its result nor consumes a checkpoint.
@@ -107,10 +104,7 @@ impl SessionActor {
         }
         self.next_title_refresh_idx.set(target_idx);
         // Persist the checkpoint (even on a failed attempt) so the freeze is durable and a failing model can't keep re-attempting after resume
-        session_summary::save_title_refresh_watermark(
-            &crate::session::persistence::session_dir(&self.session_info),
-            target_idx,
-        );
+        session_summary::save_title_refresh_watermark(self.rebuild_spec.session_writer.as_ref(), target_idx);
         if let Some(title) = title {
             tracing::info!(turns, chars = title.len(), "session title refreshed");
             // The persistence actor overwrites an auto title but never a manual `/rename` (checked under the summary lock)

@@ -11,9 +11,15 @@ pub enum PullResult {
 }
 
 /// Fetch a session from the backend and hydrate local JSONL storage.
+///
+/// `owner`: the writer the caller already holds for `session_id` (a cold load's own claim, design F5 §3.2). The
+/// hydration writes through it when it names the folder the pull lands in; otherwise the pull claims the id itself
+/// without waiting, and a session open in this process (or one whose folder differs from the owner's) is refused with
+/// nothing written.
 pub async fn pull_session_to_local(
     session_id: &str,
     client: &BackendClient,
+    owner: Option<&fuigo_session_writer::SessionWriter>,
 ) -> Result<PullResult, BackendError> {
     let loaded = match client.load_session_data(session_id).await {
         Ok(resp) => resp,
@@ -45,7 +51,20 @@ pub async fn pull_session_to_local(
         tracing::warn!(?e, "failed to ensure sessions cwd dir for pulled session");
     }
 
-    let num_messages = hydrate::write_to_dir(&dir, &loaded)?;
+    let claimed;
+    let writer = match owner {
+        Some(owner) if owner.id() == session_id && owner.dir() == dir => owner,
+        _ => {
+            claimed = fuigo_session_writer::SessionWriter::try_claim(session_id, dir.clone()).map_err(|_busy| {
+                BackendError::Hydration {
+                    path: dir.clone(),
+                    source: std::io::Error::other(crate::session::session_writer_lock::OPEN_HERE),
+                }
+            })?;
+            &claimed
+        }
+    };
+    let num_messages = hydrate::write_to_dir(writer, &loaded)?;
 
     tracing::info!(session_id, %cwd, num_messages, "Pulled session from backend");
 
@@ -71,10 +90,14 @@ pub(crate) mod hydrate {
     }
 
     /// Write all session files to `dir`.
+    ///
+    /// F5 (design §3.2 of the P0 receipt): every file goes through the pulled session's writer, which creates the
+    /// folder owner-only on its first write.
     pub(super) fn write_to_dir(
-        dir: &Path,
+        writer: &fuigo_session_writer::SessionWriter,
         loaded: &LoadDataResponse,
     ) -> Result<usize, BackendError> {
+        let dir = writer.dir();
         let remote = loaded
             .session
             .as_ref()
@@ -85,25 +108,23 @@ pub(crate) mod hydrate {
             cwd: remote.cwd.clone().expect("caller verified cwd is Some"),
         };
 
-        crate::util::fuigo_home::create_dir_all_owner_only(dir).map_err(|e| io_err(dir, e))?;
-
         let num_messages = loaded.messages.as_ref().map_or(0, |m| m.len());
         let mut num_chat_messages = 0;
 
         if let Some(ref messages) = loaded.messages {
-            write_updates(dir, messages)?;
-            num_chat_messages = crate::session::storage::chat_rebuild::rebuild_chat_history(dir)
+            write_updates(writer, messages)?;
+            num_chat_messages = crate::session::storage::chat_rebuild::rebuild_chat_history(writer)
                 .map_err(|e| io_err(dir, e))?;
         }
 
-        write_summary(dir, &info, remote, num_messages, num_chat_messages)?;
-        write_remote_origin_marker(dir);
+        write_summary(writer, &info, remote, num_messages, num_chat_messages)?;
+        write_remote_origin_marker(writer);
 
         Ok(num_messages)
     }
 
     fn write_summary(
-        dir: &Path,
+        writer: &fuigo_session_writer::SessionWriter,
         info: &Info,
         remote: &SessionInfo,
         num_messages: usize,
@@ -187,20 +208,19 @@ pub(crate) mod hydrate {
         }
 
         let json = serde_json::to_string_pretty(&summary)?;
-        write_file(&dir.join(SUMMARY_FILE), json.as_bytes())
+        writer.replace_atomic_sync(SUMMARY_FILE, json.as_bytes()).map_err(|e| io_err(&writer.dir().join(SUMMARY_FILE), e))
     }
 
     /// Convert backend JSON-RPC messages to local updates.jsonl (replayable methods only).
     pub(super) fn write_updates(
-        dir: &Path,
+        writer: &fuigo_session_writer::SessionWriter,
         messages: &[LoadedMessage],
     ) -> Result<(), BackendError> {
         use std::io::Write;
 
-        let path = dir.join(UPDATES_FILE);
-        // Pulled session files are owner-only like local ones (P150, S14).
-        let file = fuigo_config::create_file_owner_only(&path).map_err(|e| io_err(&path, e))?;
-        let mut w = std::io::BufWriter::new(file);
+        let path = writer.dir().join(UPDATES_FILE);
+        // Pulled session files are owner-only like local ones (P150, S14): the writer's files are.
+        let mut w = Vec::<u8>::new();
 
         for msg in messages {
             let parsed = match serde_json::from_str::<serde_json::Value>(&msg.content) {
@@ -208,7 +228,7 @@ pub(crate) mod hydrate {
                 Err(_) => continue,
             };
             if is_compaction_checkpoint(&parsed) {
-                if let Some(line) = restore_checkpoint(dir, &parsed) {
+                if let Some(line) = restore_checkpoint(writer, &parsed) {
                     let _ = w.write_all(line.as_bytes());
                     let _ = w.write_all(b"\n");
                 }
@@ -227,13 +247,13 @@ pub(crate) mod hydrate {
             }
         }
 
-        w.flush().map_err(|e| io_err(&path, e))
+        writer.replace_atomic_sync(UPDATES_FILE, &w).map_err(|e| io_err(&path, e))
     }
 
-    fn write_remote_origin_marker(dir: &Path) {
-        let _ = fuigo_config::write_file_owner_only(
-            &dir.join(".remote_origin"),
-            format!("pulled_at={}\n", chrono::Utc::now().to_rfc3339()),
+    fn write_remote_origin_marker(writer: &fuigo_session_writer::SessionWriter) {
+        let _ = writer.replace_atomic_sync(
+            ".remote_origin",
+            format!("pulled_at={}\n", chrono::Utc::now().to_rfc3339()).as_bytes(),
         );
     }
 
@@ -288,7 +308,10 @@ pub(crate) mod hydrate {
     /// Write the uploaded checkpoint file under `compaction_checkpoints/` and return the `updates.jsonl` line for its
     /// marker, with the marker's file path rewritten to the local file (the remote path is never trusted). A malformed
     /// or unsafe message yields `None`: the pull continues and that compaction degrades to the summary-less resume.
-    fn restore_checkpoint(dir: &Path, json_rpc: &serde_json::Value) -> Option<String> {
+    fn restore_checkpoint(
+        writer: &fuigo_session_writer::SessionWriter,
+        json_rpc: &serde_json::Value,
+    ) -> Option<String> {
         use crate::extensions::notification::{
             CompactionCheckpointFile, SessionNotification, SessionUpdate,
         };
@@ -305,11 +328,10 @@ pub(crate) mod hydrate {
             return None;
         }
         let rel = format!("compaction_checkpoints/{}.json", file.checkpoint_id);
-        let sub = dir.join("compaction_checkpoints");
-        crate::util::fuigo_home::create_dir_all_owner_only(&sub).ok()?;
         let bytes = serde_json::to_vec_pretty(&file).ok()?;
-        // Owner-only like every session file (P120): the summary is conversation text.
-        crate::session::storage::owner_only::write(&dir.join(&rel), bytes).ok()?;
+        // Owner-only like every session file (P120): the summary is conversation text. The writer creates
+        // `compaction_checkpoints/` owner-only.
+        writer.replace_atomic_sync(&rel, &bytes).ok()?;
         info.checkpoint_file = rel;
         let marker = serde_json::to_value(&marker).ok()?;
         serde_json::to_string(&serde_json::json!({
@@ -338,10 +360,6 @@ pub(crate) mod hydrate {
             .unwrap_or_else(chrono::Utc::now)
     }
 
-    fn write_file(path: &Path, data: &[u8]) -> Result<(), BackendError> {
-        fuigo_config::write_file_owner_only(path, data).map_err(|e| io_err(path, e))
-    }
-
     fn remote_title_is_manual(meta: Option<&serde_json::Value>) -> bool {
         meta.and_then(|m| {
             m.get("title_is_manual")
@@ -352,8 +370,14 @@ pub(crate) mod hydrate {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
+    /// A writer for `dir` under a fresh id (the hydration writes only through one).
+    fn test_writer(dir: &std::path::Path) -> fuigo_session_writer::SessionWriter {
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).unwrap()
+    }
+
     use crate::remote::client::LoadedMessage;
 
     #[test]
@@ -380,7 +404,7 @@ mod tests {
             }),
         };
         let dir = home.path().join("session-dir");
-        super::hydrate::write_to_dir(&dir, &data).unwrap();
+        super::hydrate::write_to_dir(&test_writer(&dir), &data).unwrap();
 
         let summary: crate::session::persistence::Summary =
             serde_json::from_slice(&std::fs::read(dir.join("summary.json")).unwrap()).unwrap();
@@ -405,7 +429,7 @@ mod tests {
             },
         ];
 
-        super::hydrate::write_updates(tmp.path(), &messages).unwrap();
+        super::hydrate::write_updates(&test_writer(tmp.path()), &messages).unwrap();
 
         let content = std::fs::read_to_string(tmp.path().join("updates.jsonl")).unwrap();
         let lines: Vec<&str> = content.lines().collect();
@@ -476,7 +500,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         // Subdir so the owner-only assertion covers a dir write_to_dir created.
         let dir = tmp.path().join("session");
-        super::hydrate::write_to_dir(&dir, &data).unwrap();
+        super::hydrate::write_to_dir(&test_writer(&dir), &data).unwrap();
 
         #[cfg(unix)]
         assert_eq!(
@@ -567,7 +591,7 @@ mod tests {
             }),
         };
         let tmp = tempfile::TempDir::new().unwrap();
-        super::hydrate::write_to_dir(tmp.path(), &data).unwrap();
+        super::hydrate::write_to_dir(&test_writer(tmp.path()), &data).unwrap();
 
         let chat = std::fs::read_to_string(tmp.path().join("chat_history.jsonl")).unwrap();
         let items: Vec<crate::sampling::ConversationItem> = chat
@@ -613,7 +637,7 @@ mod tests {
             },
         ];
 
-        super::hydrate::write_updates(tmp.path(), &messages).unwrap();
+        super::hydrate::write_updates(&test_writer(tmp.path()), &messages).unwrap();
 
         let content = std::fs::read_to_string(tmp.path().join("updates.jsonl")).unwrap();
         let lines: Vec<&str> = content.lines().collect();
@@ -637,7 +661,7 @@ mod tests {
             }),
         };
         let tmp = tempfile::TempDir::new().unwrap();
-        super::hydrate::write_to_dir(tmp.path(), &data).unwrap();
+        super::hydrate::write_to_dir(&test_writer(tmp.path()), &data).unwrap();
         let json = std::fs::read_to_string(tmp.path().join("summary.json")).unwrap();
         serde_json::from_str(&json).unwrap()
     }
@@ -838,7 +862,7 @@ mod tests {
         ]);
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("s");
-        super::hydrate::write_to_dir(&dir, &data).unwrap();
+        super::hydrate::write_to_dir(&test_writer(&dir), &data).unwrap();
         let chat = chat_texts(&dir);
         assert!(chat.contains("SUMMARY-OF-OLD-WORK"), "summary missing: {chat}");
         assert!(!chat.contains("old question"), "pre-compaction turns must be replaced by the summary");
@@ -857,12 +881,12 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("s");
         let file = dir.join(format!("compaction_checkpoints/{id}.json"));
-        super::hydrate::write_to_dir(&dir, &data).unwrap();
+        super::hydrate::write_to_dir(&test_writer(&dir), &data).unwrap();
         let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&file), 0o600, "pulled checkpoint file must be 0600");
         // A pull over an existing loose file tightens it.
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-        super::hydrate::write_to_dir(&dir, &data).unwrap();
+        super::hydrate::write_to_dir(&test_writer(&dir), &data).unwrap();
         assert_eq!(mode(&file), 0o600, "an existing loose checkpoint file must be tightened");
     }
 
@@ -871,7 +895,7 @@ mod tests {
         let data = checkpoint_response(vec![acp_msg(true, "q"), acp_msg(false, "a")]);
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("s");
-        super::hydrate::write_to_dir(&dir, &data).unwrap();
+        super::hydrate::write_to_dir(&test_writer(&dir), &data).unwrap();
         assert!(chat_texts(&dir).contains('q'));
         assert!(!dir.join("compaction_checkpoints").exists());
     }
@@ -885,7 +909,7 @@ mod tests {
         ]);
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("a/b/s");
-        super::hydrate::write_to_dir(&dir, &data).unwrap();
+        super::hydrate::write_to_dir(&test_writer(&dir), &data).unwrap();
         assert!(!tmp.path().join("a/escaped.json").exists());
         assert!(!tmp.path().join("escaped.json").exists());
         let entries: Vec<_> = walk(tmp.path());
@@ -907,7 +931,7 @@ mod tests {
         let data = checkpoint_response(vec![acp_msg(true, "q"), bad, acp_msg(false, "a")]);
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("s");
-        super::hydrate::write_to_dir(&dir, &data).unwrap();
+        super::hydrate::write_to_dir(&test_writer(&dir), &data).unwrap();
         assert!(chat_texts(&dir).contains('a'));
     }
 
@@ -920,7 +944,7 @@ mod tests {
         let data = checkpoint_response(vec![acp_msg(true, "q"), msg, acp_msg(true, "after")]);
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("a/b/s");
-        super::hydrate::write_to_dir(&dir, &data).unwrap();
+        super::hydrate::write_to_dir(&test_writer(&dir), &data).unwrap();
         assert!(chat_texts(&dir).contains("SUMMARY-X"));
         let updates = std::fs::read_to_string(dir.join("updates.jsonl")).unwrap();
         assert!(!updates.contains("outside.json"), "marker kept the remote path: {updates}");
@@ -942,7 +966,7 @@ mod tests {
             let data = checkpoint_response(vec![acp_msg(true, "q"), marker_update_msg(id, hostile)]);
             let tmp = tempfile::TempDir::new().unwrap();
             let dir = tmp.path().join("a/b/s");
-            super::hydrate::write_to_dir(&dir, &data).unwrap();
+            super::hydrate::write_to_dir(&test_writer(&dir), &data).unwrap();
             let updates = std::fs::read_to_string(dir.join("updates.jsonl")).unwrap();
             assert!(!updates.contains(hostile.replace('\\', "\\\\").as_str()) && !updates.contains("passwd"), "{hostile}: {updates}");
             assert!(updates.contains(&format!("compaction_checkpoints/{id}.json")), "{updates}");
@@ -955,7 +979,7 @@ mod tests {
             let data = checkpoint_response(vec![acp_msg(true, "q"), marker_update_msg(bad, "compaction_checkpoints/x.json")]);
             let tmp = tempfile::TempDir::new().unwrap();
             let dir = tmp.path().join("s");
-            super::hydrate::write_to_dir(&dir, &data).unwrap();
+            super::hydrate::write_to_dir(&test_writer(&dir), &data).unwrap();
             let updates = std::fs::read_to_string(dir.join("updates.jsonl")).unwrap();
             assert!(!updates.contains("compaction_checkpoint"), "{bad:?} kept: {updates}");
         }

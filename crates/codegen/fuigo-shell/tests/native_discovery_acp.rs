@@ -1,7 +1,7 @@
 //! Actual ACP → discovery → next-request schema activation, with fake inference.
 #[allow(dead_code)]
 mod acp_harness;
-use acp_harness::{AutoApproveClient, RPC_TIMEOUT, connect_client, new_session, prompt_turn, run_agent_test, spawn_agent_local_with_config};
+use acp_harness::{AutoApproveClient, RPC_TIMEOUT, close_and_release, connect_client, new_session, prompt_turn, run_agent_test, spawn_agent_local_with_config};
 use agent_client_protocol::{self as acp, Agent as _};
 use fuigo_test_support::{ScriptedResponse, SseEvent};
 use serde_json::{Value,json};
@@ -21,6 +21,7 @@ fn reply_tools(calls: Vec<(&str, Value)>) -> ScriptedResponse {
     }).to_string()),SseEvent::data("[DONE]")])
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn native_discovery_activates_next_request_and_rejects_undiscovered_actions() {
     unsafe {std::env::set_var("FUIGO_TOOL_PRESENTATION","adaptive");}
@@ -58,6 +59,7 @@ fn native_discovery_activates_next_request_and_rejects_undiscovered_actions() {
         assert!(result.unwrap_err().to_string().contains("not advertised"),"same-response discovery must not authorize a hidden action");
         // A fresh agent must rebuild presentation from durable hints, not the
         // old actor's mutable snapshot or conversation-tool output.
+        close_and_release(&conn,&[&session]).await;
         drop(conn);
         let mut config=fuigo_shell::agent::config::Config::default();
         config.session.title_policy=Some(fuigo_shell::agent::config::TitlePolicy::Local);

@@ -589,6 +589,7 @@ async fn record_fail_open(
 }
 
 /// Write `body` to `path` atomically via tempfile and rename. The tempfile sits next to the target so `rename` stays on one filesystem.
+#[allow(clippy::disallowed_methods, reason = "classifier details/patch files live in the goal scratch root, a 0700 dir under the system temp dir (goal_scratch_root); not inside a session folder")]
 async fn write_patch_file_atomic(path: &Path, body: &str) -> std::io::Result<()> {
     // Scratch-rooted paths always have a parent; a rootless path is a bug.
     let Some(dir) = path.parent() else {
@@ -612,6 +613,7 @@ async fn write_patch_file_atomic(path: &Path, body: &str) -> std::io::Result<()>
 ///
 /// Returns `true` when a non-empty details file exists at `path` afterward (it already did, or the write succeeded).
 /// Returns `false` when the write was attempted and failed, so the caller never surfaces a path to a file that isn't there.
+#[allow(clippy::disallowed_methods, reason = "classifier details/patch files live in the goal scratch root, a 0700 dir under the system temp dir (goal_scratch_root); not inside a session folder")]
 async fn maybe_write_classifier_placeholder(path: &Path, headline: &str, body: &str) -> bool {
     if let Ok(meta) = tokio::fs::metadata(path).await
         && meta.is_file()
@@ -1335,6 +1337,7 @@ fn skeptic_failure(skeptic_idx: u32, note: String, latency_ms: u64) -> SkepticRe
 
 /// Read skeptic `skeptic_idx`'s verdict after its terminal response.
 /// The JSON verdict file is authoritative; the terminal token is a secondary signal used only when the JSON is missing/malformed.
+#[allow(clippy::disallowed_methods, reason = "classifier details/patch files live in the goal scratch root, a 0700 dir under the system temp dir (goal_scratch_root); not inside a session folder")]
 async fn read_skeptic_verdict(
     skeptic_idx: u32,
     details_raw: &str,
@@ -1402,6 +1405,7 @@ async fn read_skeptic_verdict(
 /// `resume_from` (skeptic 0 on attempt > 1) renders the resume prompt and resumes the prior child session.
 /// If that spawn fails (e.g. the prior session no longer exists after a restart), it falls back to a cold spawn under the same `spawn_id`.
 /// Verification still runs either way.
+#[allow(clippy::disallowed_methods, reason = "classifier details/patch files live in the goal scratch root, a 0700 dir under the system temp dir (goal_scratch_root); not inside a session folder")]
 async fn run_one_skeptic(
     spawner: &Arc<dyn GoalClassifierSpawner>,
     skeptic_idx: u32,
@@ -2043,6 +2047,7 @@ fn cap_panel_details(body: String) -> String {
     out
 }
 
+#[allow(clippy::disallowed_methods, reason = "classifier details/patch files live in the goal scratch root, a 0700 dir under the system temp dir (goal_scratch_root); not inside a session folder")]
 async fn write_details_file(path: &Path, body: &str) {
     if let Err(err) = tokio::fs::write(path, body).await {
         tracing::warn!(
@@ -2079,9 +2084,11 @@ fn parse_prompt_path(prompt: &str, marker: &str, suffix: &str) -> Option<String>
 
 // Tests
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "goal_classifier_tests.rs"]
 mod tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod repo_exec_gate_tests;

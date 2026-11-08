@@ -39,11 +39,15 @@ fn start_index() -> SearchIndexManager {
 /// Titles are one made-up token, searched back verbatim.
 /// A query of ordinary words ORs its tokens, which would let one session's row answer for another.
 async fn seed_session(root: &std::path::Path, id: &str, cwd: &str) {
-    let storage = JsonlStorageAdapter::with_root(root.to_path_buf());
     let info = Info {
         id: acp::SessionId::new(id),
         cwd: cwd.to_string(),
     };
+    // A session folder is written only by its writer (design F5 §5.5); the seed holds it until it returns.
+    let storage = JsonlStorageAdapter::with_root(root.to_path_buf());
+    let writer = fuigo_session_writer::SessionWriter::try_claim(info.id.0.to_string(), storage.session_dir(&info))
+        .expect("claim the seed's session writer");
+    let storage = storage.with_writer(writer);
     storage
         .init_session(&info, acp::ModelId::new("test-model"))
         .await
@@ -73,6 +77,7 @@ async fn finds(index: &SearchIndexManager, root: &std::path::Path, id: &str) -> 
         .is_empty()
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test]
 #[serial_test::serial]
 async fn deleting_a_session_clears_only_its_own_search_row() {
@@ -153,6 +158,7 @@ async fn deleting_a_session_evicts_its_row_without_a_handle() {
     );
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 #[serial_test::serial]
 fn loading_config_applies_requirement_pins() {

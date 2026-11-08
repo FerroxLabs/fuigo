@@ -670,6 +670,7 @@ impl AuthManager {
 
     /// Drop `scope` from auth.json and persist, deleting the file when the last scope is gone.
     /// Caller holds the `auth.json` lock (taken by [`Self::remove_scope_impl`]).
+    #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
     fn write_scope_removal(&self, scope: &str) -> std::io::Result<ScopeRemoval> {
         let Ok(mut auth_store) = read_auth_json(&self.path) else {
             return Ok(ScopeRemoval::SkippedUnreadable);
@@ -1101,6 +1102,7 @@ impl AuthManager {
     }
 
     /// Takes the cross-process `auth.json` lock for one of this manager's read-modify-writes.
+    #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
     async fn lock_for_write(&self) -> std::io::Result<AuthFileLock> {
         // A custom `FUIGO_AUTH_PATH` may point into a directory that does not exist yet; the lock file lives beside it.
         if let Some(parent) = self.path.parent() {
@@ -1286,6 +1288,7 @@ impl AuthManager {
 
     /// Devbox recovery's purge: delete auth.json and save `auth` as its only entry, all under the cross-process lock.
     /// Never purges unlocked; a lock it cannot get is an error and leaves both disk and memory untouched.
+    #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
     pub(super) async fn purge_and_save(&self, auth: FuigoAuth) -> std::io::Result<FuigoAuth> {
         let flock = self.lock_for_write().await?;
         let _ = std::fs::remove_file(&self.path);
@@ -2948,6 +2951,7 @@ const _: fn() = || {
     assert_send_sync::<AuthManager>();
 };
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "manager_tests.rs"]
 mod tests;

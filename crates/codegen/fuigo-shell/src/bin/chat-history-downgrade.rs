@@ -130,6 +130,7 @@ fn extract_reasoning_text(raw: &serde_json::Value) -> Option<String> {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "offline CLI; --output is a user-chosen path; not inside a session folder")]
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
@@ -165,6 +166,7 @@ fn main() -> anyhow::Result<()> {
 // Tests: hardcoded JSON fixtures so schema changes in either ConversationItem (v1) or ChatRequestMessage (v0) will break these
 // ============================================================================
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

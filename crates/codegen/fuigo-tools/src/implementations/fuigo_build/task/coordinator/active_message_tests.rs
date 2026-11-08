@@ -1657,6 +1657,7 @@ fn insert_queued(
         .push_back(super::super::queue::QueuedSpawn {
             request: Box::new(request),
             queued_at: tokio::time::Instant::now(),
+            parent_writer: None,
             caller: super::super::queue::QueuedCaller::Awaiting {
                 result_tx,
                 deadline: None,
@@ -1683,6 +1684,7 @@ async fn send_to_owned_queued_child_parks_until_started() {
             queued_for: std::time::Duration::ZERO,
             deadline: None,
         },
+        None,
     );
     promote_pending(&mut coordinator, admission_tx, "child");
     let call = recv_with_timeout(&mut admissions).await;

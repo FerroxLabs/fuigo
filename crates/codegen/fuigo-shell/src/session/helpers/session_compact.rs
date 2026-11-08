@@ -1024,6 +1024,7 @@ mod reasoning_compaction_regression_tests;
 #[path = "session_compact_reasoning_effort_tests.rs"]
 mod reasoning_effort_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "session_compact_retain_session_asset_files_tests.rs"]
 mod retain_session_asset_files_tests;

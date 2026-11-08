@@ -113,6 +113,7 @@ fn user_texts(body: &serde_json::Value) -> Vec<String> {
     out
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn a_subagents_task_text_cannot_run_hook_commands() {
     run_agent_test(|cwd, mock| async move {

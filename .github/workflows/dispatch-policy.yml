@@ -44,10 +44,20 @@ jobs:
           for method in 'reqwest::RequestBuilder::send' 'reqwest::Client::execute' 'reqwest::blocking::RequestBuilder::send' 'reqwest::blocking::Client::execute'; do
             grep -F "error: use of a disallowed method \`$method\`" dispatch-receipts/negative.log
           done
+      - name: Prove session-writer enforcement (design F5 §9.3)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Checks 2 and 3 (no build): crate set and per-crate clippy.toml superset; raw-path scan against the baseline.
+          scripts/ci/session-writer-crates.sh 2>&1 | tee dispatch-receipts/session-writer-crates.log
+          # The six negative controls: five clippy fixtures and one scan fixture, each must fail with its diagnostic.
+          scripts/ci/session-writer-controls.sh dispatch-receipts 2>&1 | tee dispatch-receipts/session-writer-controls.log
       - name: Check shipping libraries and binaries
         shell: bash
         run: |
           set -euo pipefail
+          # Also check 1 of design F5 §5.4.3: the session-path producer ban (root clippy.toml) in every unlisted crate and
+          # the raw-write ban in the five crates of session-writer-crates.toml (their own clippy.toml).
           cargo clippy --locked --workspace --lib --bins --no-deps -- -D clippy::disallowed_methods 2>&1 | tee dispatch-receipts/shipping.log
       - name: Confirm dispatch and PTY compatibility
         shell: bash

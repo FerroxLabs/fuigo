@@ -42,29 +42,31 @@ struct RunSource {
 
 #[derive(Debug, Clone)]
 pub(crate) struct WorkflowRunStore {
-    session_dir: Option<PathBuf>,
+    /// The session's writer (F5-C6): every run file is written in its folder through it. `None`: a session-less run,
+    /// nothing persisted.
+    writer: Option<fuigo_session_writer::SessionWriter>,
     persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
     sources: Arc<parking_lot::Mutex<HashMap<String, RunSource>>>,
 }
 
 impl WorkflowRunStore {
     pub(crate) fn new(
-        session_dir: Option<PathBuf>,
+        writer: Option<fuigo_session_writer::SessionWriter>,
         persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
     ) -> Self {
         Self {
-            session_dir,
+            writer,
             persistence_tx,
             sources: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
     pub(crate) fn from_restored(
-        session_dir: Option<PathBuf>,
+        writer: Option<fuigo_session_writer::SessionWriter>,
         persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
         restored: Vec<RestoredWorkflowRun>,
     ) -> (Self, Vec<WorkflowRunState>) {
-        let store = Self::new(session_dir, persistence_tx);
+        let store = Self::new(writer, persistence_tx);
         let mut states = Vec::with_capacity(restored.len());
         let mut restored: Vec<(RestoredWorkflowRun, usize)> = restored
             .into_iter()
@@ -136,16 +138,16 @@ impl WorkflowRunStore {
             ));
         }
 
-        if let Some(run_dir) = self.run_dir(run_id) {
-            let scripts_dir = run_dir.join("scripts");
-            fuigo_config::create_dir_all_owner_only(&scripts_dir)?;
+        if let Some(writer) = &self.writer {
+            let run_dir = run_rel(run_id);
+            writer.create_dir_sync(run_dir.join("scripts"))?;
             let args_json = serde_json::to_vec_pretty(args).map_err(io::Error::other)?;
-            atomic_write_new(&run_dir.join("args.json"), &args_json)?;
+            atomic_write_new(writer, &run_dir.join("args.json"), &args_json)?;
             if let Some(effort) = effort {
-                atomic_write_new(&run_dir.join("effort"), effort.as_str().as_bytes())?;
+                atomic_write_new(writer, &run_dir.join("effort"), effort.as_str().as_bytes())?;
             }
-            atomic_write_new(&script_revision_path(&run_dir, 0), script.as_bytes())?;
-            atomic_write_replace(&run_dir.join("script.rhai"), script.as_bytes())?;
+            atomic_write_new(writer, &script_revision_path(&run_dir, 0), script.as_bytes())?;
+            writer.replace_atomic_sync(run_dir.join("script.rhai"), script.as_bytes())?;
         }
 
         self.sources.lock().insert(
@@ -180,11 +182,11 @@ impl WorkflowRunStore {
                 "workflow state has no registered resume source",
             ));
         };
-        let Some(run_dir) = self.run_dir(&state.run_id) else {
+        let Some(writer) = &self.writer else {
             return Ok(());
         };
         let json = serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?;
-        atomic_write_replace(&run_dir.join("state.json"), &json)
+        writer.replace_atomic_sync(run_rel(&state.run_id).join("state.json"), &json)
     }
 
     pub(crate) fn persist(&self, state: &WorkflowRunState) -> io::Result<()> {
@@ -233,11 +235,14 @@ impl WorkflowRunStore {
 
     pub(crate) fn remove(&self, run_id: &str) {
         self.sources.lock().remove(run_id);
-        if let Some(run_dir) = self.run_dir(run_id) {
-            if let Err(error) = atomic_write_replace(&run_dir.join("cleared"), b"") {
+        if let Some(writer) = &self.writer
+            && validate_run_id(run_id).is_ok()
+        {
+            let run_dir = run_rel(run_id);
+            if let Err(error) = writer.replace_atomic_sync(run_dir.join("cleared"), b"") {
                 tracing::warn!(run_id, %error, "failed to tombstone cleared workflow run");
             }
-            if let Err(error) = std::fs::remove_file(run_dir.join("state.json"))
+            if let Err(error) = writer.remove_sync(run_dir.join("state.json"))
                 && error.kind() != io::ErrorKind::NotFound
             {
                 tracing::warn!(run_id, %error, "failed to remove workflow manifest during clear");
@@ -280,10 +285,24 @@ impl WorkflowRunStore {
     }
 
     fn run_dir(&self, run_id: &str) -> Option<PathBuf> {
-        self.session_dir
-            .as_ref()
-            .map(|dir| dir.join("workflows").join(run_id))
+        self.writer.as_ref().map(|writer| writer.dir().join(run_rel(run_id)))
     }
+
+    /// The session writer run files are written through (`None`: a session-less run).
+    pub(crate) fn writer(&self) -> Option<&fuigo_session_writer::SessionWriter> {
+        self.writer.as_ref()
+    }
+}
+
+/// `workflows/<run_id>`, relative to the session folder.
+fn run_rel(run_id: &str) -> PathBuf {
+    Path::new("workflows").join(run_id)
+}
+
+/// Tests: a writer claimed for `dir` (`None` stays `None`).
+#[cfg(test)]
+pub(crate) fn test_writer_for(dir: Option<PathBuf>) -> Option<fuigo_session_writer::SessionWriter> {
+    dir.map(|dir| fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).unwrap())
 }
 
 pub(crate) fn validate_run_id(run_id: &str) -> io::Result<()> {
@@ -353,65 +372,18 @@ pub(crate) fn read_bounded_nofollow(path: &Path, limit: u64) -> io::Result<Vec<u
     Ok(bytes)
 }
 
-fn atomic_write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if path.exists() {
+/// Write an immutable run file `rel` atomically and durably as `writer`; `AlreadyExists` when it is there.
+fn atomic_write_new(writer: &fuigo_session_writer::SessionWriter, rel: &Path, bytes: &[u8]) -> io::Result<()> {
+    if writer.dir().join(rel).exists() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            format!("immutable workflow file already exists: {}", path.display()),
+            format!("immutable workflow file already exists: {}", rel.display()),
         ));
     }
-    atomic_write(path, bytes, false)
+    writer.replace_atomic_sync(rel, bytes)
 }
 
-fn atomic_write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    atomic_write(path, bytes, true)
-}
-
-fn atomic_write(path: &Path, bytes: &[u8], replace: bool) -> io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "workflow path has no parent")
-    })?;
-    // A workflow run lives in the session folder: owner-only folders and files (P150, S14).
-    fuigo_config::create_dir_all_owner_only(parent)?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "workflow path is not UTF-8"))?;
-    let tmp = parent.join(format!(
-        ".{file_name}.{}.{}.tmp",
-        std::process::id(),
-        uuid::Uuid::now_v7().simple()
-    ));
-    let result = (|| {
-        let mut file = fuigo_config::owner_only_file_options(
-            std::fs::OpenOptions::new().write(true).create_new(true),
-        )
-        .open(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        if !replace && path.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("immutable workflow file already exists: {}", path.display()),
-            ));
-        }
-        #[cfg(windows)]
-        if replace {
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-        std::fs::rename(&tmp, path)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
-}
-
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,7 +393,7 @@ mod tests {
     fn script_and_args_are_immutable() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let store = WorkflowRunStore::new(Some(dir.path().to_path_buf()), tx);
+        let store = WorkflowRunStore::new(test_writer_for(Some(dir.path().to_path_buf())), tx);
         let args = serde_json::json!({"objective": "ship"});
 
         store
@@ -452,7 +424,7 @@ mod tests {
     fn register_serializes_canonical_effort() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let store = WorkflowRunStore::new(Some(dir.path().to_path_buf()), tx);
+        let store = WorkflowRunStore::new(test_writer_for(Some(dir.path().to_path_buf())), tx);
 
         store
             .register(

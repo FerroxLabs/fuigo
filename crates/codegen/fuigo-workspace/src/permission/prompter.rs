@@ -2133,7 +2133,7 @@ mod tests {
         use fuigo_session_events::EventWriter;
 
         let dir = tempfile::tempdir().unwrap();
-        let writer = EventWriter::open(dir.path());
+        let writer = EventWriter::open_at(dir.path());
 
         let (tx, rx) = mpsc::unbounded_channel();
         drop(rx); // channel closed, so request_permission errors immediately

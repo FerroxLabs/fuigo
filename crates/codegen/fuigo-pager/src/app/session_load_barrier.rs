@@ -62,7 +62,9 @@ pub(super) struct SessionLoadAcpTick<'a> {
 pub(super) fn session_load_agent_id(result: &TaskResult) -> Option<AgentId> {
     match result {
         TaskResult::SessionLoaded { agent_id, .. }
-        | TaskResult::SessionLoadFailed { agent_id, .. } => Some(*agent_id),
+        | TaskResult::SessionLoadFailed { agent_id, .. }
+        | TaskResult::FolderTrustLoaded { agent_id, .. } => Some(*agent_id),
+        TaskResult::FolderTrustReloadOwed { loaded } => session_load_agent_id(loaded),
         _ => None,
     }
 }
@@ -70,7 +72,9 @@ pub(super) fn session_load_agent_id(result: &TaskResult) -> Option<AgentId> {
 fn session_load_session_id(result: &TaskResult) -> Option<&acp::SessionId> {
     match result {
         TaskResult::SessionLoaded { session_id, .. }
-        | TaskResult::SessionLoadFailed { session_id, .. } => Some(session_id),
+        | TaskResult::SessionLoadFailed { session_id, .. }
+        | TaskResult::FolderTrustLoaded { session_id, .. } => Some(session_id),
+        TaskResult::FolderTrustReloadOwed { loaded } => session_load_session_id(loaded),
         _ => None,
     }
 }

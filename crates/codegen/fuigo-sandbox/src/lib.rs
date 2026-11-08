@@ -354,7 +354,8 @@ pub(crate) fn bwrap_reexec_command_ex(
             return None;
         }
     };
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // OsString: an argument that is not UTF-8 is handed to the re-exec as the bytes it is, never a panic.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let mut cmd = std::process::Command::new("bwrap");
     cmd.arg("--cap-drop").arg("ALL");
     cmd.arg("--bind").arg("/").arg("/");

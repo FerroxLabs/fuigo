@@ -160,6 +160,7 @@ impl LeaderLock {
     }
 
     /// Open (or create) the lock file for subsequent locking operations.
+    #[allow(clippy::disallowed_methods, reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder")]
     pub(super) fn open_lock_file(&self) -> Result<File, LockError> {
         Ok(OpenOptions::new()
             .read(true)
@@ -264,6 +265,7 @@ impl LeaderLock {
     }
 
     /// Write our PID to the lock file. Call after acquiring lock.
+    #[allow(clippy::disallowed_methods, reason = "leader lock file under FUIGO_HOME (PID stamp); not inside a session folder")]
     pub fn write_pid(&mut self) -> Result<(), LockError> {
         if let Some(ref mut file) = self.lock_file {
             file.set_len(0)?;
@@ -310,6 +312,7 @@ impl LeaderLock {
     }
 
     /// Delete the socket file. Call while holding the lock.
+    #[allow(clippy::disallowed_methods, reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder")]
     pub(crate) fn cleanup_socket(&self) -> io::Result<()> {
         match fs::remove_file(&self.sock_path) {
             Ok(()) => Ok(()),
@@ -468,6 +471,7 @@ impl LeaderLock {
 }
 
 impl Drop for LeaderLock {
+    #[allow(clippy::disallowed_methods, reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder")]
     fn drop(&mut self) {
         // The flock itself releases when the file closes
         // `was_leader` is set on acquisition and cleared by `release()`, so a spawner that handed off does not delete the leader's files here
@@ -478,6 +482,7 @@ impl Drop for LeaderLock {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

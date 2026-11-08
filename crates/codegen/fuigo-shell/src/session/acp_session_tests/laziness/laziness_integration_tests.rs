@@ -41,6 +41,7 @@ fn detector_entry(
 /// The sampling config points at a closed loopback port (`create_test_actor` uses `fuigo_test_support::refused_loopback_url`).
 /// `prepare_chat_completion().conversation_collect()` therefore fails with a connect error, enough to exercise every abort/idle path.
 /// Returns the actor wrapped in `Arc` and the owned tempdir (so the file outlives the actor).
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 async fn make_laziness_actor(
     detector: LazinessDetectorPerModelConfig,
 ) -> (Arc<SessionActor>, tempfile::TempDir) {
@@ -50,7 +51,7 @@ async fn make_laziness_actor(
     let (persistence_tx, _persistence_rx) =
         tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-    actor.events = crate::session::events::EventTracker::new(tmp.path());
+    actor.events = crate::session::events::EventTracker::new_at(tmp.path());
     // Install the test model into the catalog and point the current id at it
     // `insert_test_entry` is gated on `#[cfg(test)]` so it does NOT leak into release builds
     let mut entry = detector_entry(false, 0, None);
@@ -484,6 +485,7 @@ fn arm_debug_log(actor: &mut SessionActor, path: std::path::PathBuf) {
 
 /// Build an actor with the dev flag set to `<tmp>/debug.jsonl`.
 /// Returns `(actor, tmp, log_path)`.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 async fn make_debug_actor(
     detector: LazinessDetectorPerModelConfig,
 ) -> (Arc<SessionActor>, tempfile::TempDir, std::path::PathBuf) {
@@ -493,7 +495,7 @@ async fn make_debug_actor(
     let (persistence_tx, _persistence_rx) =
         tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-    actor.events = crate::session::events::EventTracker::new(tmp.path());
+    actor.events = crate::session::events::EventTracker::new_at(tmp.path());
     let mut entry = detector_entry(false, 0, None);
     entry.info.laziness_detector = detector;
     actor

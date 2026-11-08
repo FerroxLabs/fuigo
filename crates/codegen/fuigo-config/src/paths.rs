@@ -236,6 +236,7 @@ pub fn write_file_owner_only(path: &std::path::Path, bytes: impl AsRef<[u8]>) ->
 
 /// Build the CWD-level session directory path: `fuigo_home()/sessions/{encode_cwd_dirname(cwd)}`.
 /// Does **not** create the directory on disk; use [`ensure_sessions_cwd_dir`] when the directory must exist.
+#[allow(clippy::disallowed_methods, reason = "the producer definitions: resolve the cwd bucket <fuigo_home>/sessions/<cwd>/ and create only the sessions root and that bucket, never a session folder")]
 pub fn sessions_cwd_dir(cwd: &str) -> PathBuf {
     sessions_cwd_dir_in(&fuigo_home(), cwd)
 }
@@ -247,15 +248,39 @@ pub fn sessions_cwd_dir_in(fuigo_home: &std::path::Path, cwd: &str) -> PathBuf {
 
 /// Create the CWD-level session directory and write a `.cwd` metadata file when hash-based encoding is used (long paths).
 /// For short paths the `.cwd` file is not written because the directory name itself is reversible via URL-decoding.
+#[allow(clippy::disallowed_methods, reason = "the producer definitions: resolve the cwd bucket <fuigo_home>/sessions/<cwd>/ and create only the sessions root and that bucket, never a session folder")]
 pub fn ensure_sessions_cwd_dir(cwd: &str) -> std::io::Result<PathBuf> {
     ensure_sessions_cwd_dir_in(&fuigo_home(), cwd)
 }
 
-/// [`ensure_sessions_cwd_dir`] with an injectable fuigo home.
+static SESSION_PERSISTENCE_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// F12 (`--no-session-persistence`): from now until the process exits nothing under `<fuigo_home>/sessions` is created,
+/// written or removed. The switch lives here, the lowest crate every writer of that tree depends on (the session
+/// writer, the permission store, the sandbox's event log and session-directory check); `fuigo_session_writer`
+/// re-exports it. One-way: a headless run sets it before its agent starts.
+pub fn disable_session_persistence() {
+    SESSION_PERSISTENCE_OFF.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether [`disable_session_persistence`] was called in this process.
+pub fn session_persistence_disabled() -> bool {
+    SESSION_PERSISTENCE_OFF.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// [`ensure_sessions_cwd_dir`] with an injectable fuigo home. With session persistence off (F12) nothing is created and
+/// the call fails with `PermissionDenied`.
+#[allow(clippy::disallowed_methods, reason = "the producer definitions: resolve the cwd bucket <fuigo_home>/sessions/<cwd>/ and create only the sessions root and that bucket, never a session folder")]
 pub fn ensure_sessions_cwd_dir_in(
     fuigo_home: &std::path::Path,
     cwd: &str,
 ) -> std::io::Result<PathBuf> {
+    if session_persistence_disabled() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "session persistence is off (--no-session-persistence): the sessions folder is not created",
+        ));
+    }
     let encoded_name = encode_cwd_dirname(cwd);
     let dir = sessions_cwd_dir_in(fuigo_home, cwd);
     // The 0700 dir and root shield everything beneath (children with looser modes, cwd-path dirnames, the session search index)
@@ -297,6 +322,7 @@ fn slugify(input: &str, max_len: usize) -> String {
     trimmed.chars().take(max_len).collect()
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -27,6 +27,7 @@ fn use_temp_fuigo_home(dir: &Path) {
 }
 
 /// Seed an expired credential so `auth()` takes the refresh path; a cold home returns `NotLoggedIn` without ever consulting the provider.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn seed_expired_credential(home: &Path, scope: &str) {
     let expired = FuigoAuth {
         key: SEED_TOKEN.to_owned(),

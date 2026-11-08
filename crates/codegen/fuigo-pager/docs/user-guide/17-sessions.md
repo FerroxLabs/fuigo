@@ -72,7 +72,7 @@ Alias: `/exit`. To leave the current session but stay in Fuigo, use `/home` to r
 /delete
 ```
 
-Confirms, then permanently removes the session history. Returns to the welcome screen, or to the dashboard when you opened the session from the dashboard. From `/resume` or the welcome session list, press `d` then `y`. On the [Agent Dashboard](23-dashboard.md), `Ctrl+X` twice (or hover `[✗]`) permanently deletes.
+Confirms (the prompt starts on Cancel, so `Enter` keeps the session; press `1` to delete), then permanently removes the session history. Returns to the welcome screen, or to the dashboard when you opened the session from the dashboard. From `/resume` or the welcome session list, press `d` then `y`. On the [Agent Dashboard](23-dashboard.md), `Ctrl+X` twice (or hover `[✗]`) permanently deletes.
 
 ---
 
@@ -214,6 +214,8 @@ fuigo -p "What were we doing?" -c
 In headless mode, resume an existing session with `-r`/`--resume`, which errors if the session does not exist, or continue the most recent session in the current directory with `-c`/`--continue`. A non-ID value is matched against session titles for the current directory, ignoring letter case (a sole manually renamed match wins among duplicates; remaining duplicates error with their IDs; UUID-shaped values always take the ID path) — scripts should pass the session ID from JSON output (see below) to `-r`.
 
 Use `-s`/`--session-id` only to **create** a new session with a **UUID** (errors if the value is not a UUID, or if that ID already has a session under the target session directory). It does **not** resume an existing session — that was the old hidden upsert behavior; use `-r`/`-c` instead. Combine `-s` with `-r`/`-c` only when also passing `--fork-session` (forks history into a new ID; optional `-s` names the child UUID). This matches Claude Code’s anti-overwrite model (client preflight under the write cwd; sequential use is reliable, concurrent same-ID is best-effort).
+
+For a one-shot run that should leave no trace in the session store, pass `--no-session-persistence`: nothing is written under `~/.fuigo/sessions` (no session folder, prompt history line or search index entry), so the run cannot be resumed and does not show up in `/resume` or session search. Hooks still run. The flag cannot be combined with `-r`/`-c`, and it applies to headless runs only; an interactive session prints a warning and is saved as usual.
 
 To read the session ID back, request JSON output:
 

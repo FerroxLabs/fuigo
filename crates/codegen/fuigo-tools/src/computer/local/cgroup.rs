@@ -196,6 +196,7 @@ mod linux {
     impl CgroupHandle {
         /// Create a child cgroup under the current process's cgroup and
         /// configure memory limits.
+        #[allow(clippy::disallowed_methods, reason = "cgroup files; not inside a session folder")]
         pub(crate) async fn create(config: &CgroupMemoryConfig) -> std::io::Result<Self> {
             let self_cgroup = read_self_cgroup()?;
             let name = format!("fuigo-tools-{}", uuid::Uuid::now_v7());
@@ -229,6 +230,7 @@ mod linux {
         }
 
         /// Move a process (by PID) into this cgroup.
+        #[allow(clippy::disallowed_methods, reason = "cgroup files; not inside a session folder")]
         pub(crate) async fn add_process(&self, pid: u32) -> std::io::Result<()> {
             let procs_path = self.fs_path.join("cgroup.procs");
             tokio::fs::write(&procs_path, pid.to_string()).await
@@ -250,6 +252,7 @@ mod linux {
     }
 
     impl Drop for CgroupHandle {
+        #[allow(clippy::disallowed_methods, reason = "cgroup files; not inside a session folder")]
         fn drop(&mut self) {
             let path = self.fs_path.clone();
             // Always use tokio::spawn: the cleanup future is Send and Drop

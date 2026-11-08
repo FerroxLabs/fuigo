@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// A project plugin `<repo>/.fuigo/plugins/<name>` with one agent `<name>-agent` and one skill `<name>-skill`.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn project_plugin(repo: &Path, name: &str) {
     let root = repo.join(".fuigo").join("plugins").join(name);
     std::fs::create_dir_all(root.join("agents")).unwrap();
@@ -37,6 +38,7 @@ fn repo_with_plugin(name: &str) -> tempfile::TempDir {
 }
 
 /// The user config enables the fixture plugins by name, so only the folder verdict decides project scope.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn enable_in_user_config(home: &Path, names: &[&str]) {
     let list = names
         .iter()
@@ -69,6 +71,7 @@ fn snapshot_for(handle: &SharedPluginRegistryHandle, cwd: &Path) {
     );
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn child_registry_is_built_for_the_child_folder_on_its_own_verdict() {
     if fuigo_test_support::env::rerun_in_own_process() {

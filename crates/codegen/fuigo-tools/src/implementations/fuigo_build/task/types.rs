@@ -134,6 +134,12 @@ pub struct SubagentSpawnRequest {
     /// mode attaches this; scheduler-loop fires leave it `None`.
     #[educe(Debug(ignore))]
     pub registered_tx: Option<oneshot::Sender<()>>,
+    /// The spawning session's own writer (design F5 §5.5, Fable M3), for the child's records in that session's folder
+    /// (`subagents/<id>/`). Carried on the envelope, never on [`SubagentRequest`], which the coordinator keeps copies
+    /// of: the coordinator moves it to the child's run (or holds it while the spawn is queued) and never stores it. The
+    /// runner uses it only when its id is the request's parent session id. `None` for harness-internal spawns.
+    #[educe(Debug(ignore))]
+    pub parent_writer: Option<fuigo_session_writer::SessionWriter>,
 }
 
 impl std::ops::Deref for SubagentSpawnRequest {

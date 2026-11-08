@@ -10,6 +10,7 @@ compile_error!("the `loom` feature is test-only: it swaps this module's mutexes 
 #[path = "flock_wait_loom_tests.rs"]
 mod loom_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(all(test, not(feature = "loom")))]
 #[path = "flock_wait_tests.rs"]
 mod tests;

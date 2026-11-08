@@ -273,6 +273,10 @@ pub enum ActiveModal {
         /// Browse list vs in-modal detail page.
         mode: crate::views::shortcuts_help::ShortcutsHelpMode,
     },
+    /// F11: folder trust screens (`/trust`). Boxed because it holds the trust snapshot.
+    FolderTrust {
+        state: Box<crate::views::trust_modal::TrustModalState>,
+    },
     /// Memory browser modal (/memory).
     MemoryBrowser {
         state: Box<crate::views::memory_modal::MemoryModalState>,
@@ -654,6 +658,7 @@ impl ActiveModal {
             | ActiveModal::DocViewer { .. }
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
+            | ActiveModal::FolderTrust { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::UsageInfo { .. }
             | ActiveModal::RememberNoteReview { .. } => vec![],
@@ -684,6 +689,7 @@ impl ActiveModal {
             ActiveModal::DocViewer { title, .. } => title.as_str(),
             ActiveModal::ShortcutsHelp { .. } => "Keyboard Shortcuts",
             ActiveModal::MemoryBrowser { .. } => "Memory",
+            ActiveModal::FolderTrust { .. } => crate::views::trust_modal::TITLE,
             ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,
             ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
             ActiveModal::RememberNoteReview { .. } => "Memory Note",

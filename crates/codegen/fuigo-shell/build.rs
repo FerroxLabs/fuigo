@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 const RG_VER: &str = "15.0.0";
 
+#[allow(clippy::disallowed_methods, reason = "build script: writes OUT_DIR and the bundled tool binaries at build time, never a session folder")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Only bundle in release builds to avoid slowing down cargo check.
     println!("cargo:rerun-if-env-changed=FUIGO_SHELL_BUNDLE_RG_PATH");

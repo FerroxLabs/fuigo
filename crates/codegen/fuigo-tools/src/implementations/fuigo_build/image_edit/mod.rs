@@ -21,7 +21,6 @@ use crate::attribution::ToolConsumer;
 use crate::implementations::fuigo_build::image_gen::{ImageGenClient, ImageGenResponse};
 use crate::types::output::{MediaGenOutput, ToolOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
-use crate::types::resources::SessionFolder;
 use crate::types::tool::{ToolKind, ToolNamespace};
 use crate::util::image_compress::{FilterType, ReEncodeParams, re_encode_under_limit};
 
@@ -470,7 +469,7 @@ impl fuigo_tool_runtime::Tool for ImageEditTool {
 
         let session_folder = {
             let res = resources.lock().await;
-            res.require::<SessionFolder>()?.0.clone()
+            crate::implementations::fuigo_build::storage::SessionFiles::require(&res)?
         };
 
         let absolute_path = client
@@ -489,6 +488,7 @@ impl fuigo_tool_runtime::Tool for ImageEditTool {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

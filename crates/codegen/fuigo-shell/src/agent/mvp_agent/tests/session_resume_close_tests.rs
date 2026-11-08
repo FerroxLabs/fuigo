@@ -365,6 +365,82 @@ fn close_answers_within_the_aggregate_budget() {
         drop(stop_tx);
     });
 }
+/// F5-C5/F5-T (design F5 §6.1): the session's end sends the persistence task `ReleaseWriter` (as `spawn.rs` does after
+/// `run_session`), and close waits for the task's tail flush and release, so the writer is free when close answers
+/// "closed", inside the close budget, even while another handle to the persistence task is still held (a held handle
+/// alone keeps the task, and so its clone, alive).
+#[test]
+fn close_frees_the_persistence_writer_while_a_persistence_handle_is_still_held() {
+    super::run_local_for_bridge_test(|| async {
+        let home = tempfile::TempDir::new().unwrap();
+        let sid = acp::SessionId::new(format!("sess-close-release-{}", uuid::Uuid::now_v7()));
+        let dir = home.path().join(sid.0.as_ref());
+        let writer = fuigo_session_writer::SessionWriter::try_claim(sid.0.to_string(), &dir).expect("claim");
+        let persistence = crate::session::persistence::new_with_explicit_dir(
+            &crate::session::info::Info { id: sid.clone(), cwd: "/tmp".to_string() },
+            dir.clone(),
+            crate::session::persistence::default_model_id(),
+            crate::sampling::Client::new(fuigo_sampler::SamplerConfig::default()).unwrap(),
+            "test-model".to_owned(),
+            writer,
+        )
+        .await
+        .expect("persistence task starts");
+        let held = persistence.clone();
+        let agent = super::build_minimal_agent_for_tests();
+        let (mut handle, _tx, _rx) = super::make_live_session_handle(&sid, None);
+        handle.persistence_tx = persistence.tx.clone();
+        let session_end = persistence.tx.clone();
+        tokio::task::spawn_local(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            let _ = session_end.send(crate::session::persistence::PersistenceMsg::ReleaseWriter);
+        });
+        drop(persistence);
+        agent.insert_resident(&sid, handle);
+        agent.session_registry.set_thread(&sid, exited_thread().await);
+        assert!(!fuigo_session_writer::SessionWriter::is_free(&sid.0), "the persistence task holds the writer");
+
+        let started = tokio::time::Instant::now();
+        assert_eq!(agent.close_active_session(&sid).await, CloseOutcome::Closed);
+        let free = fuigo_session_writer::SessionWriter::is_free(&sid.0);
+        let elapsed = started.elapsed();
+        assert!(free, "close answered after {elapsed:?} with the persistence task's writer clone still held");
+        assert!(elapsed < CLOSE_TOTAL_BUDGET, "close and the release took {elapsed:?}, over the budget");
+        drop(held);
+    });
+}
+/// F5-T CT1 (design F5 §6.1, §9.2): close never answers while a tail write still holds the session's writer (here the
+/// `resources_state.json` channel-close flush, after the session thread has ended). 1.0.40 drained the thread only and
+/// answered "closed" with the write still running. The tail outlasts close's 0.5 s resume-status wait, so only a
+/// wait for the writer itself can cover it.
+#[test]
+fn f5t_ct1_close_never_answers_while_a_tail_write_still_holds_the_writer() {
+    super::run_local_for_bridge_test(|| async {
+        let home = tempfile::TempDir::new().unwrap();
+        let sid = acp::SessionId::new(format!("sess-f5t-ct1-{}", uuid::Uuid::now_v7()));
+        let writer =
+            fuigo_session_writer::SessionWriter::try_claim(sid.0.to_string(), home.path().join(sid.0.as_ref()))
+                .expect("claim");
+        let agent = super::build_minimal_agent_for_tests();
+        let (handle, _tx, _rx) = super::make_live_session_handle(&sid, None);
+        agent.insert_resident(&sid, handle);
+        agent.session_registry.set_thread(&sid, exited_thread().await);
+        let tail = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(2000));
+            let _ = writer.replace_atomic_sync("resources_state.json", b"{}");
+            drop(writer);
+        });
+        let started = tokio::time::Instant::now();
+        assert_eq!(agent.close_active_session(&sid).await, CloseOutcome::Closed);
+        let elapsed = started.elapsed();
+        assert!(
+            fuigo_session_writer::SessionWriter::is_free(&sid.0),
+            "close answered after {elapsed:?} while the tail write still held the writer"
+        );
+        assert!(elapsed < CLOSE_TOTAL_BUDGET, "close took {elapsed:?}, over the budget");
+        tail.join().unwrap();
+    });
+}
 /// The response carries what the close did, so a caller can see the quiet cases (`notResident`, `superseded`) without reading agent logs.
 #[test]
 fn close_reports_its_outcome_in_response_meta() {
@@ -706,5 +782,61 @@ fn disconnect_does_not_unload_a_session_mid_attach() {
             agent.session_registry.is_attaching(&sid),
             "and the attach must still be in flight"
         );
+    });
+}
+/// F5-N (design F5 §4.1 A1, §6.1 step 3): a close whose session writer is still held at the budget answers `timeout` to a
+/// client that advertised `fuigo/folderTrust.reload` or `.v2`, and 1.0.39's `closed` to every other client.
+#[test]
+fn f5n_close_answers_timeout_to_a_reload_or_v2_client_and_closed_to_the_rest() {
+    use acp::Agent as _;
+    super::run_local_for_bridge_test(|| async {
+        let home = tempfile::TempDir::new().unwrap();
+        for (reload, v2, want) in
+            [(false, false, "closed"), (true, false, "timeout"), (false, true, "timeout"), (true, true, "timeout")]
+        {
+            let agent = super::build_minimal_agent_for_tests();
+            agent.folder_trust_reload.set(reload);
+            agent.interactive_trust_client.set(v2);
+            let sid = acp::SessionId::new(format!("sess-f5n-close-{}", uuid::Uuid::now_v7()));
+            let writer =
+                fuigo_session_writer::SessionWriter::try_claim(sid.0.to_string(), home.path().join(sid.0.as_ref()))
+                    .expect("claim");
+            let (handle, _tx, _rx) = super::make_live_session_handle(&sid, None);
+            agent.insert_resident(&sid, handle);
+            agent.session_registry.set_thread(&sid, exited_thread().await);
+            tokio::time::pause();
+            let response = agent
+                .close_session(acp::CloseSessionRequest::new(sid.clone()))
+                .await
+                .expect("close answers");
+            tokio::time::resume();
+            assert_eq!(
+                response.meta.as_ref().and_then(|m| m.get("fuigo/closeOutcome")),
+                Some(&json!(want)),
+                "reload={reload} v2={v2}: the writer was still held at the close budget"
+            );
+            assert!(!agent.is_resident(&sid));
+            drop(writer);
+        }
+    });
+}
+/// F5-N (design F5 §4.1): an owed reload is reported on a reattach to the resident session, to a `reload` client only; a
+/// client without it keeps 1.0.40's response. A cold attach builds the session trusted, so it pays the debt and reports
+/// nothing, then or later.
+#[test]
+fn f5n_owed_reload_is_reported_on_a_reattach_to_a_reload_client_only() {
+    super::run_local_for_bridge_test(|| async {
+        let agent = super::build_minimal_agent_for_tests();
+        let sid = acp::SessionId::new("sess-f5n-owed");
+        agent.folder_trust_reload.set(true);
+        assert_eq!(agent.folder_trust_reload_owed_meta(&sid, true), None, "nothing owed yet");
+        agent.folder_trust_reload_owed.borrow_mut().insert(sid.clone());
+        agent.folder_trust_reload.set(false);
+        assert_eq!(agent.folder_trust_reload_owed_meta(&sid, true), None, "a client without reload sees 1.0.40's response");
+        agent.folder_trust_reload.set(true);
+        assert_eq!(agent.folder_trust_reload_owed_meta(&sid, true), Some(json!({"owed": true})));
+        assert_eq!(agent.folder_trust_reload_owed_meta(&sid, true), Some(json!({"owed": true})), "owed until paid");
+        assert_eq!(agent.folder_trust_reload_owed_meta(&sid, false), None, "a cold attach builds it trusted");
+        assert_eq!(agent.folder_trust_reload_owed_meta(&sid, true), None, "and pays the debt");
     });
 }

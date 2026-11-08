@@ -31,7 +31,7 @@ use crate::types::api_key_provider::{CredentialPurpose, CredentialRequest};
 
 use crate::types::output::{MediaGenOutput, ToolOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
-use crate::types::resources::SessionFolder;
+use crate::implementations::fuigo_build::storage::SessionFiles;
 use crate::types::tool::{ToolKind, ToolNamespace};
 
 /// Wire model id (the request's `model`): the provider's spelling, never rebranded.
@@ -1112,12 +1112,12 @@ pub struct ReferenceToVideoInput {
 /// lives in one place.
 async fn acquire_video_client(
     ctx: &fuigo_tool_runtime::ToolCallContext,
-) -> Result<(VideoGenClient, std::path::PathBuf), fuigo_tool_runtime::ToolError> {
+) -> Result<(VideoGenClient, SessionFiles), fuigo_tool_runtime::ToolError> {
     use crate::types::tool_metadata::shared_resources;
     let resources = shared_resources(ctx)?;
     let res = resources.lock().await;
     let client = res.require::<VideoGenClient>()?.clone();
-    let session_folder = res.require::<SessionFolder>()?.0.clone();
+    let session_folder = SessionFiles::require(&res)?;
     Ok((client, session_folder))
 }
 
@@ -1126,7 +1126,7 @@ async fn acquire_video_client(
 /// in one place.
 async fn save_video_bytes(
     client: &VideoGenClient,
-    session_folder: &std::path::Path,
+    session_folder: &SessionFiles,
     video_bytes: &[u8],
 ) -> Result<std::path::PathBuf, fuigo_tool_runtime::ToolError> {
     let absolute_path = client
@@ -1146,7 +1146,7 @@ async fn save_video_bytes(
 
 async fn media_output_from_outcome(
     client: &VideoGenClient,
-    session_folder: &std::path::Path,
+    session_folder: &SessionFiles,
     outcome: VideoOutcome,
 ) -> Result<MediaGenOutput, fuigo_tool_runtime::ToolError> {
     match outcome {

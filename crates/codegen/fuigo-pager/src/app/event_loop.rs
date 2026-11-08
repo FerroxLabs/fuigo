@@ -387,12 +387,26 @@ fn reconnect_restore_outcome(
 /// `Prompt` (an undecided or pre-1.0.35 folder, with a TTY stdin to answer on) becomes `TrustState::Pending` showing the
 /// trust key; everything else becomes `TrustState::Done`. The pager prompts with its own rendered question and keyboard
 /// (it redirects native stderr at startup), so interactivity here is stdin alone.
-fn seed_trust_state(app: &mut AppView, remote: Option<&fuigo_shell::util::config::RemoteSettings>) {
+/// The folder the trust question is about (75.B4): the folder a resumed or forked session was recorded in when that
+/// is known at startup and still exists, otherwise the launch folder. Enforcement already judges each session by its
+/// own cwd; this keeps the question in step with it, so resuming a session of another folder asks about that folder.
+fn trust_question_cwd(launch: &std::path::Path, recorded: Option<&std::path::Path>) -> std::path::PathBuf {
+    match recorded {
+        Some(dir) if !dir.as_os_str().is_empty() && dir.is_dir() => dir.to_path_buf(),
+        _ => launch.to_path_buf(),
+    }
+}
+
+fn seed_trust_state(
+    app: &mut AppView,
+    remote: Option<&fuigo_shell::util::config::RemoteSettings>,
+    session_cwd: Option<&std::path::Path>,
+) {
     use fuigo_workspace::folder_trust::{PromptReason, TrustDecision, decide};
     use std::io::IsTerminal;
     let _ = remote;
     // The launch cwd is the process cwd, which is `app.cwd` (set at construction), matching the `--trust` grant's `std::env::current_dir()`
-    let cwd = app.cwd.clone();
+    let cwd = trust_question_cwd(&app.cwd, session_cwd);
     match decide(&cwd, std::io::stdin().is_terminal()) {
         TrustDecision::Prompt(reason) => match fuigo_workspace::trust::trust_key(&cwd) {
             Ok(key) => {
@@ -2087,7 +2101,7 @@ pub(crate) async fn run(
     // Folder-trust verdict, seeded BEFORE the first render and before any session is created (no repo-local MCP/LSP/hooks/plugins have loaded yet)
     // It also precedes the reader thread start, for the type-ahead gate just below
     // Feature-off (kill-switch / opt-out / local build) resolves `Trusted`, so this stays `TrustState::Done`
-    seed_trust_state(&mut app, remote_settings.as_ref());
+    seed_trust_state(&mut app, remote_settings.as_ref(), session_cwd.as_deref());
     seed_consent_state_from_gate(
         &mut app,
         remote_settings
@@ -3381,6 +3395,10 @@ pub(crate) async fn run(
                                 echo_meta.insert(
                                     fuigo_shell::session::USER_MESSAGE_ECHO_CAPABILITY.to_owned(),
                                     serde_json::Value::Bool(true),
+                                );
+                                echo_meta.insert(
+                                    super::folder_trust_reload::CAPABILITY.to_owned(),
+                                    super::folder_trust_reload::capability_value(),
                                 );
                                 let init_req = acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
                                     acp::ClientCapabilities::new()
@@ -5389,6 +5407,22 @@ mod tests {
     fn plan_reconnect_load_requires_session_id() {
         let agent = crate::test_util::make_agent_view(None, "/work/project");
         assert!(plan_reconnect_load(&agent, std::path::Path::new("/pager/cwd")).is_none());
+    }
+
+    /// 75.B4: a resumed session's recorded folder, when it exists, is the folder the trust question is about.
+    #[test]
+    fn the_trust_question_is_about_the_resumed_sessions_folder() {
+        let launch = tempfile::tempdir().unwrap();
+        let recorded = tempfile::tempdir().unwrap();
+        let (l, r) = (launch.path(), recorded.path());
+        assert_eq!(trust_question_cwd(l, Some(r)), r, "resume: the session's folder");
+        assert_eq!(trust_question_cwd(l, None), l, "no resume: the launch folder");
+        assert_eq!(trust_question_cwd(l, Some(std::path::Path::new(""))), l);
+        assert_eq!(
+            trust_question_cwd(l, Some(&r.join("gone"))),
+            l,
+            "a recorded folder that no longer exists falls back to the launch folder"
+        );
     }
 
     /// The session's own cwd keys its on-disk storage; the pager cwd is only a fallback for agents without one.

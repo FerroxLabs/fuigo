@@ -169,6 +169,7 @@ pub(crate) async fn test_agent_from_config_owned(
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
+        session_writer: None,
         state_path: std::path::PathBuf::from("/tmp/tool_state.json"),
         memory_backend: None,
         web_search_config: Default::default(),
@@ -515,7 +516,7 @@ pub(crate) async fn create_test_actor_with_terminal(
         hook_load_errors: std::cell::RefCell::new(Vec::new()),
         plugin_registry: std::cell::RefCell::new(None),
         plugin_registry_handle: None,
-        events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
+        events: crate::session::events::EventTracker::new_at(std::path::Path::new("/tmp")),
         _turn_owner_lock: None,
         observability_bridge: noop_observability_bridge(),
         current_turn_number: std::cell::Cell::new(0),
@@ -554,6 +555,15 @@ pub(crate) async fn create_test_actor_with_terminal(
         actor.tool_bridge_handle().update_resource(gate).await;
     }
     (actor, event_rx)
+}
+/// Give a test actor the writer every production actor carries (design F5 §5.5: spawn builds its `AgentRebuildSpec`
+/// with `session_writer: Some`). `test_rebuild_spec_default` has none, so a test that exercises a session-folder write
+/// claims one here, under a fresh id, for the actor's own folder (its first write creates the folder).
+pub(crate) fn give_test_writer(actor: &mut SessionActor) {
+    let dir = crate::session::persistence::session_dir(&actor.session_info);
+    let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).expect("claim");
+    std::sync::Arc::get_mut(&mut actor.rebuild_spec).expect("the test actor's spec is unshared").session_writer =
+        Some(writer);
 }
 #[cfg(test)]
 pub(crate) async fn create_test_actor(

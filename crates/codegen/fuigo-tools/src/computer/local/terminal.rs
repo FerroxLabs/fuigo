@@ -330,7 +330,7 @@ struct ProcessState {
     foreground_block_budget: Duration,
     start_time: Instant,
     output_file: PathBuf,
-    file_handle: Option<File>,
+    file_handle: Option<LogSink>,
     /// May be isolation-wrapped; `display_command` keeps the original for display.
     command: String,
     display_command: Option<String>,
@@ -432,9 +432,7 @@ impl ProcessState {
         if let Some(ref mut file) = self.file_handle {
             let _ = file.flush().await;
             if self.total_bytes as u64 > MAX_RETAINED_OUTPUT_FILE_BYTES {
-                let _ = file.set_len(MAX_RETAINED_OUTPUT_FILE_BYTES).await;
-                // Seek to new end so post-exit drain appends correctly.
-                let _ = file.seek(std::io::SeekFrom::End(0)).await;
+                file.truncate_to(MAX_RETAINED_OUTPUT_FILE_BYTES).await;
             }
         }
     }
@@ -1321,7 +1319,7 @@ impl LocalTerminalActor {
             tracing::debug!("Failed to add pid {pid} to cgroup (non-fatal): {e}");
         }
 
-        let file_handle = match open_output_file(&request.output_file).await {
+        let file_handle = match open_log_sink(request.output_log, &request.output_file).await {
             Ok(file) => Some(file),
             Err(e) => {
                 tracing::warn!(
@@ -1473,7 +1471,7 @@ impl LocalTerminalActor {
             tracing::debug!("Failed to add pid {pid} to cgroup (non-fatal): {e}");
         }
 
-        let file_handle = match open_output_file(&request.output_file).await {
+        let file_handle = match open_log_sink(request.output_log, &request.output_file).await {
             Ok(file) => Some(file),
             Err(e) => {
                 tracing::warn!(
@@ -3239,7 +3237,61 @@ async fn finalize_process(process: &mut ProcessState, status: Option<std::proces
     process.notify_waiters(result);
 }
 
+/// A command's output log: a file opened by path, or the session's append handle (design F5 §5.4.2), which owns a
+/// writer clone for as long as the process entry keeps it.
+enum LogSink {
+    File(File),
+    Session(fuigo_session_writer::SessionAppend),
+}
+
+impl LogSink {
+    async fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::File(file) => file.write_all(bytes).await,
+            Self::Session(log) => log.write_all_async(bytes.to_vec()).await,
+        }
+    }
+
+    /// A session log's writes have landed when `write_all` returns; a tokio file buffers until flushed.
+    async fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::File(file) => file.flush().await,
+            Self::Session(_) => Ok(()),
+        }
+    }
+
+    /// Cut the log to `len` bytes; later writes land at the new end.
+    #[allow(clippy::disallowed_methods, reason = "OutputLog::ByPath file only (Self::File), which no session folder gets: OutputLog::open without a writer returns Unavailable; a session log is Self::Session")]
+    async fn truncate_to(&mut self, len: u64) {
+        match self {
+            Self::File(file) => {
+                let _ = file.set_len(len).await;
+                // Seek to new end so post-exit drain appends correctly.
+                let _ = file.seek(std::io::SeekFrom::End(0)).await;
+            }
+            // Append mode: the next write lands at the new end.
+            Self::Session(log) => {
+                let _ = log.set_len_async(len).await;
+            }
+        }
+    }
+}
+
+/// The log for `output_log`: through the session's handle, or by path at `path` when the session has no writer.
+async fn open_log_sink(
+    output_log: crate::computer::types::OutputLog,
+    path: &std::path::Path,
+) -> std::io::Result<LogSink> {
+    use crate::computer::types::OutputLog;
+    match output_log {
+        OutputLog::Session(log) => Ok(LogSink::Session(log)),
+        OutputLog::ByPath => open_output_file(path).await.map(LogSink::File),
+        OutputLog::Unavailable => Err(std::io::Error::other("the session writer could not open the log")),
+    }
+}
+
 #[tracing::instrument(name = "fs.open_output_file", skip_all)]
+#[allow(clippy::disallowed_methods, reason = "reached only by `OutputLog::ByPath`, which no session folder gets (`OutputLog::open` without a writer returns `Unavailable`); tests and non-session callers only.")]
 async fn open_output_file(path: &std::path::Path) -> std::io::Result<File> {
     // A command's output log lives in `<session>/terminal/` and holds whatever the command printed (P150, D6, S14):
     // owner-only on Unix like the other session files. The folder is created 0700 and the log 0600, and an existing
@@ -3248,6 +3300,7 @@ async fn open_output_file(path: &std::path::Path) -> std::io::Result<File> {
     if let Some(parent) = path.parent() {
         #[cfg(unix)]
         {
+            // F5-A: reached only by `OutputLog::ByPath`, which no session folder gets (`OutputLog::open` without a writer returns `Unavailable`); tests and non-session callers only.
             let mut builder = tokio::fs::DirBuilder::new();
             builder.recursive(true).mode(0o700);
             builder.create(parent).await?;
@@ -3257,9 +3310,11 @@ async fn open_output_file(path: &std::path::Path) -> std::io::Result<File> {
             }
         }
         #[cfg(not(unix))]
+        // F5-A: reached only by `OutputLog::ByPath`, never a session folder (see `OutputLog::open`).
         tokio::fs::create_dir_all(parent).await?;
     }
 
+    // F5-A: reached only by `OutputLog::ByPath`, never a session folder (see `OutputLog::open`).
     let mut options = tokio::fs::OpenOptions::new();
     options.create(true).write(true).truncate(true);
     #[cfg(unix)]
@@ -3281,10 +3336,12 @@ async fn open_output_file(path: &std::path::Path) -> std::io::Result<File> {
 
 /// Set `path` to `mode` when it has any other mode (Unix). Best effort: logged, never fatal.
 #[cfg(unix)]
+#[allow(clippy::disallowed_methods, reason = "only called from open_output_file, which only OutputLog::ByPath reaches (never a session folder).")]
 async fn tighten_owner_only(path: &std::path::Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt as _;
     let result = match tokio::fs::metadata(path).await {
         Ok(meta) if meta.permissions().mode() & 0o777 == mode => Ok(()),
+        // F5-A: only called from open_output_file, which only OutputLog::ByPath reaches (never a session folder).
         Ok(_) => tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).await,
         Err(e) => Err(e),
     };
@@ -3753,6 +3810,7 @@ fn extract_exit_status(status: std::process::ExitStatus) -> ExitStatus {
 #[path = "terminal_cli_facing_unchanged_tests.rs"]
 mod cli_facing_unchanged_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4054,6 +4112,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             output_byte_limit: 10000,
             output_file,
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test".to_string(),
             display_command: None,
@@ -4062,6 +4121,48 @@ mod tests {
             kind: TaskKind::Bash,
             owner_session_id: None,
             description: None,
+        }
+    }
+
+    /// F5-C4: a session without a writer gets no log, and the run creates neither the log nor its folder by path.
+    #[tokio::test]
+    async fn output_log_without_a_writer_writes_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let folder = tmp.path().join("session");
+        let rel = PathBuf::from("terminal").join("fg.log");
+        let mut request = make_request("printf 'one\\n'");
+        request.output_file = folder.join(&rel);
+        request.output_log = crate::computer::types::OutputLog::open(None, rel).await;
+        assert!(matches!(request.output_log, crate::computer::types::OutputLog::Unavailable));
+        let backend = LocalTerminalBackend::new();
+        // The command still runs (the log is best effort) but nothing is written by path.
+        backend.run(request).await.unwrap();
+        assert!(!folder.exists(), "a writer-less run created the session folder");
+    }
+
+    /// Through the session's writer (design F5 §5.4.2): a foreground command's log is written with the session's
+    /// append handle, owner-only in the `terminal/` folder the writer creates, and holds the full output.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn output_log_through_the_session_writer() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let id = "local-terminal-session-log";
+        let folder = tmp.path().join(id);
+        let writer = fuigo_session_writer::SessionWriter::try_claim(id, &folder).unwrap();
+        let rel = PathBuf::from("terminal").join("fg.log");
+        let mut request = make_request("printf 'one\\ntwo\\n'");
+        request.output_file = folder.join(&rel);
+        request.output_log = crate::computer::types::OutputLog::open(Some(&writer), rel.clone()).await;
+        assert!(matches!(request.output_log, crate::computer::types::OutputLog::Session(_)));
+        let backend = LocalTerminalBackend::new();
+        let result = backend.run(request).await.unwrap();
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(std::fs::read_to_string(folder.join(&rel)).unwrap(), "one\ntwo\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&folder.join(&rel)), 0o600);
+            assert_eq!(mode(&folder.join("terminal")), 0o700);
         }
     }
 
@@ -4282,6 +4383,7 @@ mod tests {
             timeout: Duration::from_millis(200),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-timeout".to_string(),
             display_command: None,
@@ -4315,6 +4417,7 @@ mod tests {
             timeout: Duration::from_millis(500),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: tool_call_id.to_string(),
             display_command: None,
@@ -4372,6 +4475,7 @@ mod tests {
             timeout: Duration::from_secs(60),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: tool_call_id.to_string(),
             display_command: None,
@@ -4445,6 +4549,7 @@ mod tests {
             timeout: Duration::from_secs(3600),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: tool_call_id.to_string(),
             display_command: None,
@@ -4509,6 +4614,7 @@ mod tests {
             timeout: Duration::from_millis(500),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-fg-budget-skip".to_string(),
             display_command: None,
@@ -4553,6 +4659,7 @@ mod tests {
             timeout: Duration::from_secs(3600),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: tool_call_id.to_string(),
             display_command: None,
@@ -4604,6 +4711,7 @@ mod tests {
             timeout: Duration::from_millis(800),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: tool_call_id.to_string(),
             display_command: None,
@@ -4653,6 +4761,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             output_byte_limit: 10_000,
             output_file: output_file.clone(),
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-size".to_string(),
             display_command: None,
@@ -4701,6 +4810,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-bg".to_string(),
             display_command: None,
@@ -4741,6 +4851,7 @@ mod tests {
             timeout: Duration::from_secs(300),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-kill".to_string(),
             display_command: None,
@@ -4776,6 +4887,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             output_byte_limit: 1024 * 1024,
             output_file: tmp.path().join("output.log"),
+            output_log: Default::default(),
             notification_handle: handle,
             tool_call_id: "test-call-123".to_string(),
             display_command: None,
@@ -4842,6 +4954,7 @@ mod tests {
             timeout: Duration::from_secs(10),
             output_byte_limit: 200,
             output_file: tmp.path().join("output.log"),
+            output_log: Default::default(),
             notification_handle: handle,
             tool_call_id: "trunc-call".to_string(),
             display_command: None,
@@ -4906,6 +5019,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             output_byte_limit: 1024,
             output_file: output_file.clone(),
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "cap-test".to_string(),
             display_command: None,
@@ -4942,6 +5056,7 @@ mod tests {
             timeout: Duration::from_secs(10),
             output_byte_limit: 1024,
             output_file: output_file.clone(),
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "trunc-exit-test".to_string(),
             display_command: None,
@@ -4977,6 +5092,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             output_byte_limit: 1024 * 1024,
             output_file: tmp.path().join("output.log"),
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-call".to_string(),
             display_command: None,
@@ -5009,6 +5125,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             output_byte_limit: 1024 * 1024,
             output_file: tmp.path().join("output.log"),
+            output_log: Default::default(),
             notification_handle: handle,
             tool_call_id: "unique-id-abc".to_string(),
             display_command: None,
@@ -5050,6 +5167,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             output_byte_limit: 1024 * 1024,
             output_file: tmp.path().join("output.log"),
+            output_log: Default::default(),
             notification_handle: handle,
             tool_call_id: "test-idle".to_string(),
             display_command: None,
@@ -5092,6 +5210,7 @@ mod tests {
             timeout: Duration::from_millis(200),
             output_byte_limit: 10000,
             output_file: tmp.path().join("timeout-test.out"),
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-timeout-graceful".to_string(),
             display_command: None,
@@ -5123,6 +5242,7 @@ mod tests {
             timeout: Duration::from_secs(2),
             output_byte_limit: 10000,
             output_file: tmp.path().join("timeout-output.out"),
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-timeout-output".to_string(),
             display_command: None,
@@ -5160,6 +5280,7 @@ mod tests {
                 "terminal-test-drain-timeout-{}.out",
                 std::process::id()
             )),
+            output_log: Default::default(),
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-drain-timeout".to_string(),
             display_command: None,

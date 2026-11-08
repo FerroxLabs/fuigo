@@ -180,6 +180,7 @@ pub(crate) async fn grant_dir_for(cwd: &AbsPathBuf, served_root: &std::path::Pat
 
 /// Test-only; production resolves the scope root once in [`resolve_store_dirs`] and derives everything from it.
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test-only helper: permission state lives in the cwd bucket sessions/<cwd>/ (permission*.toml), one level above any session folder")]
 fn state_dir_for_cwd(cwd: &AbsPathBuf) -> std::path::PathBuf {
     fuigo_config::sessions_cwd_dir(&permission_scope_root(cwd).to_string_lossy())
 }
@@ -187,6 +188,7 @@ fn state_dir_for_cwd(cwd: &AbsPathBuf) -> std::path::PathBuf {
 /// The store location from before repo-root keying (keyed on the exact cwd), when it differs from the resolved repo-root store `dir`.
 /// Read-only migration source: grants saved by older builds in a subdirectory still load until the repo-root store exists.
 /// The next persist carries them into it.
+#[allow(clippy::disallowed_methods, reason = "read-only migration source: the pre-repo-root permission store in the cwd bucket sessions/<cwd>/, never inside a session folder")]
 fn legacy_state_dir_in(
     fuigo_home: &std::path::Path,
     cwd: &AbsPathBuf,
@@ -211,6 +213,7 @@ async fn resolve_store_dirs(cwd: &AbsPathBuf, ensure: bool) -> StoreDirs {
 
 /// [`resolve_store_dirs`] under an explicit fuigo home, for a holder that resolved the home once
 /// and injects it (the per-folder sandbox).
+#[allow(clippy::disallowed_methods, reason = "permission state files (permission*.toml) in the cwd bucket sessions/<repo-root>/; creates only the sessions root and that bucket, never a session folder")]
 async fn resolve_store_dirs_in(
     fuigo_home: std::path::PathBuf,
     cwd: &AbsPathBuf,
@@ -222,7 +225,7 @@ async fn resolve_store_dirs_in(
         // Resolve the scope root ONCE: discovery walks the filesystem
         // The store dir, its ensure fallback, and the legacy compare all derive from this single resolution
         let root = permission_scope_root(&cwd).to_string_lossy().into_owned();
-        let dir = if ensure {
+        let dir = if ensure && !fuigo_config::session_persistence_disabled() {
             // Canonical creator: tighten the sessions root this write may create
             // Falls back to the computed path (persist_state_to_dir re-creates it owner-only) so a failed ensure still gets a write
             fuigo_config::ensure_sessions_cwd_dir_in(&fuigo_home, &root).unwrap_or_else(|e| {
@@ -529,6 +532,11 @@ async fn persist_state_to_path_with_writer<F>(
 where
     F: FnOnce(&std::path::Path, &str) -> std::io::Result<()> + Send + 'static,
 {
+    // F12: every permission-state write (an AllowAlways grant, a reset, the legacy migrations) funnels here; with session
+    // persistence off the state stays in memory for this process and `<fuigo_home>/sessions` is not touched.
+    if fuigo_config::session_persistence_disabled() {
+        return Ok(());
+    }
     let contents = toml::to_string_pretty(state)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let path = path.to_path_buf();
@@ -594,6 +602,10 @@ pub(crate) async fn replace_state_on_disk(
 }
 
 pub async fn cleanup_stale_permission_state(max_age: std::time::Duration) {
+    // F12: as the session TTL sweep, a run without session persistence neither stores nor removes.
+    if fuigo_config::session_persistence_disabled() {
+        return;
+    }
     let sessions_dir = fuigo_home().join("sessions");
     let Ok(mut entries) = tokio::fs::read_dir(&sessions_dir).await else {
         return;
@@ -1586,5 +1598,78 @@ allowed_mcp_servers = ["a"]
                 .is_none()
             );
         }
+    }
+
+    /// Review r1 H3 (F12): with session persistence off, the permission store's writes (the legacy `edit_policy=allow`
+    /// load migration, an AllowAlways grant's persist, a reset) and its stale-state janitor create, modify and remove
+    /// nothing under `<fuigo_home>/sessions`: neither an old `permission.toml` nor a cold folder's bucket. In a child
+    /// process, because the switch is one-way for the process.
+    #[test]
+    #[allow(clippy::disallowed_methods, reason = "test code: a fixture FUIGO_HOME in a temp dir, walked and seeded by path")]
+    fn r1h3_without_session_persistence_permission_state_touches_nothing_under_sessions() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, u64, Option<std::time::SystemTime>, Vec<u8>)>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                let meta = std::fs::symlink_metadata(&path).unwrap();
+                let bytes = if meta.is_dir() { Vec::new() } else { std::fs::read(&path).unwrap_or_default() };
+                out.push((path.clone(), meta.len(), meta.modified().ok(), bytes));
+                if meta.is_dir() {
+                    walk(&path, out);
+                }
+            }
+        }
+        let snap = |dir: &std::path::Path| {
+            let mut out = Vec::new();
+            walk(dir, &mut out);
+            out.sort();
+            out
+        };
+        if std::env::var_os("R1H3_CHILD").is_some() {
+            fuigo_config::disable_session_persistence();
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async {
+                for cwd in ["R1H3_OLD", "R1H3_COLD"] {
+                    let cwd = AbsPathBuf::new(std::path::PathBuf::from(std::env::var(cwd).unwrap())).unwrap();
+                    let (store, mut state) = CachedStateStore::resolve_and_load(&cwd, None).await;
+                    if state.edit_policy == EditPolicy::Allow {
+                        state.edit_policy = EditPolicy::Ask;
+                        persist_state(&cwd, &state, None).await;
+                    }
+                    state.allowed_web_fetch_domains.insert("always.example".to_owned());
+                    store.persist(&cwd, &state).await;
+                    replace_state_on_disk(&cwd, &PermissionState::default(), None).await;
+                }
+                cleanup_stale_permission_state(std::time::Duration::from_secs(60)).await;
+            });
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let (old, cold) = (tmp.path().join("old-project"), tmp.path().join("cold-project"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&cold).unwrap();
+        let bucket = fuigo_config::sessions_cwd_dir_in(&home, &old.to_string_lossy());
+        std::fs::create_dir_all(&bucket).unwrap();
+        let file = bucket.join("permission.toml");
+        std::fs::write(&file, "edit_policy = \"allow\"\nvalidated_mcp_server_grants_version = 0\n").unwrap();
+        let month_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 3600);
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(month_ago).unwrap();
+        let sessions = home.join("sessions");
+        let before = snap(&sessions);
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "permission::state::tests::r1h3_without_session_persistence_permission_state_touches_nothing_under_sessions", "--nocapture"])
+            .env("R1H3_CHILD", "1")
+            .env("FUIGO_HOME", &home)
+            .env("R1H3_OLD", &old)
+            .env("R1H3_COLD", &cold)
+            .status()
+            .unwrap();
+        assert!(status.success(), "the child run failed");
+        let after = snap(&sessions);
+        let names = |s: &Vec<(std::path::PathBuf, u64, Option<std::time::SystemTime>, Vec<u8>)>| {
+            s.iter().map(|e| e.0.display().to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(names(&before), names(&after), "files were created or removed under sessions/");
+        assert!(before == after, "a file under sessions/ was modified: {}", String::from_utf8_lossy(&std::fs::read(&file).unwrap_or_default()));
     }
 }

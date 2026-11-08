@@ -996,7 +996,7 @@ async fn a_rewind_closes_the_turn_it_started_in_the_events_log() {
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
             let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             let events_dir = tempfile::TempDir::new().expect("tempdir");
-            actor.events = crate::session::events::EventTracker::new(events_dir.path());
+            actor.events = crate::session::events::EventTracker::new_at(events_dir.path());
 
             // The turn began, as `handle_turn_input` does before any output.
             actor.events.begin_turn();

@@ -11,6 +11,8 @@ dunce = { workspace = true }
 fuigo-hooks = { path = "../fuigo-hooks" }
 fuigo-sampling-types = { path = "../fuigo-sampling-types" }
 fuigo-tools = { path = "../fuigo-tools" }
+# The session writer handle, passed through to the toolset (F5); this crate never writes with it.
+fuigo-session-writer = { workspace = true }
 fuigo-tty-utils = { workspace = true }
 fuigo-token-estimation = { workspace = true }
 minijinja = { version = "2", features = ["custom_syntax"] }

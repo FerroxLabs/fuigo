@@ -238,6 +238,7 @@ struct Outcome {
 }
 
 /// A project directory outside the system temp dir, so memory is not treated as ephemeral.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn project_dir() -> tempfile::TempDir {
     let base = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(&base).expect("target tmpdir");
@@ -299,6 +300,7 @@ fn config_with_idle(idle_secs: u64) -> String {
     HOSTILE_CONFIG.replace("{IDLE}", &idle_secs.to_string())
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 async fn scenario(no_memory: bool) -> Outcome {
     let server = MockInferenceServer::start().await.expect("start mock");
     server.set_response(REPLY);
@@ -598,6 +600,7 @@ idle_timeout_secs = 3600
 /// delay 2 s) opens a NEW session and goes quiet: the only thing that can start a dream is the startup timer, because
 /// no `/dream` is ever sent and the periodic check is an hour out. Returns the number of dream model requests seen
 /// in run 2 and the paths of memory files changed.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 async fn startup_dream_scenario(no_memory: bool) -> (usize, Vec<String>) {
     let server = MockInferenceServer::start().await.expect("start mock");
     server.set_response(REPLY);
@@ -689,6 +692,7 @@ struct AgentMemoryOutcome {
     stderr: String,
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 async fn agent_memory_scenario(no_memory: bool) -> AgentMemoryOutcome {
     let server = MockInferenceServer::start().await.expect("start mock");
     server.set_response(REPLY);
@@ -861,6 +865,7 @@ async fn save_note(
 
 /// One agent, one session. The client holds NO memory state of its own: it never reads an available-commands update,
 /// which is exactly a pager whose first update was dropped, or whose cache went stale after another client acted.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 async fn note_scenario(no_memory: bool) -> (Vec<Result<(), (i64, String)>>, Vec<Option<String>>, Vec<String>) {
     let server = MockInferenceServer::start().await.expect("start mock");
     server.set_response(REPLY);
@@ -940,6 +945,7 @@ async fn a_memory_note_is_decided_by_the_shell_at_write_time() {
 /// refused entirely (the save returned an error and the note is not): never written after a refusal, never `Ok` without a
 /// write. The check and the append run with no `.await` between them on the session's single thread, so a toggle cannot
 /// land in the middle; this test would catch a regression that moved the append off that thread.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 async fn a_memory_note_racing_memory_off_is_all_or_nothing() {
     log_binary_identity();

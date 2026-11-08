@@ -394,6 +394,11 @@ mod agent {
         acp::SetSessionModelResponse,
         acp::AGENT_METHOD_NAMES.session_set_model,
     );
+    acp_define_request_response!(
+        acp::CloseSessionRequest,
+        acp::CloseSessionResponse,
+        acp::AGENT_METHOD_NAMES.session_close,
+    );
 
     /// ACP messages meant *for* the agent.
     #[derive(Debug, From)]
@@ -408,6 +413,7 @@ mod agent {
         ExtMethod(AcpArgsGeneric<acp::ExtRequest, S>),
         ExtNotification(AcpArgsGeneric<acp::ExtNotification, S>),
         SetSessionModel(AcpArgsGeneric<acp::SetSessionModelRequest, S>),
+        CloseSession(AcpArgsGeneric<acp::CloseSessionRequest, S>),
     }
 
     #[allow(type_alias_bounds)]
@@ -428,6 +434,7 @@ mod agent {
                 Self::ExtMethod(a) => a.method_name(),
                 Self::ExtNotification(a) => a.method_name(),
                 Self::SetSessionModel(a) => a.method_name(),
+                Self::CloseSession(a) => a.method_name(),
             }
         }
     }
@@ -462,6 +469,9 @@ mod agent {
                     state.serialize_field("request", args.request.borrow())?
                 }
                 Self::SetSessionModel(args) => {
+                    state.serialize_field("request", args.request.borrow())?
+                }
+                Self::CloseSession(args) => {
                     state.serialize_field("request", args.request.borrow())?
                 }
             }
@@ -510,6 +520,8 @@ mod agent {
                 parse!(Cancel)
             } else if method == acp::AGENT_METHOD_NAMES.session_set_model {
                 parse!(SetSessionModel)
+            } else if method == acp::AGENT_METHOD_NAMES.session_close {
+                parse!(CloseSession)
             } else if method == "ext_method" {
                 parse!(ExtMethod)
             } else if method == "ext_notification" {
@@ -535,6 +547,7 @@ mod agent {
                 Self::ExtMethod(args) => AcpAgentMessageBox::ExtMethod(args.boxed()),
                 Self::ExtNotification(args) => AcpAgentMessageBox::ExtNotification(args.boxed()),
                 Self::SetSessionModel(args) => AcpAgentMessageBox::SetSessionModel(args.boxed()),
+                Self::CloseSession(args) => AcpAgentMessageBox::CloseSession(args.boxed()),
             }
         }
 
@@ -624,6 +637,15 @@ mod agent {
                         _ = args
                             .response_tx
                             .send(agent.set_session_model(args.request).await)
+                            .ok();
+                    }
+                    .boxed_local(),
+                ),
+                AcpAgentMessage::CloseSession(args) => spawn(
+                    async move {
+                        _ = args
+                            .response_tx
+                            .send(agent.close_session(args.request).await)
                             .ok();
                     }
                     .boxed_local(),

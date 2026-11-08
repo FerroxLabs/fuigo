@@ -328,6 +328,7 @@ impl ChildRunner for SoakRunner {
                 reporter,
                 queued_for: _,
                 session_running: _,
+                parent_writer: _,
             } = run;
             let promoted = reporter
                 .started(StartedChild {

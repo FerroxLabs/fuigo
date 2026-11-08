@@ -97,6 +97,86 @@ fn api_key_required_error() -> acp::Error {
         serde_json::json!({ "metaKey": auth_method::RUNTIME_API_KEY_META }),
     ))
 }
+/// Every extension method (or method family, for a `starts_with` arm, spelled as its prefix) that
+/// [`acp::Agent::ext_method`] dispatches: the entry-point matrix of design F5 §9.3 is built from this list plus the
+/// hand list of ACP core methods. `ext_method_literals_equal_ext_methods` keeps it equal to the method names written in
+/// `ext_method`, so a new arm fails the build's tests until it is listed here and classified in the matrix.
+pub(crate) const EXT_METHODS: &[&str] = &[
+    "fuigo/auth/",
+    "fuigo/auto-topup-rule",
+    "fuigo/billing",
+    "fuigo/btw",
+    "fuigo/bundle/",
+    "fuigo/cloud/env/create",
+    "fuigo/cloud/env/delete",
+    "fuigo/cloud/env/list",
+    "fuigo/cloud/env/update",
+    "fuigo/cloud/terminate",
+    "fuigo/code/",
+    "fuigo/commands/list",
+    "fuigo/compact_conversation",
+    "fuigo/consent/record",
+    "fuigo/debug/",
+    "fuigo/feedback",
+    "fuigo/feedback/dismiss",
+    "fuigo/feedback/upload-trace",
+    "fuigo/getApiKey",
+    "fuigo/git/",
+    "fuigo/git/worktree/",
+    "fuigo/hooks/",
+    "fuigo/hunk-tracker/",
+    "fuigo/interject",
+    "fuigo/marketplace/",
+    "fuigo/memory/flush",
+    "fuigo/memory/rewrite",
+    "fuigo/memory/save_note",
+    "fuigo/models/list",
+    "fuigo/peer/",
+    "fuigo/plugins/",
+    "fuigo/plugins/reload",
+    "fuigo/pr/",
+    "fuigo/privacy/setCodingDataRetention",
+    "fuigo/prompt_history",
+    "fuigo/recap",
+    "fuigo/review",
+    "fuigo/rewind",
+    "fuigo/rollout/survey",
+    "fuigo/scheduler/",
+    "fuigo/search/",
+    "fuigo/session/close",
+    "fuigo/session/delete",
+    "fuigo/session/fork",
+    "fuigo/session/import",
+    "fuigo/session/info",
+    "fuigo/session/list",
+    "fuigo/session/load_history",
+    "fuigo/session/park",
+    "fuigo/session/rehydrate",
+    "fuigo/session/rename",
+    "fuigo/session/repair",
+    "fuigo/session/resolve_local_for_worktree_resume",
+    "fuigo/session/search",
+    "fuigo/session/state",
+    "fuigo/session/unpark",
+    "fuigo/session/update_mcp_servers",
+    "fuigo/session/updates",
+    "fuigo/session/usage",
+    "fuigo/session_summaries/",
+    "fuigo/sessions/list",
+    "fuigo/setApiKey",
+    "fuigo/share_session",
+    "fuigo/skills/",
+    "fuigo/skills/refresh-baseline",
+    "fuigo/subagent/",
+    "fuigo/suggest",
+    "fuigo/suggestPrompt",
+    "fuigo/task/",
+    "fuigo/terminal/",
+    "fuigo/workflows/list",
+    "fuigo/workspaces/list",
+    crate::leader::protocol::SESSION_OWNER_CHECK_METHOD,
+];
+
 #[async_trait::async_trait(?Send)]
 impl acp::Agent for MvpAgent {
     /// The response meta carries `model_state` so the client can display the available models and the default model.
@@ -217,6 +297,8 @@ impl acp::Agent for MvpAgent {
         self.interactive_trust_client.set(interactive_trust_client);
         self.folder_trust_reopen_notice
             .set(Self::parse_folder_trust_reopen_notice_capability(&arguments));
+        self.folder_trust_reload
+            .set(Self::parse_folder_trust_reload_capability(&arguments));
         let client_supports_mcp_apps = arguments
             .meta
             .as_ref()
@@ -3382,5 +3464,38 @@ mod context_window_meta_tests {
                 "{bad} must be refused"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ext_methods_tests {
+    /// Design F5 §9.3 (fallback form): the method names in `ext_method`'s body, as written, are exactly
+    /// [`super::EXT_METHODS`] (plus the owner-check constant it dispatches by name). An arm, guard or early branch
+    /// added without listing its method fails here.
+    #[test]
+    fn ext_method_literals_equal_ext_methods() {
+        let source = include_str!("acp_agent.rs");
+        let start = source.find("    async fn ext_method(\n").expect("ext_method");
+        let end = start + source[start..].find("    async fn ext_notification(").expect("ext_notification");
+        let mut written = std::collections::BTreeSet::new();
+        for line in source[start..end].lines() {
+            let code = line.split("//").next().unwrap_or_default();
+            let mut rest = code;
+            while let Some(open) = rest.find('"') {
+                let after = &rest[open + 1..];
+                let Some(close) = after.find('"') else { break };
+                let literal = &after[..close];
+                if literal.starts_with("fuigo/") || literal.starts_with("_fuigo/") {
+                    written.insert(literal.to_owned());
+                }
+                rest = &after[close + 1..];
+            }
+        }
+        written.insert(crate::leader::protocol::SESSION_OWNER_CHECK_METHOD.to_owned());
+        let listed: std::collections::BTreeSet<String> = super::EXT_METHODS.iter().map(|m| (*m).to_owned()).collect();
+        assert_eq!(super::EXT_METHODS.len(), listed.len(), "EXT_METHODS lists a method twice");
+        let unlisted: Vec<_> = written.difference(&listed).collect();
+        let stale: Vec<_> = listed.difference(&written).collect();
+        assert!(unlisted.is_empty() && stale.is_empty(), "ext_method and EXT_METHODS disagree: dispatched but unlisted {unlisted:?}; listed but not dispatched {stale:?}");
     }
 }

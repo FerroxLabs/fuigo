@@ -714,10 +714,11 @@ fn p145_prompt_artifacts_are_written_owner_only() {
     use std::os::unix::fs::PermissionsExt as _;
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
+    let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).unwrap();
     // A zero umask would make plain std::fs::write produce 0666; the owner-only writer still yields 0600.
     let previous = unsafe { libc::umask(0o022) };
-    write_prompt_context_in(dir, "{}".to_string()).unwrap();
-    write_system_prompt_in(dir, "You are Fuigo.").unwrap();
+    write_prompt_context_in(&writer, "{}".to_string()).unwrap();
+    write_system_prompt_in(&writer, "You are Fuigo.").unwrap();
     unsafe { libc::umask(previous) };
     assert_eq!(p145_mode(&dir.join(PROMPT_CONTEXT_FILENAME)), 0o600);
     assert_eq!(p145_mode(&dir.join(SYSTEM_PROMPT_FILENAME)), 0o600);
@@ -726,8 +727,8 @@ fn p145_prompt_artifacts_are_written_owner_only() {
     for name in [PROMPT_CONTEXT_FILENAME, SYSTEM_PROMPT_FILENAME] {
         std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(0o644)).unwrap();
     }
-    write_prompt_context_in(dir, "{\"version\":1}".to_string()).unwrap();
-    write_system_prompt_in(dir, "again").unwrap();
+    write_prompt_context_in(&writer, "{\"version\":1}".to_string()).unwrap();
+    write_system_prompt_in(&writer, "again").unwrap();
     assert_eq!(p145_mode(&dir.join(PROMPT_CONTEXT_FILENAME)), 0o600);
     assert_eq!(p145_mode(&dir.join(SYSTEM_PROMPT_FILENAME)), 0o600);
 }

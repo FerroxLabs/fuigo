@@ -1,0 +1,31 @@
+[package]
+license = "Apache-2.0"
+name = "fuigo-session-writer"
+version = "0.1.0"
+edition.workspace = true
+description = "The one write choke point for Fuigo session folders: the writer token, its OS lock and the owner-only file helpers"
+
+[dependencies]
+# Canonical lock keys without Windows verbatim prefixes (the 1.0.30 lock, moved).
+dunce = { workspace = true }
+# Owner-only session directories (`create_dir_all_owner_only`).
+fuigo-config = { workspace = true }
+# The owner-only file ACL on Windows (P145), used by the owner-only helpers.
+fuigo-secrets = { workspace = true }
+# The slot's wake-up channel, `spawn_blocking` for the async write methods, the claim deadline.
+tokio = { workspace = true, features = ["sync", "rt", "time"] }
+# The 1.0.30 lock's warn-once and contention logs.
+tracing = { workspace = true }
+
+[features]
+# The delete-order observer (CT-DEL-O) and the pause seams (CT-W3b/W3c) for other crates' tests; never enabled in a
+# shipped build.
+test-support = []
+
+[dev-dependencies]
+libc = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }
+
+[lints]
+workspace = true

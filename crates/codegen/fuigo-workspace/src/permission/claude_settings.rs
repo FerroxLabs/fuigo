@@ -99,7 +99,12 @@ pub fn load_claude_settings(path: &Path) -> Option<ClaudeSettings> {
             tracing::warn!(?path, "refusing to read non-regular settings file");
             return None;
         }
-        Err(_) => return None,
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(?path, error = %e, "settings file not loaded");
+            }
+            return None;
+        }
     }
     // A project file (`<dir>/.claude/settings*.json`) is read only from inside `<dir>`, checked on the opened file: a
     // settings file linked elsewhere on the machine is not loaded as this project's rules. The user's own
@@ -539,3 +544,99 @@ pub(crate) fn is_claude_import_marked_with_log(gate_name: &'static str) -> bool 
     }
     marked
 }
+
+/// Read a settings file the way [`load_claude_settings`] does (regular files only, project files held inside their
+/// project). `Ok(None)` is a file that is not there (NotFound and nothing else); any other metadata or read error,
+/// and a file that is not a regular file, is an `Err` the caller reports.
+fn read_settings_text(path: &Path) -> std::io::Result<Option<String>> {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => {}
+        Ok(_) => return Err(std::io::Error::other("not a regular file")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let project_dir = (!global_claude_settings_paths().iter().any(|g| g == path))
+        .then(|| path.parent().and_then(Path::parent))
+        .flatten();
+    match fuigo_dirs::contained::PinnedRoot::pin_opt(project_dir)
+        .and_then(|root| fuigo_dirs::contained::read_scoped(path, root.as_ref()))
+    {
+        Ok(c) => Ok(Some(c)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// A rule or error text with control characters removed: it comes from a project file and is shown to the user.
+fn printable(text: &str) -> String {
+    text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
+/// Rules shown per file before the rest are only counted.
+const MAX_REPORTED_RULES: usize = 5;
+
+/// What `load_claude_settings` and the rule parser skip silently for the settings files a session at `cwd` reads:
+/// a file that is not valid JSON, cannot be read (only a missing file counts as absent) or is not a regular file, and the permission rules that do not parse. One note per file,
+/// naming the file and the reason, for the session-open notice. A warning only: the session still opens and every
+/// rule that did load still applies. Empty after a Claude import (the files are no longer read at runtime).
+pub fn permission_load_warnings(cwd: &Path, project_trusted: bool) -> Vec<String> {
+    if is_claude_import_marked() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for path in claude_settings_paths_for_trust(cwd, project_trusted) {
+        let shown = printable(&path.display().to_string());
+        let text = match read_settings_text(&path) {
+            Ok(Some(text)) => text,
+            Ok(None) => continue,
+            Err(e) => {
+                out.push(format!(
+                    "{shown} could not be read ({}), so its permission rules did not load.",
+                    printable(&e.to_string())
+                ));
+                continue;
+            }
+        };
+        let value: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                out.push(format!(
+                    "{shown} is not valid JSON ({}), so its permission rules did not load.",
+                    printable(&e.to_string())
+                ));
+                continue;
+            }
+        };
+        let Some(perms) = value.get("permissions") else {
+            continue;
+        };
+        let mut bad: Vec<String> = Vec::new();
+        for (label, action) in [("allow", RuleAction::Allow), ("deny", RuleAction::Deny), ("ask", RuleAction::Ask)] {
+            let (entries, problems) = extract_string_array(perms.get(label));
+            bad.extend(problems.into_iter().map(|p| format!("permissions.{label}: {}", printable(&p))));
+            for rule in entries {
+                if let Err(e) = parse_permission_rule(&rule, action) {
+                    bad.push(format!("`{}` ({})", printable(&rule), printable(&e.to_string())));
+                }
+            }
+        }
+        if bad.is_empty() {
+            continue;
+        }
+        let total = bad.len();
+        let more = total.saturating_sub(MAX_REPORTED_RULES);
+        bad.truncate(MAX_REPORTED_RULES);
+        let noun = if total == 1 { "permission rule" } else { "permission rules" };
+        let mut note = format!("{total} {noun} in {shown} did not load: {}", bad.join("; "));
+        if more > 0 {
+            note.push_str(&format!("; and {more} more"));
+        }
+        note.push('.');
+        out.push(note);
+    }
+    out
+}
+
+#[cfg(test)]
+#[path = "claude_settings_warning_tests.rs"]
+mod warning_tests;

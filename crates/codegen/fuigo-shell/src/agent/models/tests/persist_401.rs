@@ -192,6 +192,7 @@ async fn a_different_credential_fetches_at_once() {
     assert!(w.mock.count("/v1/models") > n, "another key has its own (empty) memory");
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test]
 #[serial]
 async fn unreadable_future_dated_and_older_files_never_block() {

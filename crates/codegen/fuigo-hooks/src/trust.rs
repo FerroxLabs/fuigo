@@ -160,8 +160,14 @@ impl DisabledHooks {
         if self.managed_only {
             return Some(HookSkipReason::ManagedOnly);
         }
-        (!spec.enabled || self.unreadable || self.names.contains(&spec.name))
-            .then_some(HookSkipReason::UserDisabled)
+        (!spec.enabled || self.unreadable || self.names_disable(spec)).then_some(HookSkipReason::UserDisabled)
+    }
+
+    /// The file disables `spec`: its own per-repo line, or (project hooks only) a legacy bare `project/<name>` line,
+    /// which keeps applying to every repo exactly as it did before hooks were keyed by repo, so no disable is lost.
+    fn names_disable(&self, spec: &crate::config::HookSpec) -> bool {
+        let key = disable_key(spec);
+        self.names.contains(&key) || (key != spec.name && self.names.contains(&spec.name))
     }
 
     /// Whether dispatch skips `spec`; also what the modal shows as disabled.
@@ -277,12 +283,20 @@ fn enable_hook_with_file(hook_name: &str, file: &Path) -> Result<bool, String> {
                 .map_err(|_| "failed to read disabled-hooks file: stream did not contain valid UTF-8".to_owned())?,
             Err(e) => return Err(format!("failed to read disabled-hooks file: {e}")),
         };
+        // Enabling a project hook in a repo also drops the legacy bare `project/<name>` line (see `disable_key`).
+        let bare = hook_name
+            .split_once('\t')
+            .map(|(name, _)| name)
+            .filter(|name| name.starts_with(crate::config::PROJECT_HOOK_PREFIX));
         let mut found = false;
         let new_lines: Vec<&str> = content
             .lines()
             .filter(|line| {
                 let trimmed = line.trim();
-                if !trimmed.is_empty() && !trimmed.starts_with('#') && trimmed == hook_name {
+                if !trimmed.is_empty()
+                    && !trimmed.starts_with('#')
+                    && (trimmed == hook_name || bare == Some(trimmed))
+                {
                     found = true;
                     false
                 } else {
@@ -303,6 +317,78 @@ fn enable_hook_with_file(hook_name: &str, file: &Path) -> Result<bool, String> {
             value: true,
         })
     })
+}
+
+// ── Per-repo keys for project hooks (75.B18) ───────────────────────────
+
+/// Directory names that mark a project hook source (`<repo>/.claude/settings.json`, `<repo>/.fuigo/hooks`, `<repo>/.cursor/hooks.json`).
+const PROJECT_SOURCE_DIRS: [&str; 3] = [".claude", ".fuigo", ".cursor"];
+
+/// The folder a project hook belongs to: the parent of the `.claude` / `.fuigo` / `.cursor` directory its source lives in,
+/// canonicalised when it resolves. `None` for any hook that is not a project-file hook.
+fn project_scope(spec: &crate::config::HookSpec) -> Option<PathBuf> {
+    if crate::config::hook_origin(spec) != crate::config::HookOrigin::ProjectFile {
+        return None;
+    }
+    let owner = spec
+        .source_dir
+        .ancestors()
+        .find(|a| {
+            a.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| PROJECT_SOURCE_DIRS.contains(&n))
+        })
+        .and_then(Path::parent)
+        .unwrap_or(&spec.source_dir);
+    Some(dunce::canonicalize(owner).unwrap_or_else(|_| owner.to_path_buf()))
+}
+
+/// Encode a repo path so two different paths never give the same entry and the reader's `trim` cannot change it.
+/// `%`, tab, newline and carriage return are always percent-escaped; so is any whitespace at either end of the path
+/// (`/repos/app ` stays distinct from `/repos/app`); bytes that are not UTF-8 are escaped byte by byte, never replaced.
+/// Everything else is written as is, so an entry written by an earlier build still reads the same.
+fn escape_scope(path: &Path) -> String {
+    enum Unit {
+        Ch(char),
+        Raw(u8),
+    }
+    let mut units: Vec<Unit> = Vec::new();
+    for chunk in path.as_os_str().as_encoded_bytes().utf8_chunks() {
+        units.extend(chunk.valid().chars().map(Unit::Ch));
+        units.extend(chunk.invalid().iter().copied().map(Unit::Raw));
+    }
+    let solid = |u: &Unit| !matches!(u, Unit::Ch(c) if c.is_whitespace());
+    let first = units.iter().position(solid).unwrap_or(units.len());
+    let last = units.iter().rposition(solid).map_or(0, |i| i + 1);
+    let mut out = String::new();
+    for (i, unit) in units.iter().enumerate() {
+        match unit {
+            Unit::Raw(b) => out.push_str(&format!("%{b:02X}")),
+            Unit::Ch(c) if matches!(c, '%' | '\t' | '\n' | '\r') || i < first || i >= last => {
+                let mut buf = [0u8; 4];
+                for b in c.encode_utf8(&mut buf).bytes() {
+                    out.push_str(&format!("%{b:02X}"));
+                }
+            }
+            Unit::Ch(c) => out.push(*c),
+        }
+    }
+    out
+}
+
+/// The line `$FUIGO_HOME/disabled-hooks` holds for `spec`. A user, global, plugin or managed hook is its bare name.
+/// A project hook is `<name>\t<repo folder>`, so disabling it in one repo does not switch off a same-named hook
+/// (for instance a guard hook) in another.
+///
+/// Legacy rule (75.B18): a bare `project/<name>` line, written before project hooks were keyed by repo, is never
+/// rewritten or guessed at. It keeps applying to every repo, exactly as it did, so no disable is lost. New disables
+/// are written per repo. Enabling a project hook removes its per-repo line and that bare line (the user said the
+/// hook should run); disabling it writes the per-repo line and leaves the bare one for the repos not yet touched.
+pub fn disable_key(spec: &crate::config::HookSpec) -> String {
+    match project_scope(spec) {
+        Some(scope) => format!("{}\t{}", spec.name, escape_scope(&scope)),
+        None => spec.name.clone(),
+    }
 }
 
 /// Returns the path to `$FUIGO_HOME/disabled-hooks`, or `None` when no user fuigo home resolves.
@@ -382,3 +468,7 @@ mod tests {
 #[cfg(test)]
 #[path = "trust_p61_tests.rs"]
 mod p61_tests;
+
+#[cfg(test)]
+#[path = "trust_u41_tests.rs"]
+mod u41_tests;

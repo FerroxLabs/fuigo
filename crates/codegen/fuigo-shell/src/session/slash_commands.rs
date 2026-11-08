@@ -585,6 +585,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "toggle-mouse-reporting",
     "tour",
     "transcript",
+    "trust",
     "tutorial",
     "t",
     "undo",
@@ -1733,6 +1734,7 @@ fn build_loop_prompt_blocks(args: &str, mode: LoopFireMode) -> Vec<acp::ContentB
     };
     vec![acp::ContentBlock::Text(acp::TextContent::new(text))]
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "slash_commands_tests.rs"]
 mod tests;

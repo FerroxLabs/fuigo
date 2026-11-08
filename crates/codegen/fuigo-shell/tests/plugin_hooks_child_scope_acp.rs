@@ -39,6 +39,7 @@ fn tool_call(call_id: &str, name: &str, arguments: &str) -> ScriptedResponse {
 }
 
 /// A `read_file` call on `dir/<file>`; the file name is what marks the call in the hook envelope.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn read_call(call_id: &str, dir: &Path, file: &str) -> ScriptedResponse {
     let path = dir.join(file);
     std::fs::write(&path, "probe\n").expect("probe file");
@@ -76,6 +77,7 @@ async fn prompt(conn: &acp::ClientSideConnection, session: &acp::SessionId, text
     assert_eq!(response.stop_reason, acp::StopReason::EndTurn);
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn a_subagent_never_takes_plugin_hooks_from_the_process_snapshot() {
     run_agent_test(|workdir_b, mock| async move {

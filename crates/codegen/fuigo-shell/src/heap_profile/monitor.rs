@@ -619,6 +619,7 @@ struct PrivateTempDir {
 }
 
 impl PrivateTempDir {
+    #[allow(clippy::disallowed_methods, reason = "heap profile dir; not inside a session folder")]
     fn create() -> std::io::Result<Self> {
         let path = std::env::temp_dir().join(format!(
             "fuigo-jemalloc-{}-{}",
@@ -640,11 +641,13 @@ impl PrivateTempDir {
 }
 
 impl Drop for PrivateTempDir {
+    #[allow(clippy::disallowed_methods, reason = "heap profile dir; not inside a session folder")]
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "heap profile dir; not inside a session folder")]
 fn write_exclusive_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::fs::OpenOptions;
     use std::io::Write;
@@ -672,6 +675,7 @@ pub fn build_upload_handles(
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -48,6 +48,7 @@ struct Fixture {
 }
 
 /// Run `body` in its own process with a mock inference server, a fresh home and an initialized agent.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn run_with_agent<F, Fut>(test_name: &str, body: F)
 where
     F: FnOnce(super::MvpAgentHandle, Fixture) -> Fut,
@@ -368,6 +369,7 @@ fn stored_sessions() -> usize {
 /// `fuigo/git/worktree/resume_session` of a governed source passes the request's `_meta` claim to the fork: without it
 /// the fork is refused (`session_policy_missing`) and no session copy is left; with key + hash the child is bound to the
 /// same policy, carries the stored marker and the response carries the ack.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 #[serial_test::serial]
 fn u36_worktree_fork_of_governed_session_passes_the_claim() {

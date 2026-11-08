@@ -117,18 +117,22 @@ async fn repair_on_disk(
 
     // 1.0.30 P30-DIRECT: a repair that writes is refused while another window has the session open. A dry run only
     // reads, so it stays lock-free. Held from before the load to after the write, so the repair works on what it read.
-    let writer_lock = if dry_run {
+    // F5 (design §5.5): the hold is the session's writer, claimed with its eager OS attach; the reads run as its owner
+    // and the rewrite goes through it. A writer of the id still in this process: wait up to 10 s, then `still closing`.
+    let session_writer = if dry_run {
         None
     } else {
         let dir = crate::util::fuigo_home::sessions_cwd_dir_in(fuigo_root, &info.cwd).join(info.id.to_string());
-        crate::session::session_writer_lock::acquire(&dir)
-            .await
-            .map_err(crate::session::session_writer_lock::HeldElsewhere::into_acp_error)?
+        Some(crate::session::session_writer_lock::claim_writer(&info.id.0, dir).await?)
+    };
+    let access = match &session_writer {
+        Some(writer) => crate::session::storage::Access::Owner(writer),
+        None => crate::session::storage::Access::Reader,
     };
 
     let storage = JsonlStorageAdapter::with_root(fuigo_root.to_path_buf());
     let mut chat_history = storage
-        .load_session_without_updates(&info)
+        .load_session_without_updates(&info, access)
         .await
         .map_err(|e| {
             crate::acp_error::session_storage(format!("failed to load session history: {e}"))
@@ -137,10 +141,15 @@ async fn repair_on_disk(
 
     let report = fuigo_chat_state::compaction_utils::repair_history(&mut chat_history);
 
-    if report.changed() && !dry_run {
-        storage
-            .replace_chat_history(&info, &chat_history)
+    if report.changed()
+        && let Some(writer) = &session_writer
+    {
+        let (adapter, writer, rewrite_info, history) =
+            (storage.clone(), writer.clone(), info.clone(), chat_history.clone());
+        tokio::task::spawn_blocking(move || adapter.replace_chat_history_through(&writer, &rewrite_info, &history))
             .await
+            .map_err(std::io::Error::other)
+            .and_then(|written| written)
             .map_err(|e| {
                 crate::acp_error::session_storage(format!("failed to write repaired history: {e}"))
             })?;
@@ -153,10 +162,11 @@ async fn repair_on_disk(
         );
     }
 
-    drop(writer_lock);
+    drop(session_writer);
     to_raw_response(&RepairSessionResponse::new(report, dry_run, false))
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,7 +239,7 @@ mod tests {
 
         // The rewritten file must reload as a valid conversation with the orphan gone and the intact pair preserved
         let reloaded = adapter
-            .load_session_without_updates(&info)
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
             .await
             .expect("reload")
             .chat_history;
@@ -264,7 +274,7 @@ mod tests {
 
         // Disk untouched: the orphan is still there.
         let reloaded = adapter
-            .load_session_without_updates(&info)
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
             .await
             .expect("reload")
             .chat_history;

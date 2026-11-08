@@ -55,6 +55,7 @@ fn tool_call(call_id: &str, name: &str, arguments: &str) -> ScriptedResponse {
 }
 
 /// A `read_file` call on `cwd/<file>`; the file name is what marks the call in the hook envelope.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn read_call(call_id: &str, cwd: &std::path::Path, file: &str) -> ScriptedResponse {
     let path = cwd.join(file);
     std::fs::write(&path, "probe\n").expect("probe file");
@@ -88,6 +89,7 @@ fn session_of(envelope: &Value) -> String {
         .to_owned()
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn an_enabled_plugins_hook_fires_on_the_first_turn_and_in_its_subagents() {
     run_agent_test(|cwd, mock| async move {

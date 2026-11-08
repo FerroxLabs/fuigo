@@ -278,6 +278,7 @@ pub fn load_require_plan_approval() -> bool {
     require_plan_approval_from_layers(&layers)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

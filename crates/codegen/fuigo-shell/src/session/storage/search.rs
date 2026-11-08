@@ -125,6 +125,12 @@ impl SharedSearchIndex {
 }
 
 pub fn start_if_enabled(cfg: &crate::agent::config::Config) -> SearchIndex {
+    // F12: the index lives under `sessions/`, and its bootstrap writes even with no new session.
+    if fuigo_session_writer::persistence_disabled() {
+        return SearchIndex::Off {
+            reason: "session persistence is off (--no-session-persistence)".to_owned(),
+        };
+    }
     if let Some(reason) = cfg.feature_off_reason(crate::agent::config::Feature::SessionSearch) {
         tracing::info!(
             reason = %reason,

@@ -35,7 +35,7 @@ impl SessionActor {
     pub(super) async fn initialize(&self, system_prompt: String) {
         let bridge = self.agent.borrow().tool_bridge().clone();
         bridge.on_skill_discovery_clear().await;
-        save_system_prompt(&self.session_info, &system_prompt);
+        save_system_prompt(&self.session_info, self.rebuild_spec.session_writer.as_ref(), &system_prompt);
         let system_message = ConversationItem::system(system_prompt);
         let mut messages = vec![system_message];
         if let Some(effects) = self.inject_baseline_skill_reminder(&mut messages).await
@@ -45,7 +45,7 @@ impl SessionActor {
         }
         self.chat_state_handle
             .replace_conversation(messages.clone());
-        persist_chat_history_jsonl_sync(&self.session_info, &messages);
+        persist_chat_history_jsonl_sync(&self.session_info, self.rebuild_spec.session_writer.as_ref(), &messages);
     }
     /// Ensure the conversation carries the correct baseline skill (and workflow) `<system-reminder>`.
     /// An agent that has skills/workflows and uses reminders gets exactly one.

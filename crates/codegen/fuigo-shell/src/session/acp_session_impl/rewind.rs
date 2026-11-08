@@ -172,6 +172,7 @@ impl SessionActor {
         if wants_conversation_rewind
             && let Some(error) = crate::session::storage::jsonl::load_repair::history_rewrite_refusal(
                 &self.session_info,
+                self.rebuild_spec.session_writer.as_ref(),
                 "rewind the conversation",
             )
         {
@@ -660,7 +661,11 @@ impl SessionActor {
             let points = crate::session::persistence::session_dir(&self.session_info).join("rewind_points.jsonl");
             // No-follow: a link at that path is removed as a link, a missing path is already done. The journal goes
             // after the copy (P164).
-            if let Err(error) = crate::session::storage::jsonl::rewind_reconcile::remove_copy_then_journal(&points) {
+            let removed = match self.rebuild_spec.session_writer.as_ref() {
+                Some(writer) => crate::session::storage::jsonl::rewind_reconcile::remove_copy_then_journal(writer, &points),
+                None => Err(crate::session::storage::jsonl::no_writer_error(&points)),
+            };
+            if let Err(error) = removed {
                 tracing::warn!(%error, target_index, path = %points.display(), "rewind: rewind_points.jsonl.pre-rewind could not be removed");
             }
         }
@@ -888,7 +893,7 @@ impl SessionActor {
                 crate::session::helpers::session_summary::checkpoints_reached(post_rewind_turns);
             self.next_title_refresh_idx.set(idx);
             crate::session::helpers::session_summary::save_title_refresh_watermark(
-                &session_dir,
+                self.rebuild_spec.session_writer.as_ref(),
                 idx,
             );
         }

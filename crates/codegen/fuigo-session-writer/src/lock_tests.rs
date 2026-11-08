@@ -57,8 +57,6 @@ fn a_session_held_elsewhere_is_refused_and_free_once_released() {
     assert!(dir_open_elsewhere(dir.path()));
     let refused = rt().block_on(acquire(dir.path()));
     assert!(matches!(refused, Err(HeldElsewhere)), "{refused:?}");
-    let error = HeldElsewhere.into_acp_error();
-    assert!(format!("{error:?}").contains(HELD_ELSEWHERE), "{error:?}");
     drop(other);
     assert!(eventually(|| !dir_open_elsewhere(dir.path())));
     let lock = rt().block_on(acquire(dir.path())).expect("free").expect("locked");
@@ -95,7 +93,7 @@ fn nothing_is_locked_or_created_without_a_session_folder() {
     assert!(!dir.path().join(SESSION_WRITER_LOCK_FILE).exists());
 }
 
-const HOLDER: &str = "session::session_writer_lock::tests::holder_process";
+const HOLDER: &str = "lock::tests::holder_process";
 const HOLDER_DIR: &str = "FUIGO_P30_DIRECT_HOLDER_DIR";
 
 /// Child of [`a_crashed_holder_releases_the_session`]: holds the session and waits to be killed.

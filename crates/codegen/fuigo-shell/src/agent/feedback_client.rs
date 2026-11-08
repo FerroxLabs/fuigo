@@ -1149,6 +1149,7 @@ mod forbidden_tests {
 }
 
 /// Auth resolve and 401 recovery tests.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod auth_refresh_tests {
     use super::*;

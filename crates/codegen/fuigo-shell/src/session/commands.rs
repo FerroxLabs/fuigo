@@ -573,6 +573,13 @@ pub enum SessionCommand {
     ForgetConfigNotice {
         notice: String,
     },
+    /// Write one of a subagent's records in this session's folder (`subagents/<id>/meta.json`, `output.json`) as this
+    /// session's writer (design F5 §5.5, Fable M3): the route for a spawn whose envelope carries no writer for this
+    /// folder (a reparented nested spawn, a harness-internal spawn). `rel` is relative to the session folder.
+    WriteSubagentRecord {
+        rel: std::path::PathBuf,
+        bytes: Vec<u8>,
+    },
     /// Flush pending writes and copy the current session directory contents to memory.
     /// The caller can then tar.gz and upload to GCS (or similar).
     CopyFile {

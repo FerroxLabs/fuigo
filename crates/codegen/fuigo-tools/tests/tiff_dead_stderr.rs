@@ -38,6 +38,7 @@ enum Stderr {
     Full,
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn run_child(mode: Stderr) -> std::process::Output {
     let mut command = Command::new(std::env::current_exe().expect("test binary"));
     command

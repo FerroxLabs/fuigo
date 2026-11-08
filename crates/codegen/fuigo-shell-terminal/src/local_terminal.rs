@@ -200,6 +200,7 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,7 +218,7 @@ mod tests {
             timeout: std::time::Duration::from_secs(10),
             output_byte_limit: DEFAULT_OUTPUT_BYTE_LIMIT,
             stream: false,
-            output_file: None,
+            output_log: None,
         }
     }
 

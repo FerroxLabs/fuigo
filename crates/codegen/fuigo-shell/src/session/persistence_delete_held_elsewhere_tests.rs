@@ -56,6 +56,20 @@ fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
     out
 }
 
+/// [`snapshot`] without the writer's own `session_writer.lock`, which the delete's claim creates before anything else:
+/// the session's content.
+fn content_snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
+    let mut out = snapshot(dir);
+    out.retain(|(path, _, _)| path.file_name() != Some(std::ffi::OsStr::new("session_writer.lock")));
+    out
+}
+
+/// The delete observer is process-wide: the tests that set one take turns, so neither sees the other's steps.
+static OBSERVER_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn observer_turn() -> std::sync::MutexGuard<'static, ()> {
+    OBSERVER_TURN.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 const ID: &str = "p30-delete-held";
 
 fn seed(root: &Path) -> (Info, PathBuf) {
@@ -213,31 +227,50 @@ fn the_sweep_still_removes_an_idle_session_this_process_holds_no_lock_on() {
 
 #[test]
 fn a_second_opener_during_a_delete_finds_no_session_and_cannot_take_the_lock() {
+    let _turn = observer_turn();
     let root = tempfile::tempdir().unwrap();
     let (info, dir) = seed(root.path());
-    let storage = JsonlStorageAdapter::with_root(root.path().to_path_buf());
-    let hold = block_on(acquire(&dir)).expect("free").expect("locked");
-    let seen = std::cell::Cell::new(false);
+    // F5 (design §6.3): the delete is the session writer's `delete_tree`, claimed with the eager OS attach.
+    let writer = block_on(fuigo_session_writer::SessionWriter::claim(
+        info.id.0.to_string(),
+        dir.clone(),
+        tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+    ))
+    .expect("claim");
+    let tombstone = dir.parent().unwrap().join(format!("{DELETING_PREFIX}{ID}-{}", std::process::id()));
+    let seen = Arc::new(AtomicBool::new(false));
+    let checks = {
+        let (seen, dir, tombstone, sessions) =
+            (seen.clone(), dir.clone(), tombstone.clone(), root.path().join("sessions"));
+        move |step: &'static str| {
+            // The observer is process-wide: only this delete's rename (its tombstone exists) is checked.
+            if step != "local_rename" || !tombstone.is_dir() {
+                return;
+            }
+            seen.store(true, Ordering::SeqCst);
+            // The session's path names nothing and no lookup resolves the tombstone.
+            assert!(!dir.exists());
+            assert!(
+                find_persisted_session_dir_by_id_in_root_result(ID, &sessions).unwrap().is_none(),
+                "an opener resolved a session that is being deleted"
+            );
+            // An opener by id has no folder to lock, never the doomed one.
+            assert!(!crate::session::session_writer_lock::dir_open_elsewhere(&dir));
+            // And the doomed folder is still held: a foreign opener of its lock file is refused.
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(tombstone.join(SESSION_WRITER_LOCK_FILE))
+                .unwrap();
+            assert!(matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+        }
+    };
+    fuigo_session_writer::delete_observer::set(Some(Box::new(checks)));
+    let deleted = block_on(delete_local_session(writer));
+    fuigo_session_writer::delete_observer::set(None);
+    deleted.expect("delete");
 
-    block_on(delete_local_session(&storage, &info, &dir, Some(hold), |tombstone| {
-        seen.set(true);
-        // The session's path names nothing and no lookup resolves the tombstone.
-        assert!(!dir.exists());
-        assert!(
-            find_persisted_session_dir_by_id_in_root_result(ID, &root.path().join("sessions")).unwrap().is_none(),
-            "an opener resolved a session that is being deleted"
-        );
-        // An opener by id has no folder to lock (`acquire` answers `None` for a missing folder and the open creates a fresh
-        // session), never the doomed one.
-        assert!(!dir.is_dir());
-        assert!(!crate::session::session_writer_lock::dir_open_elsewhere(&dir));
-        // And the doomed folder is still held: a foreign opener of its lock file is refused.
-        let file = std::fs::OpenOptions::new().read(true).write(true).open(tombstone.join(SESSION_WRITER_LOCK_FILE)).unwrap();
-        assert!(matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
-    }))
-    .expect("delete");
-
-    assert!(seen.get());
+    assert!(seen.load(Ordering::SeqCst));
     let cwd = dir.parent().unwrap();
     assert!(std::fs::read_dir(cwd).unwrap().next().is_none(), "no session or tombstone left in {cwd:?}");
 }
@@ -261,4 +294,92 @@ fn the_sweep_removes_a_leftover_delete_tombstone_unless_it_is_held() {
     release(holder);
     sweep(root.path());
     assert!(!live.exists());
+}
+
+/// CT-DEL-O (design §9.2, order pinned, both remote outcomes): the remote delete runs while the folder is still under
+/// its own name, byte-identical and held (a second opener of its lock is refused); then the writer's `delete_tree`
+/// records `local_rename < hold_released < local_wipe`. A local-before-remote order fails the in-mock assertions.
+#[test]
+fn f5c_ct_del_o_remote_first_then_rename_release_wipe() {
+    let _turn = observer_turn();
+    for remote_succeeds in [true, false] {
+        // Its own id: the slot is per id, and the other tests here share `ID`.
+        let id = if remote_succeeds { "f5c-del-o-ok" } else { "f5c-del-o-404" };
+        let root = tempfile::tempdir().unwrap();
+        let (_info, dir) = seed_id(root.path(), id);
+        let before = content_snapshot(&dir);
+        let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let remote: RemoteDelete = {
+            let (log, dir, before) = (log.clone(), dir.clone(), before.clone());
+            Box::pin(async move {
+                assert!(dir.is_dir(), "the local folder was touched before the remote delete");
+                assert_eq!(content_snapshot(&dir), before, "the local folder changed before the remote delete");
+                let probe = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(dir.join(SESSION_WRITER_LOCK_FILE))
+                    .expect("the hold's lock file");
+                assert!(
+                    matches!(probe.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+                    "the OS hold is not held during the remote delete"
+                );
+                log.lock().unwrap().push("remote_done");
+                if remote_succeeds {
+                    Ok(())
+                } else {
+                    Err(crate::remote::client::BackendError::RequestFailed { status: 404, body: String::new() })
+                }
+            })
+        };
+        let observer_log = log.clone();
+        let tombstone = dir.parent().unwrap().join(format!("{DELETING_PREFIX}{id}-{}", std::process::id()));
+        let watched = dir.clone();
+        // The observer is process-wide: only steps of this delete (after its remote ran, its folder renamed away) count.
+        fuigo_session_writer::delete_observer::set(Some(Box::new(move |step| {
+            let mut log = observer_log.lock().unwrap();
+            let ours = log.first() == Some(&"remote_done")
+                && !watched.exists()
+                && (step == "local_wipe" || tombstone.exists());
+            if ours {
+                log.push(step);
+            }
+        })));
+        let deleted = block_on(delete_session_history_in(root.path(), id, None, Some(remote), None));
+        fuigo_session_writer::delete_observer::set(None);
+        let deleted = deleted.expect("delete");
+        assert!(deleted.local_removed);
+        assert!(!dir.exists());
+        let log = log.lock().unwrap().clone();
+        assert_eq!(log[..4], ["remote_done", "local_rename", "hold_released", "local_wipe"], "{log:?}");
+        assert!(fuigo_session_writer::SessionWriter::is_free(id), "the writer dropped after the wipe");
+    }
+}
+
+/// CT-DEL-R (design §9.2): a remote delete that fails leaves the local folder byte-identical with no tombstone, releases
+/// the hold and the slot, and a second delete then completes.
+#[test]
+fn f5c_ct_del_r_remote_failure_leaves_local_intact_and_releases() {
+    const DEL_R: &str = "f5c-del-r";
+    let root = tempfile::tempdir().unwrap();
+    let (_info, dir) = seed_id(root.path(), DEL_R);
+    let before = content_snapshot(&dir);
+    let failing: RemoteDelete = Box::pin(async {
+        Err(crate::remote::client::BackendError::RequestFailed { status: 503, body: String::new() })
+    });
+    let error = block_on(delete_session_history_in(root.path(), DEL_R, None, Some(failing), None)).unwrap_err();
+    assert!(matches!(error, DeleteSessionError::Remote(_)), "{error:?}");
+    assert_eq!(content_snapshot(&dir), before, "the local folder changed after a failed remote delete");
+    let cwd = dir.parent().unwrap();
+    assert_eq!(std::fs::read_dir(cwd).unwrap().count(), 1, "a tombstone was left beside the folder");
+    assert!(fuigo_session_writer::SessionWriter::is_free(DEL_R), "the slot is free after a failed remote delete");
+    release(foreign_hold(&dir));
+    let deleted = block_on(delete_session_history_in(root.path(), DEL_R, None, None, None)).expect("second delete");
+    assert!(deleted.local_removed && !dir.exists());
+}
+
+fn seed_id(root: &Path, id: &str) -> (Info, PathBuf) {
+    let info = Info { id: acp::SessionId::new(id), cwd: "/work".to_owned() };
+    block_on(JsonlStorageAdapter::with_root(root.to_path_buf()).init_session(&info, default_model_id())).expect("init");
+    let dir = session_dir_in(root, &info);
+    (info, dir)
 }

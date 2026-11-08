@@ -262,6 +262,7 @@ impl GrantStore {
 
     /// [`GrantStore::open`] with every path injected: `protected` is the floor a row is checked
     /// against, `user_home` the home no row may grant whole.
+    #[allow(clippy::disallowed_methods, reason = "cwd-bucket grants file (sessions/<cwd>/), never inside a session folder (design F5 5.4.3)")]
     pub async fn open_in(
         fuigo_home: &Path,
         workspace_root: &Path,
@@ -885,6 +886,7 @@ fn edit_rows_locked(
     result
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "grant_store_tests.rs"]
 mod tests;

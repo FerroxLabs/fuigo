@@ -117,6 +117,8 @@ pub struct SyncStatus {
     pub last_synced_at: Option<u64>,
 }
 
+const RELAY_SYNC_FILE: &str = "relay_sync.json";
+
 impl RelaySyncState {
     pub fn load(session_dir: &std::path::Path) -> Self {
         let path = Self::state_path(session_dir);
@@ -126,23 +128,15 @@ impl RelaySyncState {
         }
     }
 
-    /// Save sync state to disk atomically.
-    ///
-    /// Writes to a temporary file then renames to avoid corruption on crash.
-    /// Creates the session directory if it doesn't exist.
-    pub fn save(&self, session_dir: &std::path::Path) -> std::io::Result<()> {
-        crate::util::fuigo_home::create_dir_all_owner_only(session_dir)?;
-
-        let path = Self::state_path(session_dir);
-        let tmp_path = path.with_extension("json.tmp");
+    /// Save sync state atomically, through the session's writer (design F5 §5.4.2): owner-only, temp sibling then
+    /// rename, the folder created if missing.
+    pub fn save(&self, writer: &fuigo_session_writer::SessionWriter) -> std::io::Result<()> {
         let content = serde_json::to_string(self)?;
-        // Owner-only like every session file (P150, S14); the rename carries the temp's mode over.
-        crate::session::storage::owner_only::write(&tmp_path, content)?;
-        std::fs::rename(tmp_path, path)
+        writer.replace_atomic_sync(RELAY_SYNC_FILE, content.as_bytes())
     }
 
     fn state_path(session_dir: &std::path::Path) -> PathBuf {
-        session_dir.join("relay_sync.json")
+        session_dir.join(RELAY_SYNC_FILE)
     }
 
     pub fn exists(session_dir: &std::path::Path) -> bool {
@@ -215,7 +209,12 @@ pub struct RelaySync {
     cancel: CancellationToken,
     /// Number of pending events waiting to sync (for status display).
     pending_count: Arc<std::sync::atomic::AtomicUsize>,
+    /// The session's writer for `relay_sync.json` (design F5 §5.5), attached by the persistence task that owns this
+    /// sync and dropped with it (the session's end or close, §6.1). None: the state is kept in memory only.
+    writer: WriterSlot,
 }
+
+type WriterSlot = Arc<parking_lot::Mutex<Option<fuigo_session_writer::SessionWriter>>>;
 
 impl RelaySync {
     /// Returns a `RelaySync` that queues notifications and syncs them to the relay in a background task.
@@ -241,6 +240,7 @@ impl RelaySync {
         let session_id_task = session_id.clone();
         let cancel_task = cancel.clone();
         let pending_count_task = pending_count.clone();
+        let writer = WriterSlot::default();
 
         tokio::spawn(relay_sync_task(
             RelaySyncTaskConfig {
@@ -248,6 +248,7 @@ impl RelaySync {
                 config,
                 agent_type,
                 session_dir,
+                writer: writer.clone(),
                 status_cb,
             },
             rx,
@@ -263,7 +264,13 @@ impl RelaySync {
             connection_state_rx: state_rx,
             cancel,
             pending_count,
+            writer,
         })
+    }
+
+    /// Save the sync state as `writer` from now on (F5-C5): the persistence task's writer clone, which owns this sync.
+    pub(crate) fn attach_writer(&self, writer: fuigo_session_writer::SessionWriter) {
+        *self.writer.lock() = Some(writer);
     }
 
     /// Skips replay notifications to prevent loops.
@@ -323,6 +330,8 @@ impl Drop for RelaySync {
         // Signal shutdown
         let _ = self.tx.send(RelaySyncMsg::Shutdown);
         self.cancel.cancel();
+        // The writer clone goes with the owner, not with the task's last await (F5-C5, §6.1).
+        drop(self.writer.lock().take());
     }
 }
 
@@ -331,6 +340,7 @@ struct RelaySyncTaskConfig {
     config: RelayConfig,
     agent_type: AgentType,
     session_dir: Option<PathBuf>,
+    writer: WriterSlot,
     status_cb: Option<StatusCallback>,
 }
 
@@ -478,9 +488,10 @@ async fn relay_sync_task(
 
                         // Persist sync state synchronously to guarantee write ordering.
                         // The file is small (~100 bytes) and flushes are infrequent.
+                        let writer = cfg.writer.lock().clone();
                         if sent_count > 0
-                            && let Some(dir) = &cfg.session_dir
-                            && let Err(e) = sync_state.save(dir)
+                            && let Some(writer) = &writer
+                            && let Err(e) = sync_state.save(writer)
                         {
                             tracing::warn!(error = %e, "Failed to save relay sync state");
                         }
@@ -635,6 +646,7 @@ fn handle_relay_message(
     Ok(())
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,6 +789,11 @@ mod tests {
         assert_eq!(deserialized.synced_count, 1);
     }
 
+    /// A writer for `dir` under a fresh id (F5-C5: the state file is written through one).
+    fn test_writer(dir: &std::path::Path) -> fuigo_session_writer::SessionWriter {
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).expect("claim")
+    }
+
     #[test]
     fn test_relay_sync_state_load_save() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -786,7 +803,7 @@ mod tests {
         let mut state = RelaySyncState::default();
         state.update_cursor("test-event".to_string());
         state.relay_session_id = Some("test-session".to_string());
-        state.save(dir_path).unwrap();
+        state.save(&test_writer(dir_path)).unwrap();
 
         // Load state
         let loaded = RelaySyncState::load(dir_path);
@@ -801,7 +818,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let session_dir = temp_dir.path().join("session-abc");
 
-        RelaySyncState::default().save(&session_dir).unwrap();
+        RelaySyncState::default().save(&test_writer(&session_dir)).unwrap();
 
         assert_eq!(crate::test_support::unix_mode(&session_dir), 0o700);
     }
@@ -812,7 +829,7 @@ mod tests {
     fn p150_relay_sync_state_file_is_owner_only() {
         let temp_dir = tempfile::tempdir().unwrap();
         let session_dir = temp_dir.path().join("session-abc");
-        RelaySyncState::default().save(&session_dir).unwrap();
+        RelaySyncState::default().save(&test_writer(&session_dir)).unwrap();
         assert_eq!(
             crate::test_support::unix_mode(&session_dir.join("relay_sync.json")),
             0o600
@@ -945,7 +962,7 @@ mod tests {
             last_synced_event_id: Some("event-3".to_string()),
             last_synced_at: Some(1700000000),
         };
-        sync_state.save(session_dir).unwrap();
+        sync_state.save(&test_writer(session_dir)).unwrap();
 
         let status = RelaySyncState::get_sync_status(session_dir);
 
@@ -978,7 +995,7 @@ mod tests {
 
         // Create sync state
         let sync_state = RelaySyncState::default();
-        sync_state.save(session_dir).unwrap();
+        sync_state.save(&test_writer(session_dir)).unwrap();
 
         assert!(RelaySyncState::exists(session_dir));
     }

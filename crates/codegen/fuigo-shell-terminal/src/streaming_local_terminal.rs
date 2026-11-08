@@ -1,13 +1,11 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol as acp;
 use futures::future::{self, Either};
-use tokio::fs::OpenOptions;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 
 use crate::runner::{AsyncTerminalRunner, TerminalError, TerminalRunRequest, TerminalRunResult};
@@ -456,7 +454,7 @@ impl AsyncTerminalRunner for StreamingLocalTerminalRunner {
                 child_handle.clone(),
                 output_state.clone(),
                 exit_notify.clone(),
-                request.output_file.clone(),
+                request.output_log.as_ref(),
             )
             .await;
 
@@ -504,7 +502,7 @@ impl StreamingLocalTerminalRunner {
         child_handle: ChildHandle,
         output_state: Arc<Mutex<OutputState>>,
         exit_notify: Arc<tokio::sync::Notify>,
-        output_file: Option<PathBuf>,
+        output_log: Option<&fuigo_session_writer::SessionAppend>,
     ) -> Result<TerminalRunResult, TerminalError> {
         let (mut stdout, mut stderr) = take_child_io(&child_handle).await?;
 
@@ -519,27 +517,8 @@ impl StreamingLocalTerminalRunner {
         let sleep = tokio::time::sleep(request.timeout);
         tokio::pin!(sleep);
 
-        // Open file handle once at start (more efficient than open/close per write)
-        let mut file_handle: Option<tokio::fs::File> = match &output_file {
-            Some(path) => {
-                if let Some(parent) = path.parent() {
-                    let _ = tokio::fs::create_dir_all(parent).await;
-                }
-                match OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .await
-                {
-                    Ok(f) => Some(f),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Failed to open output file");
-                        None
-                    }
-                }
-            }
-            None => None,
-        };
+        // The session log, through the session's writer (design F5 §5.4.2).
+        let file_handle = output_log;
 
         self.send_update(
             &request.tool_call_id,
@@ -559,10 +538,6 @@ impl StreamingLocalTerminalRunner {
             {
                 let state = output_state.lock().await;
                 if state.backgrounded {
-                    // Flush file before returning
-                    if let Some(ref mut file) = file_handle {
-                        let _ = file.flush().await;
-                    }
                     return Ok(TerminalRunResult {
                         combined_output: String::from_utf8_lossy(&output_buf).into_owned(),
                         exit_code: None,
@@ -577,10 +552,6 @@ impl StreamingLocalTerminalRunner {
                 && stderr.is_none()
                 && let Some(process_status) = try_get_exit_status(&child_handle).await
             {
-                // Flush file before returning
-                if let Some(ref mut file) = file_handle {
-                    let _ = file.flush().await;
-                }
                 return self
                     .finish_exit(
                         request,
@@ -616,7 +587,7 @@ impl StreamingLocalTerminalRunner {
                             output_buf.extend_from_slice(bytes);
 
                             // Write to the file before any truncation so it always has the complete output
-                            if let Some(ref mut file) = file_handle && let Err(e) = file.write_all(bytes).await {
+                            if let Some(file) = file_handle && let Err(e) = file.write_all_async(bytes.to_vec()).await {
                                     tracing::warn!("Failed to write stdout to output file: {}", e);
                             }
                         }
@@ -629,7 +600,7 @@ impl StreamingLocalTerminalRunner {
                             let bytes = &stderr_tmp[..n];
                             output_buf.extend_from_slice(bytes);
 
-                            if let Some(ref mut file) = file_handle && let Err(e) = file.write_all(bytes).await {
+                            if let Some(file) = file_handle && let Err(e) = file.write_all_async(bytes.to_vec()).await {
                                     tracing::warn!("Failed to write stderr to output file: {}", e);
                             }
                         }
@@ -667,9 +638,6 @@ impl StreamingLocalTerminalRunner {
                     }
                 }
                 _ = &mut sleep => {
-                    if let Some(ref mut file) = file_handle {
-                        let _ = file.flush().await;
-                    }
                     return self
                         .finish_timeout(
                             request,
@@ -1144,6 +1112,7 @@ async fn run_output_collector(
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1174,7 +1143,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             output_byte_limit: DEFAULT_OUTPUT_BYTE_LIMIT,
             stream: true,
-            output_file: None,
+            output_log: None,
         }
     }
 

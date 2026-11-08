@@ -585,6 +585,7 @@ pub(crate) fn save_project_workflow(
     Ok(canonical_target)
 }
 
+#[allow(clippy::disallowed_methods, reason = "saves a workflow script to <workspace>/.fuigo/workflows/<name>.rhai (project tree); not inside a session folder")]
 fn create_contained_workflow_dir(root: &Path, dir: &Path) -> Result<(), ResolveError> {
     let root = dunce::canonicalize(root).map_err(|error| ResolveError::Io {
         path: root.display().to_string(),
@@ -642,6 +643,7 @@ fn create_contained_workflow_dir(root: &Path, dir: &Path) -> Result<(), ResolveE
     Ok(())
 }
 
+#[allow(clippy::disallowed_methods, reason = "saves a workflow script to <workspace>/.fuigo/workflows/<name>.rhai (project tree); not inside a session folder")]
 fn atomic_create_new(target: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = target
         .parent()
@@ -705,6 +707,7 @@ pub(crate) fn workflow_snapshot(
     (registry, listings)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

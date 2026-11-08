@@ -6,6 +6,7 @@ const BUILTIN_FILES: &[(&str, &str)] = &[("README.md", include_str!("../README.m
 ///
 /// User skills under `~/.fuigo/skills/` are never managed here. Platform skills
 /// are delivered separately through the bundled skill cache.
+#[allow(clippy::disallowed_methods, reason = "builtin skills/files extracted under FUIGO_HOME; not inside a session folder")]
 pub fn extract_builtin_files(fuigo_home: &std::path::Path) {
     let version = fuigo_version::VERSION;
     let marker = fuigo_home.join(".metadata_version");
@@ -132,6 +133,7 @@ pub fn purge_stale_extracted_skills(fuigo_home: &std::path::Path) {
     purge_skill_dirs_matching(fuigo_home, FORMER_PLATFORM_SKILL_HASHES);
 }
 
+#[allow(clippy::disallowed_methods, reason = "builtin skills/files extracted under FUIGO_HOME; not inside a session folder")]
 fn purge_skill_dirs_matching(fuigo_home: &std::path::Path, known: &[(&str, &str)]) {
     // For reversing the extract-time `~/.fuigo/` -> home rewrite (help only).
     let home_prefix = format!("{}/", fuigo_home.to_string_lossy());
@@ -169,6 +171,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

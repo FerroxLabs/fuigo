@@ -47,6 +47,7 @@ impl acp::Client for ProcessGrantClient {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn a_process_reply_trusts_the_folder_and_saves_nothing() {
     run_agent_test(|cwd, _mock| async move {
