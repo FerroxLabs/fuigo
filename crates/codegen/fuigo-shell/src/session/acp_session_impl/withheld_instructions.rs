@@ -117,6 +117,7 @@ pub(super) fn deliver_at_open(
     inherited_prefix_len: Option<usize>,
     compat: &CompatConfig,
     session_info: &SessionInfo,
+    session_writer: Option<&fuigo_session_writer::SessionWriter>,
     display_cwd: Option<&str>,
     cwd: &std::path::Path,
 ) -> bool {
@@ -132,7 +133,7 @@ pub(super) fn deliver_at_open(
         );
         let mut prompt_context = agent.prompt_context().clone();
         prompt_context.normalize_for_persistence();
-        save_prompt_context(session_info, &prompt_context);
+        save_prompt_context(session_info, session_writer, &prompt_context);
         return false;
     }
     deliver_withheld_instructions(
@@ -234,7 +235,7 @@ impl SessionActor {
         self.refresh_classifier_project_instructions();
         let mut prompt_context = self.agent.borrow().prompt_context().clone();
         prompt_context.normalize_for_persistence();
-        save_prompt_context(&self.session_info, &prompt_context);
+        save_prompt_context(&self.session_info, self.rebuild_spec.session_writer.as_ref(), &prompt_context);
     }
 
     /// The agent's current list, split for delivery.

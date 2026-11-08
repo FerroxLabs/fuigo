@@ -1,0 +1,20 @@
+---
+source: crates/codegen/fuigo-pager/src/views/trust_modal_tests.rs
+expression: "render(&mut TrustModalState::new(snap(TrustStatus::Undecided, &[])))"
+---
+              ┌─ Folder trust ─────────────────────────────────────────────────────────── [✗] ─┐
+              │  This folder  Trusted folders                                                  │
+              │────────────────────────────────────────────────────────────────────────────────│
+              │  Folder     /work/app/src                                                      │
+              │  Trust key  /work/app                                                          │
+              │  Status     Not trusted: you have not decided yet. Its settings do not load;   │
+              │  shell commands ask.                                                           │
+              │                                                                                │
+              │  Trust covers the folder's settings (MCP servers, hooks, skills, rules) and    │
+              │  its shell commands.                                                           │
+              │                                                                                │
+              │                                                                                │
+              │                                                                                │
+              │                                                                                │
+              │                t trust this folder  |  Tab switch  |  Esc close                │
+              └────────────────────────────────────────────────────────────────────────────────┘

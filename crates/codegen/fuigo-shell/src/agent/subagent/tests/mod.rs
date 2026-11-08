@@ -986,26 +986,27 @@ fn persist_gate_only_persists_successful_nonempty_outputs() {
         ..Default::default()
     };
     assert_eq!(
-            persist_subagent_output(dir.path(), &ok),
+            persist_subagent_output(&SubagentRecords::fixture(dir.path()), &ok),
             Some(dir.path().to_path_buf())
         );
     let empty = SubagentResult {
         success: true,
         ..Default::default()
     };
-    assert_eq!(persist_subagent_output(dir.path(), &empty), None);
+    assert_eq!(persist_subagent_output(&SubagentRecords::fixture(dir.path()), &empty), None);
     let failed = SubagentResult {
         success: false,
         output: std::sync::Arc::from("partial"),
         ..Default::default()
     };
-    assert_eq!(persist_subagent_output(dir.path(), &failed), None);
+    assert_eq!(persist_subagent_output(&SubagentRecords::fixture(dir.path()), &failed), None);
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn subagent_output_roundtrips_through_output_json() {
     let dir = tempfile::tempdir().expect("tempdir");
     let output = "line one\nline two with unicode ✓";
-    assert!(write_subagent_output(dir.path(), output));
+    assert!(write_subagent_output(&SubagentRecords::fixture(dir.path()), output));
     assert_eq!(read_subagent_output(dir.path()).as_deref(), Some(output));
     assert_eq!(read_subagent_output(&dir.path().join("missing")), None);
     std::fs::write(dir.path().join("output.json"), "not json").expect("corrupt file");
@@ -1077,6 +1078,7 @@ fn persona_resolved_from_config() {
             Some("Be thorough.")
         );
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn persona_inline_plus_file_merged_in_order() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1637,7 +1639,7 @@ async fn bootstrap_no_fork_is_new() {
             None,
             &ctx,
             &child,
-            Path::new("/tmp"),
+            Path::new("/tmp"), None,
             "m",
             super::resume_window::ResumeWindowPolicy {
                 context_window: 128_000,
@@ -1656,6 +1658,7 @@ async fn bootstrap_no_fork_is_new() {
 }
 /// A woken child (`resume_from` == its own id) continues its own session dir
 /// in place: no copy, the transcript on disk is the conversation, untouched.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test]
 async fn bootstrap_same_session_resume_reads_transcript_in_place_without_copying() {
     use fuigo_sampling_types::conversation::ConversationItem;
@@ -1696,7 +1699,7 @@ async fn bootstrap_same_session_resume_reads_transcript_in_place_without_copying
         Some(&source),
         &ctx,
         &child,
-        dir.path(),
+        dir.path(), None,
         "m",
         super::resume_window::ResumeWindowPolicy {
             context_window: 128_000,
@@ -1735,7 +1738,7 @@ async fn bootstrap_fork_without_parent_fails_open() {
             None,
             &ctx,
             &child,
-            Path::new("/tmp"),
+            Path::new("/tmp"), None,
             "m",
             super::resume_window::ResumeWindowPolicy {
                 context_window: 128_000,
@@ -1778,7 +1781,7 @@ async fn bootstrap_fork_live_parent_chat_state_is_forked_with_marker() {
             None,
             &ctx,
             &child,
-            Path::new("/tmp"),
+            Path::new("/tmp"), None,
             "m",
             super::resume_window::ResumeWindowPolicy {
                 context_window: 128_000,
@@ -1877,7 +1880,7 @@ async fn copy_session_data_preserves_parent_chat_history() {
         )
         .unwrap();
     assert!(result.chat_messages_copied > 0, "should copy chat history");
-    let child_data = adapter.load_session(&child_info).await.unwrap();
+    let child_data = adapter.load_session(&child_info, crate::session::storage::Access::Reader).await.unwrap();
     assert_eq!(
             child_data.summary.session_kind.as_deref(),
             Some("subagent_fork")
@@ -2156,7 +2159,7 @@ async fn cancel_pending_shell_child_presents_one_cancelled_finish() {
             &ctx.workspace_ops,
             &request.id,
             &acp::SessionId::new(request.id.clone()),
-            meta_dir.path(),
+            &SubagentRecords::fixture(meta_dir.path()),
             None,
             false,
             42,
@@ -2228,7 +2231,7 @@ async fn run_promote_cancel_with_worktree(
             &ctx.workspace_ops,
             "worktree-cancel",
             &acp::SessionId::new("worktree-cancel"),
-            meta_dir.path(),
+            &SubagentRecords::fixture(meta_dir.path()),
             Some(worktree),
             worktree_freshly_created,
             42,
@@ -2245,6 +2248,7 @@ async fn run_promote_cancel_with_worktree(
     assert!(result.cancelled);
 }
 /// A pending cancel removes a freshly-created worktree but preserves a resumed child worktree owned by its source.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test]
 async fn cancel_pending_at_promote_removes_fresh_worktree_preserves_resumed() {
     fuigo_test_utils::require_git!();
@@ -2298,6 +2302,7 @@ fn running_meta_json(id: &str) -> String {
             }}"#
         )
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test]
 async fn unproven_thread_exit_preserves_fresh_worktree() {
     let ctx = ctx_with_toggle(HashMap::new());
@@ -2318,7 +2323,7 @@ async fn unproven_thread_exit_preserves_fresh_worktree() {
             &ctx.workspace_ops,
             "unproven-exit",
             &acp::SessionId::new("unproven-exit"),
-            meta_dir.path(),
+            &SubagentRecords::fixture(meta_dir.path()),
             Some(worktree.path()),
             true,
             42,
@@ -2347,6 +2352,7 @@ async fn unproven_thread_exit_preserves_fresh_worktree() {
     assert_eq!(meta.error.as_deref(), Some("Subagent was cancelled"));
     drop(hold_tx);
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test]
 async fn startup_admission_timeout_is_failed_not_cancelled() {
     let mut ctx = ctx_with_toggle(HashMap::new());
@@ -2364,7 +2370,7 @@ async fn startup_admission_timeout_is_failed_not_cancelled() {
             &ctx.workspace_ops,
             &request.id,
             &acp::SessionId::new(request.id.clone()),
-            meta_dir.path(),
+            &SubagentRecords::fixture(meta_dir.path()),
             None,
             false,
             42,

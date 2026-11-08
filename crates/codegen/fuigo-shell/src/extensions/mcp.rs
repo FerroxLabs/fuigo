@@ -2464,6 +2464,7 @@ async fn handle_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     to_ext_response(Ok(McpToggleResponse { ok: true }))
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

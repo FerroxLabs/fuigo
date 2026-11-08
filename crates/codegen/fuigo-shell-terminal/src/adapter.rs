@@ -273,7 +273,7 @@ impl TerminalBackend for AcpTerminalAdapter {
         let total_bytes = output.output.len();
 
         let mut recorder =
-            OutputRecorder::new(request.output_file.clone(), request.output_byte_limit);
+            OutputRecorder::new(request.output_file.clone(), request.output_byte_limit, request.output_log);
         recorder.initialize().await;
         if let Err(e) = recorder.append(&output.output).await {
             tracing::warn!(error = %e, "output recorder failed to write foreground output");
@@ -323,7 +323,8 @@ impl TerminalBackend for AcpTerminalAdapter {
             );
         }
 
-        let recorder = OutputRecorder::new(output_file.clone(), request.output_byte_limit);
+        let recorder =
+            OutputRecorder::new(output_file.clone(), request.output_byte_limit, request.output_log);
         recorder.initialize().await;
         tokio::spawn(watch_for_exit(
             self.gateway.clone(),
@@ -670,6 +671,7 @@ impl TerminalBackend for AcpTerminalAdapter {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "adapter_tests.rs"]
 mod tests;

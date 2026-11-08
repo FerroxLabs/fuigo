@@ -888,6 +888,11 @@ impl AvailableSkills {
 /// Session folder for logs and output files.
 #[derive(Debug, Clone)]
 pub struct SessionFolder(pub PathBuf);
+/// The session's writer (design F5 §5.4.2), present when the session has one. Tools write inside [`SessionFolder`]
+/// only through it: terminal logs, MCP dumps, fetched and generated files. Absent (headless runs, the workspace
+/// daemon's own tree, tests), they write by path as before; that folder is then not a session folder.
+#[derive(Debug, Clone)]
+pub struct SessionFolderWriter(pub fuigo_session_writer::SessionWriter);
 /// Per-turn registry mapping each attached image's `[Image #N]` display
 /// number to a reference `image_edit` can resolve.
 ///

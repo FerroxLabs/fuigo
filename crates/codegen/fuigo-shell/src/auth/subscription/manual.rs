@@ -99,6 +99,7 @@ impl Drop for SilentTty {
 }
 
 #[cfg(unix)]
+#[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
 pub(super) fn open_terminal() -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     #[cfg(target_os = "macos")]

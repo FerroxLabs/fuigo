@@ -385,6 +385,7 @@ impl AuditCore {
     }
 
     /// Rotate under the cross-process lock; re-check the size under it so two processes cannot both rotate.
+    #[allow(clippy::disallowed_methods, reason = "<FUIGO_HOME>/peer-audit.jsonl, .1 rotation and .peer-audit.lock (sink dir is fuigo_home()); not inside a session folder")]
     fn rotate(&mut self, incoming: u64) -> io::Result<()> {
         let path = self.path();
         let _lock = fuigo_config::fs_atomic::lock_file_for_write(&self.dir.join(LOCK_NAME))?;
@@ -414,6 +415,7 @@ fn same_file(open: Option<&File>, path: &Path) -> bool {
     open.is_some() && path.exists()
 }
 
+#[allow(clippy::disallowed_methods, reason = "<FUIGO_HOME>/peer-audit.jsonl, .1 rotation and .peer-audit.lock (sink dir is fuigo_home()); not inside a session folder")]
 fn open_owner_only(path: &Path) -> io::Result<File> {
     let mut o = OpenOptions::new();
     o.create(true).append(true);
@@ -577,6 +579,7 @@ impl AuditCtx {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "peer_audit_tests.rs"]
 mod tests;

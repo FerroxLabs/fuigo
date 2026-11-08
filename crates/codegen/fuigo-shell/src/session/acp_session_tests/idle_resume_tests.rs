@@ -357,7 +357,7 @@ async fn test_e2e_idle_resume_never_sends_the_session_to_a_loopback_models() {
                 hook_load_errors: std::cell::RefCell::new(Vec::new()),
                 plugin_registry: std::cell::RefCell::new(None),
                 plugin_registry_handle: None,
-                events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
+                events: crate::session::events::EventTracker::new_at(std::path::Path::new("/tmp")),
                 _turn_owner_lock: None,
                 observability_bridge: noop_observability_bridge(),
                 current_turn_number: std::cell::Cell::new(0),

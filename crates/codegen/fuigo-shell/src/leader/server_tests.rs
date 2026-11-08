@@ -6678,3 +6678,145 @@ async fn reopen_notice_follows_the_latest_requests_answerer_despite_a_late_answe
     assert_eq!(notices(&b), 0, "{b:?}");
     drop((writer_a, writer_b));
 }
+
+// F5-N: `folder_trust_reload`, the owed-reload `_meta` and close's `timeout` on a shared leader. A client that advertised
+// neither `reload` nor `v2` must see byte-identical frames to 1.0.40.
+
+fn f5n_initialize_line(folder_trust: serde_json::Value) -> String {
+    serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": 1,
+        "clientCapabilities": {"_meta": {"fuigo/folderTrust": folder_trust}}}})
+    .to_string()
+}
+
+/// Answer the next forwarded request whose method is `method` with `result`.
+async fn f5n_answer(
+    acp_rx: &mut mpsc::UnboundedReceiver<String>,
+    response_tx: &mpsc::UnboundedSender<String>,
+    method: &str,
+    result: serde_json::Value,
+) {
+    loop {
+        let forwarded = tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
+            .await
+            .expect("timed out waiting for a forwarded request")
+            .expect("agent channel closed");
+        let json: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+        if json.get("method").and_then(|m| m.as_str()) == Some(method) {
+            let response = serde_json::json!({"jsonrpc": "2.0", "id": json["id"].clone(), "result": result});
+            response_tx.send(response.to_string()).unwrap();
+            return;
+        }
+    }
+}
+
+/// Every ACP frame `reader` receives until the line goes quiet. The owner's reconnect token is random per leader, so it
+/// alone is masked; every other byte is compared.
+async fn f5n_drain(reader: &mut tokio::io::ReadHalf<LeaderStream>) -> Vec<String> {
+    let mut frames = Vec::new();
+    while let Some(frame) = next_acp_payload(reader).await {
+        let mut json = pv(&frame);
+        match json.pointer_mut("/result/_meta").and_then(|m| m.as_object_mut()) {
+            Some(meta) if meta.contains_key(super::super::protocol::LEADER_RECONNECT_TOKEN_KEY) => {
+                meta.insert(super::super::protocol::LEADER_RECONNECT_TOKEN_KEY.to_owned(), serde_json::json!("<token>"));
+                frames.push(json.to_string());
+            }
+            _ => frames.push(frame),
+        }
+    }
+    frames
+}
+
+/// A (the session's owner) and B attach `sess-ft`, each with its own `fuigo/folderTrust` capabilities; then A closes it.
+/// With `f5n` the agent does what F5-N adds (load responses owe a reload, it emits `folder_trust_reload`, close answers
+/// `timeout`); without, what 1.0.40 did. Returns every frame each client received.
+async fn f5n_frames(a_caps: serde_json::Value, b_caps: serde_json::Value, f5n: bool) -> (Vec<String>, Vec<String>) {
+    let temp = TempDir::new().unwrap();
+    let (sock_path, cancel, response_tx, mut acp_rx, _board) = spawn_reopen_leader(&temp, Duration::from_secs(30)).await;
+    let load_result = if f5n {
+        serde_json::json!({"models": [], "_meta": {"sessionId": "sess-ft", "fuigo/folderTrustReload": {"owed": true}}})
+    } else {
+        serde_json::json!({"models": [], "_meta": {"sessionId": "sess-ft"}})
+    };
+    let close_result = serde_json::json!({"_meta": {"fuigo/closeOutcome": if f5n { "timeout" } else { "closed" }}});
+
+    let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
+    write_message(&mut writer_a, &ClientMessage::Acp { payload: f5n_initialize_line(a_caps) }).await.unwrap();
+    load_session(&mut writer_a, "sess-ft").await;
+    f5n_answer(&mut acp_rx, &response_tx, "session/load", load_result.clone()).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
+    write_message(&mut writer_b, &ClientMessage::Acp { payload: f5n_initialize_line(b_caps) }).await.unwrap();
+    load_session(&mut writer_b, "sess-ft").await;
+    f5n_answer(&mut acp_rx, &response_tx, "session/load", load_result).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    if f5n {
+        let reload = serde_json::json!({"jsonrpc": "2.0", "method": "_fuigo/session/update", "params": {
+            "method": "fuigo/session/update", "params": {"sessionId": "sess-ft",
+            "update": {"sessionUpdate": crate::agent::mvp_agent::FOLDER_TRUST_RELOAD_UPDATE}}}});
+        response_tx.send(reload.to_string()).unwrap();
+    }
+    let after = r#"{"jsonrpc":"2.0","method":"session/notification","params":{"sessionId":"sess-ft","updates":[{"type":"message_start","message_id":"after-reload"}]}}"#;
+    response_tx.send(after.to_string()).unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let close = r#"{"jsonrpc":"2.0","method":"session/close","id":7,"params":{"sessionId":"sess-ft"}}"#;
+    write_message(&mut writer_a, &ClientMessage::Acp { payload: close.to_string() }).await.unwrap();
+    f5n_answer(&mut acp_rx, &response_tx, "session/close", close_result).await;
+
+    let a = f5n_drain(&mut reader_a).await;
+    let b = f5n_drain(&mut reader_b).await;
+    cancel.cancel();
+    (a, b)
+}
+
+fn f5n_count(frames: &[String], needle: &str) -> usize {
+    frames.iter().filter(|f| f.contains(needle)).count()
+}
+
+/// F5-N (owner requirement 4): a client that advertised neither `reload` nor `v2` sees byte-identical frames to 1.0.40,
+/// whether it owns the session (the reload is unicast to the owner) or only watches it.
+#[tokio::test]
+async fn f5n_a_client_without_reload_or_v2_sees_byte_identical_frames_to_1_0_40() {
+    // The owner A did not opt in; B advertised `reload` and `v2` but does not own the session.
+    let plain = serde_json::json!({"interactive": true, "reopenNotice": true});
+    let opted = serde_json::json!({"interactive": true, "v2": true, "reload": true});
+    let (a_new, b_new) = f5n_frames(plain.clone(), opted.clone(), true).await;
+    let (a_old, _) = f5n_frames(plain.clone(), opted.clone(), false).await;
+    assert!(a_old.len() >= 3, "premise: load, update and close frames: {a_old:?}");
+    assert_eq!(a_new, a_old, "owner A without reload or v2 must see 1.0.40's frames");
+    assert_eq!(f5n_count(&b_new, "folder_trust_reload"), 0, "the reload goes to the session's owner only: {b_new:?}");
+    assert_eq!(f5n_count(&b_new, "folderTrustReload"), 1, "B's own load response owes it: {b_new:?}");
+
+    // The owner A opted in; B advertised nothing.
+    let (a_new, b_new) = f5n_frames(opted.clone(), serde_json::json!({}), true).await;
+    let (_, b_old) = f5n_frames(opted, serde_json::json!({}), false).await;
+    assert!(b_old.len() >= 2, "premise: load and update frames: {b_old:?}");
+    assert_eq!(b_new, b_old, "B without reload or v2 must see 1.0.40's frames");
+    assert_eq!(f5n_count(&a_new, "folder_trust_reload"), 1, "the opted-in owner gets the reload once: {a_new:?}");
+    assert_eq!(f5n_count(&a_new, "folderTrustReload"), 1, "{a_new:?}");
+    assert_eq!(f5n_count(&a_new, r#""fuigo/closeOutcome":"timeout""#), 1, "{a_new:?}");
+}
+
+/// F5-N (design F5 §4.1 A1): a `v2` client without `reload` is answered close's `timeout`, and is sent neither the reload
+/// nor the owed `_meta`.
+#[tokio::test]
+async fn f5n_a_v2_client_without_reload_sees_timeout_but_no_reload() {
+    let (a, _) = f5n_frames(serde_json::json!({"interactive": true, "v2": true}), serde_json::json!({}), true).await;
+    assert_eq!(f5n_count(&a, "folder_trust_reload"), 0, "{a:?}");
+    assert_eq!(f5n_count(&a, "folderTrustReload"), 0, "{a:?}");
+    assert_eq!(f5n_count(&a, r#""fuigo/closeOutcome":"timeout""#), 1, "{a:?}");
+}
+
+/// F5-N: the relay opts in to no F5-N field: an agent line carrying one is fitted, any other line passes as the same bytes.
+#[test]
+fn f5n_relay_lines_are_fitted_and_never_carry_the_reload() {
+    let reload = r#"{"jsonrpc":"2.0","method":"_fuigo/session/update","params":{"method":"fuigo/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"folder_trust_reload"}}}}"#;
+    assert!(is_folder_trust_reload_line(reload));
+    assert!(!is_folder_trust_reload_line(&reopen_notice_line("s")));
+    let close = r#"{"jsonrpc":"2.0","id":3,"result":{"_meta":{"fuigo/closeOutcome":"timeout"}}}"#;
+    assert_eq!(pv(&fit_folder_trust_line_for_relay(close.to_string()))["result"]["_meta"]["fuigo/closeOutcome"], "closed");
+    let load = r#"{"jsonrpc":"2.0","id":4,"result":{"_meta":{"sessionId":"s","fuigo/folderTrustReload":{"owed":true}}}}"#;
+    assert!(pv(&fit_folder_trust_line_for_relay(load.to_string()))["result"]["_meta"].get("fuigo/folderTrustReload").is_none());
+    let other = r#"{"jsonrpc":"2.0","id":5,"result":{"text":"a \"timeout\" here"}}"#;
+    assert_eq!(fit_folder_trust_line_for_relay(other.to_string()), other);
+}

@@ -183,6 +183,7 @@ fn scan_path_from(path_var: &str) -> Vec<String> {
     executables
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,7 +7,7 @@
 #[allow(dead_code)]
 mod acp_harness;
 use acp_harness::{
-    AutoApproveClient, RPC_TIMEOUT, connect_client, prompt_turn, run_agent_test,
+    AutoApproveClient, RPC_TIMEOUT, close_and_release, connect_client, prompt_turn, run_agent_test,
     spawn_agent_local_with_config,
 };
 use agent_client_protocol::{self as acp, Agent as _};
@@ -169,6 +169,7 @@ fn override_survives_cold_load_and_model_switch() {
             override_file(&without).is_none(),
             "no override must write no {FILE}"
         );
+        close_and_release(&conn, &[&with, &without]).await;
         drop(conn);
 
         // Fresh agent, cold load, override NOT resent, then a model switch.

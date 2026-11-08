@@ -582,6 +582,7 @@ impl SessionActor {
     fn compaction_refusal(&self) -> Option<String> {
         crate::session::storage::jsonl::load_repair::history_rewrite_refusal(
             &self.session_info,
+            self.rebuild_spec.session_writer.as_ref(),
             "compact the conversation",
         )
     }
@@ -1021,6 +1022,7 @@ impl SessionActor {
         // Refuse before any request is made or anything changes.
         if let Some(error) = crate::session::storage::jsonl::load_repair::history_rewrite_refusal(
             &self.session_info,
+            self.rebuild_spec.session_writer.as_ref(),
             "compact the conversation",
         ) {
             tracing::warn!(session_id = %self.session_info.id, %error, "compaction refused");
@@ -1662,7 +1664,7 @@ impl SessionActor {
         let (kept, dropped_paths) = if harvested_paths.is_empty() {
             (Vec::new(), 0)
         } else {
-            match crate::session::persistence::ensure_owner_only_session_dir(&self.session_info) {
+            match Ok::<_, std::io::Error>(crate::session::persistence::session_dir(&self.session_info)) {
                 // `<sessions_root>/<cwd-dir>/<session-id>`: any session's assets qualify, so a fork keeps the
                 // images its inherited transcript names in the parent's `assets/`.
                 Ok(session_dir) => match session_dir.parent().and_then(std::path::Path::parent) {
@@ -2373,7 +2375,7 @@ impl SessionActor {
         // note, no memory-save request, no summary request. The first refusal since the backup became owed says why; the
         // later ones return the same refusal quietly until the backup can be made (P123, K14).
         if let Err(refused) =
-            crate::session::storage::jsonl::load_repair::refused_auto_compaction(&self.session_info)
+            crate::session::storage::jsonl::load_repair::refused_auto_compaction(&self.session_info, self.rebuild_spec.session_writer.as_ref())
         {
             if let Some(note) = refused.note {
                 tracing::warn!(session_id = %self.session_info.id, error = %refused.refusal, "auto-compaction refused");
@@ -2647,6 +2649,7 @@ mod artifact_error_text_tests {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "compaction_inline_auto_compact_flow_tests.rs"]
 mod inline_auto_compact_flow_tests;

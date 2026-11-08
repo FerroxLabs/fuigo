@@ -637,7 +637,7 @@ mod imp {
         const LOCK_ACCESS: u32 = 0x8000_0000 | 0x4000_0000 | 0x0001_0000;
         std::fs::OpenOptions::new()
             .read(true)
-            .write(true)
+            .write(true) // F5-A: lock sidecar (§5.6): the sweep lock lives next to the session folder, never inside it
             .create_new(create_new)
             .access_mode(LOCK_ACCESS)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
@@ -646,6 +646,7 @@ mod imp {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "persistence_sweep_pin_tests.rs"]
 mod tests;

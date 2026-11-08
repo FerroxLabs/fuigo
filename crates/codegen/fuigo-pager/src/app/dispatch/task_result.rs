@@ -443,6 +443,21 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             scheduler_background_loops,
             attempt,
         ),
+        TaskResult::FolderTrustReloadOwed { loaded } => {
+            let target = crate::app::folder_trust_reload::loaded_target(&loaded);
+            let mut effects = dispatch_task_result(*loaded, app);
+            if let Some((agent_id, session_id)) = target {
+                crate::app::folder_trust_reload::mark_owed(app, agent_id, &session_id);
+                effects.extend(crate::app::folder_trust_reload::poll(app));
+            }
+            effects
+        }
+        TaskResult::FolderTrustClosed { agent_id, session_id, outcome } => {
+            crate::app::folder_trust_reload::handle_closed(app, agent_id, &session_id, outcome)
+        }
+        TaskResult::FolderTrustLoaded { agent_id, session_id, generation, result } => {
+            crate::app::folder_trust_reload::handle_loaded(app, agent_id, &session_id, generation, result)
+        }
         TaskResult::SessionMetaFromDisk {
             agent_id,
             title,

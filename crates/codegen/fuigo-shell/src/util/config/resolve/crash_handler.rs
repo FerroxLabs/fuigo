@@ -125,6 +125,7 @@ fn persisted_remote_gate_path() -> std::path::PathBuf {
 /// Best-effort and atomic: the value goes to a unique temporary sibling that is renamed over the
 /// gate, so a concurrent startup never reads a truncated file and a failed write keeps the
 /// previous value.
+#[allow(clippy::disallowed_methods, reason = "config/campaign/crash-handler flag files under FUIGO_HOME; not inside a session folder")]
 fn persist_remote_gate(path: &std::path::Path, value: bool) {
     let Some(dir) = path.parent() else {
         return;
@@ -177,6 +178,7 @@ pub fn load_crash_handler_enabled_sync() -> bool {
     .value
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod crash_handler_gate_tests {
     use super::*;

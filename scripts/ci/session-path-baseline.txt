@@ -1,0 +1,29 @@
+# Frozen baseline for the raw-path scan (design F5 §5.4.3 check 3, scripts/ci/session-writer-crates.sh).
+# One line per hit in the non-test sources of an UNLISTED crate: `crate:file:pattern: reason`. The reason says what the
+# path is and why that crate does not write inside a session folder (`<fuigo_home>/sessions/<cwd>/<id>/`). A new hit
+# fails CI until it is reviewed into this file or its crate is listed in session-writer-crates.toml.
+fuigo-config:src/paths.rs:join("sessions"): the producer definitions (sessions_cwd_dir_in, ensure_sessions_cwd_dir_in) and the 0700 sessions root; they create only the root and the cwd bucket, never a session folder
+fuigo-foreign-sessions:src/codex/files.rs:join("sessions"): the Codex CLI tree (<codex_root>/sessions), read-only import source, not a Fuigo session folder
+fuigo-memory:src/archive.rs:join("sessions"): its own memory/<project>/sessions archive tree, a different tree
+fuigo-memory:src/storage.rs:join("sessions"): its own memory/<project>/sessions tree (and the legacy one it reads), a different tree
+fuigo-pager:src/app/agent_view/plan.rs:join("sessions"): plan_file_path reads <session>/plan.md for the plan preview (read_to_string, open_markdown); read-only
+fuigo-pager:src/app/leader_cluster/scenarios.rs:join("sessions"): find_session_updates_file locates updates.jsonl for a leader-cluster scenario check; read-only
+fuigo-pager:src/app/session_startup.rs:join("sessions"): parent_session_is_worktree reads summary.json; the second hit is the cfg(test) fixture of that check; read-only in shipping code
+fuigo-pager:src/app/subagent.rs:join("sessions"): enrich_from_meta_with_home reads subagents/<id>/meta.json for the subagent list; read-only
+fuigo-pager-pty-harness:src/bin/startup_tui_probe.rs:join("sessions"): PTY test harness probe over a private test FUIGO_HOME; walks the sessions root read-only
+fuigo-pager-pty-harness:src/leader.rs:join("sessions"): PTY test harness: names the sessions root of its private test home for assertions; never shipped
+fuigo-pager-pty-harness:src/scenarios/plan_approval_resume.rs:join("sessions"): PTY test harness scenario over a private test home; reads the persisted session back
+fuigo-sandbox:src/command/grant_store.rs:join("sessions"): the cwd-bucket grants file (sessions/<cwd>/), never inside a session folder
+fuigo-sandbox:src/command/policy.rs:join("sessions"): names the sessions root as a protected tree in the command policy; no write
+fuigo-sandbox:src/command/protected.rs:join("sessions"): read-only protected-tree check over the sessions root and its linked grant files
+fuigo-sandbox:src/home_write_deny.rs:join("sessions"): adds the sessions root to the sandbox write-deny roots; no write
+fuigo-sandbox:src/paths.rs:join("sessions"): the sandbox audit log sessions/sandbox-events.jsonl at the sessions root and the root as a grant path; never inside a session folder
+fuigo-sandbox:src/profiles.rs:join("sessions"): the sessions root as a sandbox profile grant/deny path; no write into a session folder
+fuigo-session-search:src/db.rs:join("sessions"): the search index sessions/session_search.sqlite at the sessions root, not a session folder
+fuigo-session-search:src/fts.rs:join("sessions"): the search index path at the sessions root (index tests at the end of the file); not a session folder
+fuigo-workspace:src/permission/shell_access.rs:join("sessions"): compares a path with the sessions root for the shell-access rule; no write
+fuigo-workspace:src/permission/state.rs:join("sessions"): cleanup_stale_permission_state removes permission*.toml in the cwd buckets (sessions/<cwd>/), one level above any session folder
+fuigo-workspace:src/recovery.rs:join("sessions"): workspace_home/sessions, the workspace tree, a different tree
+fuigo-workspace:src/session/mod.rs:join("sessions"): workspace_home/sessions, the workspace tree, a different tree
+fuigo-workspace:src/session/tool_config.rs:join("sessions"): <root>/sessions/<sanitized id> under the workspace tree, a different tree
+ptyctl-cli:src/registry.rs:join("sessions"): ptyctl state_dir/ptyctl/sessions, its own pty registry, not a Fuigo session

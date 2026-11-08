@@ -63,6 +63,8 @@ test-loopback-operator = ["tokio/net"]
 
 
 [dev-dependencies]
+# examples/f5_raw_session_write.rs (design F5 §9.3 producer-ban control) only.
+fuigo-config = { workspace = true }
 tempfile = { workspace = true }
 axum = { workspace = true, features = ["multipart"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "net", "time"] }

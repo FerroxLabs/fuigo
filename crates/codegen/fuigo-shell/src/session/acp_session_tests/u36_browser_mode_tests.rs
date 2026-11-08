@@ -407,6 +407,7 @@ async fn run_load_repair(
 
 /// Test 7: every 1.0.35 browser head is replaced by the canonical head (the restored override when there is one) at
 /// load; a second load makes no further change; negatives stay byte-identical.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
 async fn legacy_heads_are_repaired_at_load() {
@@ -433,7 +434,10 @@ async fn legacy_heads_are_repaired_at_load() {
                 assert_eq!(head_of(&conversation), head, "negative stays byte-identical");
             }
             // Override variant: the restored client override is the canonical head.
-            crate::session::acp_session::save_system_prompt_override(&actor.session_info, "U36 client override");
+            let dir = crate::session::persistence::session_dir(&actor.session_info);
+            std::fs::create_dir_all(&dir).unwrap();
+            let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).expect("claim");
+            crate::session::acp_session::save_system_prompt_override(&actor.session_info, Some(&writer), "U36 client override");
             let mut conversation = legacy_conversation(browser_body());
             run_load_repair(&actor, &mut conversation, HEAD).await;
             assert_eq!(head_of(&conversation), "U36 client override");
@@ -461,6 +465,7 @@ async fn a_browser_use_profile_head_is_left_alone() {
         .await;
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn repo_with_agent(stem: &str, body: &str) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
@@ -474,6 +479,7 @@ fn repo_with_agent(stem: &str, body: &str) -> tempfile::TempDir {
 
 /// Guard: a trusted cwd `default.md` / `ask.md` whose Full-mode body renders to `B` blocks the repair (that is how a
 /// never-browser session holds a `B` head); the same file in an untrusted cwd does not.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
 async fn a_trusted_mode_file_rendering_to_the_body_blocks_the_repair() {
@@ -528,6 +534,7 @@ async fn cross_compaction_rewind_repairs_a_legacy_checkpoint_head() {
 /// whose canonical head is the browsing body (client override `B`). The checkpoint holds `B` + an older memory block, the
 /// live head `B` + a newer one. The checkpoint head is the session's own, so it is installed as is; the live head is
 /// only ever the replacement. Control: the same checkpoint in a session whose canonical head is `HEAD` gets the live head.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 async fn cross_compaction_rewind_keeps_a_browser_canonical_checkpoint_head() {
     tokio::task::LocalSet::new()

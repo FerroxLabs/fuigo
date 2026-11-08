@@ -18,6 +18,8 @@ use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use fuigo_sampling_types::ReasoningEffort;
 
+use fuigo_session_writer::SessionWriter;
+
 use crate::session::persistence::Summary;
 use crate::session::worktree::WorktreeIdentity;
 
@@ -268,11 +270,26 @@ impl WorktreeIdentityRepair {
 /// Desktop hides local rows whose cwd sits under a fuigo worktree unless they carry a label (or `session_kind == "worktree"`).
 /// Those sessions never appear, so a repair that ran only on session load would never fire.
 pub(crate) fn repair_worktree_identity(
+    writer: &SessionWriter,
+    identity: &WorktreeIdentity,
+) -> io::Result<WorktreeIdentityRepair> {
+    // Review r2: the repair is the session writer's work, like every other summary change. `SessionWriter::summary` is
+    // the only source of the two paths, so there is no by-path way in.
+    writer.summary(|summary_path, lock_path| {
+        // rb/re marks for B-F5 (design F5 §9.4); one branch when tracing is off.
+        fuigo_session_writer::trace::sanctioned_rmw(&[lock_path, summary_path], || {
+            repair_worktree_identity_locked(writer, summary_path, lock_path, identity)
+        })
+    })
+}
+
+fn repair_worktree_identity_locked(
+    writer: &SessionWriter,
     summary_path: &Path,
     lock_path: &Path,
     identity: &WorktreeIdentity,
 ) -> io::Result<WorktreeIdentityRepair> {
-    let lock = open_lock_file(lock_path)?;
+    let lock = open_lock_file(writer, lock_path)?;
     lock.lock_exclusive()?;
     let result = (|| {
         let mut summary = read_summary(summary_path)?;
@@ -297,9 +314,9 @@ pub(crate) fn repair_worktree_identity(
         let previous_mtime = std::fs::metadata(summary_path)
             .ok()
             .and_then(|meta| meta.modified().ok());
-        write_summary_atomic(summary_path, &summary)?;
+        write_summary_atomic(writer, summary_path, &summary)?;
         if let Some(mtime) = previous_mtime
-            && let Err(error) = restore_summary_mtime(summary_path, mtime)
+            && let Err(error) = restore_summary_mtime(writer, summary_path, mtime)
         {
             tracing::warn!(
                 "failed to restore summary mtime after worktree identity heal on {}: {error}",
@@ -316,25 +333,44 @@ pub(crate) fn repair_worktree_identity(
 /// Stamps the missing identity on disk via [`repair_worktree_identity`] and replaces `summary` with the lock-fresh on-disk state.
 /// Memory then mirrors disk whichever way the repair went.
 /// On failure the summary stays as-is (logged); the next read retries.
+///
+/// Review r2: the heal runs as the session's writer. `writer` is asked for only when a repair is due, and `None`
+/// (the session is held elsewhere or still closing) skips the heal quietly: a listing never blocks or fails on it,
+/// and a later one retries.
 pub(crate) fn repair_untagged_worktree_summary(
     summary: &mut Summary,
-    summary_path: &Path,
-    lock_path: &Path,
+    writer: impl FnOnce(&crate::session::info::Info) -> Option<SessionWriter>,
 ) {
-    if summary.session_kind.is_some() && summary.worktree_label.is_some() {
-        return;
-    }
-    let Some(identity) = crate::session::worktree::worktree_identity_for_cwd(&summary.info.cwd)
-    else {
+    let Some(identity) = worktree_repair_due(summary) else {
         return;
     };
-    match repair_worktree_identity(summary_path, lock_path, &identity) {
+    let Some(writer) = writer(&summary.info) else {
+        tracing::debug!(
+            "worktree identity heal of session {} skipped: another writer holds it; a later read retries",
+            summary.info.id.0
+        );
+        return;
+    };
+    match repair_worktree_identity(&writer, &identity) {
         Ok(repair) => *summary = repair.into_summary(),
+        Err(error) if fuigo_session_writer::refusal(&error).is_some() => tracing::debug!(
+            "worktree identity heal of session {} skipped: {error}",
+            summary.info.id.0
+        ),
         Err(error) => tracing::warn!(
-            "failed to repair worktree identity onto {}: {error}",
-            summary_path.display()
+            "failed to repair worktree identity onto session {}: {error}",
+            summary.info.id.0
         ),
     }
+}
+
+/// The identity to stamp onto `summary` when it is untagged (or kinded without a `worktree_label`) and its cwd is
+/// inside a fuigo-managed worktree.
+pub(crate) fn worktree_repair_due(summary: &Summary) -> Option<WorktreeIdentity> {
+    if summary.session_kind.is_some() && summary.worktree_label.is_some() {
+        return None;
+    }
+    crate::session::worktree::worktree_identity_for_cwd(&summary.info.cwd)
 }
 
 /// Read, apply `patch`, then write `summary_path`, serialized by an exclusive lock on the sidecar `lock_path`.
@@ -343,28 +379,33 @@ pub(crate) fn repair_untagged_worktree_summary(
 ///
 /// Returns whether a `generated_title_if_absent` was applied (see [`Summary::apply_patch`]).
 /// Because the read-modify-write happens under the lock, this "set the title only if absent" check is atomic against a concurrent manual rename.
-pub(crate) fn apply_patch_locked(
-    summary_path: &Path,
-    lock_path: &Path,
-    patch: &SummaryPatch,
-) -> io::Result<bool> {
-    let lock = open_lock_file(lock_path)?;
-    lock.lock_exclusive()?;
-    let result = read_modify_write(summary_path, patch);
-    let _ = lock.unlock();
-    result
+pub(crate) fn apply_patch_locked(writer: &SessionWriter, patch: &SummaryPatch) -> io::Result<bool> {
+    writer.summary(|summary_path, lock_path| {
+        // rb/re marks for B-F5 (design F5 §9.4); one branch when tracing is off.
+        fuigo_session_writer::trace::sanctioned_rmw(&[lock_path, summary_path], || {
+            let lock = open_lock_file(writer, lock_path)?;
+            lock.lock_exclusive()?;
+            let result = read_modify_write(writer, summary_path, patch);
+            let _ = lock.unlock();
+            result
+        })
+    })
 }
 
-fn read_modify_write(summary_path: &Path, patch: &SummaryPatch) -> io::Result<bool> {
+fn read_modify_write(writer: &SessionWriter, summary_path: &Path, patch: &SummaryPatch) -> io::Result<bool> {
     let mut summary = read_summary(summary_path)?;
     let absent_title_applied = summary.apply_patch(patch, Utc::now());
-    write_summary_atomic(summary_path, &summary)?;
+    write_summary_atomic(writer, summary_path, &summary)?;
     Ok(absent_title_applied)
 }
 
-fn open_lock_file(path: &Path) -> io::Result<File> {
-    crate::session::storage::owner_only::open(
-        OpenOptions::new().read(true).write(true).create(true).truncate(false),
+// Every raw write below takes the session's `&SessionWriter` and refuses a path outside its folder: with no writer
+// there is no way to call it, so the compiler lists every caller (review r2).
+#[allow(clippy::disallowed_methods, reason = "summary RMW (§5.5): summary.json.lock")]
+fn open_lock_file(writer: &SessionWriter, path: &Path) -> io::Result<File> {
+    writer.rel_of(path)?;
+    crate::session::storage::owner_only::open( // F5-A: summary RMW (§5.5): summary.json.lock
+        OpenOptions::new().read(true).write(true).create(true).truncate(false), // F5-A: summary RMW (§5.5): summary.json.lock
         path,
     )
 }
@@ -381,10 +422,11 @@ fn read_summary(path: &Path) -> io::Result<Summary> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-fn write_summary_atomic(summary_path: &Path, summary: &Summary) -> io::Result<()> {
+fn write_summary_atomic(writer: &SessionWriter, summary_path: &Path, summary: &Summary) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(summary)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    crate::session::storage::write_bytes_atomic(summary_path, &bytes)
+    // F5-A: summary RMW (§5.5): the sanctioned summary.json rewrite under summary.json.lock
+    crate::session::storage::write_bytes_atomic(writer, summary_path, &bytes)
 }
 
 #[cfg(test)]
@@ -397,17 +439,20 @@ pub(crate) fn fail_next_restore_summary_mtime() {
     RESTORE_MTIME_FAULT.set(true);
 }
 
-fn restore_summary_mtime(path: &Path, mtime: std::time::SystemTime) -> io::Result<()> {
+#[allow(clippy::disallowed_methods, reason = "summary RMW (§5.5): mtime restore under summary.json.lock")]
+fn restore_summary_mtime(writer: &SessionWriter, path: &Path, mtime: std::time::SystemTime) -> io::Result<()> {
+    writer.rel_of(path)?;
     #[cfg(test)]
     if RESTORE_MTIME_FAULT.replace(false) {
         return Err(io::Error::other("injected mtime restore failure"));
     }
     OpenOptions::new()
-        .write(true)
+        .write(true) // F5-A: summary RMW (§5.5): mtime restore under summary.json.lock
         .open(path)?
         .set_modified(mtime)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -893,6 +938,10 @@ mod tests {
         }
     }
 
+    fn writer_of(adapter: &JsonlStorageAdapter, info: &Info) -> SessionWriter {
+        adapter.owner(info).unwrap()
+    }
+
     fn lock_path_for(summary_path: &Path) -> std::path::PathBuf {
         summary_path.with_file_name(format!("{}.lock", crate::session::storage::SUMMARY_FILE))
     }
@@ -903,10 +952,7 @@ mod tests {
         let (_adapter, _info, summary_path) = new_session(&dir).await;
         let mut expected = read_summary(&summary_path).unwrap();
 
-        let repair = repair_worktree_identity(
-            &summary_path,
-            &lock_path_for(&summary_path),
-            &identity("fix-bug", Some("/home/user/repo")),
+        let repair = repair_worktree_identity(&writer_of(&_adapter, &_info), &identity("fix-bug", Some("/home/user/repo")),
         )
         .unwrap();
 
@@ -940,10 +986,7 @@ mod tests {
             .modified()
             .unwrap();
 
-        let repair = repair_worktree_identity(
-            &summary_path,
-            &lock_path_for(&summary_path),
-            &identity("fix-bug", Some("/home/user/repo")),
+        let repair = repair_worktree_identity(&writer_of(&_adapter, &_info), &identity("fix-bug", Some("/home/user/repo")),
         )
         .unwrap();
         assert!(matches!(repair, WorktreeIdentityRepair::Applied(_)));
@@ -968,10 +1011,7 @@ mod tests {
         let (_adapter, _info, summary_path) = new_session(&dir).await;
         fail_next_restore_summary_mtime();
 
-        let repair = repair_worktree_identity(
-            &summary_path,
-            &lock_path_for(&summary_path),
-            &identity("fix-bug", Some("/home/user/repo")),
+        let repair = repair_worktree_identity(&writer_of(&_adapter, &_info), &identity("fix-bug", Some("/home/user/repo")),
         )
         .unwrap();
         let WorktreeIdentityRepair::Applied(applied) = repair else {
@@ -995,10 +1035,7 @@ mod tests {
         std::fs::write(&summary_path, serde_json::to_vec_pretty(&on_disk).unwrap()).unwrap();
         let bytes_before = std::fs::read(&summary_path).unwrap();
 
-        let repair = repair_worktree_identity(
-            &summary_path,
-            &lock_path_for(&summary_path),
-            &identity("fix-bug", Some("/home/user/repo")),
+        let repair = repair_worktree_identity(&writer_of(&_adapter, &_info), &identity("fix-bug", Some("/home/user/repo")),
         )
         .unwrap();
 
@@ -1019,10 +1056,7 @@ mod tests {
         on_disk.source_workspace_dir = Some("/home/user/repo".to_owned());
         std::fs::write(&summary_path, serde_json::to_vec_pretty(&on_disk).unwrap()).unwrap();
 
-        let repair = repair_worktree_identity(
-            &summary_path,
-            &lock_path_for(&summary_path),
-            &identity("fix-bug", Some("/other/source")),
+        let repair = repair_worktree_identity(&writer_of(&_adapter, &_info), &identity("fix-bug", Some("/other/source")),
         )
         .unwrap();
 
@@ -1045,16 +1079,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (_adapter, _info, summary_path) = new_session(&dir).await;
         let lock_path = lock_path_for(&summary_path);
-        repair_worktree_identity(
-            &summary_path,
-            &lock_path,
-            &identity("fix-bug", Some("/home/user/repo")),
+        repair_worktree_identity(&writer_of(&_adapter, &_info), &identity("fix-bug", Some("/home/user/repo")),
         )
         .unwrap();
         let bytes_after_first = std::fs::read(&summary_path).unwrap();
 
         let repair =
-            repair_worktree_identity(&summary_path, &lock_path, &identity("other-label", None))
+            repair_worktree_identity(&writer_of(&_adapter, &_info), &identity("other-label", None))
                 .unwrap();
 
         let WorktreeIdentityRepair::AlreadyKinded(fresh) = repair else {

@@ -57,6 +57,7 @@ fn read_call(id: &str) -> ScriptedResponse {
     ))
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn repeat_read_of_unchanged_file_is_deduped_until_the_workspace_changes() {
     run_agent_test(|cwd, mock| async move {

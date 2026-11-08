@@ -158,6 +158,13 @@ impl WorkspaceSandbox {
                 recorded.id.clone()
             }
             GrantScope::Session => store.add_session(session_id, grant)?,
+            // F12: a folder or global grant is not saved under `<fuigo_home>/sessions` when session persistence is off;
+            // it holds for this conversation instead.
+            GrantScope::Workspace { .. } | GrantScope::Global if fuigo_config::session_persistence_disabled() => {
+                let mut grant = grant;
+                grant.scope = GrantScope::Session;
+                store.add_session(session_id, grant)?
+            }
             GrantScope::Workspace { .. } | GrantScope::Global => store.add(grant).await?,
         };
         engaged.refresh_live(&store);

@@ -203,6 +203,9 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub is_chat_kind: bool,
     /// 1.0.36 item a: the session's launch policy (`_meta` path + sha256, verified and pinned); `None` when ungoverned.
     pub launch_policy: Option<std::sync::Arc<fuigo_workspace::permission::launch_policy::LaunchPolicy>>,
+    /// The session's writer, claimed by setup with the waiting claim (design F5 §5.5, §6.2): `session/new` at the start
+    /// of setup, a cold load after admission and before its first read. The spawn moves it into the actor.
+    pub session_writer: fuigo_session_writer::SessionWriter,
 }
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
@@ -344,6 +347,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
     model_agent_type: Option<&'a str>,
     session_model_id: acp::ModelId,
     session_yolo_mode: bool,
+    session_writer: fuigo_session_writer::SessionWriter,
 ) -> SessionSpawnOptions<'a> {
     SessionSpawnOptions {
         session_info,
@@ -377,6 +381,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
         is_headless: false,
         is_chat_kind: true,
         launch_policy: None,
+        session_writer,
     }
 }
 /// `_meta.noReplay` skips gateway replay (client already has the transcript).
@@ -708,6 +713,19 @@ pub struct MvpAgent {
     /// Whether the current client advertised `fuigo/folderTrust.reopenNotice`: it is sent one config notice when a grant
     /// lands mid-session, since part of trust applies only on reopen. Set on every `initialize()` (last-client-wins).
     folder_trust_reopen_notice: std::cell::Cell<bool>,
+    /// F5-N: whether the current client advertised `fuigo/folderTrust.reload`: it closes and reloads a session when told
+    /// `folder_trust_reload`. Set on every `initialize()` (last-client-wins); under the leader the leader holds it per
+    /// connection.
+    folder_trust_reload: std::cell::Cell<bool>,
+    /// F5-N: sessions a durable folder-trust grant covered whose reload is still owed: a reattach to the resident session
+    /// reports it in its response `_meta`, and a cold attach (which builds the session trusted) pays it. Captured into the
+    /// detached prompt task.
+    folder_trust_reload_owed: Rc<RefCell<std::collections::HashSet<acp::SessionId>>>,
+    /// Grants a session made itself (`/trust`, the `/hooks` Trust action): every session reports into the sender, and
+    /// the agent settles each like the modal's grant (`ensure_folder_trust_grant_listener` takes the receiver).
+    folder_trust_grant_tx: tokio::sync::mpsc::UnboundedSender<crate::session::notifications::SessionGrant>,
+    folder_trust_grant_rx:
+        RefCell<Option<tokio::sync::mpsc::UnboundedReceiver<crate::session::notifications::SessionGrant>>>,
     /// Workspaces (canonical `workspace_key`) already prompted/decided for the interactive folder-trust round-trip this process.
     /// Dedups re-prompts on `load_session` reconnect and concurrent same-workspace sessions.
     /// Agent-owned (mirrors the `DECISIONS` cache, but not a process global) and captured into the detached prompt task.
@@ -1400,10 +1418,6 @@ fn plan_hunk_tracking(mode_str: Option<&str>) -> HunkTrackingPlan {
         actor_mode: resolve_hunk_tracking_mode(mode_str),
     }
 }
-/// Bound on waiting out an evicted session's flushing actor thread.
-pub(super) const DRAIN_OLD_THREAD_WAIT: std::time::Duration = std::time::Duration::from_secs(
-    5,
-);
 /// RAII marker for an in-flight attach; dropping it wakes every waiter.
 pub(crate) struct SessionLoadGuard<'a> {
     agent: &'a MvpAgent,
@@ -1452,7 +1466,9 @@ mod session_setup;
 mod settings_manager;
 mod subagent_spawn;
 use session_registry::SessionRegistry;
-pub(crate) use folder_trust_prompt::FOLDER_TRUST_REOPEN_NOTICE;
+pub(crate) use folder_trust_prompt::{
+    FOLDER_TRUST_RELOAD_METHOD, FOLDER_TRUST_RELOAD_OWED_META, FOLDER_TRUST_RELOAD_UPDATE, FOLDER_TRUST_REOPEN_NOTICE,
+};
 pub(crate) use session_lifecycle::RegistrySnapshot;
 pub(super) use super::ext_parsers;
 /// Named `auth.lifecycle` (not `auth`) to avoid colliding with the pre-existing per-request `AuthManager::auth()` `#[instrument]` span.
@@ -2721,8 +2737,10 @@ pub(crate) fn settings_allow_access(
     !matches!(rs.and_then(|s| s.allow_access), Some(false))
 }
 mod replay;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod replay_tests;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

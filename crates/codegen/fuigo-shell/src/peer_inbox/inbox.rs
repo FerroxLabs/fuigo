@@ -158,6 +158,7 @@ impl Drop for SocketGuard {
 }
 
 /// Every blocking step of `start`, in order. Runs in `spawn_blocking`.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn prepare(home: &Path, runtime_dir: Option<&Path>, host_id: HostId) -> Result<Prepared, Disabled> {
     let loc = Locations::new(home, runtime_dir);
     // Decide the directory FIRST: when it is unavailable nothing is created.

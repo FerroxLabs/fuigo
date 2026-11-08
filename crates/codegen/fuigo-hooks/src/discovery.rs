@@ -91,6 +91,22 @@ impl HookRegistry {
         }
     }
 
+    /// The `disabled-hooks` lines for every hook named `name` (one per repo for a project hook), or `name` itself when
+    /// no such hook is loaded, so a disable or enable acts on exactly the hook the user picked.
+    pub fn disable_keys_for_name(&self, name: &str) -> Vec<String> {
+        let mut keys: Vec<String> = Vec::new();
+        for spec in self.hooks.values().flatten().filter(|s| s.name == name) {
+            let key = crate::trust::disable_key(spec);
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        if keys.is_empty() {
+            keys.push(name.to_owned());
+        }
+        keys
+    }
+
     pub fn all_hooks(&self) -> Vec<&HookSpec> {
         let mut all = Vec::new();
         for event in HookEventName::ALL {

@@ -544,13 +544,24 @@ impl SessionActor {
             self.session_info.id.0.as_ref(),
             &self.notifications.gateway,
             Some(&cmd_tx),
+            self.rebuild_spec.session_writer.as_ref(),
             self.tool_context.live_orphan_heal_lock.clone(),
         )
         .await;
         drop(cmd_tx);
         while let Ok(cmd) = cmd_rx.try_recv() {
-            if let SessionCommand::FuigoSessionNotification { notification } = cmd {
-                self.handle_fuigo_session_notification(notification).await;
+            match cmd {
+                SessionCommand::FuigoSessionNotification { notification } => {
+                    self.handle_fuigo_session_notification(notification).await;
+                }
+                SessionCommand::WriteSubagentRecord { rel, bytes } => {
+                    crate::agent::subagent::write_routed_subagent_record(
+                        self.rebuild_spec.session_writer.as_ref(),
+                        &rel,
+                        &bytes,
+                    );
+                }
+                _ => {}
             }
         }
     }
@@ -885,6 +896,7 @@ impl SessionActor {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod live_orphan_hook_tests {
     use super::*;
@@ -1041,6 +1053,8 @@ mod live_orphan_hook_tests {
             return;
         }
         let _home = fuigo_test_support::FuigoHome::new();
+        // The fixture stands in for the parent actor (no writer), so its records stage by path.
+        let _by_path = crate::agent::subagent::records_by_path_in_tests();
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -1136,6 +1150,8 @@ mod live_orphan_hook_tests {
             return;
         }
         let _home = fuigo_test_support::FuigoHome::new();
+        // The fixture stands in for the parent actor (no writer), so its records stage by path.
+        let _by_path = crate::agent::subagent::records_by_path_in_tests();
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -1194,6 +1210,8 @@ mod live_orphan_hook_tests {
             return;
         }
         let _home = fuigo_test_support::FuigoHome::new();
+        // The fixture stands in for the parent actor (no writer), so its records stage by path.
+        let _by_path = crate::agent::subagent::records_by_path_in_tests();
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -1222,6 +1240,8 @@ mod live_orphan_hook_tests {
             return;
         }
         let _home = fuigo_test_support::FuigoHome::new();
+        // The fixture stands in for the parent actor (no writer), so its records stage by path.
+        let _by_path = crate::agent::subagent::records_by_path_in_tests();
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {

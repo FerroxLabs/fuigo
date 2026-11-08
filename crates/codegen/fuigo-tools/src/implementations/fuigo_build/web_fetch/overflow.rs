@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::implementations::fuigo_build::storage::SessionFiles;
+
 use super::artifact::WebFetchArtifactWriter;
 use crate::util::query_tools::{QueryTools, examples_clause};
 use crate::util::truncate;
@@ -106,7 +108,7 @@ impl OverflowHandler {
         &self,
         content: String,
         budget: InlineBudget,
-        session_folder: Option<&Path>,
+        session_folder: Option<&SessionFiles>,
         content_type: &str,
         tools: RecoveryTools<'_>,
     ) -> OverflowResult {
@@ -306,6 +308,7 @@ fn web_fetch_steer(
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,7 +344,7 @@ mod tests {
             .process(
                 full.clone(),
                 budget(100),
-                Some(tmp.path()),
+                Some(&SessionFiles::at(tmp.path())),
                 "markdown",
                 tools(Some("ReadAsset"), Some("ExecuteAsset")),
             )
@@ -373,7 +376,7 @@ mod tests {
             .process(
                 "a".repeat(100),
                 budget(100),
-                Some(tmp.path()),
+                Some(&SessionFiles::at(tmp.path())),
                 "text/plain",
                 tools(Some("ReadAsset"), Some("ExecuteAsset")),
             )
@@ -386,7 +389,7 @@ mod tests {
             .process(
                 "b".repeat(101),
                 budget(100),
-                Some(tmp.path()),
+                Some(&SessionFiles::at(tmp.path())),
                 "text/plain",
                 tools(Some("ReadAsset"), Some("ExecuteAsset")),
             )
@@ -409,7 +412,7 @@ mod tests {
             .process(
                 "ééé".to_string(),
                 budget(5),
-                Some(tmp.path()),
+                Some(&SessionFiles::at(tmp.path())),
                 "text/plain",
                 tools(Some("ReadAsset"), Some("ExecuteAsset")),
             )
@@ -506,7 +509,7 @@ mod tests {
             .process(
                 json.clone(),
                 budget(5),
-                Some(tmp.path()),
+                Some(&SessionFiles::at(tmp.path())),
                 "application/json",
                 tools(Some("ReadAsset"), Some("ExecuteAsset")),
             )
@@ -515,7 +518,7 @@ mod tests {
             .process(
                 json_lines.clone(),
                 budget(5),
-                Some(tmp.path()),
+                Some(&SessionFiles::at(tmp.path())),
                 "application/x-ndjson",
                 tools(Some("ReadAsset"), Some("ExecuteAsset")),
             )
@@ -524,7 +527,7 @@ mod tests {
             .process(
                 text.clone(),
                 budget(5),
-                Some(tmp.path()),
+                Some(&SessionFiles::at(tmp.path())),
                 "text/plain",
                 tools(Some("ReadAsset"), Some("ExecuteAsset")),
             )
@@ -657,7 +660,7 @@ mod tests {
             .process(
                 full.clone(),
                 budget(100),
-                Some(&blocker),
+                Some(&SessionFiles::at(&blocker)),
                 "text/plain",
                 tools(Some("ReadAsset"), Some("ExecuteAsset")),
             )
@@ -671,7 +674,7 @@ mod tests {
             .process(
                 full.clone(),
                 budget(100),
-                Some(&blocker),
+                Some(&SessionFiles::at(&blocker)),
                 "text/plain",
                 tools(Some("RetryRead"), Some("ExecuteAsset")),
             )
@@ -695,7 +698,7 @@ mod tests {
             .process(
                 full.clone(),
                 budget(100),
-                Some(tmp.path()),
+                Some(&SessionFiles::at(tmp.path())),
                 "text/plain",
                 tools(Some("FirstRead"), Some("ExecuteAsset")),
             )
@@ -708,7 +711,7 @@ mod tests {
             .process(
                 full.clone(),
                 budget(100),
-                Some(tmp.path()),
+                Some(&SessionFiles::at(tmp.path())),
                 "text/plain",
                 tools(Some("SecondRead"), Some("ExecuteAsset")),
             )
@@ -730,7 +733,7 @@ mod tests {
             .process(
                 "line\n".repeat(21_000),
                 budget,
-                Some(tmp.path()),
+                Some(&SessionFiles::at(tmp.path())),
                 "text/plain",
                 tools(Some("ReadAsset"), Some("ExecuteAsset")),
             )
@@ -757,7 +760,7 @@ mod tests {
                     preview_bytes: 100,
                     output_bytes: 300,
                 },
-                Some(tmp.path()),
+                Some(&SessionFiles::at(tmp.path())),
                 "text/plain",
                 tools(Some(&read_tool), Some("ExecuteAsset")),
             )
@@ -781,7 +784,7 @@ mod tests {
                     preview_bytes: 100,
                     output_bytes: 128,
                 },
-                Some(&session),
+                Some(&SessionFiles::at(&session)),
                 "text/plain",
                 tools(Some("ReadAsset"), Some("ExecuteAsset")),
             )
@@ -807,7 +810,7 @@ mod tests {
                     preview_bytes: 10,
                     output_bytes: 3,
                 },
-                Some(tmp.path()),
+                Some(&SessionFiles::at(tmp.path())),
                 "text/plain",
                 tools(Some("ReadAsset"), Some("ExecuteAsset")),
             )

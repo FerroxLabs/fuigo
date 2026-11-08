@@ -96,7 +96,7 @@ async fn pre_tool_use_rewrite_runs_silently_and_is_telemetry_tagged() {
             )
             .await;
             let events_dir = tempfile::tempdir().expect("tempdir");
-            actor.events = crate::session::events::EventTracker::new(events_dir.path());
+            actor.events = crate::session::events::EventTracker::new_at(events_dir.path());
             let updates = spawn_gateway_loop(gateway_rx);
 
             tokio::time::timeout(

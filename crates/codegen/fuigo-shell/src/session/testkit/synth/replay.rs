@@ -135,6 +135,7 @@ fn envelope_line(session_id: &str, update: acp::SessionUpdate) -> String {
     serde_json::to_string(&envelope).expect("serialize envelope")
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn write_updates_jsonl(path: &Path, session_id: &str, spec: &SessionSpec) {
     let mut out = String::new();
     for turn in 0..spec.turns {
@@ -165,6 +166,7 @@ pub fn expected_replay_lines(spec: &SessionSpec) -> usize {
     spec.turns * (1 + spec.agent_chunks_per_turn)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 pub fn write_rewind_jsonl(path: &Path, spec: &SessionSpec) {
     let mut out = String::new();
     for p in 0..spec.rewind_points {

@@ -211,6 +211,7 @@ impl SessionHarnessMetrics {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod is_same_skill_file_tests {
     use super::is_same_skill_file;

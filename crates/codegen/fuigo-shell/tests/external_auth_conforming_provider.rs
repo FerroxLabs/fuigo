@@ -26,6 +26,7 @@ const LOGIN_BUDGET: Duration = Duration::from_secs(60);
 const NO_SELF_CONTENTION: Duration = Duration::from_secs(20);
 
 /// The skeleton published in `README.md` and `docs/user-guide/02-authentication.md`, which operators copy.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn write_conforming_provider(home: &Path) -> String {
     use std::os::unix::fs::PermissionsExt;
 
@@ -61,6 +62,7 @@ fn invocations(home: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn seed_expired_credential(home: &Path, scope: &str) {
     let expired = FuigoAuth {
         key: STALE_TOKEN.to_owned(),

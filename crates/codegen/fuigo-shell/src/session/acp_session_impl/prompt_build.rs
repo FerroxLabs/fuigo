@@ -935,13 +935,13 @@ impl SessionActor {
         let join_fallback =
             strip_offload_notice(&bounded, &build_offload_notice(full_len, &file_path));
         let offload_span = region!("turn.prompt_offload_write", Parent::Inherit);
+        // F5-C4: the offloaded prompt is a session file, written as the session's writer (owner-only, atomic).
+        let session_writer = self.rebuild_spec.session_writer.clone();
         let offload = tokio::task::spawn_blocking(move || {
-            write_offload_and_build(
-                &full_message,
-                bounded,
-                file_path,
-                crate::util::secure_file::write_secure_file,
-            )
+            write_offload_and_build(&full_message, bounded, file_path, |path, bytes| match &session_writer {
+                Some(writer) => writer.replace_atomic_sync(writer.rel_of(path)?, bytes),
+                None => Err(crate::session::storage::jsonl::no_writer_error(path)),
+            })
         })
         .await;
         offload_span.close();
@@ -978,16 +978,10 @@ impl SessionActor {
     ) -> Result<String, acp::Error> {
         let prior = self.chat_state_handle.get_conversation_for_model().await;
         let outline = crate::session::image_describe::build_conversation_outline(&prior);
-        let session_dir = crate::session::persistence::ensure_owner_only_session_dir(
-            &crate::session::info::Info {
-                id: self.session_info.id.clone(),
-                cwd: self.session_info.cwd.clone(),
-            },
-        )
-        .map_err(|e| {
-            crate::acp_error::session_storage(format!("failed to create session dir: {e}"))
+        let writer = self.rebuild_spec.session_writer.as_ref().ok_or_else(|| {
+            crate::acp_error::session_storage("no session writer: the images cannot be saved".to_string())
         })?;
-        let persisted = crate::session::image_describe::persist_user_images(&session_dir, images)
+        let persisted = crate::session::image_describe::persist_user_images(writer, images)
             .map_err(|e| {
             crate::acp_error::session_storage(format!(
                 "failed to save user images to assets dir: {e}"

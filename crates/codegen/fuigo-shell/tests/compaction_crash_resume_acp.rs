@@ -15,7 +15,7 @@
 mod acp_harness;
 
 use acp_harness::{
-    AutoApproveClient, RPC_TIMEOUT, connect_client, ext_method, new_session, prompt_turn,
+    AutoApproveClient, RPC_TIMEOUT, close_and_release, connect_client, ext_method, new_session, prompt_turn,
     run_agent_test, spawn_agent_local_with_config,
 };
 use agent_client_protocol::{self as acp, Agent as _};
@@ -121,6 +121,7 @@ async fn script(conn: &acp::ClientSideConnection, mock: &MockInferenceServer, se
     turn(conn, mock, session, "Remember the number 42.", "Noted 42.").await;
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn a_crash_between_the_compaction_commit_and_the_history_rewrite_resumes_compacted() {
     run_agent_test(|cwd, mock| async move {
@@ -151,6 +152,7 @@ fn a_crash_between_the_compaction_commit_and_the_history_rewrite_resumes_compact
             assert!(std::time::Instant::now() < deadline, "fixture: the compaction never rewrote chat_history.jsonl");
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+        close_and_release(&a, &[&crashed]).await;
         drop(a);
         // What a crash between the activation marker and the chat_history.jsonl rewrite leaves on disk.
         std::fs::write(&chat_path, &before_compaction).expect("restore the pre-compaction chat history");
@@ -161,6 +163,7 @@ fn a_crash_between_the_compaction_commit_and_the_history_rewrite_resumes_compact
             &turn_messages(&b, &mock, &crashed, "What do you remember?", "Teal and 42.").await,
             &crashed,
         );
+        close_and_release(&b, &[&crashed]).await;
         drop(b);
         assert_eq!(
             got,

@@ -1001,6 +1001,7 @@ pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<(
     }
     Ok(())
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

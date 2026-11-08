@@ -57,6 +57,10 @@ pub struct ForkSessionResponse {
     /// 1.0.36 item a: the launch policy the fork runs under (its id is bound to it before the copy); never serialized.
     #[serde(skip)]
     pub launch_policy: Option<std::sync::Arc<fuigo_workspace::permission::launch_policy::LaunchPolicy>>,
+    /// F5 (design §5.5): the fork target's writer, claimed before the copy and held through `finish_fork_policy`; it
+    /// drops with this response. Never serialized.
+    #[serde(skip)]
+    pub target_writer: Option<fuigo_session_writer::SessionWriter>,
 }
 
 /// The [`PolicyError`](fuigo_workspace::permission::launch_policy::PolicyError) a fork was refused with, if that is why
@@ -151,12 +155,21 @@ pub async fn fork_session(
         ..Default::default()
     };
 
+    // F5 (design §5.5): the target id is claimed without waiting before anything is copied. Open in this process:
+    // `This session is open. Close it first.`, nothing written. The claim moves into the copy and back out, and is
+    // held through `finish_fork_policy`.
+    let target_writer = fuigo_session_writer::SessionWriter::try_claim(
+        new_session_id.clone(),
+        crate::session::persistence::session_dir(&target_info),
+    )
+    .map_err(|_busy| io::Error::other(crate::session::session_writer_lock::OPEN_HERE))?;
+    let copy_writer = target_writer.clone();
     let meta = request.meta.clone();
     let (result, launch_policy) = tokio::task::spawn_blocking(move || {
         let launch_policy =
             resolve_fork_policy(&storage, &source_info, &target_info.id.0, meta.as_ref())?;
         storage
-            .copy_session_data_sync(&source_info, &target_info, options)
+            .copy_session_data_as_sync(&source_info, &target_info, options, &copy_writer)
             .map(|result| (result, launch_policy))
     })
     .await
@@ -211,6 +224,7 @@ pub async fn fork_session(
         meta: None,
         source_permission_policy: result.source_permission_policy,
         launch_policy,
+        target_writer: Some(target_writer),
     })
 }
 
@@ -342,7 +356,8 @@ mod tests {
             meta: None,
             source_permission_policy: None,
             launch_policy: None,
-        };
+            target_writer: None,
+};
 
         let json = serde_json::to_string(&response).unwrap();
         let deserialized: ForkSessionResponse = serde_json::from_str(&json).unwrap();
@@ -369,7 +384,8 @@ mod tests {
             meta: None,
             source_permission_policy: None,
             launch_policy: None,
-        };
+            target_writer: None,
+};
 
         let json = serde_json::to_string(&response).unwrap();
         assert!(!json.contains("new_model_id"));
@@ -423,7 +439,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let loaded = adapter.load_session(&target).await.unwrap();
+            let loaded = adapter.load_session(&target, crate::session::storage::Access::Reader).await.unwrap();
             assert_eq!(
                 loaded.summary.session_kind.as_deref(),
                 Some(expected),
@@ -434,6 +450,7 @@ mod tests {
 
     /// Grok r1 #1: a governed source (stored marker, or bound in this process) forks only with a claim naming its
     /// policy; a refusal comes before the copy, and an accepted fork binds the new id first.
+    #[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
     #[tokio::test]
     async fn a_governed_source_forks_only_with_its_claim_and_binds_the_new_id() {
         use crate::session::persistence::default_model_id;

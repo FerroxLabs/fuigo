@@ -437,6 +437,7 @@ async fn load_on_a_parked_session_writes_only_its_reply_and_stays_parked() {
 
 /// A parked load with fresh MCP servers (one good, one that cannot start) replies only once both settled,
 /// listing each one's status, and writes nothing else (no `_fuigo/mcp_initialized`).
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn parked_load_reply_carries_mcp_readiness() {

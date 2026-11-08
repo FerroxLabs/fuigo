@@ -80,22 +80,96 @@ pub(crate) fn lock_path(session_dir: &Path) -> PathBuf {
     session_dir.join(SNAPSHOT_LOCK_FILE)
 }
 
+/// The lock file's opener: the session's own writer, or a fork's source.
+#[derive(Clone, Copy)]
+pub(crate) enum Opener<'w> {
+    /// Through the writer (design F5 §5.6: a lock sidecar is made by `SessionWriter::open_lock` and carries B-F5 marks).
+    /// A writer that refuses (not held, released, another process's) gives no lock: no by-path fallback.
+    Writer(&'w fuigo_session_writer::SessionWriter),
+    /// A fork's source ([`open_source_sidecar`]): through the source's writer when this process has it; otherwise an
+    /// existing sidecar is opened read-only and none is created.
+    Source(Option<&'w fuigo_session_writer::SessionWriter>),
+    /// By path, created when missing: tests only (a fixture holding a session's lock as another process would).
+    #[cfg(test)]
+    UnownedSource,
+}
+
 /// Open `path` as a lock file (created when missing). `None` when it cannot be opened: the caller goes on without the lock.
-fn open(path: &Path) -> Option<std::fs::File> {
-    // Owner-only like every session file (P120): a lock file other users can open is a lock they can hold.
-    match super::owner_only::open(std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false), path) {
-        Ok(file) => Some(file),
+/// `Err(Interrupted)`: a fork's source is held by another process and the sidecar is missing; the copy is refused.
+fn open(path: &Path, opener: Opener<'_>) -> io::Result<Option<std::fs::File>> {
+    let opened = match opener {
+        Opener::Writer(writer) => writer.rel_of(path).and_then(|rel| writer.open_lock(rel)),
+        Opener::Source(writer) => open_source_sidecar(writer, path),
+        #[cfg(test)]
+        Opener::UnownedSource => open_unowned_source(path),
+    };
+    match opened {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => Err(error),
         Err(error) => {
             tracing::debug!(%error, path = %path.display(), "no snapshot lock: it cannot be opened");
-            None
+            Ok(None)
         }
+    }
+}
+
+/// Owner-only like every session file (P120): a lock file other users can open is a lock they can hold.
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test fixture: a session lock held by path, as another process would hold it")]
+fn open_unowned_source(path: &Path) -> io::Result<std::fs::File> {
+    // F5-A: test fixture only (a lock held by path, as another process would hold it)
+    super::owner_only::open(std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false), path)
+}
+
+/// Open a lock sidecar (`snapshot.lock`, `<file>.jsonl.lock`) of a fork's SOURCE (design F5 §5.5, §5.6; box B6). Through
+/// `writer`, the source's writer in this process, so the sidecar is made with B-F5 marks. When there is none, or another
+/// process holds the source (`HELD_ELSEWHERE`), the sidecar is opened read-only and only if it exists: a fork never
+/// creates or writes a file in a folder another writer holds. An advisory lock needs no write access.
+pub(crate) fn open_source_sidecar(
+    writer: Option<&fuigo_session_writer::SessionWriter>,
+    path: &Path,
+) -> io::Result<std::fs::File> {
+    let mut held_elsewhere = false;
+    if let Some(writer) = writer {
+        match writer.rel_of(path).and_then(|rel| writer.open_lock(rel)) {
+            Ok(file) => return Ok(file),
+            Err(error)
+                if fuigo_session_writer::refusal(&error) == Some(fuigo_session_writer::Refusal::HeldElsewhere) =>
+            {
+                held_elsewhere = true;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    match std::fs::File::open(path) {
+        // Review r1 H2: the other process's writer makes its sidecars when its hold attaches, so a missing one means that
+        // session is only now being made. Copying it unlocked could split a turn start; refuse as retryable.
+        Err(error) if held_elsewhere && error.kind() == io::ErrorKind::NotFound => Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            format!(
+                "Cannot copy the session: it is open in another Fuigo window and {} is not there yet. Nothing was \
+                 created; try again.",
+                path.display()
+            ),
+        )),
+        opened => opened,
     }
 }
 
 /// Take `path` (a lock file) exclusively, waiting at most [`SNAPSHOT_LOCK_WAIT`] (polling, so the wait blocks the calling
 /// thread). `Ok(None)`: the lock file cannot be opened or locked at all. `Err(Interrupted)`: it stayed held (retryable).
+#[cfg(test)]
 pub(crate) fn acquire_blocking(path: &Path, what: &Path) -> io::Result<Option<crate::session::storage::jsonl::HeldLock>> {
-    let Some(file) = open(path) else {
+    acquire_blocking_as(Opener::UnownedSource, path, what)
+}
+
+/// [`acquire_blocking`] with the lock file opened by `opener`.
+pub(crate) fn acquire_blocking_as(
+    opener: Opener<'_>,
+    path: &Path,
+    what: &Path,
+) -> io::Result<Option<crate::session::storage::jsonl::HeldLock>> {
+    let Some(file) = open(path, opener)? else {
         return Ok(None);
     };
     let deadline = Instant::now() + SNAPSHOT_LOCK_WAIT;
@@ -121,12 +195,14 @@ pub(crate) fn acquire_blocking(path: &Path, what: &Path) -> io::Result<Option<cr
     }
 }
 
-/// [`acquire_blocking`] for an async task (the persistence actor): it yields while it waits, and gives up after
-/// [`SNAPSHOT_LOCK_WAIT`] by going on without the lock (a snapshot that holds it for that long is stuck, and the actor must
-/// not stop persisting for it).
-pub(crate) async fn acquire_async(session_dir: &Path) -> Option<crate::session::storage::jsonl::HeldLock> {
-    let path = lock_path(session_dir);
-    let file = open(&path)?;
+/// [`acquire_blocking`] for an async task (the persistence actor, as the session's `writer`): it yields while it waits,
+/// and gives up after [`SNAPSHOT_LOCK_WAIT`] by going on without the lock (a snapshot that holds it for that long is
+/// stuck, and the actor must not stop persisting for it).
+pub(crate) async fn acquire_async(
+    writer: &fuigo_session_writer::SessionWriter,
+) -> Option<crate::session::storage::jsonl::HeldLock> {
+    let path = lock_path(writer.dir());
+    let file = open(&path, Opener::Writer(writer)).ok().flatten()?;
     let deadline = Instant::now() + SNAPSHOT_LOCK_WAIT;
     loop {
         match fs2::FileExt::try_lock_exclusive(&file) {
@@ -147,3 +223,8 @@ pub(crate) async fn acquire_async(session_dir: &Path) -> Option<crate::session::
         }
     }
 }
+
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create and remove files in test-owned temp dirs; no product session writer runs there")]
+#[cfg(test)]
+#[path = "snapshot_lock_tests.rs"]
+mod tests;

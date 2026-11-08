@@ -42,6 +42,7 @@ macro_rules! timed {
     }};
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn rewind_and_resume_picker_timings() {
     run_agent_test(|cwd, mock| async move {

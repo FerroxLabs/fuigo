@@ -230,6 +230,8 @@ pub(crate) struct GoalStrategistInputs<'a> {
     /// Resolved tool names for the strategist role's prompt placeholders (`{READ_TOOL}`/`{SEARCH_TOOL}`/`{LIST_TOOL}`/`{EXECUTE_TOOL}`).
     /// Built parent-side from the strategist's resolved toolset.
     pub tool_names: &'a RoleToolNames,
+    /// The session's writer (F5-C5): plan.md is restored or removed through it. None: the restore fails (reported).
+    pub session_writer: Option<fuigo_session_writer::SessionWriter>,
     /// Default/parent-toolset tool names used to render the fail-open RETRY prompt.
     /// A retry that falls back to the default toolset then names THAT toolset's tools.
     /// On the inherit path this equals `tool_names`.
@@ -251,14 +253,11 @@ pub(crate) async fn run_goal_strategist(
         model_id: inputs.model_id.to_string(),
     });
 
-    // A failure here is not fatal (fail-open): the spawn may still succeed if the dir already exists
-    // If it doesn't, the missing-strategy guard catches it
-    if let Some(parent) = inputs.strategy_file.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
+    // F5-C5: the caller creates `goal/` through the session's writer (fail-open: if it is missing, the
+    // missing-strategy guard catches it).
 
     // plan.md safety: snapshot plan.md byte-for-byte and set up the restore guard BEFORE spawning
-    let mut plan_guard = PlanGuard::capture(inputs.plan_file);
+    let mut plan_guard = PlanGuard::capture(inputs.plan_file).with_writer(inputs.session_writer.clone());
 
     let strategy_file_str = inputs.strategy_file.to_string_lossy();
     let plan_file_str = inputs.plan_file.to_string_lossy();
@@ -411,6 +410,7 @@ struct PlanGuard<'a> {
     plan_file: &'a Path,
     snapshot: PlanSnapshot,
     armed: bool,
+    writer: Option<fuigo_session_writer::SessionWriter>,
 }
 
 impl<'a> PlanGuard<'a> {
@@ -431,6 +431,22 @@ impl<'a> PlanGuard<'a> {
             plan_file,
             snapshot,
             armed: true,
+            writer: None,
+        }
+    }
+
+    fn with_writer(mut self, writer: Option<fuigo_session_writer::SessionWriter>) -> Self {
+        self.writer = writer;
+        self
+    }
+
+    /// Write (`Some(bytes)`) or remove (`None`) plan.md through the session's writer (F5-C5).
+    fn through_writer(&self, bytes: Option<&[u8]>) -> std::io::Result<()> {
+        let writer = self.writer.as_ref().ok_or_else(|| crate::session::storage::jsonl::no_writer_error(self.plan_file))?;
+        let rel = writer.rel_of(self.plan_file)?;
+        match bytes {
+            Some(bytes) => writer.replace_atomic_sync(rel, bytes),
+            None => writer.remove_sync(rel),
         }
     }
 
@@ -463,7 +479,7 @@ impl<'a> PlanGuard<'a> {
                     if unchanged {
                         return None;
                     }
-                    if std::fs::write(self.plan_file, orig).is_err() {
+                    if self.through_writer(Some(orig)).is_err() {
                         self.log_restore_fail("failed to rewrite plan.md");
                         Some(GoalStrategistRestoreFailReason::WriteFailed)
                     } else {
@@ -478,7 +494,7 @@ impl<'a> PlanGuard<'a> {
                 }
                 // Strategist created a regular file where none existed: remove it
                 Ok(_) => {
-                    if std::fs::remove_file(self.plan_file).is_err() {
+                    if self.through_writer(None).is_err() {
                         self.log_restore_fail("failed to remove strategist-created plan.md");
                         Some(GoalStrategistRestoreFailReason::RemoveFailed)
                     } else {
@@ -532,6 +548,7 @@ fn record_fail_open(
 
 // Tests
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -798,6 +815,11 @@ mod tests {
         TN.get_or_init(RoleToolNames::inherit_defaults)
     }
 
+    /// A writer for the folder of `plan` under a fresh id (F5-C5: restores go through one).
+    fn test_writer(plan: &Path) -> fuigo_session_writer::SessionWriter {
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), plan.parent().unwrap()).expect("claim")
+    }
+
     fn inputs<'a>(plan: &'a Path, strategy: &'a Path) -> GoalStrategistInputs<'a> {
         GoalStrategistInputs {
             objective: "do X",
@@ -810,6 +832,7 @@ mod tests {
             every: 2,
             model_id: "fuigo-test",
             tool_names: default_tool_names(),
+            session_writer: Some(test_writer(plan)),
             inherit_tool_names: default_tool_names(),
         }
     }
@@ -1078,7 +1101,7 @@ mod tests {
         std::fs::write(&secret, b"secret\n").unwrap();
         std::os::unix::fs::symlink(&secret, &plan).unwrap();
 
-        let mut guard = PlanGuard::capture(&plan);
+        let mut guard = PlanGuard::capture(&plan).with_writer(Some(test_writer(&plan)));
         assert!(
             matches!(guard.snapshot, PlanSnapshot::Unsafe),
             "a symlink at capture must snapshot Unsafe",
@@ -1105,7 +1128,7 @@ mod tests {
         let dir = tmp_dir("remove-fail");
         let plan = dir.join("plan.md");
         // Absent at capture.
-        let mut guard = PlanGuard::capture(&plan);
+        let mut guard = PlanGuard::capture(&plan).with_writer(Some(test_writer(&plan)));
         // The "strategist" creates a directory where the regular file would be.
         std::fs::create_dir(&plan).unwrap();
         assert_eq!(
@@ -1122,7 +1145,7 @@ mod tests {
         let dir = tmp_dir("write-fail");
         let plan = dir.join("plan.md");
         std::fs::write(&plan, b"# contract\n").unwrap();
-        let mut guard = PlanGuard::capture(&plan);
+        let mut guard = PlanGuard::capture(&plan).with_writer(Some(test_writer(&plan)));
         // The "strategist" swaps the file for a directory at the same path.
         std::fs::remove_file(&plan).unwrap();
         std::fs::create_dir(&plan).unwrap();

@@ -2349,5 +2349,6 @@ pub(crate) fn remove_hooks_path_from_file(
     )
     .map_err(edit_error_into_box)
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests;

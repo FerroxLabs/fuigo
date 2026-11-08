@@ -140,6 +140,7 @@ while True:
                       "error": {"code": -32601, "message": "Method not found"}})
 "#;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 pub(super) fn write_mock_server() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let script_path = dir.path().join("mock_lsp.py");
@@ -147,6 +148,7 @@ pub(super) fn write_mock_server() -> (tempfile::TempDir, PathBuf) {
     (dir, script_path)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 pub(super) fn write_delayed_diagnostics_server() -> (tempfile::TempDir, PathBuf) {
     const DELAYED_SERVER: &str = r#"
 import json, sys, time
@@ -219,6 +221,7 @@ pub(super) fn write_init_failure_server() -> (tempfile::TempDir, PathBuf) {
     write_init_failure_server_n_times(3)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 pub(super) fn write_slow_init_server(delay_ms: u64) -> (tempfile::TempDir, PathBuf) {
     let script = format!(
         r#"import json, sys, time
@@ -284,6 +287,7 @@ while True:
     (dir, script_path)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 pub(super) fn write_init_failure_server_n_times(
     failures_before_success: usize,
 ) -> (tempfile::TempDir, PathBuf) {
@@ -445,6 +449,7 @@ def serve(capabilities, handle):
 "#;
 
 /// Write a mock server whose behaviour is `body`, on top of [`MOCK_PREAMBLE`].
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 pub(super) fn write_python_server(file_name: &str, body: &str) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let script_path = dir.path().join(file_name);

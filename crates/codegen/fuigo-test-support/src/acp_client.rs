@@ -520,7 +520,8 @@ impl From<Option<serde_json::Value>> for RawReply {
 /// Example: Xcode's Swift/Foundation `JSONEncoder` output, with escaped-slash methods (`"session\/prompt"`) and string UUID request ids.
 /// Child process is killed on drop.
 pub struct RawStdioClient {
-    stdin: tokio::process::ChildStdin,
+    /// `None` once [`Self::close_stdin_and_wait`] has sent EOF.
+    stdin: Option<tokio::process::ChildStdin>,
     stdout: tokio::io::BufReader<crate::process::TestProcessStdout>,
     process: TestProcess,
     sandbox: TestSandbox,
@@ -549,7 +550,7 @@ impl RawStdioClient {
         let child_stdout = process.take_stdout().expect("child stdout missing");
 
         Self {
-            stdin,
+            stdin: Some(stdin),
             stdout: tokio::io::BufReader::new(child_stdout),
             process,
             sandbox,
@@ -783,12 +784,23 @@ impl RawStdioClient {
     pub async fn send_line(&mut self, line: &str) {
         use tokio::io::AsyncWriteExt as _;
 
-        self.stdin
+        let stdin = self.stdin.as_mut().expect("agent stdin already closed");
+        stdin
             .write_all(line.as_bytes())
             .await
             .expect("write line to agent stdin");
-        self.stdin.write_all(b"\n").await.expect("write newline");
-        self.stdin.flush().await.expect("flush agent stdin");
+        stdin.write_all(b"\n").await.expect("write newline");
+        stdin.flush().await.expect("flush agent stdin");
+    }
+
+    /// Close the agent's stdin (EOF, what a client that quits sends) and wait up to `within` for it to exit.
+    /// `Ok(None)`: still running at the deadline (the caller decides; nothing is killed here).
+    pub async fn close_stdin_and_wait(
+        &mut self,
+        within: Duration,
+    ) -> std::io::Result<Option<std::process::ExitStatus>> {
+        drop(self.stdin.take());
+        self.process.wait_with_deadline(within).await
     }
 
     /// Read stdout lines until the response to `id` arrives: a message with no `method` key and an exact string-id match.

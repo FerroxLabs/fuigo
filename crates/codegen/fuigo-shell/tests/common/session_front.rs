@@ -97,6 +97,7 @@ impl SessionFront {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn tls_acceptor_and_ca() -> (
     tokio_rustls::TlsAcceptor,
     tempfile::TempDir,

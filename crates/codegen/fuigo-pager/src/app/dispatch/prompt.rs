@@ -500,6 +500,10 @@ pub(super) fn dispatch_send_prompt_inner(
         app.show_toast(RECONNECTING_NOTICE);
         return vec![];
     }
+    if crate::app::folder_trust_reload::holds_input(app) {
+        app.show_toast(crate::app::folder_trust_reload::HOLD_NOTICE);
+        return vec![];
+    }
 
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -1067,6 +1071,10 @@ pub(super) fn dispatch_send_prompt_inner(
 pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> Vec<Effect> {
     if app.reconnect_pending {
         app.show_toast(RECONNECTING_NOTICE);
+        return vec![];
+    }
+    if crate::app::folder_trust_reload::holds_input(app) {
+        app.show_toast(crate::app::folder_trust_reload::HOLD_NOTICE);
         return vec![];
     }
 

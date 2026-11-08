@@ -616,6 +616,9 @@ impl SchedulerActor {
         if should_remove {
             state.tasks.remove(idx);
         }
+        // The fire is saved with the session's state (the debounced writer), so a session restored from it counts the
+        // loop from this fire instead of firing at once (box B8). Before, only a later tool call saved it.
+        self.resources_persistence.save(&res);
 
         let background_enabled = res
             .get::<crate::types::resources::SchedulerBackgroundLoops>()
@@ -636,6 +639,10 @@ impl SchedulerActor {
             background = spawn_deps.is_some(),
             "Firing scheduled task"
         );
+        #[cfg(test)]
+        if let Some(hook) = AT_FIRING.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
 
         let removed_task_id = should_remove.then(|| task_id.clone());
 
@@ -976,6 +983,8 @@ impl SchedulerActor {
                 request: Box::new(request),
                 result_tx,
                 registered_tx: None,
+                // A scheduler fire is harness-internal: its records route to the parent actor (design F5 §5.5).
+                parent_writer: None,
             }))
             .is_err()
         {
@@ -1304,6 +1313,15 @@ impl SchedulerActor {
     }
 }
 
+// Tests: runs once where a fire logs "Firing scheduled task" (resources released, nothing committed yet). Not a tracing
+// subscriber hook: a callsite first hit on another test thread while one scoped dispatcher is live takes that thread's
+// (empty) interest (tracing-core `has_just_one`), so such a hook could miss the event.
+#[cfg(test)]
+thread_local! {
+    static AT_FIRING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     /// Hang guard for anything a test REQUIRES to arrive (a notification, an expiry, a reply).
@@ -1749,7 +1767,7 @@ mod tests {
 
         // "First process": a due, non-durable recurring task exists; persist
         // the resources the way the tool bridge does after a tool call.
-        let persistence = Arc::new(crate::persistence::ResourcesPersistence::new(path.clone()));
+        let persistence = Arc::new(crate::persistence::ResourcesPersistence::new_at(path.clone()));
         let mut task = ScheduledTask::new(1, "babysit the pipeline".into(), true, false);
         task.id = "loop-1".into();
         task.created_at = Utc::now() - chrono::Duration::seconds(10);
@@ -1765,7 +1783,7 @@ mod tests {
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
         assert!(
-            crate::persistence::ResourcesPersistence::new(path).load(&mut resources),
+            crate::persistence::ResourcesPersistence::new_at(path).load(&mut resources),
             "persisted scheduler state must load on restart"
         );
         let shared = Arc::new(Mutex::new(resources));
@@ -1814,7 +1832,7 @@ mod tests {
                     resources.register_state::<SchedulerState>();
                     resources.get_or_default::<State<SchedulerState>>().tasks = vec![task.clone()];
                     let persistence = if keyed {
-                        crate::persistence::ResourcesPersistence::new(path.clone())
+                        crate::persistence::ResourcesPersistence::new_at(path.clone())
                     } else {
                         crate::persistence::ResourcesPersistence::noop()
                     };
@@ -1858,7 +1876,7 @@ mod tests {
         let path = dir.path().join("resources_state.json");
         // A persisted scheduler needs a live scope to fire or expire (`is_dead`).
         let _scope = SchedulerScope::register(&path);
-        let persistence = Arc::new(crate::persistence::ResourcesPersistence::new(path.clone()));
+        let persistence = Arc::new(crate::persistence::ResourcesPersistence::new_at(path.clone()));
 
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
@@ -1891,6 +1909,57 @@ mod tests {
             persisted["state"]["fuigo_build.Scheduler"]["tasks"],
             serde_json::json!([]),
             "expired task must not survive on disk"
+        );
+    }
+
+    /// Box B8: a fire is saved with the session state, so a scheduler restored from the state file counts the loop from
+    /// its last fire instead of firing at once. Before B5 `last_fired_at` lived only in memory until a later tool call.
+    #[tokio::test]
+    async fn f5b5_a_fire_is_persisted_so_a_restored_loop_counts_from_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("resources_state.json");
+        let _scope = SchedulerScope::register(&path);
+        let persistence = Arc::new(crate::persistence::ResourcesPersistence::new_at(path.clone()));
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        let mut task = ScheduledTask::new(3600, "hourly".into(), true, false);
+        task.created_at = Utc::now() - chrono::Duration::seconds(3601);
+        task.expires_at = None;
+        resources.get_or_default::<State<SchedulerState>>().tasks = vec![task];
+        persistence.save(&resources);
+        persistence.flush().await;
+
+        let (notif_handle, mut notif_rx) = auto_acknowledged_notifications();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let mut actor = SchedulerActor {
+            resources: Arc::new(Mutex::new(resources)),
+            resources_persistence: persistence.clone(),
+            notification_handle: notif_handle,
+            cmd_rx,
+            cancel_token: CancellationToken::new(),
+            clock: SchedulerClock::new(),
+            pending_removal: None,
+            blocked_expiries: HashSet::new(),
+            loop_spawn_cancel: None,
+        };
+        let before = Utc::now();
+        actor.fire_next_task().await;
+        let fired = notification!(next_event(&mut notif_rx).await, ScheduledTaskFired);
+        assert!(fired.next_fire_at.is_some(), "fixture: a recurring fire");
+        persistence.flush().await;
+
+        let mut restored = Resources::new();
+        restored.register_state::<SchedulerState>();
+        assert!(
+            crate::persistence::ResourcesPersistence::new_at(path).load(&mut restored),
+            "the state file loads"
+        );
+        let task = &restored.get_or_default::<State<SchedulerState>>().tasks[0];
+        assert!(task.last_fired_at.is_some_and(|at| at >= before), "the fire was not persisted: {:?}", task.last_fired_at);
+        assert!(
+            task.next_fire_at() > Utc::now() + chrono::Duration::seconds(3500),
+            "the restored loop is due at {} instead of an interval after its last fire",
+            task.next_fire_at()
         );
     }
 
@@ -3174,7 +3243,7 @@ mod tests {
     async fn durable_delete_retries_persistence_and_reuses_version() {
         let dir = tempfile::tempdir().unwrap();
         let parent = dir.path().join("missing");
-        let persistence = Arc::new(crate::persistence::ResourcesPersistence::new(
+        let persistence = Arc::new(crate::persistence::ResourcesPersistence::new_at(
             parent.join("resources_state.json"),
         ));
         let mut task = ScheduledTask::new(300, "retry".into(), true, true);
@@ -3274,7 +3343,7 @@ mod tests {
         let mut task = ScheduledTask::new(300, "stuck".into(), true, true);
         task.id = "stuck".into();
         let (mut actor, _) = make_boundary_actor(vec![task], 0);
-        actor.resources_persistence = Arc::new(crate::persistence::ResourcesPersistence::new(
+        actor.resources_persistence = Arc::new(crate::persistence::ResourcesPersistence::new_at(
             parent.join("resources_state.json"),
         ));
         let (plain, mut notifications) = ToolNotificationHandle::channel();
@@ -3539,7 +3608,7 @@ mod tests {
         let state_path = dir.path().join("resources_state.json");
         // A persisted scheduler needs a live scope to fire or expire (`is_dead`).
         let _scope = SchedulerScope::register(&state_path);
-        actor.resources_persistence = Arc::new(crate::persistence::ResourcesPersistence::new(
+        actor.resources_persistence = Arc::new(crate::persistence::ResourcesPersistence::new_at(
             state_path.clone(),
         ));
         let (notification_handle, mut notifications) =
@@ -3689,45 +3758,29 @@ mod tests {
         );
     }
 
-    /// Runs `shutdown` once, synchronously, inside the event whose message contains `message`: a test hook for a
+    /// Runs `shutdown` once, synchronously, at the point whose log message is `message` (`AT_FIRING`): a test hook for a
     /// window with no await in it (a shutdown on another thread can land there; a test can only land there this way).
     struct ShutdownOnEvent {
         message: &'static str,
         shutdown: parking_lot::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
-    impl tracing::Subscriber for ShutdownOnEvent {
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
+    /// Clears the hook on drop (a fire that never reached it).
+    struct AtFiringGuard;
+
+    impl Drop for AtFiringGuard {
+        fn drop(&mut self) {
+            AT_FIRING.with(|hook| hook.borrow_mut().take());
         }
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
+    }
+
+    impl ShutdownOnEvent {
+        fn at_firing(self) -> AtFiringGuard {
+            assert_eq!(self.message, "Firing scheduled task", "the only seam is the firing point");
+            let shutdown = self.shutdown.into_inner().expect("a hook");
+            AT_FIRING.with(|hook| *hook.borrow_mut() = Some(shutdown));
+            AtFiringGuard
         }
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-        fn event(&self, event: &tracing::Event<'_>) {
-            struct Message(String);
-            impl tracing::field::Visit for Message {
-                fn record_debug(
-                    &mut self,
-                    field: &tracing::field::Field,
-                    value: &dyn std::fmt::Debug,
-                ) {
-                    if field.name() == "message" {
-                        self.0 = format!("{value:?}");
-                    }
-                }
-            }
-            let mut message = Message(String::new());
-            event.record(&mut message);
-            if message.0.contains(self.message)
-                && let Some(shutdown) = self.shutdown.lock().take()
-            {
-                shutdown();
-            }
-        }
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
     }
 
     /// R5-H1: shutdown (cancel, last scope dropped, coordinator closed) while a background loop fire waits for
@@ -3752,7 +3805,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let mut actor = SchedulerActor {
             resources: shared.clone(),
-            resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::new(
+            resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::new_at(
                 path.clone(),
             )),
             notification_handle: notif_handle,
@@ -3838,7 +3891,7 @@ mod tests {
             resources.get_or_default::<State<SchedulerState>>().tasks = vec![task];
             let mut actor = SchedulerActor {
                 resources: Arc::new(Mutex::new(resources)),
-                resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::new(
+                resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::new_at(
                     path.clone(),
                 )),
                 notification_handle: notif_handle,
@@ -3850,7 +3903,7 @@ mod tests {
                 loop_spawn_cancel: Some(scope.loop_spawns()),
             };
             let shut_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let hook = tracing::subscriber::set_default(ShutdownOnEvent {
+            let hook = ShutdownOnEvent::at_firing(ShutdownOnEvent {
                 message: "Firing scheduled task",
                 shutdown: parking_lot::Mutex::new(Some(Box::new({
                     let (cancel, shut_down) = (cancel.clone(), shut_down.clone());
@@ -3921,7 +3974,7 @@ mod tests {
         let shared = Arc::new(Mutex::new(resources));
         let mut actor = SchedulerActor {
             resources: shared.clone(),
-            resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::new(
+            resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::new_at(
                 path.clone(),
             )),
             notification_handle: notif_handle,
@@ -3933,7 +3986,7 @@ mod tests {
             loop_spawn_cancel: Some(scope.loop_spawns()),
         };
         let snapshot: Arc<parking_lot::Mutex<Option<Vec<String>>>> = Arc::default();
-        let hook = tracing::subscriber::set_default(ShutdownOnEvent {
+        let hook = ShutdownOnEvent::at_firing(ShutdownOnEvent {
             message: "Firing scheduled task",
             shutdown: parking_lot::Mutex::new(Some(Box::new({
                 let (cancel, shared, snapshot) = (cancel.clone(), shared.clone(), snapshot.clone());
@@ -4010,7 +4063,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let mut actor = SchedulerActor {
             resources: shared.clone(),
-            resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::new(
+            resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::new_at(
                 path.clone(),
             )),
             notification_handle: notif_handle,
@@ -4070,7 +4123,7 @@ mod tests {
         let path = dir.path().join("resources_state.json");
         let mut actor = SchedulerActor {
             resources: Arc::new(Mutex::new(Resources::new())),
-            resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::new(
+            resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::new_at(
                 path.clone(),
             )),
             notification_handle: ToolNotificationHandle::channel().0,

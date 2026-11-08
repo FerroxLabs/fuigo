@@ -130,6 +130,7 @@ impl SubscriptionStore {
     fn path(&self) -> PathBuf {
         self.root.join("credentials.json")
     }
+    #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
     fn prepare(&self) -> Result<()> {
         std::fs::create_dir_all(self.root.parent().ok_or(SubscriptionError::Storage)?)
             .map_err(|_| SubscriptionError::Storage)?;
@@ -160,6 +161,7 @@ impl SubscriptionStore {
         }
         Ok(())
     }
+    #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
     async fn lock(&self) -> Result<File> {
         self.prepare()?;
         let path = self.root.join("credentials.lock");
@@ -197,6 +199,7 @@ impl SubscriptionStore {
             Err(_) => Err(SubscriptionError::Storage),
         }
     }
+    #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
     fn write(&self, records: &Records) -> Result<()> {
         #[cfg(test)]
         if self
@@ -328,6 +331,7 @@ impl SubscriptionStore {
     /// only inside this store's directory: `credentials.json`, and any `.tmp*` file a write
     /// interrupted by a crash left behind (each is a full copy of the records; no write is
     /// in flight while the lock is held). Nothing is revoked at the provider.
+    #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
     pub async fn logout_all(&self) -> Result<()> {
         let forget_all = || {
             stash().entries.retain(|(root, _, _), _| root != &self.root);
@@ -368,6 +372,7 @@ impl SubscriptionStore {
     }
     /// The cached model list is only meaningful while an account is signed in; drop it with the last one.
     /// Best effort: it holds model IDs only, never a credential.
+    #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
     fn forget_model_cache(&self, provider: SubscriptionProvider) {
         let _ = std::fs::remove_file(self.root.join(format!("models-{}.json", provider.name())));
     }

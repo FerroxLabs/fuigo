@@ -66,6 +66,7 @@ fn agent_config() -> fuigo_shell::agent::config::Config {
     config
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn stock_backend_finalize_advertises_no_action_tool() {
     unsafe { std::env::set_var("FUIGO_MAX_MODEL_CALLS", "3") };

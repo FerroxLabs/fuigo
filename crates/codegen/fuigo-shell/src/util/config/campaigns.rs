@@ -73,6 +73,7 @@ pub(crate) fn dismiss_campaign_ids(ids: impl IntoIterator<Item = String>) {
 /// state goes through the shared temp (unique name, synced, removed on every
 /// failure), which also sweeps temps a crashed writer left. A lock that cannot
 /// be taken is now an error rather than an unlocked write.
+#[allow(clippy::disallowed_methods, reason = "config/campaign/crash-handler flag files under FUIGO_HOME; not inside a session folder")]
 fn dismiss_campaign_ids_at(
     home: &Path,
     ids: impl IntoIterator<Item = String>,
@@ -505,6 +506,7 @@ pub async fn persist_models_default(
     .await
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

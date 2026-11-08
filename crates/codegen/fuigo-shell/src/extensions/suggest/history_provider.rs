@@ -374,6 +374,7 @@ fn load_fish_history(path: &std::path::Path) -> Vec<String> {
     commands
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

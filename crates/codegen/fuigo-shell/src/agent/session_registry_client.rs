@@ -369,6 +369,7 @@ impl SessionRegistryClient {
     }
 
     /// GET /v1/sessions/{id}/download; returns a signed URL, then streams to the dest file.
+    #[allow(clippy::disallowed_methods, reason = "download_file dest is caller-chosen; download_file has no callers in the workspace; not inside a session folder")]
     pub async fn download_file(
         &self,
         session_id: &str,

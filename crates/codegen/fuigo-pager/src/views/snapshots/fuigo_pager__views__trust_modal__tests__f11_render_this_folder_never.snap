@@ -1,0 +1,20 @@
+---
+source: crates/codegen/fuigo-pager/src/views/trust_modal_tests.rs
+expression: "render(&mut TrustModalState::new(s))"
+---
+              ┌─ Folder trust ─────────────────────────────────────────────────────────── [✗] ─┐
+              │  This folder  Trusted folders                                                  │
+              │────────────────────────────────────────────────────────────────────────────────│
+              │  Folder     /home/me                                                           │
+              │  Status     Can never be trusted: home and root folders. Run Fuigo from a      │
+              │  project folder.                                                               │
+              │                                                                                │
+              │  Trust covers the folder's settings (MCP servers, hooks, skills, rules) and    │
+              │  its shell commands.                                                           │
+              │                                                                                │
+              │                                                                                │
+              │                                                                                │
+              │                                                                                │
+              │                                                                                │
+              │                            Tab switch  |  Esc close                            │
+              └────────────────────────────────────────────────────────────────────────────────┘

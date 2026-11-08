@@ -609,3 +609,52 @@ fn a_profile_with_a_materialized_glob_bus_path_refuses() {
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+#[cfg(unix)]
+fn materialized_socket_paths_refuse_behind_a_directory_this_user_owns() {
+    // Review: a sandboxed child can `chmod 000` a directory it owns (e.g. `/run/user/$UID/systemd`) so the next session
+    // would skip the mask, then `chmod` it back and connect. A blocking directory this user owns must still refuse.
+    use std::os::unix::fs::PermissionsExt;
+    let root = temp_runtime_root("own-locked");
+    let locked = root.join("systemd");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::write(locked.join("private"), "").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = std::fs::symlink_metadata(locked.join("private")).is_err();
+    let result = materialize_runtime_socket_deny_paths_from([locked.join("private")]);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+    if !denied {
+        // Running as root: the kernel lets us through, so the endpoint resolves and is masked.
+        assert_eq!(result.expect("root resolves the endpoint").len(), 1);
+        return;
+    }
+    let error = result.expect_err("a directory this user owns and locked must not drop the mask");
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied, "{error}");
+    assert!(error.to_string().contains("could not resolve runtime-socket deny path"), "{error}");
+}
+
+#[test]
+#[cfg(unix)]
+fn only_an_unsearchable_directory_owned_by_another_user_counts_as_unreachable() {
+    use std::os::unix::fs::MetadataExt as _;
+    let root = temp_runtime_root("foreign");
+    let locked = root.join("podman");
+    std::fs::create_dir_all(&locked).unwrap();
+    let endpoint = locked.join("podman.sock");
+    let owner = std::fs::symlink_metadata(&locked).unwrap().uid();
+    let not_locked = |dir: &std::path::Path| dir != locked.as_path();
+    // Owned by someone else (as seen from `owner + 1`): unreachable, skipped.
+    assert!(blocked_by_foreign_directory_with(&endpoint, owner.wrapping_add(1), not_locked));
+    // Owned by this uid: a child could re-permission it, so it is not skipped.
+    assert!(!blocked_by_foreign_directory_with(&endpoint, owner, not_locked));
+    // Nothing blocks: not an unreachable endpoint.
+    assert!(!blocked_by_foreign_directory_with(&endpoint, owner.wrapping_add(1), |_| true));
+    // A blocking symlink is never trusted.
+    let link = root.join("link");
+    std::os::unix::fs::symlink(&locked, &link).unwrap();
+    let via_link = link.join("podman.sock");
+    assert!(!blocked_by_foreign_directory_with(&via_link, owner.wrapping_add(1), |dir: &std::path::Path| dir != link.as_path()));
+    let _ = std::fs::remove_dir_all(&root);
+}

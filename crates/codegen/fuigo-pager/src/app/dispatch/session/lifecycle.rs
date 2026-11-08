@@ -651,15 +651,16 @@ pub(in crate::app::dispatch) fn open_delete_current_session_question(
         multi_select: Some(false),
     };
     let stashed = agent.prompt.stash();
-    agent.question_view = Some(
-        QuestionViewState::new(
-            format!("delete-session-{}", uuid::Uuid::new_v4()),
-            vec![question],
-            stashed,
-        )
-        .with_local_kind(LocalQuestionKind::DeleteCurrentSession)
-        .with_no_freeform(),
-    );
+    let mut view = QuestionViewState::new(
+        format!("delete-session-{}", uuid::Uuid::new_v4()),
+        vec![question],
+        stashed,
+    )
+    .with_local_kind(LocalQuestionKind::DeleteCurrentSession)
+    .with_no_freeform();
+    // The destructive answer is never the default: Enter on the freshly opened prompt keeps the session; `1` deletes.
+    view.set_cursor(1);
+    agent.question_view = Some(view);
     agent.prompt.set_text("");
     vec![]
 }

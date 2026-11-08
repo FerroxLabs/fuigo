@@ -235,6 +235,7 @@ pub(crate) fn goal_scratch_root(verifier_id: &str) -> PathBuf {
 /// A pre-existing entry is accepted only if [`verify_owned_real_dir`] passes, then re-pinned to 0700.
 /// The chmod is safe: the entry is proven ours and the sticky-bit temp parent prevents swapping it.
 /// Callers treat `Err` as "do not write classifier artifacts here".
+#[allow(clippy::disallowed_methods, reason = "goal scratch root under system temp; not inside a session folder")]
 pub(crate) fn ensure_goal_scratch_root(verifier_id: &str) -> std::io::Result<PathBuf> {
     let root = goal_scratch_root(verifier_id);
     #[cfg(unix)]
@@ -279,17 +280,6 @@ fn verify_owned_real_dir(path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Cross-filesystem rescue copy.
-/// `create_new` (O_EXCL) makes any pre-existing destination (symlink included) fail the copy instead of being written through.
-fn copy_no_follow(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
-    let mut src_f = std::fs::File::open(src)?;
-    let mut dest_f =
-        fuigo_config::owner_only_file_options(std::fs::OpenOptions::new().write(true).create_new(true))
-            .open(dest)?;
-    std::io::copy(&mut src_f, &mut dest_f)?;
-    Ok(())
-}
-
 /// Parse `(attempt, skeptic_idx)` out of a per-skeptic report file name (`goal-classifier-{vid}-{attempt}-skeptic-{idx}.md`); `None` otherwise.
 fn parse_skeptic_report_order(name: &str) -> Option<(u32, u32)> {
     let stem = name.strip_suffix(".md")?;
@@ -305,7 +295,11 @@ fn parse_skeptic_report_order(name: &str) -> Option<(u32, u32)> {
 /// Whole files only: each report's on-disk size is checked against the remaining budget BEFORE reading.
 /// The harness does not cap report size and this runs under the tracker lock.
 /// The first overflow writes an elision marker and stops.
-fn append_skeptic_reports(scratch_root: &std::path::Path, dest: &std::path::Path) {
+fn append_skeptic_reports(
+    scratch_root: &std::path::Path,
+    writer: &fuigo_session_writer::SessionWriter,
+    rel: &std::path::Path,
+) {
     use std::io::Write;
 
     let Ok(entries) = std::fs::read_dir(scratch_root) else {
@@ -324,9 +318,11 @@ fn append_skeptic_reports(scratch_root: &std::path::Path, dest: &std::path::Path
     if reports.is_empty() {
         return;
     }
-    let Ok(mut out) = std::fs::OpenOptions::new().append(true).open(dest) else {
-        return;
-    };
+    let _ = writer.with_append_file(rel, |out| append_reports(out, reports));
+}
+
+fn append_reports(out: &mut std::fs::File, reports: Vec<((u32, u32), PathBuf)>) {
+    use std::io::Write;
     let mut budget = crate::session::goal_classifier::GOAL_VERIFIER_PANEL_MAX_BYTES as u64;
     for (_, report) in reports {
         let name = report.file_name().unwrap_or_default().to_string_lossy();
@@ -594,10 +590,15 @@ pub struct GoalTracker {
     planner_run: Option<GoalPlannerRunState>,
     /// Consecutive goal continuations that ended without a single tool call (runtime only, never persisted).
     idle_continuations: u32,
+    /// The session's writer (design F5 §5.5): `goal/` and the rescued classifier details are written through it.
+    writer: Option<fuigo_session_writer::SessionWriter>,
 }
 
 /// Consecutive continuations with no tool call after which a goal pauses instead of burning more turns.
 pub(crate) const GOAL_IDLE_CONTINUATION_THRESHOLD: u32 = 3;
+
+/// The goal's folder inside the session folder.
+const GOAL_DIR: &str = "goal";
 
 #[derive(Debug)]
 pub(crate) struct GoalPlannerRunState {
@@ -613,6 +614,7 @@ impl GoalTracker {
             active_since: None,
             planner_run: None,
             idle_continuations: 0,
+            writer: None,
         }
     }
 
@@ -633,6 +635,7 @@ impl GoalTracker {
     /// An in-flight `Active` goal becomes `UserPaused`.
     /// Other paused variants (including [`GoalStatus::InfraPaused`]) are preserved so `pause_message` and pause cause stay aligned.
     /// Clear `current_subagent_id`.
+    #[allow(clippy::disallowed_methods, reason = "implementer scratch dir under system temp; not inside a session folder")]
     pub(crate) fn from_snapshot(session_dir: PathBuf, mut snapshot: GoalOrchestration) -> Self {
         if matches!(snapshot.phase, GoalPhase::Planning | GoalPhase::Executing) {
             snapshot.phase = GoalPhase::Idle;
@@ -691,6 +694,7 @@ impl GoalTracker {
             active_since,
             planner_run: None,
             idle_continuations: 0,
+            writer: None,
         }
     }
 
@@ -753,7 +757,46 @@ impl GoalTracker {
     }
 
     fn goal_dir(&self) -> PathBuf {
-        self.session_dir.join("goal")
+        self.session_dir.join(GOAL_DIR)
+    }
+
+    /// This tracker, writing as `writer` (F5-C5): the session actor's.
+    pub(crate) fn with_writer(mut self, writer: fuigo_session_writer::SessionWriter) -> Self {
+        self.writer = Some(writer);
+        self
+    }
+
+    /// The session's writer, for a write under `goal/` (F5-C5: never by path). Unit tests that drive a tracker
+    /// directly get one claimed for the folder.
+    fn session_writer(&self) -> std::io::Result<fuigo_session_writer::SessionWriter> {
+        Self::writer_of(&self.writer, &self.session_dir)
+    }
+
+    fn writer_of(
+        writer: &Option<fuigo_session_writer::SessionWriter>,
+        session_dir: &std::path::Path,
+    ) -> std::io::Result<fuigo_session_writer::SessionWriter> {
+        let _ = session_dir;
+        match writer {
+            Some(writer) => Ok(writer.clone()),
+            #[cfg(test)]
+            None => fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), session_dir)
+                .map_err(|_busy| std::io::Error::other(crate::session::session_writer_lock::OPEN_HERE)),
+            #[cfg(not(test))]
+            None => Err(crate::session::storage::jsonl::no_writer_error(session_dir)),
+        }
+    }
+
+    /// Create `<session>/goal/` through the session's writer (owner-only); existing is kept.
+    pub(crate) fn ensure_goal_dir(&self) -> std::io::Result<()> {
+        self.session_writer()?.create_dir_sync(GOAL_DIR)
+    }
+
+    /// The session's writer and `path` relative to its folder, for a goal file the caller names by path.
+    pub(crate) fn writer_for(&self, path: &std::path::Path) -> std::io::Result<(fuigo_session_writer::SessionWriter, PathBuf)> {
+        let writer = self.session_writer()?;
+        let rel = writer.rel_of(path)?.to_path_buf();
+        Ok((writer, rel))
     }
 
     /// Path to the goal's plan markdown (`<session_dir>/goal/plan.md`); may not exist yet.
@@ -815,13 +858,17 @@ impl GoalTracker {
             return;
         };
         let dest = goal_dir.join(name);
-        let _ = std::fs::create_dir_all(&goal_dir);
-        if std::fs::rename(&src, &dest).is_ok() || copy_no_follow(&src, &dest).is_ok() {
+        let Ok(writer) = Self::writer_of(&self.writer, &self.session_dir) else {
+            return;
+        };
+        let rel = std::path::Path::new(GOAL_DIR).join(name);
+        // F5-C5: moved in through the session's writer (a rename, or an owner-only copy across filesystems).
+        if writer.move_in_sync(&src, &rel).is_ok() {
             // A rename keeps the scratch file's mode: owner-only like the session files beside it (P150, S14).
             if let Ok(file) = std::fs::OpenOptions::new().read(true).open(&dest) {
                 fuigo_config::tighten_file_owner_only(&file, &dest);
             }
-            append_skeptic_reports(&scratch_root, &dest);
+            append_skeptic_reports(&scratch_root, &writer, &rel);
             o.last_classifier_details_path = Some(dest.to_string_lossy().into_owned());
         }
     }
@@ -830,6 +877,7 @@ impl GoalTracker {
     ///
     /// `baseline_commit` is the `git rev-parse HEAD` captured at the call site (or `None` if not available).
     /// It is consumed by value; callers with `&str` should `.to_string()` at the call site rather than have the helper clone.
+    #[allow(clippy::disallowed_methods, reason = "implementer scratch dir under system temp; not inside a session folder")]
     pub(crate) fn create_goal(
         &mut self,
         goal_id: String,
@@ -839,7 +887,7 @@ impl GoalTracker {
         created_at: String,
         baseline_commit: Option<String>,
     ) {
-        let _ = std::fs::create_dir_all(self.goal_dir());
+        let _ = self.ensure_goal_dir();
         // Replacing a still-active goal: same rescue-then-remove contract as the terminal transitions
         // The prior goal's details path may already be in user-visible messages
         if self.orchestration.is_some() {
@@ -1076,6 +1124,7 @@ impl GoalTracker {
 
     /// Best-effort scratch-root removal shared by every terminal transition.
     /// A distinct `verifier_id` per goal means this never touches a concurrent goal's dir.
+    #[allow(clippy::disallowed_methods, reason = "goal scratch root under system temp; not inside a session folder")]
     fn remove_scratch_root(&self) {
         if let Some(o) = &self.orchestration {
             let _ = std::fs::remove_dir_all(goal_scratch_root(&o.verifier_id));
@@ -1315,6 +1364,7 @@ pub(crate) fn make_base_orchestration() -> GoalOrchestration {
 
 // Tests
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "goal_tracker_tests.rs"]
 mod tests;

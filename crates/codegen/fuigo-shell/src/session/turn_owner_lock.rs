@@ -35,12 +35,17 @@ pub(crate) const OWNER_WAIT_LIMIT: Duration = Duration::from_secs(60);
 pub(crate) const RECOVERY_APPEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Owner-only like every other session file (P145: it kept the folder's inherited ACL on Windows).
-fn open_lock_file(session_dir: &Path) -> std::io::Result<std::fs::File> {
-    crate::session::storage::owner_only::open(
+#[allow(clippy::disallowed_methods, reason = "lock sidecar (§5.6): turn_owner.lock")]
+fn open_lock_file(session_dir: &Path, writer: Option<&fuigo_session_writer::SessionWriter>) -> std::io::Result<std::fs::File> {
+    // Through the writer only into an existing folder: a missing one stays NotFound, as on the by-path open.
+    if let Some(writer) = writer.filter(|_| session_dir.is_dir()) {
+        return writer.open_lock(TURN_OWNER_LOCK_FILE);
+    }
+    crate::session::storage::owner_only::open( // F5-A: lock sidecar (§5.6): turn_owner.lock
         std::fs::OpenOptions::new()
             .read(true)
-            .write(true)
-            .create(true)
+            .write(true) // F5-A: lock sidecar (§5.6): turn_owner.lock
+            .create(true) // F5-A: lock sidecar (§5.6): turn_owner.lock
             .truncate(false),
         &session_dir.join(TURN_OWNER_LOCK_FILE),
     )
@@ -127,7 +132,23 @@ impl TurnOwnerLock {
     /// never constructed, so no `turn_started` is written unlocked. `Ok(None)` only when the lock cannot be taken at
     /// all (a missing session dir, or a filesystem without advisory locks, warned once per process).
     pub(crate) async fn acquire(session_dir: &Path) -> Result<Option<Self>, OwnerLockBusy> {
-        let file = match open_lock_file(session_dir) {
+        Self::acquire_with(session_dir, None).await
+    }
+
+    /// [`acquire`](Self::acquire), opening (and creating) the sidecar through the session's writer, so it carries
+    /// B-F5 marks (design F5 §5.6, §9.4).
+    pub(crate) async fn acquire_as(
+        session_dir: &Path,
+        writer: &fuigo_session_writer::SessionWriter,
+    ) -> Result<Option<Self>, OwnerLockBusy> {
+        Self::acquire_with(session_dir, Some(writer)).await
+    }
+
+    async fn acquire_with(
+        session_dir: &Path,
+        writer: Option<&fuigo_session_writer::SessionWriter>,
+    ) -> Result<Option<Self>, OwnerLockBusy> {
+        let file = match open_lock_file(session_dir, writer) {
             Ok(file) => file,
             // A missing session dir also means no events.jsonl, so there is no turn to protect.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -259,7 +280,17 @@ impl RecoveryGuard {
 
 /// Non-blocking exclusive lock: `Acquired` only when no actor anywhere holds the session.
 pub(crate) fn try_recovery_lock(session_dir: &Path) -> RecoveryLock {
-    let file = match open_lock_file(session_dir) {
+    try_recovery_lock_with(session_dir, None)
+}
+
+/// [`try_recovery_lock`] on `writer`'s folder, opening the sidecar through the writer so it carries B-F5 marks (design
+/// F5 §5.6, §9.4).
+pub(crate) fn try_recovery_lock_as(writer: &fuigo_session_writer::SessionWriter) -> RecoveryLock {
+    try_recovery_lock_with(writer.dir(), Some(writer))
+}
+
+fn try_recovery_lock_with(session_dir: &Path, writer: Option<&fuigo_session_writer::SessionWriter>) -> RecoveryLock {
+    let file = match open_lock_file(session_dir, writer) {
         Ok(file) => file,
         Err(error) => return RecoveryLock::Unknown(error),
     };
@@ -272,6 +303,7 @@ pub(crate) fn try_recovery_lock(session_dir: &Path) -> RecoveryLock {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "turn_owner_lock_tests.rs"]
 mod tests;

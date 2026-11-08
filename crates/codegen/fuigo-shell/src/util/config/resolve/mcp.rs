@@ -335,6 +335,7 @@ pub(crate) fn resolve_max_mcp_output_bytes_precedence(
         .unwrap_or(DEFAULT_MAX_MCP_OUTPUT_BYTES)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod max_mcp_output_bytes_tests {
     use super::{

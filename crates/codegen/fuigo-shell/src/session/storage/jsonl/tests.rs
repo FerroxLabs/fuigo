@@ -129,7 +129,7 @@ async fn test_jsonl_round_trip() {
     adapter.write_plan_state(&info, &plan_state).await.unwrap();
     let new_model = acp::ModelId::new("grok-4.3");
     adapter.update_current_model(&info, &new_model).await.unwrap();
-    let loaded = adapter.load_session(&info).await.unwrap();
+    let loaded = adapter.load_session(&info, crate::session::storage::Access::Reader).await.unwrap();
     assert_eq!(loaded.summary.info.id, info.id);
     assert_eq!(loaded.summary.current_model_id, new_model);
     assert_eq!(loaded.chat_history.len(), messages.len());
@@ -144,7 +144,9 @@ async fn load_rebuilds_chat_history_from_updates() {
         ContentBlock, ContentChunk, SessionUpdate as Acp, TextContent,
     };
     let temp_dir = TempDir::new().unwrap();
-    let info = create_test_info();
+    // Its own id: the shared test id's writer slot is per id, so a parallel test holding it would turn this load's
+    // repair into a read-only one.
+    let info = Info { id: acp::SessionId::new("load-rebuilds-chat-history"), ..create_test_info() };
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     adapter.init_session(&info, default_model_id()).await.unwrap();
     let text = |s: &str| ContentChunk::new(
@@ -163,7 +165,7 @@ async fn load_rebuilds_chat_history_from_updates() {
         .unwrap();
     let chat_path = adapter.session_dir(&info).join("chat_history.jsonl");
     assert_eq!(std::fs::metadata(&chat_path).map(|m| m.len()).unwrap_or(0), 0);
-    let loaded = adapter.load_session(&info).await.unwrap();
+    let loaded = adapter.load_session(&info, crate::session::storage::Access::Reader).await.unwrap();
     assert_eq!(loaded.chat_history.len(), 2, "one user + one agent conversation item");
     assert!(matches!(loaded.chat_history[0], ConversationItem::User(_)));
     assert!(matches!(loaded.chat_history[1], ConversationItem::Assistant(_)));
@@ -203,21 +205,21 @@ async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
         script_revision: 0,
     };
     adapter.write_workflow_run_state(&info, &manifest).await.unwrap();
-    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
+    let loaded = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
     assert_eq!(loaded.workflow_runs.len(), 1);
     assert_eq!(loaded.workflow_runs[0].script, "complete(\"ok\");");
     assert_eq!(loaded.workflow_runs[0].args, serde_json::json!({"objective": "ship"}));
     assert_eq!(loaded.workflow_runs[0].effort, None);
     let effort_path = run_dir.join("effort");
     std::fs::write(&effort_path, "high").unwrap();
-    let loaded_with_effort = adapter.load_session_without_updates(&info).await.unwrap();
+    let loaded_with_effort = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
     assert_eq!(loaded_with_effort.workflow_runs[0].effort,
             Some(fuigo_sampling_types::ReasoningEffort::High));
     for invalid in ["XHIGH", "turbo"] {
         std::fs::write(&effort_path, invalid).unwrap();
         assert!(
                 adapter
-                    .load_session_without_updates(&info)
+                    .load_session_without_updates(&info, crate::session::storage::Access::Reader)
                     .await
                     .unwrap()
                     .workflow_runs
@@ -227,10 +229,10 @@ async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
     }
     std::fs::remove_file(&effort_path).unwrap();
     std::fs::create_dir(&effort_path).unwrap();
-    assert!(adapter.load_session_without_updates(&info).await.unwrap().workflow_runs.is_empty());
+    assert!(adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap().workflow_runs.is_empty());
     std::fs::remove_dir(&effort_path).unwrap();
     std::fs::write(&effort_path, [0xff]).unwrap();
-    assert!(adapter.load_session_without_updates(&info).await.unwrap().workflow_runs.is_empty());
+    assert!(adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap().workflow_runs.is_empty());
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
@@ -238,7 +240,7 @@ async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
         std::fs::write(&effort_target, "high").unwrap();
         std::fs::remove_file(&effort_path).unwrap();
         symlink(&effort_target, &effort_path).unwrap();
-        assert!(adapter.load_session_without_updates(&info).await.unwrap().workflow_runs.is_empty());
+        assert!(adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap().workflow_runs.is_empty());
         std::fs::remove_file(&effort_path).unwrap();
         std::fs::remove_file(&effort_target).unwrap();
     }
@@ -246,7 +248,7 @@ async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
     let mut legacy = manifest.clone();
     legacy.version = 2;
     adapter.write_workflow_run_state(&info, &legacy).await.unwrap();
-    let loaded_v2 = adapter.load_session_without_updates(&info).await.unwrap();
+    let loaded_v2 = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
     assert_eq!(loaded_v2.workflow_runs.len(), 1);
     assert_eq!(loaded_v2.workflow_runs[0].manifest.version, 2);
     adapter.delete_workflow_run_state(&info, "wf_restore").await.unwrap();
@@ -254,7 +256,7 @@ async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
     assert!(run_dir.join("cleared").is_file());
     assert!(
             adapter
-                .load_session_without_updates(&info)
+                .load_session_without_updates(&info, crate::session::storage::Access::Reader)
                 .await
                 .unwrap()
                 .workflow_runs
@@ -308,7 +310,7 @@ async fn workflow_restore_rejects_symlinks_and_caps_run_count() {
     let symlinked = workflows.join("wf_symlink");
     std::fs::create_dir_all(symlinked.join("scripts")).unwrap();
     symlink(&attacker, symlinked.join("state.json")).unwrap();
-    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
+    let loaded = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
     assert_eq!(loaded.workflow_runs.len(), MAX_RESTORED_WORKFLOW_RUNS);
     assert!(
             loaded
@@ -327,8 +329,8 @@ async fn load_session_without_updates_defers_rewind_points() {
     adapter.init_session(&info, default_model_id()).await.unwrap();
     adapter.append_rewind_point(&info, &RewindPoint::new(0)).await.unwrap();
     adapter.append_rewind_point(&info, &RewindPoint::new(1)).await.unwrap();
-    adapter.load_session_without_updates(&info).await.unwrap();
-    let full = adapter.load_session(&info).await.unwrap();
+    adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
+    let full = adapter.load_session(&info, crate::session::storage::Access::Reader).await.unwrap();
     assert_eq!(full.rewind_points.len(), 2);
     assert_eq!(adapter.load_rewind_points(&info).await.unwrap().len(), 2);
     let path = adapter.rewind_points_file_path(&info).unwrap();
@@ -451,7 +453,7 @@ async fn reads_never_modify_rewind_or_updates_files() {
     let rewind_path = adapter.rewind_points_file_path(&info).unwrap();
     let rewind_before = std::fs::read(&rewind_path).unwrap();
     let updates_before = std::fs::read(&updates_path).unwrap();
-    adapter.load_session_without_updates(&info).await.unwrap();
+    adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
     let tracker = FileStateTracker::with_lazy_source(rewind_path.clone());
     assert_eq!(tracker.get_rewind_points().await.len(), 2);
     assert_eq!(
@@ -518,7 +520,7 @@ async fn test_fuigo_session_update_round_trip() {
         .append_update(&info, &SessionUpdate::Acp(Box::new(acp_notification)))
         .await
         .unwrap();
-    let loaded = adapter.load_session(&info).await.unwrap();
+    let loaded = adapter.load_session(&info, crate::session::storage::Access::Reader).await.unwrap();
     assert_eq!(
             loaded.updates.len(),
             2,
@@ -596,7 +598,7 @@ async fn test_subagent_notifications_round_trip() {
         meta: None,
     };
     adapter.append_update(&info, &SessionUpdate::Fuigo(Box::new(finished))).await.unwrap();
-    let loaded = adapter.load_session(&info).await.unwrap();
+    let loaded = adapter.load_session(&info, crate::session::storage::Access::Reader).await.unwrap();
     assert_eq!(loaded.updates.len(), 2);
     match &loaded.updates[0] {
         SessionUpdate::Fuigo(notification) => {
@@ -697,7 +699,7 @@ async fn test_subagent_spawned_resumed_roundtrip() {
         meta: None,
     };
     adapter.append_update(&info, &SessionUpdate::Fuigo(Box::new(spawned))).await.unwrap();
-    let loaded = adapter.load_session(&info).await.unwrap();
+    let loaded = adapter.load_session(&info, crate::session::storage::Access::Reader).await.unwrap();
     assert_eq!(loaded.updates.len(), 1);
     match &loaded.updates[0] {
         SessionUpdate::Fuigo(notification) => {
@@ -1125,7 +1127,7 @@ async fn summary_provenance_survives_write_read_roundtrip() {
     summary.session_kind = Some("subagent_fork".to_string());
     let json = serde_json::to_vec_pretty(&summary).unwrap();
     std::fs::write(adapter.session_dir(&info).join("summary.json"), json).unwrap();
-    let loaded = adapter.load_session(&info).await.unwrap();
+    let loaded = adapter.load_session(&info, crate::session::storage::Access::Reader).await.unwrap();
     assert_eq!(
             loaded.summary.fork_context_source.as_deref(),
             Some("forked")
@@ -1148,7 +1150,7 @@ async fn summary_provenance_defaults_to_none() {
         cwd: "/test".to_string(),
     };
     adapter.init_session(&info, default_model_id()).await.unwrap();
-    let loaded = adapter.load_session(&info).await.unwrap();
+    let loaded = adapter.load_session(&info, crate::session::storage::Access::Reader).await.unwrap();
     assert!(loaded.summary.fork_context_source.is_none());
     assert!(loaded.summary.fork_parent_prompt_id.is_none());
 }
@@ -2504,7 +2506,7 @@ async fn load_session_without_updates_survives_merged_chat_line() {
             .unwrap();
         f.write_all(b"\n").unwrap();
     }
-    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
+    let loaded = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
     assert_eq!(
             user_text(&loaded.chat_history),
             vec!["real turn"],
@@ -2884,7 +2886,7 @@ async fn a_damaged_rewind_row_does_not_fail_the_full_load() {
     let original = p123_rewind_file_with_a_damaged_row();
     std::fs::write(&path, &original).unwrap();
     let loaded = adapter
-        .load_session(&info)
+        .load_session(&info, crate::session::storage::Access::Reader)
         .await
         .expect("a damaged rewind row must not fail the full load (export, writeback backfill)");
     let indexes: Vec<usize> = loaded.rewind_points.iter().map(|point| point.prompt_index).collect();
@@ -2985,7 +2987,7 @@ async fn a_rewind_points_rewrite_gives_up_when_the_append_lock_stays_held() {
     }
     let path = adapter.rewind_points_file_path(&info).unwrap();
     let before = std::fs::read(&path).unwrap();
-    let held = JsonlStorageAdapter::lock_append(&path).unwrap();
+    let held = JsonlStorageAdapter::lock_append_by_path(&path).unwrap();
     super::REWRITE_LOCK_WAIT_OVERRIDE_MS.store(200, std::sync::atomic::Ordering::Relaxed);
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), adapter.truncate_rewind_points_from(&info, 1)).await;
     super::REWRITE_LOCK_WAIT_OVERRIDE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -3248,4 +3250,94 @@ async fn the_rewind_points_rewrite_lock_file_is_created_owner_only() {
     adapter.truncate_rewind_points_from(&info, 0).await.unwrap();
     let mode = std::fs::metadata(&lock_path).expect("the rewrite made its lock file").permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "the rewrite lock file is owner-only");
+}
+
+// ---- F5-C (design §9.2): the cold load's own writer repairs; an unowned reader of a live session reads only ----
+
+/// A session with one agent message in `updates.jsonl`, and the folder's writer claimed as a cold load claims it.
+async fn f5c_seed(root: &std::path::Path, id: &str) -> (JsonlStorageAdapter, Info, fuigo_session_writer::SessionWriter) {
+    let adapter = JsonlStorageAdapter::with_root(root.to_path_buf());
+    let info = Info { id: acp::SessionId::new(id), cwd: "/work".to_string() };
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter
+        .append_update(&info, &SessionUpdate::Acp(Box::new(create_test_notification())))
+        .await
+        .unwrap();
+    let writer = fuigo_session_writer::SessionWriter::try_claim(id, adapter.session_dir(&info)).unwrap();
+    (adapter, info, writer)
+}
+
+/// CT-B1: a cold load of a session whose `chat_history.jsonl` is missing (intact `updates.jsonl`) rebuilds the history
+/// as its own writer. Round-1 HIGH B: under rev 1's "try_claim or skip" the load, which holds the slot itself, saw
+/// `Busy` and never wrote the rebuild. Fails with the cold load's access resolved as a reader's.
+#[tokio::test]
+async fn f5c_ct_b1_cold_load_rebuilds_a_missing_history_as_its_own_writer() {
+    let root = TempDir::new().unwrap();
+    let (adapter, info, writer) = f5c_seed(root.path(), "f5c-ct-b1").await;
+    let chat = adapter.chat_file(&info);
+    let _ = std::fs::remove_file(&chat);
+    let loaded = adapter
+        .load_session_without_updates(&info, crate::session::storage::Access::Owner(&writer))
+        .await
+        .unwrap();
+    assert!(!loaded.chat_history.is_empty(), "the cold load returned no history: its rebuild was suppressed");
+    assert!(std::fs::metadata(&chat).map(|m| m.len() > 0).unwrap_or(false), "the rebuild was not written");
+}
+
+/// CT-B2: the same with an empty history file.
+#[tokio::test]
+async fn f5c_ct_b2_cold_load_rebuilds_an_empty_history_as_its_own_writer() {
+    let root = TempDir::new().unwrap();
+    let (adapter, info, writer) = f5c_seed(root.path(), "f5c-ct-b2").await;
+    let chat = adapter.chat_file(&info);
+    std::fs::write(&chat, b"").unwrap();
+    let loaded = adapter
+        .load_session_without_updates(&info, crate::session::storage::Access::Owner(&writer))
+        .await
+        .unwrap();
+    assert!(!loaded.chat_history.is_empty(), "the cold load returned no history: its rebuild was suppressed");
+    assert!(std::fs::metadata(&chat).map(|m| m.len() > 0).unwrap_or(false), "the rebuild was not written");
+}
+
+/// A load of a session a live writer owns, with no history file yet: the rebuild stays in memory, so the history is
+/// complete and the live session's folder is not written.
+#[tokio::test]
+async fn f5c_resident_load_rebuilds_in_memory_and_writes_nothing() {
+    let root = TempDir::new().unwrap();
+    let (adapter, info, _live) = f5c_seed(root.path(), "f5c-resident-rebuild").await;
+    let chat = adapter.chat_file(&info);
+    let _ = std::fs::remove_file(&chat);
+    let loaded = adapter
+        .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+        .await
+        .unwrap();
+    assert!(!loaded.chat_history.is_empty(), "the resident load lost the history the transcript holds");
+    assert!(!chat.exists(), "the resident load wrote the live session's history");
+}
+
+/// CT10 (resident load): a load of a session a live writer owns, reading a history with a torn line, writes no
+/// `.corrupt` copy (1.0.40 wrote one by path into the live session's folder). Once the session is free, an unowned
+/// reader takes the slot and makes the copy, as 1.0.40 did.
+#[tokio::test]
+async fn f5c_ct10_resident_load_with_a_torn_line_writes_no_corrupt_copy() {
+    let root = TempDir::new().unwrap();
+    let (adapter, info, live) = f5c_seed(root.path(), "f5c-ct10-resident").await;
+    let chat = adapter.chat_file(&info);
+    let good = serde_json::to_string(&ConversationItem::user("hello")).unwrap();
+    std::fs::write(&chat, format!("{good}\n{{\"type\":\"user\",\"cont\n{good}\n")).unwrap();
+    let quarantine = chat.with_extension("jsonl.corrupt");
+
+    let loaded = adapter
+        .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+        .await
+        .unwrap();
+    assert_eq!(loaded.skipped_chat_lines, 1);
+    assert!(!quarantine.exists(), "a resident load wrote into the live session's folder");
+
+    drop(live);
+    adapter
+        .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+        .await
+        .unwrap();
+    assert!(quarantine.exists(), "an unowned reader of a free session keeps 1.0.40's quarantine copy");
 }

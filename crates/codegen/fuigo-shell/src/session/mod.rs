@@ -36,6 +36,13 @@ pub use self::user_echo::{CLIENT_USER_MESSAGE_ECHO_META, USER_MESSAGE_ECHO_CAPAB
 pub use fuigo_fsnotify::{
     FsConfig, FsEvent, FsEventKind, FsEventSource, FsNotifyError, GitMetaKind,
 };
+/// F12 (`--no-session-persistence`): nothing under `FUIGO_HOME/sessions` is written for the rest of this process. The
+/// session writer refuses every session-folder write, sessions open with a no-op persistence actor, and prompt
+/// history, the search index and the TTL sweep stand down. Call before the agent starts.
+pub use fuigo_session_writer::{
+    disable_persistence as disable_session_persistence,
+    persistence_disabled as session_persistence_disabled,
+};
 pub use prod_mc_cli_chat_proxy_types::feedback_types::{
     ClientType, FeedbackImage, FeedbackTerminalInfo, MAX_FEEDBACK_IMAGE_BYTES,
     MAX_FEEDBACK_IMAGE_TOTAL_BYTES, MAX_FEEDBACK_IMAGES, RatingType, feedback_image_extension,

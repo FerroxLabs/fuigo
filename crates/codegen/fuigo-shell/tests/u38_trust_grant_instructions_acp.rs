@@ -63,6 +63,7 @@ async fn server() -> MockInferenceServer {
     server
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn sandbox(server: &MockInferenceServer) -> TestSandbox {
     let sandbox = TestSandbox::builder().mock_url(server.url()).git().build();
     std::fs::write(
@@ -73,6 +74,7 @@ fn sandbox(server: &MockInferenceServer) -> TestSandbox {
     sandbox
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn plant_user_file(sandbox: &TestSandbox) {
     std::fs::write(
         sandbox.fuigo_home().join("AGENTS.md"),
@@ -654,6 +656,7 @@ fn a_durable_grant_elsewhere_delivers_on_a_trusted_load_once() {
     });
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn an_empty_set_then_a_user_file_inserts_the_reminder_once() {
     local(async {
@@ -681,6 +684,7 @@ fn an_empty_set_then_a_user_file_inserts_the_reminder_once() {
 
 /// A plan agent keeps its rules in the first message and a load never rebuilds that message, so a user file added later
 /// waits for a new session. The untrusted head behaves as a trusted one does: nothing here depends on a grant.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn a_plan_head_leaves_a_later_user_file_to_a_new_session() {
     local(async {
@@ -755,6 +759,7 @@ fn trusted_spec() -> AgentSpawnSpec<'static> {
 }
 
 /// With `U38_DUMP` set, writes the trusted sessions' bodies so a run on each build can be compared.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn a_trusted_session_is_unchanged_with_no_bit_and_no_late_file() {
     local(async {
@@ -1160,6 +1165,7 @@ fn a_failed_history_write_on_load_delivers_once_on_the_next_load() {
 }
 
 /// The live grant's history write fails: the conversation stays as stored, and the next start delivers once.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn a_failed_history_write_on_a_live_grant_delivers_at_the_next_start() {
     local(async {
@@ -1255,6 +1261,7 @@ enum Fault {
     ReadFails,
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn break_file(file: &std::path::Path, fault: Fault) {
     let away = file.with_extension("away");
     std::fs::rename(file, away).expect("move the file away");
@@ -1263,6 +1270,7 @@ fn break_file(file: &std::path::Path, fault: Fault) {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn restore_file(file: &std::path::Path, fault: Fault) {
     if matches!(fault, Fault::ReadFails) {
         std::fs::remove_dir(file).expect("clear the fault");
@@ -1408,6 +1416,7 @@ fn checkpoints(sandbox: &TestSandbox, session: &str) -> usize {
 
 /// A process grant delivers, the restart is untrusted, and the load's history has no bit. A second grant must still
 /// refresh the list at the next start, or an inline compaction in that very turn rebuilds a head without the file.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn a_second_process_grant_carries_the_file_through_an_inline_compaction() {
     local(async {

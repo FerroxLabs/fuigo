@@ -1050,10 +1050,28 @@ pub(super) fn file_registry_with_spec(
     file_registry(event, script, true)
 }
 
+/// [`file_registry_with_spec`] with the hook's own timeout.
+pub(super) fn file_registry_with_timeout(
+    event: fuigo_hooks::event::HookEventName,
+    script: &str,
+    timeout_ms: u64,
+) -> fuigo_hooks::discovery::HookRegistry {
+    file_registry_timed(event, script, true, timeout_ms)
+}
+
 fn file_registry(
     event: fuigo_hooks::event::HookEventName,
     script: &str,
     enabled: bool,
+) -> fuigo_hooks::discovery::HookRegistry {
+    file_registry_timed(event, script, enabled, 5000)
+}
+
+fn file_registry_timed(
+    event: fuigo_hooks::event::HookEventName,
+    script: &str,
+    enabled: bool,
+    timeout_ms: u64,
 ) -> fuigo_hooks::discovery::HookRegistry {
     let (mut registry, _) = fuigo_hooks::discovery::load_hooks(None, None);
     registry.append_specs(vec![fuigo_hooks::config::HookSpec {
@@ -1069,7 +1087,7 @@ fn file_registry(
         shell: None,
         url: None,
         url_raw: None,
-        timeout_ms: 5000,
+        timeout_ms,
         source_dir: std::path::PathBuf::from("/tmp"),
         extra_env: std::collections::HashMap::new(),
         layer: fuigo_hooks::config::HookProvenance::File,

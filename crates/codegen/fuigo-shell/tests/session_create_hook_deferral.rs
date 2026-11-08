@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use acp_harness::{AutoApproveClient, connect_and_auth, new_session, prompt_turn, run_agent_test};
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn session_create_does_not_wait_for_session_start_hooks() {
     run_agent_test(|cwd, _server| async move {

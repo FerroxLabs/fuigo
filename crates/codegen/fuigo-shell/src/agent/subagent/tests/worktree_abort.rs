@@ -5,6 +5,7 @@ use super::super::handle_request::{create_isolated_worktree, isolated_worktree_a
 use fuigo_test_utils::git::{git_commit_all, init_git_repo};
 use std::path::{Path, PathBuf};
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn repo(temp: &tempfile::TempDir) -> PathBuf {
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).unwrap();
@@ -48,6 +49,7 @@ fn assert_nothing_left(repo: &Path, dest: &Path) {
 }
 
 /// (a) A tracked file that cannot be copied: failed result naming the file, parent untouched, nothing left.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(unix)]
 #[test]
 fn socket_tracked_file_fails_cleanly_and_leaves_nothing() {
@@ -77,6 +79,7 @@ fn socket_tracked_file_fails_cleanly_and_leaves_nothing() {
 }
 
 /// A repo whose `post-checkout` hook runs `body` and exits 1, and a probe that reports a nearly full disk.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(unix)]
 fn failing_hook_under_low_probe(
     temp: &tempfile::TempDir,
@@ -146,6 +149,7 @@ fn low_probe_and_a_write_failure_line_leaves_nothing() {
 }
 
 /// (c) A `StorageFull` before the guard with `dest` absent (the create made a partial `dest`): reclaimed.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn storage_full_before_the_guard_reclaims_a_dest_this_create_made() {
     fuigo_test_utils::require_git!();
@@ -165,6 +169,7 @@ fn storage_full_before_the_guard_reclaims_a_dest_this_create_made() {
 }
 
 /// (d) A `dest` that existed before this create is never removed, even on an abort.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn pre_existing_dest_is_not_removed_on_an_abort() {
     fuigo_test_utils::require_git!();
@@ -187,6 +192,7 @@ fn pre_existing_dest_is_not_removed_on_an_abort() {
 }
 
 /// (e) A non-git folder named after the ENOSPC sentence: an ordinary error, so the 1.0.38 fallback.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn non_git_folder_named_after_the_sentence_falls_back() {
     let temp = tempfile::TempDir::new().unwrap();

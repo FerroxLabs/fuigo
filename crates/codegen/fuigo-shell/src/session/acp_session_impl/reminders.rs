@@ -727,7 +727,10 @@ impl SessionActor {
         if self.startup_hints.is_subagent {
             return;
         }
-        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        // Through the actor's writer (design F5 §5.3); a test actor built without one has no folder to write.
+        let Some(session_writer) = self.rebuild_spec.session_writer.clone() else {
+            return;
+        };
         let snapshot = self.collect_resume_status().await;
         if snapshot.is_empty() {
             return;
@@ -742,9 +745,8 @@ impl SessionActor {
             "persisting resume status snapshot"
         );
         let _ = tokio::task::spawn_blocking({
-            let session_dir = session_dir.clone();
             let snapshot = snapshot.clone();
-            move || crate::session::resume_status::persist(&session_dir, &snapshot)
+            move || crate::session::resume_status::persist(&session_writer, &snapshot)
         })
         .await;
     }
@@ -844,7 +846,10 @@ impl SessionActor {
     /// The files are deleted after loading so the reminder is only shown once.
     pub(super) fn inject_resumed_tasks_reminder(&self) {
         let session_dir = crate::session::persistence::session_dir(&self.session_info);
-        let snapshot = crate::session::resume_status::load_and_clear(&session_dir);
+        let snapshot = crate::session::resume_status::load_and_clear(
+            &session_dir,
+            self.rebuild_spec.session_writer.as_ref(),
+        );
         let Some(reminder) = crate::session::resume_status::format_reminder(&snapshot) else {
             return;
         };

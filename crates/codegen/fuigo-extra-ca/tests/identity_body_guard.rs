@@ -109,6 +109,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/acp_handler/permissions.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/acp_handler/routing.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/acp_handler/session_notification.rs", 2),
+    ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/folder_trust_reload.rs", 1), // F5 1.0.41: in-process AgentId field of a `TaskResult::SessionLoaded` test fixture (pager tab key, never a request body).
     ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/goals.rs", 2),
     ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/interactions.rs", 7),
     ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/mod.rs", 1),
@@ -116,7 +117,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/settings.rs", 3),
     ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/turn_completion.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/acp_handler/workflow_ingest.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/actions.rs", 137), // 26-6d: +2 `agent_id` fields of `Effect::SetContextWindow` / `TaskResult::ContextWindowSet` (in-process agent-view key; the request is `session/set_model` with `_meta.contextWindow`, no new identity). R-xs-p12: +2 `agent_id: AgentId` fields of `Effect::PeerRpc` / `Action::PeerRpcDone`: the pager's in-process agent-view key that routes the answer back; the request body is `PeerCall::params` (sessionId, heldId, token, action) and carries no identity. Keep.
+    ("crates/codegen/fuigo-pager/src/app/actions.rs", 140), // 26-6d: +2 `agent_id` fields of `Effect::SetContextWindow` / `TaskResult::ContextWindowSet` (in-process agent-view key; the request is `session/set_model` with `_meta.contextWindow`, no new identity). R-xs-p12: +2 `agent_id: AgentId` fields of `Effect::PeerRpc` / `Action::PeerRpcDone`: the pager's in-process agent-view key that routes the answer back; the request body is `PeerCall::params` (sessionId, heldId, token, action) and carries no identity. Keep. F5 1.0.41: +3 `agent_id: AgentId` fields of `TaskResult::FolderTrustLoaded` / `FolderTrustClosed` / `Effect::FolderTrustLoad` (in-process AgentId field of a task result or effect; pager tab key, never a request body).
     ("crates/codegen/fuigo-pager/src/app/agent_view/cta.rs", 3),
     ("crates/codegen/fuigo-pager/src/app/agent_view/dock_input_tests.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/agent_view/key_owner_tests.rs", 6), // R-guard54: +1 `"email"` in an MCP elicitation-form test (4784cfc4); fixture JSON, no request body. Keep.
@@ -160,7 +161,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/modal.rs", 6),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/settings.rs", 4),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/status.rs", 27),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/task_result.rs", 39), // pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep. // 26-6d: pager-local fixtures for `ContextWindowSet`; no body site
+    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/task_result.rs", 40), // pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep. // 26-6d: pager-local fixtures for `ContextWindowSet`; no body site F5 1.0.41: +1 `agent_id: AgentId(0)` field of a `TaskResult::RenameSessionFailed` test fixture (in-process AgentId field; pager tab key, never a request body).
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/transcript.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/turn.rs", 7),
     ("crates/codegen/fuigo-pager/src/app/dispatch/transcript.rs", 9),
@@ -168,6 +169,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/effects/tests.rs", 3), // P77: +1 fixture
     ("crates/codegen/fuigo-pager/src/app/event_loop.rs", 8), // P66 (97efd30a) deleted the dead local-workspace feature; pager-local, no body site (re-pinned by P54-K, R080 §11)
     ("crates/codegen/fuigo-pager/src/app/external_editor.rs", 10),
+    ("crates/codegen/fuigo-pager/src/app/folder_trust_reload.rs", 2), // F5 1.0.41: in-process AgentId args of `handle_closed` / `handle_loaded` (pager tab key, never a request body).
     ("crates/codegen/fuigo-pager/src/app/foreign_sessions.rs", 2), // P77: `hostname: None` rows; local UI
     ("crates/codegen/fuigo-pager/src/app/modals.rs", 1), // P77: `hostname: None` row; local UI
     ("crates/codegen/fuigo-pager/src/app/queue_edit.rs", 1),

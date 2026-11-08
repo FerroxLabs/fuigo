@@ -1180,6 +1180,7 @@ pub fn session_command_dir_is_writable(inputs: &ProtectedInputs<'_>) -> bool {
         && is_real_directory(&own.join(SESSION_COMMAND_DIRNAME))
 }
 
+#[allow(clippy::disallowed_methods, reason = "read-only protected-path check (design F5 5.4.3)")]
 fn own_session_dir_as_named(inputs: &ProtectedInputs<'_>) -> PathBuf {
     fuigo_config::sessions_cwd_dir_in(
         inputs.fuigo_home,
@@ -1436,6 +1437,7 @@ pub fn hard_linked_protected_file(
     None
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "protected_tests.rs"]
 mod tests;

@@ -90,26 +90,26 @@ impl ResumeStatusSnapshot {
     }
 }
 
-pub(crate) fn persist(session_dir: &Path, snapshot: &ResumeStatusSnapshot) {
+/// Write the snapshot if none is there yet (first snapshot wins), through the session's writer (design F5 §5.3,
+/// `create_new`): owner-only, and never into a folder the writer released for a delete.
+pub(crate) fn persist(session_writer: &fuigo_session_writer::SessionWriter, snapshot: &ResumeStatusSnapshot) {
     if snapshot.is_empty() {
         return;
     }
-    let path = session_dir.join(FILENAME);
     let Ok(data) = serde_json::to_vec_pretty(snapshot) else {
         tracing::warn!("failed to serialize resume status snapshot");
         return;
     };
-    match fuigo_config::owner_only_file_options(std::fs::OpenOptions::new().write(true).create_new(true))
-        .open(&path)
-    {
-        Ok(mut file) => {
-            if let Err(e) = std::io::Write::write_all(&mut file, &data) {
-                tracing::warn!(%e, "failed to write resume status snapshot");
-                let _ = std::fs::remove_file(&path);
+    match session_writer.create_new_sync(FILENAME, &data) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => {
+            tracing::warn!(%e, "failed to write resume status snapshot");
+            // A file this call created but could not fill; a refusal (held elsewhere, gone) wrote nothing.
+            if fuigo_session_writer::refusal(&e).is_none() {
+                let _ = session_writer.remove_sync(FILENAME);
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => tracing::warn!(%e, "failed to create resume status snapshot"),
     }
 }
 
@@ -117,22 +117,31 @@ pub(crate) fn exists(session_dir: &Path) -> bool {
     session_dir.join(FILENAME).is_file()
 }
 
-pub(crate) fn load_and_clear(session_dir: &Path) -> ResumeStatusSnapshot {
+/// `session_writer`: the session's writer, through which the snapshot and the legacy background-task manifest are
+/// removed (design F5 §5.4.2). Without one (a test actor) nothing is removed: the read is read-only.
+pub(crate) fn load_and_clear(
+    session_dir: &Path,
+    session_writer: Option<&fuigo_session_writer::SessionWriter>,
+) -> ResumeStatusSnapshot {
     let path = session_dir.join(FILENAME);
     let data = match std::fs::read(&path) {
         Ok(d) => d,
-        Err(_) => return merge_legacy_manifest(session_dir, ResumeStatusSnapshot::default()),
+        Err(_) => return merge_legacy_manifest(session_dir, session_writer, ResumeStatusSnapshot::default()),
     };
     let snapshot = match serde_json::from_slice(&data) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(%e, "failed to parse resume status snapshot");
-            let _ = std::fs::remove_file(&path);
-            return merge_legacy_manifest(session_dir, ResumeStatusSnapshot::default());
+            if let Some(writer) = session_writer {
+                let _ = writer.remove_sync(FILENAME);
+            }
+            return merge_legacy_manifest(session_dir, session_writer, ResumeStatusSnapshot::default());
         }
     };
-    let _ = std::fs::remove_file(&path);
-    merge_legacy_manifest(session_dir, snapshot)
+    if let Some(writer) = session_writer {
+        let _ = writer.remove_sync(FILENAME);
+    }
+    merge_legacy_manifest(session_dir, session_writer, snapshot)
 }
 
 pub(crate) fn resume_task_description(
@@ -155,9 +164,14 @@ fn monitor_label(display_command: &str) -> Option<&str> {
 
 fn merge_legacy_manifest(
     session_dir: &Path,
+    session_writer: Option<&fuigo_session_writer::SessionWriter>,
     mut snapshot: ResumeStatusSnapshot,
 ) -> ResumeStatusSnapshot {
-    let entries = crate::terminal::load_and_clear_manifest(session_dir);
+    let _ = session_dir;
+    let entries = match session_writer {
+        Some(writer) => crate::terminal::load_and_clear_manifest(writer),
+        None => Vec::new(),
+    };
     for entry in entries {
         let description = resume_task_description(None, entry.display_command.as_deref());
         let task = ResumeTask {
@@ -404,8 +418,13 @@ fn one_line(s: &str) -> String {
         .join(" ")
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
+    /// A writer for `dir` under a fresh id (design F5: the snapshot is written and removed only through one).
+    fn test_writer(dir: &std::path::Path) -> fuigo_session_writer::SessionWriter {
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).expect("claim")
+    }
     use super::*;
 
     #[test]
@@ -490,7 +509,7 @@ mod tests {
             }],
             ..ResumeStatusSnapshot::default()
         };
-        persist(dir.path(), &snapshot);
+        persist(&test_writer(dir.path()), &snapshot);
         assert!(exists(dir.path()));
         #[cfg(unix)]
         {
@@ -498,24 +517,23 @@ mod tests {
             let mode = std::fs::metadata(dir.path().join(FILENAME)).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "P150: resume_status.json is a session file, owner-only");
         }
-        let loaded = load_and_clear(dir.path());
+        let loaded = load_and_clear(dir.path(), Some(&test_writer(dir.path())));
         assert_eq!(loaded, snapshot);
         assert!(!exists(dir.path()));
-        assert!(load_and_clear(dir.path()).is_empty());
+        assert!(load_and_clear(dir.path(), Some(&test_writer(dir.path()))).is_empty());
     }
 
     #[test]
     fn persist_skips_empty() {
         let dir = tempfile::tempdir().unwrap();
-        persist(dir.path(), &ResumeStatusSnapshot::default());
+        persist(&test_writer(dir.path()), &ResumeStatusSnapshot::default());
         assert!(!exists(dir.path()));
     }
 
     #[test]
     fn persist_keeps_first_snapshot() {
         let dir = tempfile::tempdir().unwrap();
-        persist(
-            dir.path(),
+        persist(&test_writer(dir.path()),
             &ResumeStatusSnapshot {
                 background: vec![ResumeTask {
                     task_id: "bg1".into(),
@@ -524,8 +542,7 @@ mod tests {
                 ..ResumeStatusSnapshot::default()
             },
         );
-        persist(
-            dir.path(),
+        persist(&test_writer(dir.path()),
             &ResumeStatusSnapshot {
                 loops: vec![ResumeLoop {
                     id: "loop1".into(),
@@ -535,7 +552,7 @@ mod tests {
                 ..ResumeStatusSnapshot::default()
             },
         );
-        let loaded = load_and_clear(dir.path());
+        let loaded = load_and_clear(dir.path(), Some(&test_writer(dir.path())));
         assert_eq!(loaded.background.len(), 1);
         assert!(loaded.loops.is_empty());
     }
@@ -544,11 +561,10 @@ mod tests {
     fn load_and_clear_deletes_corrupt_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("resume_status.json"), "not-json").unwrap();
-        let loaded = load_and_clear(dir.path());
+        let loaded = load_and_clear(dir.path(), Some(&test_writer(dir.path())));
         assert!(loaded.is_empty());
         assert!(!exists(dir.path()));
-        persist(
-            dir.path(),
+        persist(&test_writer(dir.path()),
             &ResumeStatusSnapshot {
                 loops: vec![ResumeLoop {
                     id: "loop1".into(),

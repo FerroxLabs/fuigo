@@ -17,5 +17,6 @@ pub(crate) mod manifest;
 pub(crate) mod memory;
 pub(crate) mod trace;
 pub(crate) mod turn;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod p71_gate_tests;

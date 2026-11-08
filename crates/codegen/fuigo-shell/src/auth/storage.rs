@@ -105,6 +105,7 @@ pub(crate) fn read_auth_json_or_empty(auth_file: &Path) -> std::io::Result<AuthS
 ///
 /// If the file exists and `read_auth_json` fails with `InvalidData`, it is renamed to `auth.json.corrupt.<millis>` in the same directory.
 /// Returns the backup path. This runs before recovery writes so the original bytes are never silently lost.
+#[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
 pub(crate) fn backup_corrupt_auth_file(path: &Path) -> Option<PathBuf> {
     if !path.exists() {
         return None;
@@ -231,6 +232,7 @@ fn write_auth_json_with(
 /// Shared core of the atomic path (which targets the temp file) and the in-place fallback (which targets `auth.json` directly).
 ///
 /// Streams `to_writer_pretty` through a `BufWriter` so the entire JSON string is never held in memory, avoiding OOM under severe memory pressure.
+#[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
 fn write_store_to(path: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
     use crate::util::secure_file::open_secure_file;
 
@@ -289,6 +291,7 @@ pub(super) fn inject_write_fault(auth_file: &Path) -> impl Drop + use<> {
 
 /// Atomic write: a temp file, then a rename.
 /// Unix `rename(2)` replaces atomically; Windows `rename` requires removing the target first.
+#[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
 fn write_auth_json_atomic(auth_file: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
     #[cfg(test)]
     if WRITE_FAULT_PATHS
@@ -314,6 +317,7 @@ fn write_auth_json_atomic(auth_file: &Path, auth_store: &AuthStore) -> std::io::
     // Reclaim the temp file on any early return (write/sync/rename failure); the unique name otherwise accumulates one orphan per failed write
     struct TmpReclaim<'a>(Option<&'a Path>);
     impl Drop for TmpReclaim<'_> {
+        #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
         fn drop(&mut self) {
             if let Some(p) = self.0 {
                 let _ = std::fs::remove_file(p);
@@ -432,6 +436,7 @@ fn auth_state() -> &'static parking_lot::ReentrantMutex<()> {
 /// write; otherwise a sibling's token rotation landing in between would be rolled back by this write. Waits at most
 /// `AUTH_LOCK_TIMEOUT` and never writes unlocked: a lock it cannot get is an error.
 /// Blocks the calling thread while it waits; async callers use [`store_api_key_async`].
+#[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
 pub fn store_api_key(fuigo_home: &Path, api_key: &str) -> std::io::Result<()> {
     let path = fuigo_home.join("auth.json");
     std::fs::create_dir_all(fuigo_home)?;
@@ -442,6 +447,7 @@ pub fn store_api_key(fuigo_home: &Path, api_key: &str) -> std::io::Result<()> {
 }
 
 /// [`store_api_key`] for async callers: waits for the cross-process lock without blocking a runtime thread.
+#[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
 pub(crate) async fn store_api_key_async(fuigo_home: &Path, api_key: &str) -> std::io::Result<()> {
     let path = fuigo_home.join("auth.json");
     std::fs::create_dir_all(fuigo_home)?;
@@ -501,6 +507,7 @@ pub(crate) async fn clear_api_key_async(fuigo_home: &Path) -> std::io::Result<()
     clear_api_key_locked(&path, &flock)
 }
 
+#[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
 fn clear_api_key_locked(path: &Path, _flock: &AuthFileLock) -> std::io::Result<()> {
     let _state = auth_state_lock();
     if let Ok(mut map) = read_auth_json(path) {
@@ -514,6 +521,7 @@ fn clear_api_key_locked(path: &Path, _flock: &AuthFileLock) -> std::io::Result<(
     Ok(())
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod write_fallback_tests {
     use super::*;

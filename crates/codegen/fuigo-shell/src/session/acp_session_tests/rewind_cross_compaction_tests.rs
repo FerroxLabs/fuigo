@@ -1043,7 +1043,12 @@ async fn run_rewind_replacement_failure_scenario() {
         ConversationItem::assistant("R1"),
     ];
     let chat_file = session_dir.join("chat_history.jsonl");
-    crate::session::storage::write_jsonl_atomic(&chat_file, &conversation).unwrap();
+    crate::session::storage::write_bytes_atomic_as(
+        &storage.owner(&info).unwrap(),
+        &chat_file,
+        &crate::session::storage::to_jsonl_bytes(&conversation).unwrap(),
+    )
+    .unwrap();
     let persistence = test_seam::spawn_actor(info.clone(), std::sync::Arc::new(storage));
     let truncations = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let restores = std::rc::Rc::new(std::cell::Cell::new(0usize));
@@ -1421,7 +1426,8 @@ async fn run_abandoned_end_scenario() {
     }
     let project = tempfile::tempdir().unwrap();
     let root = project.path();
-    let (actor, _gateway_rx) = actor_on_real_fs(root, persistence_tx, "p153-abandoned-end").await;
+    let (mut actor, _gateway_rx) = actor_on_real_fs(root, persistence_tx, "p153-abandoned-end").await;
+    super::support::give_test_writer(&mut actor);
     let session_dir = crate::session::persistence::session_dir(&actor.session_info);
     std::fs::create_dir_all(&session_dir).unwrap();
     let copy = session_dir.join("rewind_points.jsonl.pre-rewind");

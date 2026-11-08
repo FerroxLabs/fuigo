@@ -21,6 +21,7 @@ fn echo_server() -> fuigo_shell::util::config::McpServerConfig {
         .expect("stdio server config")
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn config_writers_replace_a_symlink_and_never_write_its_target() {
     // One #[test] per binary: the env is process-global and `fuigo_home()` is cached.

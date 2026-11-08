@@ -44,6 +44,7 @@ impl acp::Client for Recorder {
 
 const AGENT: &str = "---\nname: p148inl\ndescription: p148 inline mcp probe\nmcpServers:\n  - p148_inl_h:\n      type: http\n      url: http://127.0.0.1:9/mcp\n      headers:\n        - name: X-Ref\n          value: \"${FUIGO_API_KEY}\"\n---\nYou are a test agent. Reply done.\n";
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn an_agent_inline_mcp_server_naming_the_key_is_announced_to_the_session() {
     run_agent_test(|cwd, mock| async move {

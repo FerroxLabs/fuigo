@@ -1245,10 +1245,12 @@ pub async fn run_leader(
                                 crate::leader::server::note_agent_request(&msg, &agent_out_board);
                                 let maybe_tx = agent_to_ws_tx_clone.lock();
                                 // P1 (1.0.40): the reopen notice is for one opted-in local connection, never the relay.
+                                // F5-N: nor is `folder_trust_reload`, and the relay opts in to no F5-N field.
                                 if let Some(ref tx) = *maybe_tx
                                     && !crate::leader::server::is_folder_trust_reopen_notice_line(&msg)
+                                    && !crate::leader::server::is_folder_trust_reload_line(&msg)
                                 {
-                                    let _ = tx.send(msg.clone());
+                                    let _ = tx.send(crate::leader::server::fit_folder_trust_line_for_relay(msg.clone()));
                                 }
                                 drop(maybe_tx);
                                 let _ = agent_to_ipc_tx_clone.send(msg);
@@ -1560,12 +1562,15 @@ pub async fn run_leader(
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     Ok(())
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "p93_relay_opt_in_tests.rs"]
 mod p93_relay_opt_in_tests;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "p125_relay_tests.rs"]
 mod p125_relay_tests;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

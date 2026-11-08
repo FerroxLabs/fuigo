@@ -5,8 +5,13 @@
 
 use std::path::PathBuf;
 
+use fuigo_tools::computer::types::OutputLog;
+
 pub(crate) struct OutputRecorder {
     path: PathBuf,
+    /// How the log is written (design F5 §5.4.2): through the session's writer, which this recorder (and so the
+    /// detached exit watcher that owns it) holds until it drops, or by path at `path` when the session has none.
+    log: OutputLog,
     last: String,
     /// Must span the whole client buffer, or a rolled buffer's overlap is missed and the snapshot is re-appended each poll.
     overlap_window: usize,
@@ -17,9 +22,10 @@ pub(crate) struct OutputRecorder {
 }
 
 impl OutputRecorder {
-    pub(crate) fn new(path: PathBuf, output_byte_limit: usize) -> Self {
+    pub(crate) fn new(path: PathBuf, output_byte_limit: usize, log: OutputLog) -> Self {
         Self {
             path,
+            log,
             last: String::new(),
             overlap_window: output_byte_limit,
             realign_warned: false,
@@ -33,10 +39,17 @@ impl OutputRecorder {
         &self.last
     }
 
+    #[allow(clippy::disallowed_methods, reason = "`OutputLog::ByPath` only (tests); `OutputLog::open` gives a session without a writer `Unavailable`, so no session folder gets here.")]
     pub(crate) async fn initialize(&self) {
+        // Through the session's writer the log was created (owner-only) when it was opened; no writer that could
+        // open it means no log.
+        if !matches!(self.log, OutputLog::ByPath) {
+            return;
+        }
         // A client terminal's output log is session content: owner-only folder and file (P150, S14).
         let path = self.path.clone();
         let created = tokio::task::spawn_blocking(move || {
+            // F5-A: `OutputLog::ByPath` only (tests); `OutputLog::open` gives a session without a writer `Unavailable`, so no session folder gets here.
             if let Some(parent) = path.parent() {
                 let _ = fuigo_config::create_dir_all_owner_only(parent);
             }
@@ -51,6 +64,7 @@ impl OutputRecorder {
 
     /// Append what `current` adds beyond the previous snapshot, realigning on the largest overlap once the buffer rolls.
     /// On write error `last` is left unadvanced so the next poll retries, and the error is returned.
+    #[allow(clippy::disallowed_methods, reason = "`OutputLog::ByPath` only (tests); a session without a writer is `Unavailable` (see `initialize`).")]
     pub(crate) async fn append(&mut self, current: &str) -> std::io::Result<()> {
         // An empty snapshot must not clear the baseline, or the next cumulative one gets re-appended in full
         if current.is_empty() || current == self.last {
@@ -76,9 +90,14 @@ impl OutputRecorder {
                 &current[overlap..]
             }
         };
-        if !new_suffix.is_empty() {
+        if !new_suffix.is_empty() && !matches!(self.log, OutputLog::ByPath) {
+            if let OutputLog::Session(log) = &self.log {
+                log.write_all_async(new_suffix.as_bytes().to_vec()).await?;
+            }
+        } else if !new_suffix.is_empty() {
             use tokio::io::AsyncWriteExt;
             if self.file.is_none() {
+                // F5-A: `OutputLog::ByPath` only (tests); a session without a writer is `Unavailable` (see `initialize`).
                 let mut options = tokio::fs::OpenOptions::new();
                 options.create(true).append(true);
                 #[cfg(unix)]
@@ -180,6 +199,7 @@ pub(crate) async fn read_log_tail(path: &std::path::Path, limit: usize) -> Optio
     })
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,7 +230,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("task.log");
-        let mut recorder = OutputRecorder::new(path.clone(), 1024 * 1024);
+        let mut recorder = OutputRecorder::new(path.clone(), 1024 * 1024, OutputLog::ByPath);
         recorder.append("line1\n").await.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "line1\n");
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
@@ -220,7 +240,7 @@ mod tests {
     async fn recorder_appends_cumulative_suffixes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("task.log");
-        let mut recorder = OutputRecorder::new(path.clone(), 1024 * 1024);
+        let mut recorder = OutputRecorder::new(path.clone(), 1024 * 1024, OutputLog::ByPath);
         recorder.initialize().await;
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
         // P150 (S14): a client terminal's log is session content, owner-only.
@@ -246,7 +266,7 @@ mod tests {
     async fn recorder_retries_the_suffix_after_a_failed_write() {
         let dir = tempfile::tempdir().unwrap();
 
-        let mut recorder = OutputRecorder::new(dir.path().to_path_buf(), 1024 * 1024);
+        let mut recorder = OutputRecorder::new(dir.path().to_path_buf(), 1024 * 1024, OutputLog::ByPath);
         assert!(recorder.append("line1\n").await.is_err());
         assert_eq!(recorder.last, "");
 
@@ -261,7 +281,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("task.log");
         let limit = 8usize;
-        let mut recorder = OutputRecorder::new(path.clone(), limit);
+        let mut recorder = OutputRecorder::new(path.clone(), limit, OutputLog::ByPath);
         recorder.initialize().await;
 
         let full = "abcdefghijklmnopqrstuvwxyz";
@@ -277,7 +297,7 @@ mod tests {
     async fn recorder_ignores_empty_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("task.log");
-        let mut recorder = OutputRecorder::new(path.clone(), 1024 * 1024);
+        let mut recorder = OutputRecorder::new(path.clone(), 1024 * 1024, OutputLog::ByPath);
         recorder.initialize().await;
 
         recorder.append("line1\nline2\n").await.unwrap();
@@ -311,5 +331,41 @@ mod tests {
         let tail = read_log_tail(&path, 1024).await.unwrap();
         assert_eq!(tail.text, "ab");
         assert!(!tail.truncated);
+    }
+
+    /// Through the session's writer (design F5 §5.4.2): the recorder appends with its `SessionAppend`, and the
+    /// session's writer is not free while a recorder (a detached exit watcher's) exists. 1.0.40's recorder wrote by
+    /// path and held no writer.
+    #[tokio::test]
+    async fn session_log_holds_the_writer_while_the_recorder_lives() {
+        use fuigo_session_writer::SessionWriter;
+        let dir = tempfile::tempdir().unwrap();
+        let id = "output-recorder-session-log";
+        let folder = dir.path().join(id);
+        let writer = SessionWriter::try_claim(id, &folder).unwrap();
+        let rel = PathBuf::from("terminal").join("t1.log");
+        let log = OutputLog::open(Some(&writer), rel.clone()).await;
+        assert!(matches!(log, OutputLog::Session(_)));
+        drop(writer);
+        let mut recorder = OutputRecorder::new(folder.join(&rel), 1024 * 1024, log);
+        recorder.initialize().await;
+        recorder.append("hello ").await.unwrap();
+        recorder.append("hello world").await.unwrap();
+        assert!(!SessionWriter::is_free(id), "the recorder holds the session writer");
+        assert_eq!(std::fs::read_to_string(folder.join(&rel)).unwrap(), "hello world");
+        drop(recorder);
+        assert!(SessionWriter::is_free(id), "the writer frees with the recorder");
+    }
+
+    /// F5-C4: a session without a writer gets `OutputLog::Unavailable`; the recorder then creates and appends
+    /// nothing by path.
+    #[tokio::test]
+    async fn unavailable_log_writes_nothing_by_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session").join("terminal").join("task.log");
+        let mut recorder = OutputRecorder::new(path.clone(), 1024 * 1024, OutputLog::Unavailable);
+        recorder.initialize().await;
+        recorder.append("line1\n").await.unwrap();
+        assert!(!dir.path().join("session").exists(), "an unavailable log created the session folder");
     }
 }

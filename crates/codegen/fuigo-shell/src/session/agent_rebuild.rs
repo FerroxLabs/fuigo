@@ -70,6 +70,9 @@ pub(crate) struct AgentRebuildSpec {
     pub fs_backend: Arc<dyn AsyncFileSystem>,
     pub tools_notification_handle: ToolNotificationHandle,
     pub bridge_state_path: PathBuf,
+    /// The session's writer (design F5 §5.4.2), passed to every agent build so the toolset writes the session folder
+    /// only through it. Every spawned session sets it (the spawn takes a claimed writer, F5-T); `None` is test fixtures only.
+    pub session_writer: Option<fuigo_session_writer::SessionWriter>,
     pub session_env: Arc<HashMap<String, String>>,
     pub models_manager: crate::agent::models::ModelsManager,
     pub compaction_policy: CompactionPolicy,
@@ -183,6 +186,7 @@ impl AgentRebuildSpec {
             fs_backend,
             tools_notification_handle,
             bridge_state_path,
+            session_writer,
             session_env,
             models_manager,
             compaction_policy,
@@ -270,6 +274,7 @@ impl AgentRebuildSpec {
         .with_system_prompt_label(system_prompt_label.clone())
         .with_session_env(session_env.clone())
         .with_state_path(bridge_state_path.clone())
+        .with_session_writer(session_writer.clone())
         .with_web_search_config(web_search_config.clone())
         .with_backend_search(*backend_search)
         .with_image_gen_config(image_gen_config.clone())
@@ -381,7 +386,10 @@ impl AgentRebuildSpec {
                                                 sender.clone(),
                                                 session_id_str.clone(),
                                             ),
-                                        ),
+                                        )
+                                        // The child records in this session's folder are written as this session's
+                                        // writer (design F5 §5.5, Fable M3).
+                                        .with_parent_writer(session_writer.clone()),
                                 ),
                             ),
                         );
@@ -444,6 +452,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         fs_backend: Arc::new(fuigo_tools::computer::local::LocalFs),
         tools_notification_handle: ToolNotificationHandle::noop(),
         bridge_state_path: std::env::temp_dir().join("test_tool_state.json"),
+        session_writer: None,
         session_env: Arc::new(HashMap::new()),
         models_manager: crate::agent::models::ModelsManager::default(),
         compaction_policy: CompactionPolicy::default(),
@@ -503,6 +512,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         parent_scheduler_handle: None,
     })
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

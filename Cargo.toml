@@ -67,6 +67,7 @@ members = [
     "crates/codegen/fuigo-external-agent-migration",
     "crates/codegen/fuigo-secrets",
     "crates/codegen/fuigo-session-events",
+    "crates/codegen/fuigo-session-writer",
     "crates/codegen/fuigo-session-search",
     "crates/codegen/fuigo-shared",
     "crates/codegen/fuigo-shell",
@@ -365,6 +366,7 @@ fuigo-models = { path = "crates/codegen/fuigo-models" }
 fuigo-sampler = { path = "crates/codegen/fuigo-sampler" }
 fuigo-secrets = { path = "crates/codegen/fuigo-secrets" }
 fuigo-session-events = { path = "crates/codegen/fuigo-session-events" }
+fuigo-session-writer = { path = "crates/codegen/fuigo-session-writer" }
 fuigo-session-search = { path = "crates/codegen/fuigo-session-search" }
 fuigo-shared = { path = "crates/codegen/fuigo-shared" }
 fuigo-shell = { path = "crates/codegen/fuigo-shell" }

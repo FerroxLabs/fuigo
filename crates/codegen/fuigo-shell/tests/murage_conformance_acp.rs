@@ -349,6 +349,7 @@ impl Murage {
 }
 
 /// Plant a trust-gated project config: a project `.mcp.json` declaring one stdio server.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn plant_project_mcp(sandbox: &TestSandbox) {
     std::fs::write(
         sandbox.workspace().join(".mcp.json"),
@@ -570,6 +571,7 @@ fn script_terminal_call(
 /// E.1 semantics of the security-critical `--permission-mode`: under `default` a side-effecting tool call
 /// asks the client (`session/request_permission`) and a rejection stops it; under `bypassPermissions` the
 /// same call runs with no question asked.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 async fn permission_mode_flag_governs_tool_approval() {
     for (global, expect_question) in [(GLOBAL_DEFAULT, true), (GLOBAL_BYPASS, false)] {
@@ -670,6 +672,7 @@ async fn model_and_reasoning_effort_flags_reach_inference() {
 
 /// E.1 semantics of `--no-leader`: with `[cli] use_leader = true` in the user config, `agent stdio` would
 /// attach to (or start) a shared leader. Murage's `--no-leader` must keep the process standalone.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 async fn no_leader_flag_keeps_the_agent_standalone_when_config_enables_leader() {
     let mut m = Murage::spawn(
@@ -1318,6 +1321,7 @@ done
 /// `{"action":"accept","content":…}`; (2) readiness is `_fuigo/mcp_initialized` with the server's tool
 /// counted (the background-handshake send site, not the no-server shortcut).
 /// Unix only: the fixture server is a POSIX `sh` script (Murage's own platforms run the same Fuigo path).
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn murage_mcp_server_elicit_and_ready_wire_names() {
@@ -1874,6 +1878,7 @@ async fn runtime_api_key_authenticates_with_no_env_or_config_key() {
 /// P08 acceptance 2, strong form: an `auth.json` that already exists (holding another key) is byte-for-byte
 /// unchanged by a session-only `authenticate`, and the key the client supplied, not the one on disk (which
 /// the agent loads at `initialize`), is the one inference bills.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_api_key_leaves_an_existing_auth_json_byte_identical() {
     let seeded = json!({
@@ -2268,6 +2273,7 @@ async fn malformed_wire_lines_carrying_the_key_reach_no_log() {
 /// Astra r4: with a model whose `env_key` names `FUIGO_API_KEY`, a runtime key also reaches the AuthManager's
 /// process static key (via `sync_process_static_api_key`). Clearing through `fuigo/setApiKey` must re-derive that
 /// copy too, or `getBearerToken` hands the cleared key out (the transcript scan in `assert_key_nowhere` sees it).
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 async fn set_api_key_clear_with_a_mapped_model_hands_out_nothing() {
     let mut m = Murage::spawn(
@@ -2307,6 +2313,7 @@ const P70_DISK_KEY: &str = "p70-disk-key-FAKE-4e9a1c7d2b";
 /// An innocuous variable in the agent's environment: the control that the child really inherits the agent's env.
 const P70_CANARY: (&str, &str) = ("P70_INHERITED_CANARY", "p70-canary-present");
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn seed_auth_json(sandbox: &TestSandbox, key: &str) {
     let seeded = json!({
         "fuigo::api_key": {
@@ -2331,6 +2338,7 @@ fn seed_auth_json(sandbox: &TestSandbox, key: &str) {
 /// passes with the old `set_var` too (Astra r1). `client_terminal_child_does_not_inherit_the_saved_key` below and
 /// `auth_method`'s unit tests are the ones that fail when the key is put back into the environment.
 /// Controls: the dump holds the child's `HOME` and the canary the agent was given.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 async fn auth_json_key_authenticates_and_reaches_no_tool_child() {
     let mut m = Murage::spawn(
@@ -2431,6 +2439,7 @@ async fn injected_env_key_outranks_the_auth_json_key() {
 /// holds its value under no name. Like the test above it passes with the old `set_var` too (the shell tool strips the
 /// name unconditionally); `client_terminal_child_does_not_inherit_the_saved_key` and `auth_method`'s unit tests are
 /// the ones that fail when the key is put back into the environment.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 async fn set_api_key_key_authenticates_and_reaches_no_tool_child() {
     const SET_KEY: &str = "p70-setapikey-FAKE-8c3f0e1a6d";
@@ -2748,6 +2757,7 @@ async fn poll_for<T>(timeout: Duration, mut read: impl FnMut() -> Option<T>) -> 
 /// canary is the control), so they also show the key never entered the agent's own environment.
 /// `/proc/<agent>/environ` (Linux) is checked too; it shows the environment the agent was STARTED with, so it is a
 /// control on the launch, not a detector of a later `set_var`.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn explicit_key_references_in_config_reach_only_their_own_destination() {

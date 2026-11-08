@@ -78,7 +78,7 @@ Leave the current session and return to the welcome screen. Alias: `/welcome`.
 
 ### `/delete`
 
-Delete the current session's history. Confirms first. Stops any running turn, background tasks, and subagents before wiping history. Returns to the welcome screen, or to the dashboard when you opened the session from the dashboard.
+Delete the current session's history. Confirms first, and the confirmation starts on Cancel, so pressing `Enter` keeps the session; press `1` to delete. Stops any running turn, background tasks, and subagents before wiping history. Returns to the welcome screen, or to the dashboard when you opened the session from the dashboard.
 
 To delete a session you are not in, open `/resume` or the welcome session list and press `d` then `y`. On the dashboard, press `Ctrl+X` twice or click `[✗]`.
 
@@ -224,7 +224,13 @@ Save a note to memory immediately, without waiting for an automatic summary.
 
 Open the extensions modal on the Hooks tab, where you can view loaded hooks, add or remove custom ones, and toggle them individually. The modal does not grant project trust — see [10-hooks.md](10-hooks.md) for the trust model.
 
-The shell also advertises individual `/hooks-list`, `/hooks-trust` (alias `/trust`), `/hooks-add`, `/hooks-remove`, and `/hooks-untrust` (alias `/untrust`) commands; in the pager these are folded into the `/hooks` modal. `/trust` and `/untrust` trust or stop trusting the whole folder: its settings and its shell commands (see [Folder trust](22-permissions-and-safety.md#folder-trust)).
+The shell also advertises individual `/hooks-list`, `/hooks-trust` (alias `/trust`), `/hooks-add`, `/hooks-remove`, and `/hooks-untrust` (alias `/untrust`) commands; in the pager these are folded into the `/hooks` modal and the `/trust` screens. In an ACP client `/trust` and `/untrust` trust or stop trusting the whole folder: its settings and its shell commands (see [Folder trust](22-permissions-and-safety.md#folder-trust)).
+
+### `/trust`
+
+Open the folder trust screens (full-screen app only). **This folder** shows the session folder, its trust key (the repository root, or the folder) and whether it is trusted. `t` trusts it and `u` stops trusting it; each asks `y` to confirm (any other key cancels). **Trusted folders** (`Tab`) lists every folder you trusted, marking this folder and any folder trusted before 1.0.35 for its settings only; `Up`/`Down` (or `k`/`j`) select and `u` stops trusting the selected folder. `Esc` closes.
+
+Trusting here is the same as typing `/hooks-trust`: the session reloads with the folder's settings, exactly as after the trust question. Stopping trust takes effect at once for shell commands (the next one asks); settings a session already loaded stay until you reopen it. `/untrust` still stops trusting this folder without the screens.
 
 ### `/plugins`
 

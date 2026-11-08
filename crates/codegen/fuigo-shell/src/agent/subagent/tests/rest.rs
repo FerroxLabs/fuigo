@@ -466,13 +466,13 @@ fn snapshot_test_meta(id: &str) -> SubagentMeta {
 #[test]
 fn update_subagent_meta_snapshot_ref_persists_to_disk() {
     let dir = tempfile::TempDir::new().unwrap();
-    assert!(write_subagent_meta(
+    assert!(write_subagent_meta_at(
             dir.path(),
             &snapshot_test_meta("sa-write")
         ));
     assert!(
             update_subagent_meta_snapshot_ref(
-                dir.path(),
+                &SubagentRecords::fixture(dir.path()),
                 "refs/fuigo/subagents/sa-write",
                 "completed"
             ),
@@ -496,7 +496,7 @@ fn update_subagent_meta_snapshot_ref_persists_to_disk() {
 fn update_subagent_meta_snapshot_ref_reports_failure_when_meta_missing() {
     let dir = tempfile::TempDir::new().unwrap();
     assert!(!update_subagent_meta_snapshot_ref(
-            dir.path(),
+                &SubagentRecords::fixture(dir.path()),
             "refs/fuigo/subagents/sa-missing",
             "completed"
         ));
@@ -508,9 +508,9 @@ fn snapshot_ref_write_promotes_nonterminal_status_to_terminal() {
     let dir = tempfile::TempDir::new().unwrap();
     let mut meta = snapshot_test_meta("sa-promote");
     meta.status = "running".into();
-    assert!(write_subagent_meta(dir.path(), &meta));
+    assert!(write_subagent_meta_at(dir.path(), &meta));
     assert!(update_subagent_meta_snapshot_ref(
-            dir.path(),
+                &SubagentRecords::fixture(dir.path()),
             "refs/fuigo/subagents/x",
             "completed"
         ));
@@ -643,6 +643,7 @@ fn inherited_child_toolset_cannot_reintroduce_workflow() {
 }
 /// The gate keeping a worktree must leave no resume pointer.
 /// A pointer sends resume down the rehydrate path, which deletes the directory and rebuilds it from a snapshot that lacks whatever kept it.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test]
 async fn kept_worktree_leaves_no_resume_pointer() {
     fuigo_test_utils::require_git!();
@@ -665,11 +666,11 @@ async fn kept_worktree_leaves_no_resume_pointer() {
     ctx.agent_config = Some(config);
     assert!(ctx.resolve_subagent_worktree_snapshot_enabled());
     let meta_dir = temp.path().join("meta");
-    write_subagent_meta(&meta_dir, &snapshot_test_meta("keeps-1"));
+    write_subagent_meta_at(&meta_dir, &snapshot_test_meta("keeps-1"));
     let disposal = crate::agent::subagent::handle_request::dispose_worktree_after_completion(
             &wt,
             &repo,
-            &meta_dir,
+            &SubagentRecords::fixture(&meta_dir),
             "completed",
             "keeps-1",
         )
@@ -707,11 +708,11 @@ async fn disposed_linked_worktree_persists_the_pointer_then_removes_the_director
     let wt = temp.path().join("subagent-reclaim-1");
     fuigo_fast_worktree::WorktreeBuilder::new(&repo, &wt).create().unwrap();
     let meta_dir = temp.path().join("meta");
-    write_subagent_meta(&meta_dir, &snapshot_test_meta("reclaim-1"));
+    write_subagent_meta_at(&meta_dir, &snapshot_test_meta("reclaim-1"));
     let disposal = crate::agent::subagent::handle_request::dispose_worktree_after_completion(
             &wt,
             &repo,
-            &meta_dir,
+            &SubagentRecords::fixture(&meta_dir),
             "completed",
             "reclaim-1",
         )
@@ -745,11 +746,11 @@ async fn disposal_names_a_reflog_only_commit_before_removing_the_worktree() {
     fuigo_fast_worktree::WorktreeBuilder::new(&repo, &wt).create().unwrap();
     let discarded = reflog_only_commit(&wt, None);
     let meta_dir = temp.path().join("meta");
-    write_subagent_meta(&meta_dir, &snapshot_test_meta("reclaim-2"));
+    write_subagent_meta_at(&meta_dir, &snapshot_test_meta("reclaim-2"));
     let disposal = crate::agent::subagent::handle_request::dispose_worktree_after_completion(
             &wt,
             &repo,
-            &meta_dir,
+            &SubagentRecords::fixture(&meta_dir),
             "completed",
             "reclaim-2",
         )
@@ -1253,6 +1254,7 @@ fn token_estimation_accounts_for_images() {
     let multi_tokens = fuigo_chat_state::estimate_conversation_tokens(&multi_image);
     assert_eq!(multi_tokens, 765 * 3, "three images = 3 * 765 tokens");
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn durable_fallback_roundtrips_child_cwd_and_worktree() {
     let dir = std::env::temp_dir()
@@ -1276,7 +1278,7 @@ fn durable_fallback_roundtrips_child_cwd_and_worktree() {
         effective_model_id: Some("grok-3".into()),
         ..base_meta()
     };
-    write_subagent_meta(&dir, &meta);
+    write_subagent_meta_at(&dir, &meta);
     let data = std::fs::read_to_string(dir.join("meta.json")).unwrap();
     let loaded: SubagentMeta = serde_json::from_str(&data).unwrap();
     assert_eq!(loaded.child_cwd.as_deref(), Some("/workspace/project"));
@@ -1284,6 +1286,7 @@ fn durable_fallback_roundtrips_child_cwd_and_worktree() {
     assert_eq!(loaded.status, "completed");
     let _ = std::fs::remove_dir_all(&dir);
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn durable_fallback_rejects_running_status() {
     let dir = std::env::temp_dir()
@@ -1301,7 +1304,7 @@ fn durable_fallback_rejects_running_status() {
         child_cwd: Some("/workspace".into()),
         ..base_meta()
     };
-    write_subagent_meta(&parent_dir, &meta);
+    write_subagent_meta_at(&parent_dir, &meta);
     let data = std::fs::read_to_string(parent_dir.join("meta.json")).unwrap();
     let loaded: SubagentMeta = serde_json::from_str(&data).unwrap();
     let is_terminal = matches!(loaded.status.as_str(), "completed" | "failed" | "cancelled");
@@ -1405,6 +1408,7 @@ async fn reconcile_with_inspections(
     gateway: &GatewaySender,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
 ) {
+    let _fixture = records_by_path_in_tests();
     let expected = inspections.len();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let backend = ChannelBackend::new(event_tx);
@@ -1426,6 +1430,7 @@ async fn reconcile_with_inspections(
                 "parent-x",
                 gateway,
                 parent_cmd_tx,
+                None,
                 ORPHAN_RECONCILE_REASON,
                 std::sync::Arc::new(tokio::sync::Mutex::new(())),
             ),
@@ -1454,6 +1459,7 @@ async fn live_reconcile_with_heal_lock(
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
     heal_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 ) {
+    let _fixture = records_by_path_in_tests();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let backend = ChannelBackend::new(event_tx);
     let respond = tokio::spawn(async move {
@@ -1473,6 +1479,7 @@ async fn live_reconcile_with_heal_lock(
                 "parent-x",
                 gateway,
                 parent_cmd_tx,
+                None,
                 heal_lock,
             ),
         )
@@ -1487,7 +1494,7 @@ async fn reconcile_orphan_flips_running_meta_to_cancelled() {
     let session_dir = tempfile::TempDir::new().unwrap();
     let id = "sa-orphan";
     let sub_dir = session_dir.path().join("subagents").join(id);
-    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    write_subagent_meta_at(&sub_dir, &running_test_meta(id, "parent-x"));
     let (gateway, mut gateway_rx) = test_gateway_with_receiver();
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     reconcile_with_inspections(
@@ -1519,7 +1526,7 @@ async fn reconcile_orphan_skips_shared_actor_live_child() {
     let session_dir = tempfile::TempDir::new().unwrap();
     let id = "sa-live";
     let sub_dir = session_dir.path().join("subagents").join(id);
-    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    write_subagent_meta_at(&sub_dir, &running_test_meta(id, "parent-x"));
     reconcile_with_inspections(
             &[],
             HashMap::from([
@@ -1544,7 +1551,7 @@ async fn reconcile_reemits_shared_actor_terminal_outcome() {
     let session_dir = tempfile::TempDir::new().unwrap();
     let id = "sa-raced";
     let sub_dir = session_dir.path().join("subagents").join(id);
-    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    write_subagent_meta_at(&sub_dir, &running_test_meta(id, "parent-x"));
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     reconcile_with_inspections(
             &[(id.to_string(), format!("child-{id}"))],
@@ -1595,7 +1602,7 @@ async fn live_reconcile_finalizes_running_meta_not_in_coordinator() {
     let session_dir = tempfile::TempDir::new().unwrap();
     let id = "sa-live-orphan";
     let sub_dir = session_dir.path().join("subagents").join(id);
-    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    write_subagent_meta_at(&sub_dir, &running_test_meta(id, "parent-x"));
     let (gateway, mut gateway_rx) = test_gateway_with_receiver();
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     live_reconcile_with_inspections(
@@ -1626,7 +1633,7 @@ async fn live_reconcile_skips_live_coordinator_child() {
     let session_dir = tempfile::TempDir::new().unwrap();
     let id = "sa-live-keep";
     let sub_dir = session_dir.path().join("subagents").join(id);
-    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    write_subagent_meta_at(&sub_dir, &running_test_meta(id, "parent-x"));
     live_reconcile_with_inspections(
             HashMap::from([
                 (
@@ -1663,7 +1670,7 @@ async fn live_reconcile_reemitted_finish_has_will_wake_false() {
     let session_dir = tempfile::TempDir::new().unwrap();
     let id = "sa-live-raced";
     let sub_dir = session_dir.path().join("subagents").join(id);
-    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    write_subagent_meta_at(&sub_dir, &running_test_meta(id, "parent-x"));
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     live_reconcile_with_inspections(
             HashMap::from([
@@ -1712,7 +1719,7 @@ async fn live_reconcile_persists_terminal_meta_so_second_tick_is_noop() {
     let session_dir = tempfile::TempDir::new().unwrap();
     let id = "sa-live-once";
     let sub_dir = session_dir.path().join("subagents").join(id);
-    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    write_subagent_meta_at(&sub_dir, &running_test_meta(id, "parent-x"));
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     let completed = inspection(
         id,
@@ -1779,7 +1786,7 @@ async fn live_reconcile_overlapping_ticks_emit_once() {
     let session_dir = tempfile::TempDir::new().unwrap();
     let id = "sa-live-race";
     let sub_dir = session_dir.path().join("subagents").join(id);
-    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    write_subagent_meta_at(&sub_dir, &running_test_meta(id, "parent-x"));
     let (gateway, mut gateway_rx) = test_gateway_with_receiver();
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     let completed = inspection(
@@ -1855,7 +1862,7 @@ async fn live_reconcile_ignores_terminal_on_disk_meta() {
         let sub_dir = session_dir.path().join("subagents").join(&id);
         let mut meta = running_test_meta(&id, "parent-x");
         meta.status = status.to_string();
-        write_subagent_meta(&sub_dir, &meta);
+        write_subagent_meta_at(&sub_dir, &meta);
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         live_reconcile_with_inspections(
                 HashMap::from([(id.clone(), None)]),
@@ -1895,7 +1902,7 @@ async fn live_reconcile_persists_failed_and_cancelled_inspection() {
         let session_dir = tempfile::TempDir::new().unwrap();
         let id = format!("sa-insp-{expected}");
         let sub_dir = session_dir.path().join("subagents").join(&id);
-        write_subagent_meta(&sub_dir, &running_test_meta(&id, "parent-x"));
+        write_subagent_meta_at(&sub_dir, &running_test_meta(&id, "parent-x"));
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         live_reconcile_with_inspections(
                 HashMap::from([(id.clone(), Some(inspection(&id, status)))]),
@@ -1929,7 +1936,7 @@ async fn reconcile_dedups_replay_and_running_meta_sources() {
     let session_dir = tempfile::TempDir::new().unwrap();
     let id = "sa-crash";
     let sub_dir = session_dir.path().join("subagents").join(id);
-    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    write_subagent_meta_at(&sub_dir, &running_test_meta(id, "parent-x"));
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     reconcile_with_inspections(
             &[(id.to_string(), format!("child-{id}"))],
@@ -2020,6 +2027,7 @@ fn resume_identity_does_not_gate_on_model() {
             "source model remains available for pinning"
         );
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn durable_meta_roundtrips_effective_model_id() {
     let dir = std::env::temp_dir()
@@ -2039,7 +2047,7 @@ fn durable_meta_roundtrips_effective_model_id() {
         effective_model_id: Some("grok-3".into()),
         ..base_meta()
     };
-    write_subagent_meta(&dir, &meta);
+    write_subagent_meta_at(&dir, &meta);
     let data = std::fs::read_to_string(dir.join("meta.json")).unwrap();
     let loaded: SubagentMeta = serde_json::from_str(&data).unwrap();
     assert_eq!(

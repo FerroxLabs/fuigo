@@ -83,8 +83,18 @@ pub(crate) fn essential_writable_paths(workspace: &Path) -> Vec<PathBuf> {
 ///
 /// Strict may read `fuigo_home()` but must not write the parent.
 /// Events JSONL lives under `sessions/`.
+///
+/// With session persistence off (F12, `--no-session-persistence`) the session tree is not granted: applying a grant
+/// creates a missing directory, and a run that persists nothing must not make `<fuigo_home>/sessions` (review r2).
 pub(crate) fn essential_writable_paths_strict(workspace: &Path) -> Vec<PathBuf> {
-    let mut paths = vec![workspace.to_path_buf(), fuigo_home().join("sessions")];
+    strict_writable_paths(workspace, fuigo_config::session_persistence_disabled())
+}
+
+fn strict_writable_paths(workspace: &Path, persistence_off: bool) -> Vec<PathBuf> {
+    let mut paths = vec![workspace.to_path_buf()];
+    if !persistence_off {
+        paths.push(fuigo_home().join("sessions"));
+    }
     paths.extend(temp_writable_paths());
     paths
 }
@@ -95,4 +105,20 @@ pub(crate) fn essential_writable_paths_minimal() -> Vec<PathBuf> {
     let mut paths = vec![fuigo_home()];
     paths.extend(temp_writable_paths());
     paths
+}
+
+#[cfg(test)]
+mod r2_tests {
+    use super::*;
+
+    /// Review r2 (F12): the strict profile's read_write grants name the session tree only while persistence is on.
+    #[test]
+    fn r2f12_strict_profile_grants_the_session_tree_only_with_persistence_on() {
+        let workspace = Path::new("/work/space");
+        let sessions = fuigo_home().join("sessions");
+        assert!(strict_writable_paths(workspace, false).contains(&sessions));
+        let off = strict_writable_paths(workspace, true);
+        assert!(!off.iter().any(|p| p.starts_with(&sessions)), "{off:?}");
+        assert!(off.contains(&workspace.to_path_buf()), "the workspace stays writable: {off:?}");
+    }
 }

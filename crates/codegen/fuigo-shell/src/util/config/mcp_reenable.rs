@@ -120,6 +120,7 @@ pub(crate) fn reenableable_disabled_stubs(
     index.reenableable_for_list(disabled_names, catalog_names, &settings.mcp_allowlist)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

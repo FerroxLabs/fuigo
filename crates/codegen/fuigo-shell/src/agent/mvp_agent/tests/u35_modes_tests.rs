@@ -27,6 +27,7 @@ fn marker_agent(name: &str) -> String {
 }
 
 /// A git-initialised repo (bounds the trust walk) holding `.fuigo/agents/<stem>.md` marker files.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn repo_with_agents(stems: &[&str]) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
@@ -57,6 +58,7 @@ struct TrustEnv {
     _flag: EnvGuard,
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn trust_env() -> TrustEnv {
     let home = fuigo_test_support::FuigoHome::new();
     std::fs::create_dir_all(home.path().join("agents")).unwrap();
@@ -356,6 +358,7 @@ async fn untrusted_project_agents_reach_no_entry_point() {
 }
 
 /// One enabled plugin `plug` whose `reviewer` agent asks for a full prompt and a marker user template.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn plugin_registry(agent_dir: &Path, trusted: bool, scope: fuigo_agent::plugins::PluginScope) -> fuigo_agent::plugins::PluginRegistry {
     use fuigo_agent::plugins::discovery::{DiscoveredPlugin, PluginId};
     use fuigo_agent::plugins::manifest::PluginManifest;
@@ -725,6 +728,7 @@ fn session_responses_advertise_modes() {
 /// Cold load of a session whose persisted plan state is Active advertises `plan`.
 const COLD_TEST: &str = "agent::mvp_agent::tests::u35_modes_tests::cold_load_of_persisted_plan_advertises_plan";
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 #[serial_test::serial]
 fn cold_load_of_persisted_plan_advertises_plan() {

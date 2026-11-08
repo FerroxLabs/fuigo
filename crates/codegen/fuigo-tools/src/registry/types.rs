@@ -277,6 +277,11 @@ pub struct SessionContext {
     /// Empty means this registry gives the session a handle that reads and writes nothing. `fuigo-agent` reads
     /// the same empty value as "use the temp directory" for `session_folder`; unifying the two is a follow-up.
     pub state_path: PathBuf,
+    /// The session's writer (design F5 §5.4.2). `Some`: every write the toolset makes inside the session folder goes
+    /// through it (resources state, terminal logs, MCP dumps, fetched and generated files), and each holder keeps the
+    /// writer until its write has landed. `None` keeps the by-path behaviour above: headless runs, tests, and the
+    /// workspace daemon's own tree (`<fuigo_home>/workspace/sessions/`), which is not a session folder.
+    pub session_writer: Option<fuigo_session_writer::SessionWriter>,
     /// Optional memory backend for cross-session knowledge retrieval.
     /// When `Some`, injected into `Resources` so `memory_search` / `memory_get`
     /// tools can access it. When `None`, the tools return "not enabled".
@@ -1061,6 +1066,7 @@ impl ToolRegistryBuilder {
     /// Finalize with an explicit `TruncationConfig` so that per-tool
     /// `max_output_bytes` overrides are reflected in tool descriptions.
     /// `workspace_viewer_ctx` is `None` outside a workspace bind.
+    #[allow(clippy::disallowed_methods, reason = "ResourcesPersistence::new_at only when ctx.session_writer is None and state_path is set: the workspace tree or a headless state folder, not a session folder (design F5 5.4.2)")]
     pub fn finalize_with_trunc_config(
         mut self,
         config: ToolServerConfig,
@@ -1105,6 +1111,9 @@ impl ToolRegistryBuilder {
         let cwd = ctx.cwd;
         resources.insert(crate::types::resources::Cwd(cwd.clone()));
         resources.insert(crate::types::resources::SessionFolder(ctx.session_folder));
+        if let Some(writer) = ctx.session_writer.clone() {
+            resources.insert(crate::types::resources::SessionFolderWriter(writer));
+        }
         resources.insert(crate::types::resources::SessionEnv(ctx.session_env));
         if let Some(hook) = self.sandbox_launch.take() {
             resources.insert(hook);
@@ -1223,11 +1232,14 @@ impl ToolRegistryBuilder {
         for entry in self.tools.values() {
             (entry.register_params)(&mut resources);
         }
-        let persistence = Arc::new(if ctx.state_path.as_os_str().is_empty() {
+        let persistence = Arc::new(if let Some(writer) = ctx.session_writer.clone() {
+            ResourcesPersistence::new(writer)
+        } else if ctx.state_path.as_os_str().is_empty() {
             ResourcesPersistence::noop()
         } else {
+            // No writer: a headless or workspace-tree state folder, not a session folder.
             let dir = ctx.state_path.parent().unwrap_or(&ctx.state_path);
-            ResourcesPersistence::new(dir.join("resources_state.json"))
+            ResourcesPersistence::new_at(dir.join(crate::persistence::RESOURCES_STATE_FILE))
         });
         persistence.load(&mut resources);
         let preset_name = config.behavior_preset.as_deref().unwrap_or("current");
@@ -2455,6 +2467,7 @@ fn requirement_error_from_param_error(
     }
     out
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2623,6 +2636,7 @@ mod tests {
             parent_scheduler_handle: None,
             skills: vec![],
             state_path: tmp.path().join("state.json"),
+            session_writer: None,
             memory_backend: None,
             web_search_config: crate::implementations::web_search::WebSearchConfig::default(),
             web_fetch_config:

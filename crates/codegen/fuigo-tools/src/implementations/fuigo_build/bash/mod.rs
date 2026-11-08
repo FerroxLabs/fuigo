@@ -2077,11 +2077,13 @@ impl fuigo_tool_runtime::Tool for BashTool {
         );
 
         // --- Read resources ---
-        let (backend, session_folder, env, notification_handle, owner_session_id) = {
+        let (backend, session_folder, session_writer, env, notification_handle, owner_session_id) = {
             let res = resources.lock().await;
             (
                 res.require::<Terminal>()?.0.clone(),
                 res.require::<SessionFolder>()?.0.clone(),
+                res.get::<crate::types::resources::SessionFolderWriter>()
+                    .map(|w| w.0.clone()),
                 res.require::<SessionEnv>()?.0.as_ref().clone(),
                 res.require::<NotificationHandle>()?.0.clone(),
                 res.get::<crate::types::resources::OwnerSessionId>()
@@ -2216,9 +2218,10 @@ impl fuigo_tool_runtime::Tool for BashTool {
         let display_command: Option<String> = None;
 
         // --- Route to foreground or background ---
-        let output_file = session_folder
-            .join("terminal")
-            .join(format!("{}.log", tool_call_id.as_str()));
+        let output_rel = std::path::PathBuf::from("terminal").join(format!("{}.log", tool_call_id.as_str()));
+        let output_file = session_folder.join(&output_rel);
+        let output_log =
+            crate::computer::types::OutputLog::open(session_writer.as_ref(), output_rel).await;
 
         if input.is_background {
             // ─── Background execution ───
@@ -2247,6 +2250,7 @@ impl fuigo_tool_runtime::Tool for BashTool {
                 timeout,
                 output_byte_limit,
                 output_file,
+                output_log,
                 notification_handle: notification_handle.clone(),
                 tool_call_id: tool_call_id.as_str().to_owned(),
                 display_command: display_command.clone(),
@@ -2333,6 +2337,7 @@ impl fuigo_tool_runtime::Tool for BashTool {
                 timeout,
                 output_byte_limit,
                 output_file: output_file.clone(),
+                output_log,
                 notification_handle: notification_handle.clone(),
                 tool_call_id: tool_call_id.as_str().to_owned(),
                 display_command,

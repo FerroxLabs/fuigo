@@ -24,6 +24,7 @@ fn point_rg_at_a_binary_that_does_not_exist(dir: &std::path::Path) {
     unsafe { std::env::set_var("RG_BIN_PATH", &missing) };
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test]
 async fn a_search_that_cannot_start_is_an_error_not_an_empty_result() {
     let tmp = tempfile::tempdir().unwrap();

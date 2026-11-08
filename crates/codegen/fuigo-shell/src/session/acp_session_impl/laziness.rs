@@ -199,6 +199,7 @@ pub(crate) struct LazinessDebugLogLine {
 
 /// Append a single JSONL line to the debug-log file. Creates the file on first write; subsequent writes append.
 /// Concurrent callers rely on `O_APPEND` for atomic ordering (JSONL lines fit under `PIPE_BUF`).
+#[allow(clippy::disallowed_methods, reason = "--laziness-debug-log path, a user-chosen debug file; not inside a session folder")]
 pub(crate) async fn append_laziness_debug_log_line(
     log_handle: &std::sync::Arc<std::path::Path>,
     line: &LazinessDebugLogLine,

@@ -22,7 +22,7 @@ const LOCK_FILE: &str = "session_writer.lock";
 const REFUSAL: &str = "This session is open in another Fuigo window";
 
 /// Every file under `dir` with its bytes, sorted: what a refused open must leave exactly as it was.
-fn snapshot(dir: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+pub(super) fn snapshot(dir: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
     fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         for entry in rd.flatten() {
@@ -41,6 +41,7 @@ fn snapshot(dir: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
 }
 
 /// What another Fuigo process holds while the session is open there.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn hold_as_another_process(session_dir: &std::path::Path) -> std::fs::File {
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -54,6 +55,7 @@ fn hold_as_another_process(session_dir: &std::path::Path) -> std::fs::File {
 }
 
 /// Whether another process could take the session right now.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn another_process_could_open(session_dir: &std::path::Path) -> bool {
     let Ok(file) = std::fs::OpenOptions::new()
         .read(true)
@@ -82,7 +84,7 @@ async fn wait_until_another_process_could_open(session_dir: &std::path::Path, wh
     }
 }
 
-async fn make_agent(leader: bool) -> crate::agent::mvp_agent::MvpAgentHandle {
+pub(super) async fn make_agent(leader: bool) -> crate::agent::mvp_agent::MvpAgentHandle {
     let agent_config = crate::agent::config::Config::default();
     let (tx, mut gw_rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::task::spawn_local(async move {
@@ -134,7 +136,7 @@ async fn make_agent(leader: bool) -> crate::agent::mvp_agent::MvpAgentHandle {
     agent
 }
 
-async fn load(
+pub(super) async fn load(
     agent: &crate::agent::mvp_agent::MvpAgentHandle,
     session: &str,
     cwd: &std::path::Path,
@@ -143,7 +145,7 @@ async fn load(
     tokio::time::timeout(std::time::Duration::from_secs(120), agent.load_session(request)).await.expect("load timed out")
 }
 
-async fn seed(session: &str, cwd: &std::path::Path) -> std::path::PathBuf {
+pub(super) async fn seed(session: &str, cwd: &std::path::Path) -> std::path::PathBuf {
     let info = Info { id: acp::SessionId::new(session), cwd: cwd.to_string_lossy().into_owned() };
     JsonlStorageAdapter::new().init_session(&info, acp::ModelId::new("test-model")).await.expect("init session");
     let dir = crate::session::persistence::session_dir(&info);
@@ -224,7 +226,7 @@ fn a_session_open_in_another_process_is_not_opened_again() {
 const ADMIN_TEST: &str = "agent::mvp_agent::tests::p30_direct_lock_tests::a_session_open_in_another_process_is_not_renamed_or_unpinned";
 const ADMIN_SESSION: &str = "p30-direct-lock-admin";
 
-async fn admin_call(
+pub(super) async fn admin_call(
     agent: &crate::agent::mvp_agent::MvpAgentHandle,
     method: &str,
     params: serde_json::Value,
@@ -271,9 +273,13 @@ fn a_session_open_in_another_process_is_not_renamed_or_unpinned() {
         let rename = json!({ "sessionId": ADMIN_SESSION, "title": "Taken over", "cwd": cwd });
         let error = admin_call(&agent, "fuigo/session/rename", rename.clone()).await.expect_err("renamed a session open elsewhere");
         assert!(format!("{error:?}").contains(REFUSAL), "{error:?}");
+        // Review r1: the window that asked sees why, and where to do it instead.
+        assert_eq!(error.message, crate::session::session_writer_lock::RENAME_HELD_ELSEWHERE, "{error:?}");
+        assert_eq!(error.message, "This session is open in another Fuigo window. Rename it there.");
         let unpin = json!({ "sessionId": ADMIN_SESSION, "title": "", "resetToAuto": true, "cwd": cwd });
         let error = admin_call(&agent, "fuigo/session/rename", unpin).await.expect_err("unpinned a session open elsewhere");
         assert!(format!("{error:?}").contains(REFUSAL), "{error:?}");
+        assert_eq!(error.message, crate::session::session_writer_lock::RENAME_HELD_ELSEWHERE, "{error:?}");
         assert_eq!(snapshot(&dir), before, "a refused rename wrote into the other window's session");
 
         drop(window_a);

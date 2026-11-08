@@ -859,9 +859,10 @@ impl SessionActor {
         };
         // A lost turn from a previous process whose marker is still being written (its recovery outlived the append
         // bound) is closed first, so this turn's `turn_started` never lands inside it.
-        crate::session::interrupted_turn::close_deferred_turn_before_new_turn(
-            &crate::session::persistence::session_dir(&self.session_info),
-        );
+        // Through the actor's writer (design F5 §5.4.2); a test actor built without one has no session folder to close.
+        if let Some(writer) = self.rebuild_spec.session_writer.as_ref() {
+            crate::session::interrupted_turn::close_deferred_turn_before_new_turn(writer);
+        }
         self.emit_event(crate::session::events::Event::TurnStarted {
             session_id: self.session_id_string(),
             turn_number,
@@ -1256,17 +1257,11 @@ impl SessionActor {
                 self.transcribe_user_images(user_message, &user_images)
                     .await?
             } else {
-                let session_dir = crate::session::persistence::ensure_owner_only_session_dir(
-                    &crate::session::info::Info {
-                        id: self.session_info.id.clone(),
-                        cwd: self.session_info.cwd.clone(),
-                    },
-                )
-                .map_err(|e| {
-                    crate::acp_error::session_storage(format!("failed to create session dir: {e}"))
+                let writer = self.rebuild_spec.session_writer.as_ref().ok_or_else(|| {
+                    crate::acp_error::session_storage("no session writer: the images cannot be saved".to_string())
                 })?;
                 crate::session::image_describe::persist_and_prepend_image_files(
-                    &session_dir,
+                    writer,
                     &user_images,
                     &user_message,
                 )

@@ -66,12 +66,18 @@ pub(crate) fn initial_title_refresh_idx(
 /// Persist the checkpoint index after a completed attempt.
 /// It is best-effort and written atomically (temp sibling, then rename).
 /// A crash mid-write therefore can't leave a partial/empty file that would load as `0` and reopen the refresh window.
-pub(crate) fn save_title_refresh_watermark(session_dir: &std::path::Path, idx: usize) {
+/// Written as the session's writer (F5-C6); with none (a session without a folder writer) nothing is written.
+pub(crate) fn save_title_refresh_watermark(writer: Option<&fuigo_session_writer::SessionWriter>, idx: usize) {
+    let Some(writer) = writer else {
+        tracing::debug!("no session writer: title refresh watermark not persisted");
+        return;
+    };
+    let session_dir = writer.dir();
     if !session_dir.is_dir() {
         return;
     }
     let path = session_dir.join(TITLE_REFRESH_WATERMARK_FILE);
-    if let Err(e) = crate::session::storage::write_bytes_atomic(&path, idx.to_string().as_bytes()) {
+    if let Err(e) = crate::session::storage::write_bytes_atomic_as(writer, &path, idx.to_string().as_bytes()) {
         tracing::warn!(error = %e, path = %path.display(), "failed to persist title refresh watermark");
     }
 }
@@ -240,6 +246,7 @@ pub(crate) fn clean_title_text(raw: &str) -> String {
     out
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::{
@@ -272,7 +279,8 @@ mod tests {
             None,
             "missing → None"
         );
-        save_title_refresh_watermark(dir.path(), 1);
+        let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir.path()).unwrap();
+        save_title_refresh_watermark(Some(&writer), 1);
         assert_eq!(load_title_refresh_watermark(dir.path()), Some(1));
         std::fs::write(dir.path().join(TITLE_REFRESH_WATERMARK_FILE), "99").unwrap();
         assert_eq!(

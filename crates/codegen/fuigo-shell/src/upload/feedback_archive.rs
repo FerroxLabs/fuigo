@@ -579,6 +579,7 @@ pub(crate) fn open_regular_nofollow(path: &std::path::Path) -> std::io::Result<s
     Ok(file)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,7 +723,7 @@ mod tests {
         std::fs::write(dir.path().join("updates.jsonl"), format!("{update}{torn}\n")).unwrap();
         // What P70a does when a server's config hands it the key.
         fuigo_telemetry::sent_credentials::record(KEY);
-        fuigo_session_events::EventWriter::open(dir.path()).emit(
+        fuigo_session_events::EventWriter::open_at(dir.path()).emit(
             fuigo_session_events::Event::McpTransportDecodeError {
                 server_name: "s".into(),
                 error: "e".into(),

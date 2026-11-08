@@ -55,6 +55,7 @@ pub mod rewind;
 pub mod screen_mode_switch;
 pub mod scroll_debug;
 pub mod session_info;
+pub mod trust;
 pub mod settings_cmd;
 pub mod share;
 pub mod stoke;
@@ -122,6 +123,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(plugin::SkillsCommand),
         Arc::new(mcps::McpsCommand),
         Arc::new(plugin::HooksCommand),
+        Arc::new(trust::TrustCommand),
         Arc::new(plugin::MarketplaceCommand),
         Arc::new(workflow::WorkflowCommand),
         Arc::new(personas::PersonasCommand),

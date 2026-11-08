@@ -55,7 +55,8 @@ impl SandboxLogger {
 
     pub fn flush_to_disk(&self) -> anyhow::Result<()> {
         let events = self.take_events();
-        if events.is_empty() {
+        // F12: the log lives under `<fuigo_home>/sessions`, which a run without session persistence leaves untouched.
+        if events.is_empty() || fuigo_config::session_persistence_disabled() {
             return Ok(());
         }
 

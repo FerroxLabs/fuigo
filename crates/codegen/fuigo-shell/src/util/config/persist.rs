@@ -441,9 +441,11 @@ const OPTIMISTIC_SETTINGS_PASSES: usize = 2;
 #[cfg(test)]
 #[path = "persist_tests.rs"]
 mod tests;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "p61_cross_process_tests.rs"]
 mod p61_cross_process_tests;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "p72_tests.rs"]
 mod p72_tests;

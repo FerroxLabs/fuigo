@@ -7,6 +7,7 @@ pub(crate) use fuigo_config::write_through::stage_file_atomically;
 #[cfg(test)]
 pub(crate) use fuigo_config::write_through::{create_temp_with, fault, write_file_atomically};
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "atomic_write_tests.rs"]
 mod tests;

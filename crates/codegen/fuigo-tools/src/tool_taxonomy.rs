@@ -286,6 +286,7 @@ impl CanonicalToolMeta {
 pub fn tool_meta_json_schema_str() -> &'static str {
     include_str!("../schema/tool_meta.schema.json")
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

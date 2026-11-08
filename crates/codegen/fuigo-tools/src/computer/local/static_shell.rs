@@ -272,6 +272,7 @@ fn set_cloexec(fd: &OwnedFd) -> std::io::Result<()> {
 #[path = "static_shell_cli_facing_unchanged_tests.rs"]
 mod cli_facing_unchanged_tests;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use std::process::Stdio;

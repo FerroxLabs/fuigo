@@ -55,6 +55,27 @@ const FOLDER_TRUST_PROCESS_DURATION: &str = "process";
 /// (nested instruction files, project skills, some config) applies only when the session is reopened.
 pub(crate) const FOLDER_TRUST_REOPEN_NOTICE: &str = "Folder trust is on. Reopen this session to use it.";
 
+/// F5-N (design F5 §4.1): the ext notification a client that advertised `fuigo/folderTrust.reload` is sent, once per
+/// session per durable grant, so it closes and reloads the session when idle. Ephemeral: it goes straight to the client,
+/// never through the session's update log, so a `session/load` never replays it.
+pub(crate) const FOLDER_TRUST_RELOAD_METHOD: &str = "fuigo/session/update";
+/// The `sessionUpdate` of [`FOLDER_TRUST_RELOAD_METHOD`].
+pub(crate) const FOLDER_TRUST_RELOAD_UPDATE: &str = "folder_trust_reload";
+/// The load or resume response `_meta` key that tells a reattaching `reload` client the reload is still owed.
+pub(crate) const FOLDER_TRUST_RELOAD_OWED_META: &str = "fuigo/folderTrustReload";
+
+/// F5-N: only a grant that newly reached the trust store offers or owes a reload. A grant that was not saved, one already
+/// durable (nothing changed), one held for this process only and a refusal never do.
+pub(crate) fn grant_offers_reload(outcome: &fuigo_workspace::folder_trust::GrantOutcome) -> bool {
+    matches!(
+        outcome,
+        fuigo_workspace::folder_trust::GrantOutcome::Granted {
+            persist: fuigo_workspace::folder_trust::PersistStatus::Durable,
+            ..
+        }
+    )
+}
+
 /// Outcome of the trust prompt, sent by the GUI client to the agent.
 /// Fail-closed: any value other than `"trust"`, including unknown strings via `#[serde(other)]`, decodes to [`FolderTrustOutcome::Reject`].
 /// Only an explicit grant unblocks. `TrustForProcess` has no wire name: it comes from the reply's `duration`.
@@ -131,6 +152,67 @@ impl MvpAgent {
             .unwrap_or(false)
     }
 
+    /// F5-N: whether the client advertised `fuigo/folderTrust.reload == true` (it closes and reloads a session on
+    /// `folder_trust_reload`). Absent or not `true`: its wire is 1.0.40's.
+    pub(crate) fn parse_folder_trust_reload_capability(init: &acp::InitializeRequest) -> bool {
+        init.client_capabilities
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("fuigo/folderTrust"))
+            .and_then(|v| v.get("reload"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Every resident session sharing the granted workspace `key` (the grant's scope), each with its own cwd.
+    fn grant_targets(&self, key: &std::path::Path) -> Vec<ReloadTarget> {
+        let mut targets = Vec::new();
+        self.session_registry.for_each_resident(|sid, h| {
+            if fuigo_workspace::trust::workspace_key(std::path::Path::new(&h.info.cwd)) == key {
+                targets.push(ReloadTarget {
+                    session_id: sid.clone(),
+                    cmd_tx: h.cmd_tx.clone(),
+                    initial_client_mcp_servers: h.initial_client_mcp_servers.clone(),
+                    cwd: PathBuf::from(&h.info.cwd),
+                });
+            }
+        });
+        targets
+    }
+
+    /// Start settling the grants sessions make themselves (`/trust`, the `/hooks` Trust action); idempotent. The loop is
+    /// bound to the agent (`spawn_bound`) and ends with it.
+    pub(super) fn ensure_folder_trust_grant_listener(&self) {
+        let Some(mut grants) = self.folder_trust_grant_rx.borrow_mut().take() else {
+            return;
+        };
+        self.spawn_bound(move |agent_ref| {
+            Box::pin(async move {
+                while let Some(grant) = grants.recv().await {
+                    agent_ref.get().settle_session_grant(grant).await;
+                }
+            })
+        });
+    }
+
+    /// A grant a session made itself, settled exactly as the modal settles its grant once the grant took effect (design
+    /// F5 §2 goal 1, §9.4 B2): after a durable save only, the reopen notice to the granting session of a `reopenNotice`
+    /// client, and every same-workspace session owed a reload and sent one when the client advertised `reload` (or the
+    /// leader decides per connection). A grant not saved, already durable, held for this process only or refused sends
+    /// nothing and owes nothing; a client that opted in to neither sees 1.0.40's frames.
+    pub(crate) async fn settle_session_grant(&self, grant: crate::session::notifications::SessionGrant) {
+        if !grant_offers_reload(&grant.outcome) {
+            return;
+        }
+        let targets = self.grant_targets(&fuigo_workspace::trust::workspace_key(&grant.cwd));
+        let reopen_notice = self.leader_mode || self.folder_trust_reopen_notice.get();
+        let reload_notify = self.leader_mode || self.folder_trust_reload.get();
+        send_reopen_notice(reopen_notice, &grant.session_id, &targets);
+        for reload in offer_reload(&grant.outcome, reload_notify, &targets, &self.folder_trust_reload_owed) {
+            send_folder_trust_reload(&self.gateway, &reload).await;
+        }
+    }
+
     /// Ask a GUI client to decide trust for `session_id`'s workspace, then grant and reload on accept.
     /// Dormant: it does nothing unless the client advertised `fuigo/folderTrust.interactive` and [`folder_trust::prompt_warranted`] holds.
     ///
@@ -170,17 +252,7 @@ impl MvpAgent {
         // It stays gated until its own next session open, so the miss never over-exposes anything
         // Re-querying at grant time would need the `sessions` map (a non-`Rc` `RefCell` field) shared into the detached task, which we cannot do
         // That gap is accepted instead
-        let mut targets = Vec::new();
-        self.session_registry.for_each_resident(|sid, h| {
-            if fuigo_workspace::trust::workspace_key(std::path::Path::new(&h.info.cwd)) == key {
-                targets.push(ReloadTarget {
-                    session_id: sid.clone(),
-                    cmd_tx: h.cmd_tx.clone(),
-                    initial_client_mcp_servers: h.initial_client_mcp_servers.clone(),
-                    cwd: PathBuf::from(&h.info.cwd),
-                });
-            }
-        });
+        let targets = self.grant_targets(&key);
         if targets.is_empty() {
             prompted.borrow_mut().remove(&key);
             return;
@@ -197,6 +269,10 @@ impl MvpAgent {
         // leader delivers it only to the opted-in client the trust request went to (`is_folder_trust_reopen_notice`).
         // The agent's own flag is only the last `initialize` it saw, never one connection's.
         let reopen_notice = self.leader_mode || self.folder_trust_reopen_notice.get();
+        // F5-N: the same for `folder_trust_reload`; the leader delivers it only to the session's owner when that owner
+        // advertised `reload`.
+        let reload_notify = self.leader_mode || self.folder_trust_reload.get();
+        let reload_owed = self.folder_trust_reload_owed.clone();
         let prompting_session = session_id.clone();
         let session_id = session_id.0.to_string();
         // Regression guard: every reverse-request must carry a non-empty sessionId or leader Tier-2 routing silently drops it
@@ -293,6 +369,9 @@ impl MvpAgent {
                 return;
             }
             send_reopen_notice(reopen_notice, &prompting_session, &targets);
+            for reload in offer_reload(&outcome, reload_notify, &targets, &reload_owed) {
+                send_folder_trust_reload(&gateway, &reload).await;
+            }
             // The grant is stored: a first turn waiting on it goes ahead without the MCP reload below.
             drop(in_flight);
 
@@ -378,6 +457,51 @@ fn send_reopen_notice(enabled: bool, prompting_session: &acp::SessionId, targets
                 })
                 .is_ok()
         })
+}
+
+/// F5-N: after a grant that took effect, a durable one owes every session it covers a reload: record each as owed and
+/// return the sessions to notify (one `folder_trust_reload` each), none unless `notify` (the client advertised `reload`,
+/// or the leader decides per connection). Any other grant owes nothing and notifies nobody.
+fn offer_reload(
+    outcome: &fuigo_workspace::folder_trust::GrantOutcome,
+    notify: bool,
+    targets: &[ReloadTarget],
+    owed: &RefCell<std::collections::HashSet<acp::SessionId>>,
+) -> Vec<acp::SessionId> {
+    if !grant_offers_reload(outcome) {
+        return Vec::new();
+    }
+    owed.borrow_mut().extend(targets.iter().map(|target| target.session_id.clone()));
+    if !notify {
+        return Vec::new();
+    }
+    targets.iter().map(|target| target.session_id.clone()).collect()
+}
+
+/// The `folder_trust_reload` params for one session.
+pub(crate) fn folder_trust_reload_params(session_id: &acp::SessionId) -> serde_json::Value {
+    serde_json::json!({
+        "sessionId": session_id.0.as_ref(),
+        "update": { "sessionUpdate": FOLDER_TRUST_RELOAD_UPDATE },
+    })
+}
+
+/// Send one `folder_trust_reload` straight to the client (never through the session, so never logged or replayed).
+async fn send_folder_trust_reload(gateway: &GatewaySender, session_id: &acp::SessionId) {
+    use agent_client_protocol::Client as _;
+    let raw = match serde_json::value::to_raw_value(&folder_trust_reload_params(session_id)) {
+        Ok(raw) => raw,
+        Err(e) => {
+            tracing::error!(error = %e, "folder trust: reload notification serialization failed");
+            return;
+        }
+    };
+    if let Err(e) = gateway
+        .ext_notification(acp::ExtNotification::new(FOLDER_TRUST_RELOAD_METHOD, raw.into()))
+        .await
+    {
+        tracing::debug!(session_id = %session_id.0, error = %crate::sampling::error::acp_error_text(&e), "folder trust: reload notification not delivered");
+    }
 }
 
 /// Inputs for [`reload_project_servers_after_grant`], bundled to avoid a long positional arg list.
@@ -804,6 +928,88 @@ mod tests {
         assert!(settle_gui_grant(&saved, &cwd, &sessions, &prompted, &key));
         for rx in [&mut rx1, &mut rx2] {
             assert!(p180_drain_notices(rx).is_empty());
+        }
+    }
+
+    /// F5-N (owner requirement 2): a reload is offered and owed only on a grant that newly reached the trust store; never
+    /// on one that was not saved (EROFS, EACCES), one already durable, one held for this process only, or a refusal.
+    #[test]
+    fn f5n_reload_is_offered_and_owed_only_on_a_durable_grant() {
+        use fuigo_workspace::folder_trust::{GrantOutcome, GrantRefuse, PersistStatus};
+        let key = PathBuf::from("/f5n/ws");
+        let (asked, _asked_rx) = reopen_target("asked");
+        let (sibling, _sibling_rx) = reopen_target("sibling");
+        let targets = [asked, sibling];
+        let not_saved = |errno| GrantOutcome::Granted {
+            key: key.clone(),
+            persist: PersistStatus::NotSaved { error: std::io::Error::from_raw_os_error(errno) },
+        };
+        let no_reload = [
+            not_saved(30),
+            not_saved(13),
+            GrantOutcome::AlreadyDurable { key: key.clone() },
+            GrantOutcome::Granted { key: key.clone(), persist: PersistStatus::ProcessOnly },
+            GrantOutcome::Refused { reason: GrantRefuse::Unreadable },
+            GrantOutcome::Refused { reason: GrantRefuse::InertBuild },
+        ];
+        for outcome in &no_reload {
+            let owed = RefCell::new(std::collections::HashSet::new());
+            assert!(!grant_offers_reload(outcome), "{outcome:?}");
+            assert!(offer_reload(outcome, true, &targets, &owed).is_empty(), "{outcome:?} offers a reload");
+            assert!(owed.borrow().is_empty(), "{outcome:?} owes a reload");
+        }
+        let durable = GrantOutcome::Granted { key, persist: PersistStatus::Durable };
+        let ids = |sessions: Vec<acp::SessionId>| sessions.into_iter().map(|s| s.0.to_string()).collect::<Vec<_>>();
+        let owed = RefCell::new(std::collections::HashSet::new());
+        assert_eq!(ids(offer_reload(&durable, true, &targets, &owed)), ["asked", "sibling"], "one per covered session");
+        assert_eq!(owed.borrow().len(), 2);
+        // A direct client without `reload` is sent nothing, but the reload is still owed.
+        let owed = RefCell::new(std::collections::HashSet::new());
+        assert!(offer_reload(&durable, false, &targets, &owed).is_empty());
+        assert_eq!(owed.borrow().len(), 2);
+    }
+
+    /// F5-N (owner requirement 3): a grant against a read-only trust store (a real EACCES from the kernel, and EROFS)
+    /// comes back not saved: no reload is offered or owed, the folder stays untrusted, and every covered session is told
+    /// the grant could not be saved and the folder stays untrusted.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn f5n_a_read_only_trust_store_offers_no_reload_and_warns() {
+        use fuigo_workspace::folder_trust::{GrantOutcome, PersistStatus};
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
+        let _release = fuigo_test_support::EnvGuard::set(fuigo_version::TEST_VERSION_ENV, "0.0.0-sim");
+        let _env_trust = fuigo_test_support::EnvGuard::unset("FUIGO_FOLDER_TRUST");
+        let repo = tempfile::tempdir().unwrap();
+        let key = dunce::canonicalize(repo.path()).unwrap();
+        // `/sys` refuses every new file with EACCES, even to root (a chmod would not stop root).
+        let denied = fuigo_workspace::folder_trust::grant_folder_trust_key_in(std::path::Path::new("/sys"), &key);
+        assert!(
+            matches!(&denied, GrantOutcome::Granted { persist: PersistStatus::NotSaved { error }, .. }
+                if error.kind() == std::io::ErrorKind::PermissionDenied),
+            "{denied:?}"
+        );
+        let read_only = GrantOutcome::Granted {
+            key: key.clone(),
+            persist: PersistStatus::NotSaved { error: std::io::Error::from_raw_os_error(30) },
+        };
+        for outcome in [denied, read_only] {
+            let prompted = RefCell::new(std::collections::HashSet::from([key.clone()]));
+            let owed = RefCell::new(std::collections::HashSet::new());
+            let (target, mut rx) = reopen_target("f5n-read-only");
+            let sessions = [target.cmd_tx.clone()];
+            assert!(!settle_gui_grant(&outcome, &key, &sessions, &prompted, &key), "{outcome:?} took effect");
+            assert!(offer_reload(&outcome, true, &[target], &owed).is_empty(), "{outcome:?} offers a reload");
+            assert!(owed.borrow().is_empty(), "{outcome:?} owes a reload");
+            let notices = p180_drain_notices(&mut rx);
+            assert_eq!(notices.len(), 1, "{notices:?}");
+            assert!(
+                notices[0].contains("Couldn't save folder trust") && notices[0].contains("the folder stays untrusted"),
+                "{notices:?}"
+            );
+            assert!(!fuigo_workspace::folder_trust::decide_key(&key, false).is_trusted(), "the folder stays untrusted");
         }
     }
 }

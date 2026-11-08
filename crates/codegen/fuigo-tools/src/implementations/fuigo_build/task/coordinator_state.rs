@@ -101,6 +101,11 @@ pub struct ChildRunRequest<C> {
     /// The session's running non-workflow children when this spawn started,
     /// including itself when it is one of them.
     pub session_running: usize,
+    /// The spawning session's writer from the envelope ([`SubagentSpawnRequest::parent_writer`]); `None` for a wake or a
+    /// harness-internal spawn.
+    ///
+    /// [`SubagentSpawnRequest::parent_writer`]: super::types::SubagentSpawnRequest::parent_writer
+    pub parent_writer: Option<fuigo_session_writer::SessionWriter>,
 }
 
 /// Terminal output from one runtime-specific child run.

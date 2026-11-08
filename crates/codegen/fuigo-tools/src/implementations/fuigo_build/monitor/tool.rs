@@ -87,7 +87,7 @@ impl fuigo_tool_runtime::Tool for MonitorTool {
         let resolved_timeout = input.resolved_timeout_ms();
         let description = input.description;
 
-        let (terminal, notification_handle, cwd, session_folder, owner_session_id) = {
+        let (terminal, notification_handle, cwd, session_folder, session_writer, owner_session_id) = {
             let res = resources.lock().await;
             let terminal = res.require::<Terminal>()?.0.clone();
             let notif = res
@@ -102,16 +102,21 @@ impl fuigo_tool_runtime::Tool for MonitorTool {
                 .require::<crate::types::resources::SessionFolder>()?
                 .0
                 .clone();
+            let session_writer = res
+                .get::<crate::types::resources::SessionFolderWriter>()
+                .map(|w| w.0.clone());
             let owner = res
                 .get::<crate::types::resources::OwnerSessionId>()
                 .map(|o| o.0.clone());
-            (terminal, notif, cwd, session_folder, owner)
+            (terminal, notif, cwd, session_folder, session_writer, owner)
         };
 
         // Output file lives in the session folder alongside bash terminal logs.
-        let output_file = session_folder
-            .join("terminal")
+        let output_rel = std::path::PathBuf::from("terminal")
             .join(format!("monitor-{}.log", ctx.call_id.as_str()));
+        let output_file = session_folder.join(&output_rel);
+        let output_log =
+            crate::computer::types::OutputLog::open(session_writer.as_ref(), output_rel).await;
         let bg_handle = terminal
             .run_background(crate::computer::types::TerminalRunRequest {
                 request_cwd: None,
@@ -131,6 +136,7 @@ impl fuigo_tool_runtime::Tool for MonitorTool {
                 },
                 output_byte_limit: 10 * 1024 * 1024,
                 output_file,
+                output_log,
                 notification_handle: notification_handle.clone(),
                 tool_call_id: ctx.call_id.as_str().to_owned(),
                 display_command: Some(format!("[monitor] {description}")),
@@ -452,6 +458,7 @@ mod tests {
                 timeout: Duration::from_secs(86_400 * 365),
                 output_byte_limit: 10 * 1024 * 1024,
                 output_file: output_file.clone(),
+                output_log: Default::default(),
                 notification_handle: ToolNotificationHandle::noop(),
                 tool_call_id: "tc-monitor".to_string(),
                 display_command: Some("[monitor] tick".to_string()),
@@ -531,6 +538,7 @@ mod tests {
                 timeout: Duration::from_secs(60),
                 output_byte_limit: 10 * 1024 * 1024,
                 output_file: output_file.clone(),
+                output_log: Default::default(),
                 notification_handle: ToolNotificationHandle::noop(),
                 tool_call_id: "tc-exit".to_string(),
                 display_command: Some("[monitor] done".to_string()),
@@ -603,6 +611,7 @@ mod tests {
                 timeout: Duration::from_secs(60),
                 output_byte_limit: 10 * 1024 * 1024,
                 output_file: output_file.clone(),
+                output_log: Default::default(),
                 notification_handle: ToolNotificationHandle::noop(),
                 tool_call_id: "tc-reparent".to_string(),
                 display_command: Some("[monitor] tick".to_string()),

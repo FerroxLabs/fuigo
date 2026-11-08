@@ -102,7 +102,7 @@ use super::status::{
     dispatch_copy_session_id, dispatch_manage_billing, dispatch_open_gboom, dispatch_open_stoke,
     dispatch_open_tutorial, dispatch_privacy_banner_opt_in, dispatch_privacy_banner_opt_out,
     dispatch_share_session, dispatch_show_context_info, dispatch_show_queue,
-    dispatch_show_release_notes, dispatch_show_session_info, dispatch_show_tasks,
+    dispatch_decline_folder_trust, dispatch_open_folder_trust, dispatch_show_release_notes, dispatch_show_session_info, dispatch_show_tasks,
     dispatch_show_usage, set_coding_data_sharing,
 };
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
@@ -155,9 +155,11 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
     // Only the outermost call shows the image notices the whole tree queued, so a nested action's own toast cannot bury them
     // and one submission yields one message.
     app.dispatch_depth = app.dispatch_depth.saturating_add(1);
-    let effects = dispatch_inner(action, app);
+    let mut effects = dispatch_inner(action, app);
     app.dispatch_depth = app.dispatch_depth.saturating_sub(1);
     if app.dispatch_depth == 0 {
+        // F5-P: an owed folder-trust reload starts as soon as the action left its session idle (R3).
+        effects.extend(crate::app::folder_trust_reload::poll(app));
         flush_image_notices(app);
         // A dialog this action closed may have been holding a plan review back.
         crate::app::acp_handler::release_parked_plan_requests(app);
@@ -1086,6 +1088,8 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::CycleMode => dispatch_cycle_mode(app),
         Action::ShareSession => dispatch_share_session(app),
         Action::ShowSessionInfo => dispatch_show_session_info(app),
+        Action::OpenFolderTrust => dispatch_open_folder_trust(app),
+        Action::DeclineFolderTrust(folder) => dispatch_decline_folder_trust(app, &folder),
         Action::ShowReleaseNotes { title, content } => {
             dispatch_show_release_notes(app, title, content)
         }

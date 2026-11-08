@@ -842,6 +842,7 @@ impl HostService {
         Ok((files, bytes))
     }
 
+    #[allow(clippy::disallowed_methods, reason = "session-less workflow run: scratch under the temp dir; with a session writer it goes through the writer, F5-C6; not inside a session folder")]
     async fn write_scratch_file(&self, name: &str, content: &str) -> Result<String, HostError> {
         if content.len() > WORKFLOW_MAX_SCRATCH_FILE_BYTES {
             return Err(HostError::Failed(format!(
@@ -852,9 +853,20 @@ impl HostService {
         let _io = self.scratch_io.lock().await;
 
         Self::reject_symlink(&self.params.scratch_dir, "scratch directory")?;
-        tokio::fs::create_dir_all(&self.params.scratch_dir)
-            .await
-            .map_err(|e| HostError::Failed(format!("scratch dir: {e}")))?;
+        // In a session folder the scratch is written through the session's writer (F5-C6). A session-less run's
+        // scratch lives under the temp dir: not a session folder.
+        let writer = self.params.store.writer().cloned();
+        if let Some(writer) = writer.clone() {
+            let dir = self.params.scratch_dir.clone();
+            tokio::task::spawn_blocking(move || writer.create_dir_sync(writer.rel_of(&dir)?))
+                .await
+                .map_err(|e| HostError::Failed(format!("scratch dir: {e}")))?
+                .map_err(|e| HostError::Failed(format!("scratch dir: {e}")))?;
+        } else {
+            tokio::fs::create_dir_all(&self.params.scratch_dir)
+                .await
+                .map_err(|e| HostError::Failed(format!("scratch dir: {e}")))?;
+        }
         Self::reject_symlink(&self.params.scratch_dir, "scratch directory")?;
         Self::reject_symlink(&path, "scratch file")?;
 
@@ -878,6 +890,14 @@ impl HostService {
         let body = content.as_bytes().to_vec();
         tokio::task::spawn_blocking(move || {
             use std::io::Write as _;
+            if let Some(writer) = writer {
+                Self::reject_symlink(&scratch_dir, "scratch directory")?;
+                Self::reject_symlink(&path, "scratch file")?;
+                let rel = writer.rel_of(&path).map_err(|e| HostError::Failed(format!("scratch path: {e}")))?;
+                return writer
+                    .replace_atomic_sync(rel, &body)
+                    .map_err(|e| HostError::Failed(format!("scratch atomic persist: {e}")));
+            }
             let mut tmp = tempfile::NamedTempFile::new_in(&scratch_dir)
                 .map_err(|e| HostError::Failed(format!("scratch temp file: {e}")))?;
             Self::reject_symlink(&scratch_dir, "scratch directory")?;

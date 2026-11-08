@@ -1098,7 +1098,14 @@ impl SessionActor {
                     // Turn the "planning…" badge off NOW, before the plan/baseline I/O below, instead of only at the very end
                     // That way the UI never advertises "planning" while it can no longer replan
                     self.clear_goal_planning_latch(run_goal_id.as_deref()).await;
-                    if attempt_file.persist(&plan_file).is_err() {
+                    // F5-C5: published by a rename through the session's writer.
+                    let published = self
+                        .goal_tracker
+                        .lock()
+                        .writer_for(&attempt_file)
+                        .and_then(|(writer, from)| writer.rename_sync(from, writer.rel_of(&plan_file)?));
+                    drop(attempt_file);
+                    if published.is_err() {
                         let still_same_goal =
                             self.goal_tracker.lock().snapshot().is_some_and(|goal| {
                                 same_active_goal(goal) && goal.plan_file.is_none()
@@ -1144,8 +1151,19 @@ impl SessionActor {
                                 break;
                             }
                         };
-                        match tokio::fs::copy(&src, &tmp).await {
-                            Ok(_) => {
+                        let staged = match self.goal_tracker.lock().writer_for(&tmp) {
+                            Ok((writer, rel)) => Ok((writer, rel)),
+                            Err(error) => Err(error),
+                        };
+                        let copied = match staged {
+                            Ok((writer, rel)) => {
+                                let src = src.clone();
+                                writer.copy_in(src, rel).await.map(|_| writer)
+                            }
+                            Err(error) => Err(error),
+                        };
+                        match copied {
+                            Ok(writer) => {
                                 let mut tracker = self.goal_tracker.lock();
                                 let can_publish = tracker.snapshot().is_some_and(|goal| {
                                     same_active_goal(goal)
@@ -1153,7 +1171,10 @@ impl SessionActor {
                                         && goal.plan_baseline_file.is_none()
                                 });
                                 if can_publish
-                                    && baseline_file.persist(&dst).is_ok()
+                                    && writer
+                                        .rel_of(&tmp)
+                                        .and_then(|from| writer.rename_sync(from, writer.rel_of(&dst)?))
+                                        .is_ok()
                                     && let Some(goal) = tracker.snapshot_mut()
                                 {
                                     goal.plan_baseline_file = Some(dst);
@@ -1323,6 +1344,9 @@ impl SessionActor {
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         self.emit_goal_planning(current_tokens);
 
+        if let Err(error) = self.goal_tracker.lock().ensure_goal_dir() {
+            tracing::warn!(%error, "goal planner: could not create the goal folder through the session writer");
+        }
         let outcome = crate::session::goal_planner::run_goal_planner(
             spawner,
             crate::session::goal_planner::GoalPlannerInputs {
@@ -1432,6 +1456,9 @@ impl SessionActor {
                 events: Some(self.events.writer()),
             });
 
+        if let Err(error) = self.goal_tracker.lock().ensure_goal_dir() {
+            tracing::warn!(%error, "goal strategist: could not create the goal folder through the session writer");
+        }
         let outcome = crate::session::goal_strategist::run_goal_strategist(
             spawner,
             crate::session::goal_strategist::GoalStrategistInputs {
@@ -1449,6 +1476,7 @@ impl SessionActor {
                 ),
                 tool_names: &tool_names,
                 inherit_tool_names: &inherit_tool_names,
+                session_writer: self.rebuild_spec.session_writer.clone(),
             },
             &|e| self.events.emit(e),
         )

@@ -2,6 +2,7 @@
 //!
 //! Run with: `cargo test -p fuigo-shell -- pull_smoke --ignored --nocapture`
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use crate::auth::FuigoAuth;
@@ -93,7 +94,7 @@ mod tests {
         assert!(loaded.messages.as_ref().map_or(0, |m| m.len()) >= 2);
 
         // PULL back to local
-        let result = crate::remote::pull_session_to_local(&session_id, &client)
+        let result = crate::remote::pull_session_to_local(&session_id, &client, None)
             .await
             .expect("pull failed");
         let pulled = match result {
@@ -109,7 +110,7 @@ mod tests {
 
         let storage = JsonlStorageAdapter::default();
         let data = storage
-            .load_session_without_updates(&pulled)
+            .load_session_without_updates(&pulled, crate::session::storage::Access::Reader)
             .await
             .expect("storage load failed");
         assert_eq!(data.summary.session_summary, test_title);

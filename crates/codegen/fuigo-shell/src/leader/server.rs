@@ -121,6 +121,11 @@ struct ClientState {
     /// P1 (1.0.40): this client advertised `fuigo/folderTrust.reopenNotice` on its own `initialize`. The agent sees every
     /// client's `initialize` (last one wins), so the per-connection opt-in is held here.
     folder_trust_reopen_notice: bool,
+    /// F5-N: this client advertised `fuigo/folderTrust.reload` on its own `initialize`: only such a client, as the session's
+    /// owner, is sent `folder_trust_reload`, and only it sees the owed-reload `_meta`.
+    folder_trust_reload: bool,
+    /// F5-N: this client advertised `fuigo/folderTrust.v2`: with `reload`, the only clients that see close's `timeout`.
+    folder_trust_v2: bool,
 }
 #[derive(Debug, Clone)]
 pub struct LeaderServerMetadata {
@@ -891,14 +896,68 @@ fn initialize_startup_hints(json: &serde_json::Value) -> Option<serde_json::Valu
 /// P1 (1.0.40): whether an `initialize` opts its client in to the folder-trust reopen notice
 /// (`clientCapabilities._meta["fuigo/folderTrust"].reopenNotice == true`); `None` for any other message.
 fn initialize_folder_trust_reopen_notice(json: &serde_json::Value) -> Option<bool> {
+    initialize_folder_trust_flag(json, "reopenNotice")
+}
+/// Whether an `initialize` sets `clientCapabilities._meta["fuigo/folderTrust"][flag] == true`; `None` for any other
+/// message.
+fn initialize_folder_trust_flag(json: &serde_json::Value, flag: &str) -> Option<bool> {
     if json.get("method").and_then(|m| m.as_str()) != Some(AGENT_METHOD_NAMES.initialize) {
         return None;
     }
     Some(
-        json.pointer("/params/clientCapabilities/_meta/fuigo~1folderTrust/reopenNotice")
+        json.get("params")
+            .and_then(|p| p.pointer("/clientCapabilities/_meta/fuigo~1folderTrust"))
+            .and_then(|caps| caps.get(flag))
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
     )
+}
+/// F5-N: whether a payload is the `folder_trust_reload` ext notification (wrapped or direct). It is for one session owner
+/// that advertised `reload`, so it is never fanned out to subscribers or the relay.
+pub(crate) fn is_folder_trust_reload(json: &serde_json::Value) -> bool {
+    method_of(json) == Some(crate::agent::mvp_agent::FOLDER_TRUST_RELOAD_METHOD)
+        && interaction_inner_params(json)
+            .and_then(|p| p.get("update"))
+            .and_then(|u| u.get("sessionUpdate"))
+            .and_then(|v| v.as_str())
+            == Some(crate::agent::mvp_agent::FOLDER_TRUST_RELOAD_UPDATE)
+}
+/// [`is_folder_trust_reload`] for a raw agent line (cheap substring check first).
+pub(crate) fn is_folder_trust_reload_line(line: &str) -> bool {
+    line.contains(crate::agent::mvp_agent::FOLDER_TRUST_RELOAD_UPDATE)
+        && serde_json::from_str::<serde_json::Value>(line).is_ok_and(|json| is_folder_trust_reload(&json))
+}
+/// F5-N: fit an agent response to a client's own folder-trust opt-ins, so a client that did not opt in keeps 1.0.40's
+/// frames: no owed-reload `_meta` without `reload`, and close's `timeout` spelled `closed` without `reload` or `v2`.
+/// Returns whether it changed anything.
+pub(crate) fn fit_folder_trust_response(json: &mut serde_json::Value, reload: bool, v2: bool) -> bool {
+    let Some(meta) = json
+        .get_mut("result")
+        .and_then(|r| r.get_mut("_meta"))
+        .and_then(|m| m.as_object_mut())
+    else {
+        return false;
+    };
+    let mut changed = false;
+    if !reload {
+        changed |= meta.remove(crate::agent::mvp_agent::FOLDER_TRUST_RELOAD_OWED_META).is_some();
+    }
+    if !(reload || v2) && meta.get("fuigo/closeOutcome").and_then(|v| v.as_str()) == Some("timeout") {
+        meta.insert("fuigo/closeOutcome".to_owned(), serde_json::json!("closed"));
+        changed = true;
+    }
+    changed
+}
+/// [`fit_folder_trust_response`] for a raw agent line bound for the relay, which opts in to neither. A line without an
+/// F5-N field is passed on as the same bytes.
+pub(crate) fn fit_folder_trust_line_for_relay(line: String) -> String {
+    if !(line.contains(crate::agent::mvp_agent::FOLDER_TRUST_RELOAD_OWED_META) || line.contains("\"timeout\"")) {
+        return line;
+    }
+    let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&line) else {
+        return line;
+    };
+    if fit_folder_trust_response(&mut json, false, false) { json.to_string() } else { line }
 }
 /// P1 (1.0.40): whether a payload is the post-grant folder-trust reopen notice (a `config_notice` session notification
 /// carrying exactly [`crate::agent::mvp_agent::FOLDER_TRUST_REOPEN_NOTICE`]). It is for one opted-in connection only,
@@ -2470,6 +2529,7 @@ fn forward_process_notices(clients: &HashMap<ClientId, ClientState>, forwarded: 
 ///   Pass `None` in production.
 ///   Tests use it to pin a leader version independent of the crate's own.
 /// * `control_state` - Leader-local control metadata and CPU profiling state
+#[allow(clippy::disallowed_methods, reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder")]
 pub async fn run_leader_server(
     socket_path: std::path::PathBuf,
     acp_tx: mpsc::UnboundedSender<String>,
@@ -2586,6 +2646,8 @@ pub async fn run_leader_server(
                             registered: false,
                             init_startup_hints: None,
                             folder_trust_reopen_notice: false,
+                            folder_trust_reload: false,
+                            folder_trust_v2: false,
                         },
                     );
                     spawn_client_handler(
@@ -2928,6 +2990,12 @@ pub async fn run_leader_server(
                         if let Some(opted_in) = initialize_folder_trust_reopen_notice(json) {
                             client.folder_trust_reopen_notice = opted_in;
                         }
+                        if let Some(opted_in) = initialize_folder_trust_flag(json, "reload") {
+                            client.folder_trust_reload = opted_in;
+                        }
+                        if let Some(opted_in) = initialize_folder_trust_flag(json, "v2") {
+                            client.folder_trust_v2 = opted_in;
+                        }
                         payload_mutated |=
                             stamp_inbound_client_identity(json, &client.client_type, id);
                         payload_mutated |= inject_session_request_context(
@@ -3109,6 +3177,7 @@ pub async fn run_leader_server(
                             }
                         }
                     }
+                    fit_folder_trust_response(json, client.folder_trust_reload, client.folder_trust_v2);
                     if take_initialize_patch_if_matches(&mut client.patch_initialize_request_id, json) {
                         patch_initialize_response_model(json, &client.capabilities.default_model);
                     }
@@ -3348,6 +3417,23 @@ pub async fn run_leader_server(
                         .entry(sid.clone())
                         .or_default()
                         .insert(tcid, payload.clone());
+                }
+                // F5-N: `folder_trust_reload` goes only to the session's owner, while it is connected and only when it
+                // advertised `reload` on its own `initialize`. Never broadcast, held, replayed or sent to the relay: every
+                // other client's frames are unchanged. The agent emits it under the leader whatever its last `initialize` said.
+                if let Some(ref sid) = session_id
+                    && json.as_ref().is_some_and(is_folder_trust_reload)
+                {
+                    let owner = driver_board.owner_client(owning_session(&child_sessions, sid));
+                    match owner.and_then(|c| clients.get(&c).map(|client| (c, client))) {
+                        Some((cid, client)) if client.folder_trust_reload => {
+                            if let Err(e) = client.tx.send(ClientOutbound::Acp(payload.clone())) {
+                                warn!(client_id = cid.0, session_id = sid.as_str(), error = %e, "Failed to send folder-trust reload (channel closed)");
+                            }
+                        }
+                        _ => trace!(session_id = sid.as_str(), "Dropping folder-trust reload: the session's owner is gone or did not advertise reload"),
+                    }
+                    continue;
                 }
                 // P1 (1.0.40): the folder-trust reopen notice goes only to the client whose answer to the session's latest trust
                 // request was admitted first (recorded by request id, `OwnerBoard::take_folder_trust_answerer`), while it is
@@ -3918,6 +4004,7 @@ async fn spawn_leader_server_with(
 fn hub_url_allows_insecure_ws(url: &url::Url) -> bool {
     url.scheme() == "ws" && crate::util::is_canonical_loopback_host(url)
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "server_tests.rs"]
 mod tests;

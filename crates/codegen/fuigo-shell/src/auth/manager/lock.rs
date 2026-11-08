@@ -5,6 +5,7 @@
 #[path = "lock/flock_wait.rs"]
 mod flock_wait;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "lock_tests.rs"]
 mod tests;
@@ -91,6 +92,7 @@ fn write_holder_info(file: &mut File) -> io::Result<()> {
 
 /// Writes `PID:ts` into the lock file, replacing any prior holder line.
 /// This is the sole production writer of the on-disk holder stamp format.
+#[allow(clippy::disallowed_methods, reason = "auth lock holder stamp under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
 fn write_holder_info_at(file: &mut File, ts: u64) -> io::Result<()> {
     let pid = std::process::id();
     file.set_len(0)?;
@@ -342,6 +344,7 @@ fn blocking_acquire(lock_path: &Path) -> io::Result<File> {
 /// Open (creating) `auth.json.lock`. It holds only the holder's pid and a timestamp, but it sits beside `auth.json`, so
 /// it is created owner-only (0600) on Unix like the file it guards, and one an older version left 0644 is tightened
 /// (best effort) (P150, D6).
+#[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
 fn open_lock_file(lock_path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
@@ -637,6 +640,7 @@ pub(crate) fn read_holder_at(auth_json_path: &Path) -> Option<LockHolder> {
         .map(|mut file| read_holder(&mut file))
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(all(test, unix))]
 pub(crate) mod test_support {
     use super::*;

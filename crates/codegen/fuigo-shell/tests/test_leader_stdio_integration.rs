@@ -718,6 +718,7 @@ async fn test_runtime_profile_creates_missing_parent_directory_end_to_end() {
     handle.cancel.cancel();
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test]
 async fn test_runtime_profile_rejects_output_collision_end_to_end() {
     let temp = TempDir::new().unwrap();
@@ -3009,6 +3010,7 @@ async fn test_leader_code_nav_isolation_end_to_end() {
 ///
 /// This test couples readiness to a file lock (matching production) so holding the lock while connecting would deadlock.
 /// Existing tests missed this because they drove readiness via a bare `watch::channel`.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test]
 async fn test_lock_released_before_connect_prevents_deadlock() {
     use fs2::FileExt;

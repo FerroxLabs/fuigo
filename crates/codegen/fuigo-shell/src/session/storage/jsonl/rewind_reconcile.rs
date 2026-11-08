@@ -123,13 +123,14 @@ impl RewindJournal {
 }
 
 /// Remove a rewind's durable copy, then its journal (a missing one is already removed). Links are removed as links.
-pub(crate) fn remove_copy_then_journal(rewind_points: &Path) -> io::Result<()> {
-    remove_if_present(&crate::session::storage::rewind_points_pre_rewind_copy(rewind_points))?;
-    remove_if_present(&crate::session::storage::rewind_points_journal(rewind_points))
+/// As the session's writer (F5-C4 gap f): never by path.
+pub(crate) fn remove_copy_then_journal(writer: &fuigo_session_writer::SessionWriter, rewind_points: &Path) -> io::Result<()> {
+    remove_if_present(writer, &crate::session::storage::rewind_points_pre_rewind_copy(rewind_points))?;
+    remove_if_present(writer, &crate::session::storage::rewind_points_journal(rewind_points))
 }
 
-fn remove_if_present(path: &Path) -> io::Result<()> {
-    match std::fs::remove_file(path) {
+fn remove_if_present(writer: &fuigo_session_writer::SessionWriter, path: &Path) -> io::Result<()> {
+    match writer.remove_sync(writer.rel_of(path)?) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
     }
@@ -353,7 +354,13 @@ fn read_transcript(
 }
 
 /// Append the rewind's `RewindMarker`; the caller holds the append lock of `updates.jsonl`.
-fn append_rewind_marker(updates: &Path, session: &Info, target: usize, created_at: &str) -> io::Result<()> {
+fn append_rewind_marker(
+    writer: &fuigo_session_writer::SessionWriter,
+    files: &Files,
+    session: &Info,
+    target: usize,
+    created_at: &str,
+) -> io::Result<()> {
     let update = crate::session::storage::SessionUpdate::Fuigo(Box::new(
         crate::extensions::notification::SessionNotification {
             session_id: session.id.clone(),
@@ -367,14 +374,9 @@ fn append_rewind_marker(updates: &Path, session: &Info, target: usize, created_a
     let envelope = crate::session::storage::SessionUpdateEnvelope::from_update(&update).map_err(io::Error::other)?;
     let mut line = serde_json::to_vec(&envelope).map_err(io::Error::other)?;
     line.push(b'\n');
-    JsonlStorageAdapter::append_jsonl_line_locked(
-        updates,
-        line,
-        super::AppendDurability::Durable,
-        crate::session::storage::sync_file_durable,
-        || crate::session::storage::sync_parent_dir_durable(updates),
-    )
-    .map_err(super::AppendLineError::into_io_error)
+    // The torn-tail fix and the sync of `append_jsonl_line_locked`, as the writer's method (the caller holds the
+    // transcript's append lock).
+    writer.append_line_checked_sync(rel(files, &files.updates)?, &line)
 }
 
 /// The files of one session the reconcile looks at.
@@ -419,10 +421,23 @@ fn bounded_lock(
 }
 
 impl JsonlStorageAdapter {
+    /// [`Self::reconcile_interrupted_rewind_as`] as a writer of the session claimed here (unit tests).
+    #[cfg(test)]
+    pub(crate) async fn reconcile_interrupted_rewind(&self, info: &Info) -> Option<String> {
+        let writer = fuigo_session_writer::SessionWriter::try_claim(info.id.0.to_string(), self.session_dir(info)).ok()?;
+        self.reconcile_interrupted_rewind_as(info, Some(&writer)).await
+    }
+
     /// Reconcile a rewind of `info` that Fuigo was killed in the middle of (see the module doc). Returns the note
     /// shown to the user, `None` when there was nothing to do or the session is in use (a live actor or a running
-    /// rewind, in this or another process: its files are not a leftover).
-    pub(crate) async fn reconcile_interrupted_rewind(&self, info: &Info) -> Option<String> {
+    /// rewind, in this or another process: its files are not a leftover). Every write is a method of `writer`, the
+    /// caller's writer of this session (design F5 §5.3, §5.7: a cold load's own); a caller without one is a reader and
+    /// the reconcile is skipped, its leftover kept for the owner's next load.
+    pub(crate) async fn reconcile_interrupted_rewind_as(
+        &self,
+        info: &Info,
+        writer: Option<&fuigo_session_writer::SessionWriter>,
+    ) -> Option<String> {
         let points = self.rewind_points_file(info);
         let files = Files {
             dir: self.session_dir(info),
@@ -435,10 +450,14 @@ impl JsonlStorageAdapter {
         if files.copy.symlink_metadata().is_err() && files.journal.symlink_metadata().is_err() {
             return None;
         }
+        let Some(writer) = writer.filter(|writer| writer.dir() == files.dir).cloned() else {
+            tracing::info!(session_id = %info.id, "interrupted rewind reconcile skipped: this caller holds no writer of the session");
+            return None;
+        };
         let info = info.clone();
         tokio::task::spawn_blocking(move || {
-            use crate::session::turn_owner_lock::{RecoveryLock, try_recovery_lock};
-            let _exclusive = match try_recovery_lock(&files.dir) {
+            use crate::session::turn_owner_lock::{RecoveryLock, try_recovery_lock_as};
+            let _exclusive = match try_recovery_lock_as(&writer) {
                 RecoveryLock::Acquired(guard) => guard,
                 RecoveryLock::HeldElsewhere => {
                     tracing::debug!(session_id = %info.id, "interrupted rewind check skipped: a live actor holds the session");
@@ -452,6 +471,7 @@ impl JsonlStorageAdapter {
             // The lock a rewind holds from before it changes anything until it is done. Never waited for: held, it
             // belongs to a rewind that is running, and its files are left to it. One that cannot be taken at all
             // leaves the files as they are, and the user is told.
+            // F5-A: lock sidecars `.jsonl.rewrite.lock` / `.jsonl.lock` (design F5 §5.6, rewind_reconcile.rs:455).
             let rewrite_lock = files.points.with_extension("jsonl.rewrite.lock");
             let _rewrite = match bounded_lock(&files.points, rewrite_lock, false, std::time::Duration::ZERO) {
                 Ok(lock) => lock,
@@ -467,7 +487,7 @@ impl JsonlStorageAdapter {
                 Err(failure) => return Some(kept_notice(&files, None, &failure.reason())),
             };
             // Every lock is released when its file is dropped, on every path.
-            reconcile_locked(&files, &info)
+            reconcile_locked(&files, &info, &writer)
         })
         .await
         .unwrap_or_else(|error| {
@@ -477,14 +497,27 @@ impl JsonlStorageAdapter {
     }
 }
 
-fn reconcile_locked(files: &Files, info: &Info) -> Option<String> {
+/// `path`, a file of the session folder, relative to it (the writer's methods take relative paths).
+fn rel<'p>(files: &Files, path: &'p Path) -> io::Result<&'p Path> {
+    path.strip_prefix(&files.dir).map_err(|_| io::Error::other(format!("{} is outside the session folder", path.display())))
+}
+
+/// [`remove_if_present`] as the session's writer.
+fn remove_through(writer: &fuigo_session_writer::SessionWriter, files: &Files, path: &Path) -> io::Result<()> {
+    match writer.remove_sync(rel(files, path)?) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+fn reconcile_locked(files: &Files, info: &Info, writer: &fuigo_session_writer::SessionWriter) -> Option<String> {
     if let Err(error) = files.copy.symlink_metadata() {
         if error.kind() != io::ErrorKind::NotFound {
             return Some(kept_notice(files, None, &format!("{} could not be checked ({error})", files.copy.display())));
         }
         // A journal alone: the rewind stopped before its copy was written, or its cleanup between the two removals.
         // Either way there is nothing to reconcile.
-        if let Err(error) = remove_if_present(&files.journal) {
+        if let Err(error) = remove_through(writer, files, &files.journal) {
             tracing::warn!(session_id = %info.id, %error, "a rewind's journal without its copy could not be removed");
         }
         return None;
@@ -544,7 +577,7 @@ fn reconcile_locked(files: &Files, info: &Info) -> Option<String> {
     Some(match decision {
         Decision::Undo { restore } => {
             if let Some(bytes) = restore
-                && let Err(error) = crate::session::storage::write_bytes_atomic(&files.points, &bytes)
+                && let Err(error) = rel(files, &files.points).and_then(|points| writer.replace_atomic_sync(points, &bytes))
             {
                 return Some(kept_notice(
                     files,
@@ -552,13 +585,13 @@ fn reconcile_locked(files: &Files, info: &Info) -> Option<String> {
                     &format!("rewind_points.jsonl could not be put back from the copy ({error})"),
                 ));
             }
-            format!("{}{}", undone_notice(journal.as_ref()), cleanup(files, info))
+            format!("{}{}", undone_notice(journal.as_ref()), cleanup(files, info, writer))
         }
         Decision::Finish { record_marker } => {
             let journal = journal.as_ref()?;
             let mut marker_note = "";
             if record_marker && let Some(created_at) = &journal.marker_created_at {
-                if let Err(error) = append_rewind_marker(&files.updates, info, journal.target(), created_at) {
+                if let Err(error) = append_rewind_marker(writer, files, info, journal.target(), created_at) {
                     // The transcript would still show the rewound turns: keep everything and say so.
                     return Some(kept_notice(
                         files,
@@ -572,7 +605,7 @@ fn reconcile_locked(files: &Files, info: &Info) -> Option<String> {
                 "An earlier rewind of this session to prompt #{} went through, but Fuigo stopped before it had \
                  cleaned up.{marker_note}{}",
                 journal.target(),
-                cleanup(files, info)
+                cleanup(files, info, writer)
             )
         }
         Decision::Keep { reason } => kept_notice(files, target, &reason),
@@ -580,16 +613,16 @@ fn reconcile_locked(files: &Files, info: &Info) -> Option<String> {
 }
 
 /// Remove the copy then the journal, and say how that went, naming only what is left (Astra r2 #4).
-fn cleanup(files: &Files, info: &Info) -> String {
+fn cleanup(files: &Files, info: &Info, writer: &fuigo_session_writer::SessionWriter) -> String {
     let copy = files.copy.display();
-    if let Err(error) = remove_if_present(&files.copy) {
+    if let Err(error) = remove_through(writer, files, &files.copy) {
         tracing::warn!(session_id = %info.id, %error, "the leftover copy of a rewind could not be removed");
         return format!(
             " The copy of the saved file history from before it ({copy}) is no longer needed, but it could not be \
              removed ({error}); rewinds of this session are refused until you delete it."
         );
     }
-    if let Err(error) = remove_if_present(&files.journal) {
+    if let Err(error) = remove_through(writer, files, &files.journal) {
         // Harmless: a journal without its copy refuses nothing and the next load removes it.
         tracing::warn!(session_id = %info.id, %error, path = %files.journal.display(), "a rewind's journal could not be removed");
     }
@@ -635,6 +668,7 @@ fn kept_notice(files: &Files, target: Option<usize>, reason: &str) -> String {
     )
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "rewind_reconcile_tests.rs"]
 mod tests;

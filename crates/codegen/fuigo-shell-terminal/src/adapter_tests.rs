@@ -129,6 +129,7 @@ fn background_request(output_file: PathBuf) -> TerminalRunRequest {
         timeout: Duration::from_secs(60),
         output_byte_limit: 1024 * 1024,
         output_file,
+        output_log: Default::default(),
         notification_handle: ToolNotificationHandle::noop(),
         tool_call_id: "call-1".into(),
         display_command: Some("[monitor] watch".into()),

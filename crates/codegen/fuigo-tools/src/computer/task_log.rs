@@ -49,6 +49,7 @@ fn decode(buf: &[u8]) -> (String, bool) {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "task_log_tests.rs"]
 mod tests;

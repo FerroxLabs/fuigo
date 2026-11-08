@@ -315,7 +315,7 @@ impl SessionActor {
             timeout: BASH_MODE_TIMEOUT,
             output_byte_limit: BASH_MODE_OUTPUT_BYTE_LIMIT,
             stream: true,      // Enable streaming for bash mode
-            output_file: None, // No file logging for interactive bash mode
+            output_log: None, // No file logging for interactive bash mode
         };
 
         let result = self.tool_context.terminal.run(request).await;
@@ -848,6 +848,7 @@ mod tests {
 /// the scrollback block had nothing more to show. These tests pin both halves of the contract: the ACP
 /// `ToolCallUpdate.raw_output.output` (what the pager renders) is the full output, and the chat-history user message
 /// plus `output_for_prompt` (what the model sees next turn) stay the `... (N lines)` + last-10 tail.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod bash_mode_output_tests {
     use super::super::support::*;
@@ -1055,7 +1056,7 @@ mod bash_mode_output_tests {
                 writeln!(file, "{line}").expect("write updates.jsonl");
             }
         }
-        crate::session::storage::chat_rebuild::rebuild_chat_history(dir.path())
+        crate::session::storage::chat_rebuild::rebuild_chat_history_for_test(dir.path())
             .expect("rebuild chat_history.jsonl");
         let chat_path = dir.path().join(crate::session::storage::CHAT_HISTORY_FILE);
         let bytes = std::fs::metadata(&chat_path)

@@ -1,0 +1,136 @@
+# GENERATED from the root clippy.toml (minus the F5 producers) + session-writer-crates.toml `raw-write-ban`.
+# fuigo-tools is a listed session-writer crate (design F5 5.4.1); scripts/ci/session-writer-crates.sh checks this file.
+# allow-invalid on an F5 entry: this crate cannot reach that path (Windows-only, or not a dependency).
+#
+# Clippy config for crates/codegen/**.
+#
+# NOTE: clippy uses the NEAREST clippy.toml (no merging), so this file must
+# duplicate any settings from the repo-root //clippy.toml.
+
+# TODO: remove after https://github.com/hyperium/tonic/issues/2253 fixed.
+large-error-threshold = 256
+
+# Printing macros are denied workspace-wide (Cargo.toml [workspace.lints.clippy]: a failed write
+# panics, and release is panic=abort). A test harness's own stdout/stderr is not a shipped stream.
+allow-print-in-tests = true
+allow-dbg-in-tests = true
+
+# Ban raw canonicalize: on Windows it returns verbatim `\\?\C:\...` paths that
+# break external tools, leak into prompts, and poison path-equality keys.
+# `dunce::canonicalize` keeps the verbatim form for paths it cannot simplify
+# (over 260 chars, device names), so containment checks there fail closed.
+#
+# Ban raw child-process spawning: an unenrolled child outlives the session that
+# started it, while an enrolled one dies with its scope. Allow with a reason
+# where a child is waited on or deliberately detached.
+#
+# Ban std::env::home_dir: hand-rolled fuigo-home resolution drifted across
+# crates ($HOME-only reads broke Windows GUI-spawned processes, which have
+# USERPROFILE but no HOME). fuigo-dirs carries the one sanctioned call.
+# Deliberately scoped to crates/codegen: the tree that ships to Windows
+# clients owns this policy, and repo-wide enforcement only produced
+# false positives in server-side code.
+#
+# Ban dirs::home_dir for the same reason: on Windows it asks the known-folder
+# API and ignores a redirected USERPROFILE, so it can disagree with
+# fuigo_dirs::home_dir — and with Node-based tools, whose os.homedir()
+# reads USERPROFILE. Every home-anchored path resolves
+# via fuigo_dirs so all sites land in the same tree.
+#
+# The canonicalize and spawn bans below are enforced by `cargo clippy` and
+# `just lint-rs` only: the Bazel lint aspect pins the repo-root config, which
+# does not carry them.
+disallowed-methods = [
+    { path = "reqwest::RequestBuilder::send", reason = "use fuigo_extra_ca::dispatch::send or send_checked so destination policy runs before proxy contact" },
+    { path = "reqwest::blocking::RequestBuilder::send", reason = "use fuigo_extra_ca::dispatch::send_blocking or send_checked so destination policy runs before proxy contact" },
+    { path = "reqwest::Client::execute", reason = "use fuigo_extra_ca::dispatch::execute; approved policy adapters require a narrow documented exception" },
+    { path = "reqwest::blocking::Client::execute", reason = "use fuigo_extra_ca::dispatch::execute_blocking; approved policy adapters require a narrow documented exception" },
+    { path = "reqwest::Client::new", reason = "bypasses the fuigo TLS policy (backend pin, OS roots, FUIGO_EXTRA_CA_BUNDLE); build through fuigo_extra_ca; localhost-only clients allow with a reason" },
+    { path = "reqwest::blocking::Client::new", reason = "bypasses the fuigo TLS policy (backend pin, OS roots, FUIGO_EXTRA_CA_BUNDLE); build through fuigo_extra_ca; localhost-only clients allow with a reason" },
+    { path = "reqwest::ClientBuilder::build", reason = "use fuigo_extra_ca::build_reqwest_client: it applies the fuigo TLS policy and survives a broken OS store; localhost/test clients allow with a reason" },
+    { path = "reqwest::blocking::ClientBuilder::build", reason = "use fuigo_extra_ca::build_blocking_reqwest_client: it applies the fuigo TLS policy and survives a broken OS store; localhost/test clients allow with a reason" },
+    { path = "std::fs::canonicalize", reason = "returns \\\\?\\ verbatim paths on Windows; use dunce::canonicalize" },
+    { path = "std::path::Path::canonicalize", reason = "returns \\\\?\\ verbatim paths on Windows; use dunce::canonicalize" },
+    { path = "tokio::fs::canonicalize", reason = "returns \\\\?\\ verbatim paths on Windows; use fuigo_tools::util::fs helpers or spawn_blocking + dunce::canonicalize" },
+    { path = "std::env::home_dir", reason = "fuigo-home resolution goes through fuigo-dirs (uncached) or fuigo_config::fuigo_home (cached); generic home via fuigo_dirs::home_dir" },
+    # allow-invalid: most codegen crates no longer depend on `dirs` at all,
+    # which would otherwise warn that the banned path is unreachable.
+    { path = "dirs::home_dir", reason = "home-anchored paths resolve via fuigo_dirs::home_dir so all sites agree; Node-based tools use os.homedir, which matches it, not the known-folder API", allow-invalid = true },
+    { path = "std::process::Command::spawn", reason = "an unenrolled child outlives its session; use fuigo_tty_utils::ProcessScope::enroll" },
+    # allow-invalid: crates built without tokio's `process` feature cannot reach this path, which would otherwise warn.
+    { path = "tokio::process::Command::spawn", reason = "an unenrolled child outlives its session; use fuigo_tty_utils::ProcessScope::enroll", allow-invalid = true },
+    { path = "portable_pty::SlavePty::spawn_command", reason = "an unenrolled pty child outlives its session; enroll the shell with fuigo_tty_utils::ProcessScope::enroll_terminal_pid" },
+    # BEGIN F5 raw-write ban (session-writer-crates.toml `raw-write-ban`)
+    { path = "std::fs::write", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::rename", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::remove_file", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::remove_dir", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::remove_dir_all", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::create_dir", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::create_dir_all", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::copy", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::hard_link", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::set_permissions", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::soft_link", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::os::unix::fs::symlink", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::os::windows::fs::symlink_file", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)", allow-invalid = true },
+    { path = "std::os::windows::fs::symlink_dir", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)", allow-invalid = true },
+    { path = "std::fs::File::create", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::File::create_new", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::File::set_len", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::File::set_permissions", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::DirBuilder::create", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::OpenOptions::write", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::OpenOptions::append", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::OpenOptions::create", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::OpenOptions::create_new", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "std::fs::OpenOptions::truncate", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::write", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::rename", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::remove_file", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::remove_dir", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::remove_dir_all", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::create_dir", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::create_dir_all", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::copy", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::hard_link", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::set_permissions", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::symlink", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::symlink_file", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)", allow-invalid = true },
+    { path = "tokio::fs::symlink_dir", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)", allow-invalid = true },
+    { path = "tokio::fs::File::create", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::File::create_new", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::File::set_len", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::File::set_permissions", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::DirBuilder::create", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::OpenOptions::write", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::OpenOptions::append", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::OpenOptions::create", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::OpenOptions::create_new", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tokio::fs::OpenOptions::truncate", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tempfile::NamedTempFile::new", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tempfile::NamedTempFile::new_in", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tempfile::NamedTempFile::persist", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tempfile::NamedTempFile::persist_noclobber", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tempfile::NamedTempFile::keep", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tempfile::TempPath::persist", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tempfile::TempPath::persist_noclobber", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tempfile::TempPath::keep", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "tempfile::Builder::tempfile_in", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "fuigo_config::paths::create_dir_all_owner_only", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "fuigo_config::paths::create_file_owner_only", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "fuigo_config::paths::write_file_owner_only", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "fuigo_config::paths::owner_only_file_options", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "fuigo_config::paths::set_dir_owner_only", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "fuigo_config::write_through::replace_file_contents", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "fuigo_secrets::owner_only::restrict_to_owner", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "fuigo_session_writer::owner_only::create", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "fuigo_session_writer::owner_only::write", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "fuigo_session_writer::owner_only::copy", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "fuigo_session_writer::owner_only::copy_async", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "fuigo_session_writer::owner_only::write_async", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "fuigo_tools::persistence::ResourcesPersistence::new_at", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "fuigo_session_events::log::EventWriter::open_at", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    { path = "fuigo_session_events::tracker::EventTracker::new_at", reason = "raw mutation: inside a session folder write through fuigo_session_writer::SessionWriter; elsewhere allow with a reason that names the file and why it is not inside a session folder (design F5 5.4.1, 5.6)" },
+    # END F5 raw-write ban
+]

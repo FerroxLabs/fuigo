@@ -223,6 +223,7 @@ pub(crate) fn check_file_size_limits(
     Ok(())
 }
 
+#[allow(clippy::disallowed_methods, reason = "file tool write of a model/user-chosen path (user content); not inside a session folder")]
 pub async fn write_file(abs_path: &Path, content: &str, create_dirs: bool) -> Result<()> {
     let abs_path = abs_path.to_path_buf();
     let content = content.to_string();
@@ -264,11 +265,13 @@ pub(crate) fn build_file_entry(bytes: &[u8]) -> FsReadFileData {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "file tool write of a model/user-chosen path (user content); not inside a session folder")]
 pub async fn delete_file(abs_path: &Path) -> Result<()> {
     tokio::fs::remove_file(abs_path).await?;
     Ok(())
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

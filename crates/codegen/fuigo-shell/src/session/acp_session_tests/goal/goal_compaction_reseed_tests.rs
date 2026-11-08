@@ -77,6 +77,7 @@ async fn compaction_goal_section_is_continuation_not_create_style_rules() {
         .await;
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 async fn summarizer_user_context_pins_objective() {
     let local = tokio::task::LocalSet::new();
@@ -344,6 +345,7 @@ async fn compact_reseed_skips_turn_end_drain_and_round_count() {
         .await;
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 async fn make_goal_actor() -> (StdArc<SessionActor>, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
     let (gateway_tx, _gateway_rx) =
@@ -351,7 +353,7 @@ async fn make_goal_actor() -> (StdArc<SessionActor>, TempDir) {
     let (persistence_tx, _persistence_rx) =
         tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-    actor.events = crate::session::events::EventTracker::new(tmp.path());
+    actor.events = crate::session::events::EventTracker::new_at(tmp.path());
     actor.goal_enabled = true;
     actor.goal_planner_enabled = true;
     set_goal_harness_for_tests(&actor);
@@ -452,6 +454,7 @@ async fn spawn_summary_server() -> (String, StdArc<std::sync::Mutex<Vec<String>>
 /// The compaction run itself, not its parts: an active goal reaches the summarizer request (beside the user's own
 /// `/compact` focus), the compacted `<user_query>`, the post-compact system reminder, and the history's last cue.
 /// Each stage is wired separately in `run_compact_inner`, so a part tested alone does not prove the run uses it.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 async fn a_compaction_run_carries_the_active_goal_through_every_stage() {
     if fuigo_test_support::env::rerun_in_own_process() {
@@ -469,7 +472,7 @@ async fn a_compaction_run_carries_the_active_goal_through_every_stage() {
             let persistence_tx =
                 crate::session::persistence::compaction_fixture_persistence(persistence_tx).await;
             let mut actor = create_test_actor(50_000, 256_000, 85, gateway_tx, persistence_tx).await;
-            actor.events = crate::session::events::EventTracker::new(tmp.path());
+            actor.events = crate::session::events::EventTracker::new_at(tmp.path());
             actor.goal_enabled = true;
             actor.goal_planner_enabled = true;
             set_goal_harness_for_tests(&actor);

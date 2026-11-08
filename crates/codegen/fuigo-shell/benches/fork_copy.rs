@@ -16,6 +16,7 @@ use fuigo_shell::session::storage::{CopySessionOptions, JsonlStorageAdapter, Sto
 use fuigo_shell::session::testkit::synth::make_session_with_size_blocking;
 use tempfile::TempDir;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn bench_fork_copy(c: &mut Criterion) {
     let target_mb: u64 = std::env::var("FORK_BENCH_MB")
         .ok()

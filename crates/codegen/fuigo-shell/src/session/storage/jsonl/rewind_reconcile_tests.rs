@@ -744,3 +744,59 @@ async fn a_rewind_does_not_read_its_journal_through_a_link() {
     assert_eq!(std::fs::read(&rig.points).unwrap(), points_before);
     assert_eq!(leftovers(&rig), (false, false));
 }
+
+/// F5-C3 (design F5 §5.5, §5.7): the reconcile writes only as the caller's writer. A caller without one (a reader)
+/// skips it and leaves the leftover for the owner; a writer refused by the folder (another process holds it) writes
+/// nothing and keeps the leftover. (1.0.40 reconciled by path for any caller.)
+#[tokio::test]
+async fn c3_the_rewind_reconcile_writes_only_as_the_callers_writer() {
+    let rig = rig("c3-reconcile-writer").await;
+    rewind_killed_at(&rig, RewindPointsRewrite::TruncateFrom(1), true, KilledAt::BeforeSwap).await;
+    let points_before = std::fs::read(&rig.points).unwrap();
+    assert_eq!(rig.adapter.reconcile_interrupted_rewind_as(&rig.info, None).await, None, "a reader does not reconcile");
+    assert_eq!(leftovers(&rig), (true, true), "a reader left the leftover alone");
+    let dir = rig.adapter.session_dir(&rig.info);
+    let other = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(fuigo_session_writer::lock::SESSION_WRITER_LOCK_FILE))
+        .unwrap();
+    other.try_lock().unwrap();
+    let writer = fuigo_session_writer::SessionWriter::try_claim(rig.info.id.0.to_string(), &dir).unwrap();
+    let _ = rig.adapter.reconcile_interrupted_rewind_as(&rig.info, Some(&writer)).await;
+    assert_eq!(leftovers(&rig), (true, true), "a refused writer removed the leftover");
+    assert_eq!(std::fs::read(&rig.points).unwrap(), points_before);
+    other.unlock().unwrap();
+    drop(other);
+    let notice = rig.adapter.reconcile_interrupted_rewind_as(&rig.info, Some(&writer)).await.expect("the owner reconciles");
+    assert!(notice.contains("did not happen"), "{notice}");
+    assert_eq!(leftovers(&rig), (false, false));
+}
+
+/// F5-C8 (design F5 §5.4, F5-C4 gap f): the rewind's journal is the session writer's. With the folder held by another
+/// process the rewrite is refused before it writes anything: no journal, no copy, the file as it was. A journal
+/// written by path would be left behind in a folder the writer was refused.
+#[tokio::test]
+async fn c8_the_rewind_journal_goes_through_the_writer() {
+    let rig = rig("c8-journal-writer").await;
+    let points_before = std::fs::read(&rig.points).unwrap();
+    let lock = rig.adapter.lock_rewind_points_rewrite(&rig.info).await.expect("the rewind takes its lock");
+    let dir = rig.adapter.session_dir(&rig.info);
+    let other = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(fuigo_session_writer::lock::SESSION_WRITER_LOCK_FILE))
+        .unwrap();
+    other.try_lock().unwrap();
+    let refused = rig.adapter.rewrite_rewind_points_holding(&rig.info, RewindPointsRewrite::TruncateFrom(1), None).await;
+    other.unlock().unwrap();
+    drop(other);
+    drop(lock);
+    assert!(refused.is_err(), "a writer refused by the folder rewrote the rewind points");
+    assert_eq!(leftovers(&rig), (false, false), "the journal or the copy was written outside the writer");
+    assert_eq!(std::fs::read(&rig.points).unwrap(), points_before);
+}

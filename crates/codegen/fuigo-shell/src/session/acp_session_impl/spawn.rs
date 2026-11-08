@@ -394,6 +394,7 @@ pub(crate) async fn spawn_session_actor(
     spawn_ctx: Option<fuigo_telemetry::subagent_spawn::SpawnPhaseContext>,
     sampling_gate: Option<Arc<tokio::sync::Semaphore>>,
     turn_owner_lock: Option<crate::session::turn_owner_lock::TurnOwnerLock>,
+    session_writer: fuigo_session_writer::SessionWriter,
 ) -> Result<
     (
         SessionHandle,
@@ -788,7 +789,8 @@ pub(crate) async fn spawn_session_actor(
             crate::session::goal_tracker::GoalTracker::from_snapshot(session_dir, snapshot)
         } else {
             crate::session::goal_tracker::GoalTracker::new(session_dir)
-        };
+        }
+        .with_writer(session_writer.clone());
         Arc::new(parking_lot::Mutex::new(tracker))
     };
     let restored_prompt_mode = plan_mode.lock().session_prompt_mode();
@@ -1144,6 +1146,7 @@ pub(crate) async fn spawn_session_actor(
         fs_backend: fs_backend.clone(),
         tools_notification_handle: tools_notification_handle.clone(),
         bridge_state_path: bridge_state_path.clone(),
+        session_writer: Some(session_writer.clone()),
         session_env: tool_context.session_env.clone(),
         models_manager: models_manager.clone(),
         compaction_policy,
@@ -1338,7 +1341,7 @@ pub(crate) async fn spawn_session_actor(
     let system_prompt = agent.system_prompt().to_string();
     let mut prompt_context = agent.prompt_context().clone();
     prompt_context.normalize_for_persistence();
-    save_prompt_context(&session_info, &prompt_context);
+    save_prompt_context(&session_info, Some(&session_writer), &prompt_context);
     let is_subagent_spawn = startup_hints.is_subagent;
     let session_non_interactive = startup_hints.non_interactive;
     install_system_prompt(
@@ -1364,6 +1367,7 @@ pub(crate) async fn spawn_session_actor(
             startup_hints.inherited_prefix_len,
             &compat,
             &session_info,
+            Some(&session_writer),
             prompt_display_cwd.as_deref(),
             tool_context.cwd.as_path(),
         );
@@ -1421,9 +1425,9 @@ pub(crate) async fn spawn_session_actor(
         }
     }
     if let Some(ConversationItem::System(sys)) = conversation.first() {
-        save_system_prompt(&session_info, &sys.content);
+        save_system_prompt(&session_info, Some(&session_writer), &sys.content);
     } else {
-        save_system_prompt(&session_info, &system_prompt);
+        save_system_prompt(&session_info, Some(&session_writer), &system_prompt);
     }
     let initial_prefix_carries_fallback_date = resumed_prefix_carries_fallback_date(
         agent
@@ -1432,7 +1436,7 @@ pub(crate) async fn spawn_session_actor(
             .surfaces_local_date(),
         &conversation,
     );
-    persist_chat_history_jsonl_sync(&session_info, &conversation);
+    persist_chat_history_jsonl_sync(&session_info, Some(&session_writer), &conversation);
     chat_state_handle.replace_conversation(conversation);
     let feedback_client = feedback_proxy_url.map(|base_url| {
         let mut client =
@@ -1651,11 +1655,11 @@ pub(crate) async fn spawn_session_actor(
             resume_workflows,
             resume_goal,
         );
-        crate::session::resume_status::persist(&workflow_session_dir, &snapshot);
+        crate::session::resume_status::persist(&session_writer, &snapshot);
     }
     let (workflow_store, workflow_snapshots) =
         crate::session::workflow::store::WorkflowRunStore::from_restored(
-            Some(workflow_session_dir.clone()),
+            Some(session_writer.clone()),
             persistence.tx.clone(),
             persisted_workflow_runs,
         );
@@ -1927,7 +1931,7 @@ pub(crate) async fn spawn_session_actor(
         );
     if title_refresh_watermark.is_none() && initial_title_refresh_idx == 0 {
         crate::session::helpers::session_summary::save_title_refresh_watermark(
-            &title_session_dir,
+            Some(&session_writer),
             0,
         );
     }
@@ -2233,9 +2237,7 @@ pub(crate) async fn spawn_session_actor(
         plugin_registry_live: plugin_registry_for_handle.clone(),
         scheduler_handle_live: scheduler_handle_for_handle.clone(),
         plugin_registry_handle,
-        events: crate::session::events::EventTracker::new(
-            &crate::session::persistence::session_dir(&session_info),
-        ),
+        events: crate::session::events::EventTracker::new(&session_writer),
         _turn_owner_lock: turn_owner_lock,
         observability_bridge: obs_bridge,
         current_turn_number: std::cell::Cell::new(0),
@@ -2577,6 +2579,7 @@ pub(crate) async fn spawn_session_actor(
     }
     let hosting = fuigo_telemetry::activity::SESSIONS_ACTIVE.enter();
     let peer_gate = session.peer_admission.gate();
+    let release_tx = persistence.tx.clone();
     tokio::task::spawn_local(async move {
         let _hosting = hosting;
         fuigo_telemetry::session_ctx::with_session_ctx(
@@ -2593,6 +2596,9 @@ pub(crate) async fn spawn_session_actor(
             ),
         )
         .await;
+        // F5-C5 (design F5 §6.1): the session ended; its tail writes are queued, so the persistence task writes them,
+        // drops its writer clone and ends, even while other handles to it are still held.
+        let _ = release_tx.send(crate::session::persistence::PersistenceMsg::ReleaseWriter);
         let _ = session_done_tx.send(());
     });
     Ok((
@@ -2799,6 +2805,7 @@ pub(crate) async fn spawn_session_on_thread(
     is_chat_kind: bool,
     spawn_ctx: Option<fuigo_telemetry::subagent_spawn::SpawnPhaseContext>,
     sampling_gate: Option<Arc<tokio::sync::Semaphore>>,
+    session_writer: fuigo_session_writer::SessionWriter,
 ) -> Result<
     (
         SessionHandle,
@@ -2819,13 +2826,19 @@ pub(crate) async fn spawn_session_on_thread(
     )
     .await
     .map_err(crate::session::session_writer_lock::HeldElsewhere::into_acp_error)?;
+    // The session's writer (design F5 §5.4.2, §5.5): claimed by the caller with the waiting claim before this runs
+    // (`session/new` at the start of setup, chat kind included; a cold load after admission and before its first read;
+    // a subagent child before its bootstrap), and moved in here. Its clones live in the actor (the rebuild spec, the
+    // event log, the resume manifest) and the toolset, and end with the session's thread. Every session folder this
+    // spawns therefore has a writer; there is no claim here and no by-path fallback.
     #[cfg(test)]
     crate::session::persistence::test_seam::run_before_turn_owner_lock(
         &session_info.id.0,
         &crate::session::persistence::session_dir(&session_info),
     );
-    let turn_owner_lock = crate::session::turn_owner_lock::TurnOwnerLock::acquire(
+    let turn_owner_lock = crate::session::turn_owner_lock::TurnOwnerLock::acquire_as(
         &crate::session::persistence::session_dir(&session_info),
+        &session_writer,
     )
     .await
     .map_err(crate::session::turn_owner_lock::OwnerLockBusy::into_acp_error)?;
@@ -2841,6 +2854,9 @@ pub(crate) async fn spawn_session_on_thread(
         .name(thread_name)
         .stack_size(SESSION_THREAD_STACK_SIZE)
         .spawn(move || {
+            // The thread's last value to drop (design F5 §6.1; box B4): the OS hold below, the actor's turn-owner lock and
+            // its event log close before this clone goes, so a freed writer leaves no handle of the session open.
+            let _writer_until_thread_end = session_writer.clone();
             // Released when the session's thread ends: after the actor and its last writes.
             let _writer_lock = writer_lock;
             let _notice_scope = notice_scope.map(fuigo_config::key_naming::NoticeScope::enter);
@@ -3003,6 +3019,7 @@ pub(crate) async fn spawn_session_on_thread(
                         spawn_ctx,
                         sampling_gate,
                         turn_owner_lock,
+                        session_writer,
                     )
                     .await
                     {

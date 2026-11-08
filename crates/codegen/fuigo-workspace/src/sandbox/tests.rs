@@ -3147,3 +3147,63 @@ async fn a_background_start_keeps_its_childs_call_answers_until_the_child_is_gon
         assert_eq!(0, sandbox.calls.lock().len(), "{gone}");
     }
 }
+
+/// Review r2 M (F12): with session persistence off the folder's session-directory check never asks for the directory
+/// to be made. An existing user-owned 0700 bucket is safe (so `enforce` runs the command), a loose-mode one is still
+/// reported, a missing one is no gap and is not created. In a child process, as the switch is one-way.
+#[cfg(unix)]
+#[test]
+#[allow(clippy::disallowed_methods, reason = "test code: a fixture FUIGO_HOME in a temp dir, seeded by path")]
+fn r2m_session_dir_gap_with_persistence_off_checks_but_never_creates() {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(home) = std::env::var_os("R2M_HOME") {
+        fuigo_config::disable_session_persistence();
+        let home = PathBuf::from(home);
+        let root = |name: &str| PathBuf::from(std::env::var(name).unwrap());
+        let gap = |name: &str| super::session_dir_gap(&home, &root(name));
+        assert_eq!(gap("R2M_GOOD"), None, "an existing 0700 bucket is not a gap");
+        let loose = gap("R2M_LOOSE").expect("a loose-mode bucket is still reported");
+        assert!(loose.contains("open to other users"), "{loose}");
+        assert_eq!(gap("R2M_MISSING"), None, "a missing bucket is not a gap");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let mk = |name: &str, mode: Option<u32>| {
+        let root = tmp.path().join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        if let Some(mode) = mode {
+            let bucket = fuigo_config::sessions_cwd_dir_in(&home, &root.to_string_lossy());
+            std::fs::create_dir_all(&bucket).unwrap();
+            std::fs::set_permissions(&bucket, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        root
+    };
+    let (good, loose, missing) = (mk("good", Some(0o700)), mk("loose", Some(0o755)), mk("missing", None));
+    let listing = |dir: &Path| {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let meta = std::fs::symlink_metadata(entry.path()).unwrap();
+                out.push((entry.path(), meta.len(), meta.modified().ok()));
+                if meta.is_dir() {
+                    stack.push(entry.path());
+                }
+            }
+        }
+        out.sort();
+        out
+    };
+    let before = listing(&home);
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "sandbox::tests::r2m_session_dir_gap_with_persistence_off_checks_but_never_creates", "--nocapture"])
+        .env("R2M_HOME", &home)
+        .env("R2M_GOOD", &good)
+        .env("R2M_LOOSE", &loose)
+        .env("R2M_MISSING", &missing)
+        .status()
+        .unwrap();
+    assert!(status.success(), "the child run failed");
+    assert_eq!(listing(&home), before, "the check created or changed something under sessions/");
+}

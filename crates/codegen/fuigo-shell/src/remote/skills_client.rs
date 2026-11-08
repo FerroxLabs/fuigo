@@ -773,6 +773,7 @@ impl SkillsClient {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 pub(crate) mod tests {
     /// P43 hostile: a skills catalog host that is not FluxRouter-operated gets no identity.

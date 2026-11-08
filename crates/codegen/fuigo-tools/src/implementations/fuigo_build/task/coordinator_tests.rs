@@ -95,6 +95,7 @@ impl ChildRunner for TestRunner {
                 reporter,
                 queued_for,
                 session_running,
+                parent_writer: _,
             } = run;
             let _ = queue_waits.send((request.id.clone(), queued_for, session_running));
             let _ = requests.send(request.clone());
@@ -3444,7 +3445,7 @@ async fn a_loop_fire_queued_by_a_replaced_scheduler_starts_exactly_once() {
         SchedulerActor {
             resources: resources.into_shared(),
             resources_persistence: std::sync::Arc::new(
-                crate::persistence::ResourcesPersistence::new(path.clone()),
+                crate::persistence::ResourcesPersistence::new_at(path.clone()),
             ),
             notification_handle: notifications.clone(),
             cmd_rx: mpsc::unbounded_channel().1,
@@ -3573,7 +3574,7 @@ async fn an_explicit_stop_cancels_a_queued_loop_fire() {
     let scope = SchedulerScope::register(&path);
     let mut actor = SchedulerActor {
         resources: resources.into_shared(),
-        resources_persistence: std::sync::Arc::new(crate::persistence::ResourcesPersistence::new(
+        resources_persistence: std::sync::Arc::new(crate::persistence::ResourcesPersistence::new_at(
             path.clone(),
         )),
         notification_handle: notifications,
@@ -3647,7 +3648,7 @@ async fn an_in_flight_fire_after_the_last_scope_drops_leaves_no_gate() {
     let cancel = CancellationToken::new();
     let mut actor = SchedulerActor {
         resources: shared.clone(),
-        resources_persistence: std::sync::Arc::new(crate::persistence::ResourcesPersistence::new(
+        resources_persistence: std::sync::Arc::new(crate::persistence::ResourcesPersistence::new_at(
             path.clone(),
         )),
         notification_handle: notifications,
@@ -3729,7 +3730,7 @@ async fn a_dead_scheduler_fire_with_a_closed_coordinator_publishes_nothing() {
     let cancel = CancellationToken::new();
     let mut actor = SchedulerActor {
         resources: shared.clone(),
-        resources_persistence: std::sync::Arc::new(crate::persistence::ResourcesPersistence::new(
+        resources_persistence: std::sync::Arc::new(crate::persistence::ResourcesPersistence::new_at(
             path.clone(),
         )),
         notification_handle: notifications,

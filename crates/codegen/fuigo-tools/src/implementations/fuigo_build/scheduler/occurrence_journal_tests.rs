@@ -283,7 +283,7 @@ async fn production_loader_preserves_tasks_and_quarantine_metadata() {
 
     let mut resources = Resources::new();
     resources.register_state::<SchedulerState>();
-    assert!(ResourcesPersistence::new(path.clone()).load(&mut resources));
+    assert!(ResourcesPersistence::new_at(path.clone()).load(&mut resources));
     let state = resources.get::<State<SchedulerState>>().unwrap();
     assert_eq!(state.tasks[0].id, "recurring");
     let (task_ids, is_global_block, is_overflowed) =
@@ -309,7 +309,7 @@ async fn production_loader_preserves_tasks_and_quarantine_metadata() {
         .unwrap();
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
-        assert!(ResourcesPersistence::new(path.clone()).load(&mut resources));
+        assert!(ResourcesPersistence::new_at(path.clone()).load(&mut resources));
         let state = resources.get::<State<SchedulerState>>().unwrap();
         assert_eq!(state.tasks[0].id, "kept");
         assert!(state.occurrence_journal.block_all_one_shots);

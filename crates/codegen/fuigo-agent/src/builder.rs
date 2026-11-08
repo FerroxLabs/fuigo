@@ -86,6 +86,9 @@ pub struct AgentBuilder {
     system_prompt_label: String,
     session_env: Option<Arc<HashMap<String, String>>>,
     state_path: Option<PathBuf>,
+    /// The session's writer (design F5 §5.4.2): passed through to the toolset, which writes the session folder only
+    /// through it. This crate never names its folder.
+    session_writer: Option<fuigo_session_writer::SessionWriter>,
     memory_backend: Option<Arc<dyn fuigo_tools::types::memory_backend::MemoryBackend>>,
     web_search_config: fuigo_tools::implementations::web_search::WebSearchConfig,
     /// When true, web search and X search go to the agentic sampler as native server-side tools instead of registering as local Function tools.
@@ -237,6 +240,7 @@ impl AgentBuilder {
             system_prompt_label: crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
             session_env: None,
             state_path: None,
+            session_writer: None,
             memory_backend: None,
             web_search_config: Default::default(),
             backend_search: false,
@@ -413,6 +417,13 @@ impl AgentBuilder {
     }
     pub fn with_state_path(mut self, path: PathBuf) -> Self {
         self.state_path = Some(path);
+        self
+    }
+    /// The session's writer. With one, the toolset writes the session folder (tool state, terminal logs, MCP dumps,
+    /// fetched and generated files) only through it; without one (`None`, the default) it keeps writing by path under
+    /// [`with_state_path`](Self::with_state_path)'s folder or the temp directory, as before.
+    pub fn with_session_writer(mut self, writer: Option<fuigo_session_writer::SessionWriter>) -> Self {
+        self.session_writer = writer;
         self
     }
     /// Set the memory backend for cross-session knowledge retrieval.
@@ -1168,6 +1179,7 @@ impl AgentBuilder {
                 parent_scheduler_handle: self.parent_scheduler_handle.take(),
                 skills: skill_info.clone(),
                 state_path,
+                session_writer: self.session_writer.take(),
                 memory_backend: self.memory_backend,
                 web_search_config: self.web_search_config,
                 web_fetch_config: self.web_fetch_config,

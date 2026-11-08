@@ -89,6 +89,7 @@ struct Fixture {
 }
 
 impl Fixture {
+    #[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
     fn new(home: TempDir) -> Self {
         let sessions_root = home.path().join("sessions");
         fs::create_dir(&sessions_root).expect("create sessions root");
@@ -290,6 +291,7 @@ struct SameRepoTopology {
     sources: Vec<CandidateSource>,
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn create_same_repo_cwds(home: &Path) -> SameRepoTopology {
     let repo_dir = home.join("fixture").join("main");
     fs::create_dir_all(&repo_dir).expect("create main checkout directory");
@@ -475,6 +477,7 @@ fn fixture_id() -> String {
     )
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn write_summary(
     cwd_dir: &Path,
     cwd: &str,

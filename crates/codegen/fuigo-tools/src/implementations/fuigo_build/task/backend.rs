@@ -236,6 +236,9 @@ impl ChannelBackendSender {
 pub struct ChannelBackend {
     tx: ChannelBackendSender,
     parent_session_id: Option<Arc<str>>,
+    /// The parent session's writer, attached to every spawn envelope (design F5 §5.5): the per-session backend lives
+    /// in that session's toolset, so this clone has the toolset's lifetime, as the toolset's own writer clone does.
+    parent_writer: Option<fuigo_session_writer::SessionWriter>,
 }
 
 impl ChannelBackend {
@@ -243,6 +246,7 @@ impl ChannelBackend {
         Self {
             tx: ChannelBackendSender::Legacy(SubagentEventSender(tx)),
             parent_session_id: None,
+            parent_writer: None,
         }
     }
 
@@ -250,6 +254,7 @@ impl ChannelBackend {
         Self {
             tx: ChannelBackendSender::Legacy(sender),
             parent_session_id: None,
+            parent_writer: None,
         }
     }
 
@@ -257,6 +262,7 @@ impl ChannelBackend {
         Self {
             tx: ChannelBackendSender::Coordinator(sender),
             parent_session_id: None,
+            parent_writer: None,
         }
     }
 
@@ -268,6 +274,7 @@ impl ChannelBackend {
         Self {
             tx: ChannelBackendSender::Legacy(SubagentEventSender(tx)),
             parent_session_id: Some(parent_session_id.into()),
+            parent_writer: None,
         }
     }
 
@@ -278,6 +285,7 @@ impl ChannelBackend {
         Self {
             tx: ChannelBackendSender::Legacy(sender),
             parent_session_id: Some(parent_session_id.into()),
+            parent_writer: None,
         }
     }
 
@@ -288,7 +296,15 @@ impl ChannelBackend {
         Self {
             tx: ChannelBackendSender::Coordinator(sender),
             parent_session_id: Some(parent_session_id.into()),
+            parent_writer: None,
         }
+    }
+
+    /// Attach the parent session's writer to this backend's spawns (built in `agent_rebuild` from the actor's writer).
+    #[must_use]
+    pub fn with_parent_writer(mut self, writer: Option<fuigo_session_writer::SessionWriter>) -> Self {
+        self.parent_writer = writer;
+        self
     }
 
     fn parent_session_id(&self) -> Option<String> {
@@ -539,6 +555,7 @@ impl SubagentBackend for ChannelBackend {
                 request: Box::new(request),
                 result_tx: respond_to,
                 registered_tx,
+                parent_writer: self.parent_writer.clone(),
             }))
             .map_err(|_| {
                 ToolError::custom(

@@ -559,7 +559,17 @@ pub(crate) fn process_limit_rule(message: &str) -> Option<ExecutionBudgetRule> {
 /// The refusal of any change but `Open` to a record that does not exist yet.
 const EXECUTION_STATE_MISSING: &str = "execution state missing";
 
+/// Tests: [`apply_as`] with a writer claimed for `dir`.
+#[cfg(test)]
 pub(crate) async fn apply(dir: &Path, mutation: ExecutionMutation) -> io::Result<Snapshot> {
+    let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+        .map_err(|_busy| io::Error::other("busy"))?;
+    apply_as(&writer, mutation).await
+}
+
+/// Apply `mutation` to the execution state file in `writer`'s session folder, written as that writer (F5-C6).
+pub(crate) async fn apply_as(writer: &fuigo_session_writer::SessionWriter, mutation: ExecutionMutation) -> io::Result<Snapshot> {
+    let dir = writer.dir();
     // The key is a fixed-length hash minted locally, never a client-provided path.
     if mutation.key.len() != 64 || !mutation.key.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(denied("invalid execution identity"));
@@ -635,7 +645,8 @@ pub(crate) async fn apply(dir: &Path, mutation: ExecutionMutation) -> io::Result
     )?;
     // Existing atomic primitive syncs bytes and the existing session directory.
     // The actor serializes this write with all other execution mutations.
-    crate::session::storage::write_bytes_atomic_async(
+    crate::session::storage::write_bytes_atomic_as_async(
+        writer,
         &path,
         serde_json::to_vec(&state).map_err(io::Error::other)?,
     )
@@ -1837,6 +1848,7 @@ impl ChildGrant {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

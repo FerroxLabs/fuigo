@@ -190,6 +190,7 @@ where
 ///
 /// Call before the first `session/new`; `FUIGO_HOME` must already point at the test's
 /// temp dir (`run_agent_test` and `sweep_env_init` both set it).
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[allow(dead_code)]
 pub fn declare_fixture_mcp_server() {
     let fuigo_home = std::path::PathBuf::from(
@@ -207,6 +208,25 @@ pub fn declare_fixture_mcp_server() {
 }
 
 // Dead-code allows below: same per-binary compilation as `AutoApproveClient` above; each helper is used by some including test binaries, not all
+/// Ends `sessions` in the agent behind `conn` and waits until each one's session writer has let go.
+///
+/// A dropped connection leaves this process's session actors running (the in-process agent is never torn down), and a
+/// cold load in another agent claims the session's writer first (design F5 §5.5), so it would wait and then refuse
+/// with "still closing". The process a second agent's load stands for (one that exited or crashed) holds nothing.
+#[allow(dead_code)]
+pub async fn close_and_release(conn: &acp::ClientSideConnection, sessions: &[&acp::SessionId]) {
+    for session in sessions {
+        ext_method(conn, "fuigo/session/close", serde_json::json!({ "sessionId": session.to_string() })).await;
+    }
+    let deadline = tokio::time::Instant::now() + RPC_TIMEOUT;
+    for session in sessions {
+        while !fuigo_session_writer::SessionWriter::is_free(&session.0) {
+            assert!(tokio::time::Instant::now() < deadline, "the agent never released session {}", session.0);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
 #[allow(dead_code)]
 pub async fn ext_method(
     conn: &acp::ClientSideConnection,

@@ -33,7 +33,12 @@ pub(crate) fn prompt_history_path(cwd: &str) -> PathBuf {
 /// for the append (P72), the lock [`truncate_if_needed`] rewrites the file
 /// under: an append that landed between the truncation's read and its rename
 /// went into the replaced file and was lost.
+#[allow(clippy::disallowed_methods, reason = "prompt_history.jsonl lives in sessions/<cwd>/, the cwd dir that parents session folders; not inside a session folder")]
 pub(crate) fn append_prompt(cwd: &str, entry: &PromptEntry) -> io::Result<()> {
+    // F12: `--no-session-persistence` records no prompt.
+    if fuigo_session_writer::persistence_disabled() {
+        return Ok(());
+    }
     let path = prompt_history_path(cwd);
     crate::util::fuigo_home::ensure_sessions_cwd_dir(cwd)?;
     // The file exists before the lock is taken (P79): a state lock covers the
@@ -93,6 +98,9 @@ pub(crate) fn load_prompts_for_session(cwd: &str, session_id: &str) -> io::Resul
 /// temp name is unique (two sessions truncating at once shared the fixed
 /// `prompt_history.jsonl.tmp`), and the file keeps its mode.
 pub(crate) fn truncate_if_needed(cwd: &str) -> io::Result<()> {
+    if fuigo_session_writer::persistence_disabled() {
+        return Ok(());
+    }
     truncate_file_if_needed(&prompt_history_path(cwd), MAX_PROMPT_HISTORY_ENTRIES)
 }
 
@@ -255,6 +263,7 @@ pub(crate) async fn truncate_if_needed_async(cwd: String) {
     .await;
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

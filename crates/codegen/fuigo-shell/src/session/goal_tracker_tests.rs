@@ -2075,7 +2075,8 @@ fn append_skeptic_reports_prefers_latest_attempt_numerically() {
     )
     .unwrap();
 
-    append_skeptic_reports(scratch.path(), &dest);
+    let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dest.parent().unwrap()).unwrap();
+    append_skeptic_reports(scratch.path(), &writer, std::path::Path::new(dest.file_name().unwrap()));
 
     let body = std::fs::read_to_string(&dest).unwrap();
     let s0 = body
@@ -2098,7 +2099,7 @@ fn append_skeptic_reports_prefers_latest_attempt_numerically() {
 /// `copy_no_follow` must refuse a pre-planted destination symlink (O_EXCL) instead of writing the rescued content through it.
 #[cfg(unix)]
 #[test]
-fn copy_no_follow_refuses_destination_symlink() {
+fn rescue_move_never_writes_through_a_destination_symlink() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.md");
     std::fs::write(&src, "rescued body").unwrap();
@@ -2107,10 +2108,11 @@ fn copy_no_follow_refuses_destination_symlink() {
     let dest = dir.path().join("dest.md");
     std::os::unix::fs::symlink(&victim, &dest).unwrap();
 
-    assert!(
-        copy_no_follow(&src, &dest).is_err(),
-        "an existing destination (symlink) must fail the copy",
-    );
+    // F5-C5: the rescue moves the file in through the session's writer; a symlink at the destination is replaced,
+    // never written through.
+    let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir.path()).unwrap();
+    writer.move_in_sync(&src, "dest.md").unwrap();
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "rescued body");
     assert_eq!(
         std::fs::read_to_string(&victim).unwrap(),
         "precious",

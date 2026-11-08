@@ -669,6 +669,7 @@ fn counts_as_replay_turn_progressive(item: &ConversationItem, seen_marker: &mut 
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -854,7 +855,7 @@ mod tests {
             dir.path(),
             usize::MAX,
         );
-        crate::session::storage::chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+        crate::session::storage::chat_rebuild::rebuild_chat_history_for_test(dir.path()).unwrap();
         let rebuilt: Vec<serde_json::Value> = std::fs::read_to_string(dir.path().join("chat_history.jsonl"))
             .unwrap()
             .lines()
@@ -880,7 +881,7 @@ mod tests {
             dir.path(),
             usize::MAX,
         );
-        crate::session::storage::chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+        crate::session::storage::chat_rebuild::rebuild_chat_history_for_test(dir.path()).unwrap();
         let mut expected = Vec::new();
         for (text, index) in [("P2", 2), ("P3", 3)] {
             let mut item = ConversationItem::user(text);
@@ -914,7 +915,7 @@ mod tests {
             dir.path(),
             usize::MAX,
         );
-        crate::session::storage::chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+        crate::session::storage::chat_rebuild::rebuild_chat_history_for_test(dir.path()).unwrap();
         let text = std::fs::read_to_string(dir.path().join("chat_history.jsonl")).unwrap();
         let (prompt, call, done) = (text.find("P0").unwrap(), text.find("call-0").unwrap(), text.find("Done.").unwrap());
         assert!(prompt < call && call < done, "{text}");
@@ -941,7 +942,7 @@ mod tests {
             dir.path(),
             usize::MAX,
         );
-        crate::session::storage::chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+        crate::session::storage::chat_rebuild::rebuild_chat_history_for_test(dir.path()).unwrap();
         let text = std::fs::read_to_string(dir.path().join("chat_history.jsonl")).unwrap();
         assert!(text.contains("summary of P0") && text.contains("P1-new") && text.contains("A1-new"), "{text}");
         assert!(!text.contains("P1-old") && !text.contains("A1-old"), "abandoned branch came back: {text}");
@@ -980,7 +981,7 @@ mod tests {
                 dir.path(),
                 usize::MAX,
             );
-            crate::session::storage::chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+            crate::session::storage::chat_rebuild::rebuild_chat_history_for_test(dir.path()).unwrap();
             let text = std::fs::read_to_string(dir.path().join("chat_history.jsonl")).unwrap();
             assert!(text.contains("P0-new") && text.contains("call-new"), "resolved={resolved}: {text}");
             assert!(!text.contains("abandoned branch"), "resolved={resolved}: abandoned summary kept: {text}");

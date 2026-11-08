@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn isolate_home() -> &'static PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {

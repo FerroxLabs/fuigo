@@ -86,6 +86,7 @@ async fn new_with_explicit_dir_overrides_worktree_stamp_so_subagent_stays_hidden
         default_model_id(),
         sampling_client,
         "test-model".to_owned(),
+        fuigo_session_writer::SessionWriter::try_claim("subagent-in-worktree", target_dir.clone()).expect("claim"),
     )
     .await
     .unwrap();

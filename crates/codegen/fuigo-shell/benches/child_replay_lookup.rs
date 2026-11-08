@@ -67,6 +67,7 @@ fn lookup(home: &Path, session_id: &str, parent_cwd: &Path, fallback: ReplayLook
     let _ = black_box(emission);
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn synth_fixture() -> Fixture {
     let cwds = env_usize("CHILD_REPLAY_LOOKUP_CWDS", DEFAULT_CWDS);
     let per_cwd = env_usize("CHILD_REPLAY_LOOKUP_PER_CWD", DEFAULT_PER_CWD);

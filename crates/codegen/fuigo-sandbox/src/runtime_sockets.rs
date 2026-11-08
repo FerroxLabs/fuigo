@@ -165,7 +165,11 @@ fn runtime_socket_deny_paths_for_context_with_policy(
     }
 }
 
-/// Missing candidates are skipped; every other resolution failure is returned.
+/// Missing candidates are skipped, and so are candidates behind a directory another user owns and this user may not
+/// search (e.g. a root-only `/run/podman` on a non-root run): neither this process nor its sandboxed children (same uid,
+/// all capabilities dropped) can reach or re-permission it, so it needs no mask. A blocking directory this user owns is
+/// NOT skipped: a sandboxed child could `chmod 000` it to drop the mask for the next session and `chmod` it back. Every
+/// other failure is returned.
 pub(crate) fn materialize_runtime_socket_deny_paths_from(
     candidates: impl IntoIterator<Item = PathBuf>,
 ) -> io::Result<Vec<PathBuf>> {
@@ -194,6 +198,12 @@ pub(crate) fn materialize_runtime_socket_deny_paths_from(
         })?;
         let canonical_parent = match dunce::canonicalize(parent) {
             Ok(parent) => parent,
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    && blocked_by_foreign_directory(&candidate) =>
+            {
+                continue;
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 match std::fs::symlink_metadata(&candidate) {
                     Err(metadata_error) if metadata_error.kind() == io::ErrorKind::NotFound => {
@@ -209,6 +219,12 @@ pub(crate) fn materialize_runtime_socket_deny_paths_from(
         let metadata = match std::fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    && blocked_by_foreign_directory(&path) =>
+            {
+                continue;
+            }
             Err(error) => return Err(with_context(error)),
         };
         if metadata.file_type().is_symlink() {
@@ -222,6 +238,61 @@ pub(crate) fn materialize_runtime_socket_deny_paths_from(
         }
     }
     Ok(paths)
+}
+
+/// Whether `endpoint` is unreachable because of a directory another user owns: the first ancestor (from `/` down) this
+/// process may not search is a real directory (not a symlink) whose owner is not this effective uid. Anything that cannot
+/// be decided this way (an ancestor that cannot be inspected, a symlink, no blocking ancestor) answers `false`, so the
+/// caller keeps failing closed.
+#[cfg(unix)]
+fn blocked_by_foreign_directory(endpoint: &Path) -> bool {
+    // SAFETY: geteuid is always safe.
+    let euid = unsafe { libc::geteuid() };
+    blocked_by_foreign_directory_with(endpoint, euid, searchable_by_this_process)
+}
+
+#[cfg(not(unix))]
+fn blocked_by_foreign_directory(_endpoint: &Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn searchable_by_this_process(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Ok(c_path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `c_path` is a valid NUL-terminated path for the duration of the call.
+    unsafe { libc::faccessat(libc::AT_FDCWD, c_path.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
+}
+
+/// [`blocked_by_foreign_directory`] with the effective uid and the search check injected (unit tests).
+#[cfg(unix)]
+pub(crate) fn blocked_by_foreign_directory_with(
+    endpoint: &Path,
+    euid: u32,
+    searchable: impl Fn(&Path) -> bool,
+) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let Some(parent) = endpoint.parent() else {
+        return false;
+    };
+    let mut ancestors: Vec<&Path> = parent.ancestors().collect();
+    ancestors.reverse();
+    for dir in ancestors {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        if searchable(dir) {
+            continue;
+        }
+        // The first directory this process may not search. Its own parent was searchable, so `lstat` works.
+        return match std::fs::symlink_metadata(dir) {
+            Ok(metadata) => metadata.file_type().is_dir() && metadata.uid() != euid,
+            Err(_) => false,
+        };
+    }
+    false
 }
 
 /// Encode the outer process's materialized automatic socket paths for bwrap re-exec.

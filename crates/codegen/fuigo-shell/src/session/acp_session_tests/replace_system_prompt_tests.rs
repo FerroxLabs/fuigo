@@ -224,6 +224,7 @@ async fn set_model_keeps_a_persisted_system_prompt_override_after_a_cold_reload(
             let id = format!("override-reload-{}", std::process::id());
             let mut first = create_test_actor_plain().await;
             first.session_info.id = agent_client_protocol::SessionId::new(id.clone());
+            super::support::give_test_writer(&mut first);
             first
                 .handle_replace_system_prompt("CLIENT OVERRIDE ONLY".to_string())
                 .await;

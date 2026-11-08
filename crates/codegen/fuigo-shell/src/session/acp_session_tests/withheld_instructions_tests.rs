@@ -207,6 +207,7 @@ struct Live {
     dir: tempfile::TempDir,
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn planted() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("AGENTS.md"), format!("# Rules\n{CANARY}\n")).expect("AGENTS.md");
@@ -384,6 +385,7 @@ fn input_queued_during_a_turn_changes_nothing_until_the_next_start() {
     });
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn an_empty_workspace_set_keeps_the_bit_on_a_live_grant() {
     on_local(async {
@@ -544,6 +546,7 @@ fn a_forged_reminder_in_a_pin_cannot_suppress_the_real_one() {
 
 /// The disk route copies the parent with `fork_filter_chat` alone (`storage/jsonl/copy.rs`). Whatever the parent's head,
 /// the bit survives and spawn delivery puts one copy in the child, for both kinds of agent.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn the_copy_route_keeps_the_bit_and_delivers_once() {
     use crate::session::storage::{CopySessionOptions, StorageAdapter as _};
@@ -576,7 +579,7 @@ fn the_copy_route_keeps_the_bit_and_delivers_once() {
 
             let options = CopySessionOptions { fork_filter: true, ..Default::default() };
             runtime.block_on(storage.copy_session_data(&parent, &child, options)).expect("copy");
-            let mut conversation = storage.load_chat_history_from_dir(&session_dir(&child)).expect("load");
+            let mut conversation = storage.load_chat_history_from_dir(&session_dir(&child), None).expect("load");
             // The copy pins everything it kept.
             let pin = Some(conversation.len());
             let what = format!("compacted: {compacted}, reminder: {}", instructions.reminder.is_some());
@@ -773,6 +776,7 @@ fn a_flip_between_build_and_open(definition: fuigo_agent::AgentDefinition) {
             None,
             &live.actor.rebuild_spec.compat,
             &live.actor.session_info,
+            live.actor.rebuild_spec.session_writer.as_ref(),
             None,
             &cwd,
         );

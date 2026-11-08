@@ -73,10 +73,26 @@ pub(crate) enum AppendDurability {
     Buffered,
     Durable,
 }
+/// The adapter's writer (design F5 §5.5, §6.1).
+#[derive(Default)]
+enum WriterSlot {
+    /// An unowned adapter (listing, preview, rename).
+    #[default]
+    Unowned,
+    Held(fuigo_session_writer::SessionWriter),
+    /// The session ended or closed: the clone is gone and every later write is refused.
+    Released,
+}
 /// JSONL storage under `{root}/sessions/{url_encoded_cwd}/{session_id}/`.
 #[derive(Clone)]
 pub struct JsonlStorageAdapter {
     dir_mode: SessionDirMode,
+    /// The session's writer (design F5 §5.5): the persistence task's adapter carries a clone of the live writer, and
+    /// every write of a session file goes through it (`Access::Owner`). `None`: an unowned adapter (listing, preview,
+    /// rename); a write through it is refused (F5-C4), except the sanctioned summary RMW.
+    /// Shared by every clone of this adapter, so one release (the session's end or close, §6.1) drops the writer for
+    /// all of them even while other holders of the persistence task live.
+    writer: std::sync::Arc<parking_lot::Mutex<WriterSlot>>,
     #[cfg(test)]
     update_append_probe: Option<std::sync::Arc<AppendProbe>>,
     #[cfg(test)]
@@ -129,6 +145,7 @@ impl JsonlStorageAdapter {
     pub fn new() -> Self {
         Self {
             dir_mode: SessionDirMode::FromRoot(crate::util::fuigo_home::fuigo_home()),
+            writer: Default::default(),
             #[cfg(test)]
             update_append_probe: None,
             #[cfg(test)]
@@ -142,6 +159,7 @@ impl JsonlStorageAdapter {
     pub fn with_root(root_dir: PathBuf) -> Self {
         Self {
             dir_mode: SessionDirMode::FromRoot(root_dir),
+            writer: Default::default(),
             #[cfg(test)]
             update_append_probe: None,
             #[cfg(test)]
@@ -157,6 +175,7 @@ impl JsonlStorageAdapter {
     pub fn with_explicit_session_dir(session_dir: PathBuf) -> Self {
         Self {
             dir_mode: SessionDirMode::Explicit(session_dir),
+            writer: Default::default(),
             #[cfg(test)]
             update_append_probe: None,
             #[cfg(test)]
@@ -174,6 +193,7 @@ impl JsonlStorageAdapter {
     ) -> Self {
         Self {
             dir_mode: SessionDirMode::Explicit(session_dir),
+            writer: Default::default(),
             update_append_probe: Some(std::sync::Arc::new(append_probe)),
             session_sync_probe: None,
             file_sync_probe: None,
@@ -190,6 +210,7 @@ impl JsonlStorageAdapter {
     ) -> Self {
         Self {
             dir_mode: SessionDirMode::Explicit(session_dir),
+            writer: Default::default(),
             update_append_probe: Some(std::sync::Arc::new(append_probe)),
             session_sync_probe: Some(std::sync::Arc::new(session_sync_probe)),
             file_sync_probe: None,
@@ -221,13 +242,17 @@ impl JsonlStorageAdapter {
     /// would make the provider reject every request. The repair is in memory. The file keeps the unreadable line's raw
     /// text in the reader's `.corrupt` copy, and a subagent's session is rewritten from this history when it resumes, so
     /// the `.pre-repair` backup a user's session gets is not made here (P123, K14).
+    ///
+    /// `repair`: the writer that owns `dir` (the subagent bootstrap's claim on the child, design F5 §5.5); the reader's
+    /// `.corrupt` copy is made through it, and without one nothing is written.
     pub fn load_chat_history_from_dir(
         &self,
         dir: &std::path::Path,
+        repair: Option<&fuigo_session_writer::SessionWriter>,
     ) -> std::io::Result<Vec<ConversationItem>> {
         let chat_file = dir.join(super::CHAT_HISTORY_FILE);
         let (mut items, skipped_lines) =
-            self.read_chat_history_counting_sync(chat_file.clone(), CHAT_FORMAT_VERSION)?;
+            self.read_chat_history_counting_with(chat_file.clone(), CHAT_FORMAT_VERSION, repair)?;
         if skipped_lines > 0 || load_repair::quarantine_of_earlier_load(&chat_file).is_some() {
             let report = fuigo_chat_state::compaction_utils::repair_history(&mut items);
             if report.changed() {
@@ -243,7 +268,8 @@ impl JsonlStorageAdapter {
         }
         Ok(items)
     }
-    fn session_dir(&self, info: &Info) -> PathBuf {
+    /// The folder this adapter keeps `info`'s session in.
+    pub fn session_dir(&self, info: &Info) -> PathBuf {
         match &self.dir_mode {
             SessionDirMode::FromRoot(root) => {
                 crate::util::fuigo_home::sessions_cwd_dir_in(root, &info.cwd)
@@ -252,21 +278,58 @@ impl JsonlStorageAdapter {
             SessionDirMode::Explicit(dir) => dir.clone(),
         }
     }
+    /// This adapter, writing as `writer` (design F5 §5.5): the persistence task's adapter.
+    pub fn with_writer(mut self, writer: fuigo_session_writer::SessionWriter) -> Self {
+        self.writer = std::sync::Arc::new(parking_lot::Mutex::new(WriterSlot::Held(writer)));
+        self
+    }
+    /// Drop this adapter's writer clone now, for every clone of the adapter (F5-C5, §6.1): the session ended or
+    /// closed. Later writes are refused.
+    pub(crate) fn release_writer_slot(&self) {
+        let released = std::mem::replace(&mut *self.writer.lock(), WriterSlot::Released);
+        drop(released);
+    }
+    /// The writer of `info`'s session folder, for a write (F5-C4: never by path). No writer, or a writer of another
+    /// folder: refused, nothing written. Unit tests that drive an adapter directly get a writer claimed for the folder.
+    /// The writer this adapter holds for `info`'s folder, if any (never a test fallback claim).
+    pub(crate) fn held_writer(&self, info: &Info) -> Option<fuigo_session_writer::SessionWriter> {
+        let dir = self.session_dir(info);
+        match &*self.writer.lock() {
+            WriterSlot::Held(writer) if writer.dir() == dir => Some(writer.clone()),
+            _ => None,
+        }
+    }
+    pub(crate) fn owner(&self, info: &Info) -> io::Result<fuigo_session_writer::SessionWriter> {
+        let dir = self.session_dir(info);
+        match &*self.writer.lock() {
+            WriterSlot::Held(writer) if writer.dir() == dir => Ok(writer.clone()),
+            WriterSlot::Held(writer) => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("the session writer holds {}, not {}", writer.dir().display(), dir.display()),
+            )),
+            WriterSlot::Released => Err(no_writer_error(&dir)),
+            #[cfg(test)]
+            WriterSlot::Unowned if !test_no_writer_fallback() => {
+                // A fresh id per write: a test may hold one writer while the adapter claims another for the folder.
+                fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+                    .map_err(|_busy| io::Error::other(crate::session::session_writer_lock::OPEN_HERE))
+            }
+            WriterSlot::Unowned => Err(no_writer_error(&dir)),
+        }
+    }
     /// Create `info`'s session dir owner-only and durable.
     /// `FromRoot` also makes the `<encoded-cwd>` dir and the sessions root owner-only; `Explicit` parents are caller-owned.
     fn create_session_dir_owner_only(&self, info: &Info) -> io::Result<PathBuf> {
         let dir = self.session_dir(info);
-        super::create_dir_all_durable(&dir, |dir| match &self.dir_mode {
-            SessionDirMode::FromRoot(root) => {
-                if let Ok(cwd_dir) =
-                    crate::util::fuigo_home::ensure_sessions_cwd_dir_in(root, &info.cwd)
-                {
-                    super::sync_cwd_marker_if_present(&cwd_dir)?;
-                }
-                crate::util::fuigo_home::create_dir_all_owner_only(dir)
-            }
-            SessionDirMode::Explicit(_) => crate::util::fuigo_home::create_dir_all_owner_only(dir),
-        })?;
+        // F5-C4: the `<encoded-cwd>` parent and the sessions root are not a session folder (they hold many); the
+        // session folder itself is created by its writer (owner-only, durable) as it attaches the hold.
+        if let SessionDirMode::FromRoot(root) = &self.dir_mode
+            && let Ok(cwd_dir) = crate::util::fuigo_home::ensure_sessions_cwd_dir_in(root, &info.cwd)
+        {
+            super::sync_cwd_marker_if_present(&cwd_dir)?;
+        }
+        // An existing folder loosened on disk (an older fuigo) is made owner-only again, as before F5-C4.
+        self.owner(info)?.ensure_folder_owner_only_sync()?;
         Ok(dir)
     }
     pub(super) fn updates_file(&self, info: &Info) -> PathBuf {
@@ -275,15 +338,36 @@ impl JsonlStorageAdapter {
     fn chat_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::CHAT_HISTORY_FILE)
     }
-    fn ensure_chat_history(&self, info: &Info, chat_format_version: u8) -> io::Result<()> {
+    /// Rebuild an empty or missing `chat_history.jsonl` from `updates.jsonl`, through `repair` (design F5 §5.7). No
+    /// repair writer (a reader that found the session owned by a live writer): the rebuild stays in memory and its
+    /// bytes come back for the load to read, so the history is the same and nothing is written.
+    fn ensure_chat_history(
+        &self,
+        info: &Info,
+        chat_format_version: u8,
+        access: super::Access<'_>,
+        repair: Option<&fuigo_session_writer::SessionWriter>,
+    ) -> io::Result<Option<Vec<u8>>> {
         if chat_format_version != crate::session::persistence::CHAT_FORMAT_VERSION {
-            return Ok(());
+            return Ok(None);
         }
         let chat_file = self.chat_file(info);
         if std::fs::metadata(&chat_file).map(|m| m.len()).unwrap_or(0) == 0 {
-            super::chat_rebuild::rebuild_chat_history(&self.session_dir(info))?;
+            let in_memory = || {
+                super::chat_rebuild::build_chat_history(&self.session_dir(info))
+                    .map(|built| built.map(|(bytes, _count)| bytes))
+            };
+            let Some(writer) = repair else { return in_memory() };
+            match super::chat_rebuild::rebuild_chat_history(writer) {
+                Ok(_) => {}
+                Err(error) if access.reads_on_after(&error) => {
+                    tracing::debug!(session_id = %info.id, "chat history rebuild not persisted: the session is open elsewhere");
+                    return in_memory();
+                }
+                Err(error) => return Err(error),
+            }
         }
-        Ok(())
+        Ok(None)
     }
     fn summary_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::SUMMARY_FILE)
@@ -349,11 +433,9 @@ impl JsonlStorageAdapter {
                     if let Ok(mut summary) = serde_json::from_slice::<Summary>(&bytes)
                         && !summary.is_hidden()
                     {
-                        super::summary_write::repair_untagged_worktree_summary(
-                            &mut summary,
-                            &summary_path,
-                            &session_dir.join(format!("{}.lock", super::SUMMARY_FILE)),
-                        );
+                        super::summary_write::repair_untagged_worktree_summary(&mut summary, |info| {
+                            self.listing_heal_writer(info, &session_dir)
+                        });
                         summaries.push(summary);
                     }
                 }
@@ -410,13 +492,10 @@ impl JsonlStorageAdapter {
                         && !summary.is_hidden()
                         && !summary.is_headless()
                     {
-                        let lock_path =
-                            summary_path.with_file_name(format!("{}.lock", super::SUMMARY_FILE));
-                        super::summary_write::repair_untagged_worktree_summary(
-                            &mut summary,
-                            &summary_path,
-                            &lock_path,
-                        );
+                        let session_dir = summary_path.parent().unwrap_or(&summary_path).to_path_buf();
+                        super::summary_write::repair_untagged_worktree_summary(&mut summary, |info| {
+                            self.listing_heal_writer(info, &session_dir)
+                        });
                         if !summary.is_unused_optimistic_husk() {
                             summaries.push(summary);
                         }
@@ -433,12 +512,13 @@ impl JsonlStorageAdapter {
         });
         Ok(summaries)
     }
-    async fn append_jsonl<T: serde::Serialize>(&self, path: PathBuf, data: &T) -> io::Result<()> {
-        self.append_jsonl_with_durability(path, data, AppendDurability::Buffered)
+    async fn append_jsonl<T: serde::Serialize>(&self, w: fuigo_session_writer::SessionWriter, path: PathBuf, data: &T) -> io::Result<()> {
+        self.append_jsonl_with_durability(w, path, data, AppendDurability::Buffered)
             .await
     }
     async fn append_jsonl_with_durability<T: serde::Serialize>(
         &self,
+        w: fuigo_session_writer::SessionWriter,
         path: PathBuf,
         data: &T,
         durability: AppendDurability,
@@ -446,24 +526,23 @@ impl JsonlStorageAdapter {
         let mut line =
             serde_json::to_vec(data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         line.push(b'\n');
-        Self::append_jsonl_line_blocking(path, line, durability).await
+        Self::append_jsonl_line_blocking(w, path, line, durability).await
     }
     async fn append_jsonl_line_blocking(
+        w: fuigo_session_writer::SessionWriter,
         path: PathBuf,
         line: Vec<u8>,
         durability: AppendDurability,
     ) -> io::Result<()> {
-        tokio::task::spawn_blocking(move || Self::append_jsonl_line_sync(&path, line, durability))
+        tokio::task::spawn_blocking(move || Self::append_jsonl_line_sync(&w, &path, line, durability))
             .await
             .map_err(io::Error::other)?
     }
-    async fn sync_file_path_durable(path: PathBuf) -> io::Result<()> {
-        tokio::task::spawn_blocking(move || {
-            let file = OpenOptions::new().write(true).open(&path)?;
-            Self::sync_file_durable(&file)
-        })
-        .await
-        .map_err(io::Error::other)?
+    /// Flush an existing session file through the writer (no content change).
+    async fn sync_file_path_durable(w: fuigo_session_writer::SessionWriter, path: PathBuf) -> io::Result<()> {
+        tokio::task::spawn_blocking(move || w.sync_existing_sync(w.rel_of(&path)?))
+            .await
+            .map_err(io::Error::other)?
     }
     /// Append one JSONL record, healing a torn tail before writing.
     ///
@@ -474,30 +553,33 @@ impl JsonlStorageAdapter {
     /// Before writing, check the last byte: if it isn't `\n`, prepend one so the torn record is terminated as its own (single) corrupt line.
     /// This bounds the damage of any torn write to exactly one record, which the lenient readers (e.g. [`Self::read_chat_history_sync`]) then skip.
     fn append_jsonl_line_sync(
+        w: &fuigo_session_writer::SessionWriter,
         path: &Path,
         line: Vec<u8>,
         durability: AppendDurability,
     ) -> io::Result<()> {
-        Self::append_jsonl_line_sync_with(path, line, durability, Self::sync_file_durable, || {
+        Self::append_jsonl_line_sync_with(w, path, line, durability, Self::sync_file_durable, || {
             Self::sync_parent_directory(path)
         })
         .map_err(AppendLineError::into_io_error)
     }
     fn append_jsonl_line_sync_with(
+        w: &fuigo_session_writer::SessionWriter,
         path: &Path,
         line: Vec<u8>,
         durability: AppendDurability,
         sync_file: impl FnMut(&std::fs::File) -> io::Result<()>,
         sync_parent: impl FnMut() -> io::Result<()>,
     ) -> Result<(), AppendLineError> {
-        let lock = Self::lock_append(path).map_err(AppendLineError::NotCommitted)?;
-        let result = Self::append_jsonl_line_locked(path, line, durability, sync_file, sync_parent);
+        let lock = Self::lock_append(w, path).map_err(AppendLineError::NotCommitted)?;
+        let result = Self::append_jsonl_line_locked(w, path, line, durability, sync_file, sync_parent);
         drop(lock);
         result
     }
     /// [`Self::append_jsonl_line_sync_with`] for a caller that already holds `path`'s append lock (P164: taken with a
     /// bounded wait).
     fn append_jsonl_line_locked(
+        w: &fuigo_session_writer::SessionWriter,
         path: &Path,
         mut line: Vec<u8>,
         durability: AppendDurability,
@@ -505,12 +587,8 @@ impl JsonlStorageAdapter {
         mut sync_parent: impl FnMut() -> io::Result<()>,
     ) -> Result<(), AppendLineError> {
         debug_assert!(line.ends_with(b"\n"), "JSONL record must end with \\n");
-        (|| {
-            let mut file = super::owner_only::open(
-                OpenOptions::new().read(true).create(true).append(true),
-                path,
-            )
-            .map_err(AppendLineError::NotCommitted)?;
+        let rel = w.rel_of(path).map_err(AppendLineError::NotCommitted)?;
+        w.with_append_file(rel, |file| {
             let len = file
                 .metadata()
                 .map_err(AppendLineError::NotCommitted)?
@@ -533,14 +611,12 @@ impl JsonlStorageAdapter {
                 .map_err(AppendLineError::NotCommitted)?;
             file.flush().map_err(AppendLineError::Committed)?;
             if matches!(durability, AppendDurability::Durable) {
-                sync_file(&file).map_err(AppendLineError::Committed)?;
-                drop(file);
+                sync_file(file).map_err(AppendLineError::Committed)?;
                 sync_parent().map_err(AppendLineError::Committed)?;
-            } else {
-                drop(file);
             }
             Ok(())
-        })()
+        })
+        .map_err(AppendLineError::NotCommitted)?
     }
     async fn append_cwd_switch_with_bookkeeping(
         &self,
@@ -564,8 +640,11 @@ impl JsonlStorageAdapter {
                     "working-directory switch item must carry a nonzero generation",
                 ))
             })?;
+        let w = self.owner(info).map_err(super::AppendCwdSwitchError::NotCommitted)?;
+        let summary_writer = w.clone();
         let disposition = tokio::task::spawn_blocking(move || {
             Self::append_cwd_switch_line_sync_with(
+                &w,
                 &path,
                 line,
                 generation,
@@ -591,7 +670,7 @@ impl JsonlStorageAdapter {
             acknowledgement: disposition.clone(),
             source,
         })?;
-        Self::sync_file_path_durable(self.summary_file(info))
+        Self::sync_file_path_durable(summary_writer, self.summary_file(info))
             .await
             .map_err(|source| super::AppendCwdSwitchError::Committed {
                 acknowledgement: disposition.clone(),
@@ -614,24 +693,22 @@ impl JsonlStorageAdapter {
         }))
     }
     pub(crate) fn append_cwd_switch_line_sync_with(
+        w: &fuigo_session_writer::SessionWriter,
         path: &Path,
         mut line: Vec<u8>,
         generation: u64,
         mut sync_file: impl FnMut(&std::fs::File) -> io::Result<()>,
         mut sync_parent: impl FnMut() -> io::Result<()>,
     ) -> Result<StrictAppendAck, super::AppendCwdSwitchError> {
-        let lock = Self::lock_append(path).map_err(super::AppendCwdSwitchError::NotCommitted)?;
+        let lock = Self::lock_append(w, path).map_err(super::AppendCwdSwitchError::NotCommitted)?;
         let result = (|| {
             if let Some(authoritative) = Self::find_cwd_switch_generation(path, generation)
                 .map_err(super::AppendCwdSwitchError::NotCommitted)?
             {
                 return Ok(StrictAppendAck::AlreadyPresent(authoritative));
             }
-            let mut file = super::owner_only::open(
-                OpenOptions::new().read(true).create(true).append(true),
-                path,
-            )
-            .map_err(super::AppendCwdSwitchError::NotCommitted)?;
+            let rel = w.rel_of(path).map_err(super::AppendCwdSwitchError::NotCommitted)?;
+            w.with_append_file(rel, |file| {
             let len = file
                 .metadata()
                 .map_err(super::AppendCwdSwitchError::NotCommitted)?
@@ -653,11 +730,13 @@ impl JsonlStorageAdapter {
                     acknowledgement: StrictAppendAck::Appended,
                     source,
                 })?;
-            sync_file(&file).map_err(|source| super::AppendCwdSwitchError::Committed {
+            sync_file(file).map_err(|source| super::AppendCwdSwitchError::Committed {
                 acknowledgement: StrictAppendAck::Appended,
                 source,
             })?;
-            drop(file);
+            Ok(())
+            })
+            .map_err(super::AppendCwdSwitchError::NotCommitted)??;
             sync_parent().map_err(|source| super::AppendCwdSwitchError::Committed {
                 acknowledgement: StrictAppendAck::Appended,
                 source,
@@ -669,11 +748,21 @@ impl JsonlStorageAdapter {
     }
     /// Lock tail healing, append, and barriers through `<target>.jsonl.lock`.
     /// Full-file [`Self::write_jsonl`] atomic-rename rewrites bypass this append-only lock.
-    fn lock_append(path: &Path) -> io::Result<HeldLock> {
-        let lock = super::owner_only::open(
-            OpenOptions::new().read(true).write(true).create(true).truncate(false),
-            &path.with_extension("jsonl.lock"),
-        )?;
+    fn lock_append(w: &fuigo_session_writer::SessionWriter, path: &Path) -> io::Result<HeldLock> {
+        let lock = w.open_lock(w.rel_of(&path.with_extension("jsonl.lock"))?)?;
+        lock.lock_exclusive()?;
+        Ok(HeldLock::new(lock))
+    }
+    /// Tests: hold `<path>.jsonl.lock` as a contender would, by path.
+    #[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+    #[cfg(test)]
+    pub(crate) fn lock_append_by_path(path: &Path) -> io::Result<HeldLock> {
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("jsonl.lock"))?;
         lock.lock_exclusive()?;
         Ok(HeldLock::new(lock))
     }
@@ -685,8 +774,8 @@ impl JsonlStorageAdapter {
     }
     /// Write a full JSONL file (rewriting all items), crash-atomically: serialize to a temp file then rename over the target.
     /// A crash / `ENOSPC` mid-write therefore can't truncate the existing file (e.g. lose `rewind_points.jsonl` history).
-    async fn write_jsonl<T: serde::Serialize>(&self, path: PathBuf, items: &[T]) -> io::Result<()> {
-        super::write_jsonl_atomic_async(&path, items).await
+    async fn write_jsonl<T: serde::Serialize>(&self, w: &fuigo_session_writer::SessionWriter, path: PathBuf, items: &[T]) -> io::Result<()> {
+        super::write_bytes_atomic_as_async(w, &path, super::to_jsonl_bytes(items)?).await
     }
     /// Rewrite `rewind_points.jsonl` crash-atomically through `edit`, which sees every line, damaged ones included.
     ///
@@ -705,6 +794,7 @@ impl JsonlStorageAdapter {
         + 'static,
     ) -> io::Result<()> {
         let path = self.rewind_points_file(info);
+        let w = self.owner(info)?;
         tokio::task::spawn_blocking(move || -> io::Result<()> {
             // Bounded: this runs on the persistence actor's queue, so a holder that is stuck (another process suspended
             // inside its append) must not hold every later write and flush hostage. A lock file that cannot be opened
@@ -715,7 +805,7 @@ impl JsonlStorageAdapter {
             let _rewrite_lock = Self::lock_rewrite_bounded(&path, deadline)?;
             let lock = Self::lock_bounded(&path, path.with_extension("jsonl.lock"), true, deadline)?;
             let result =
-                Self::rewrite_rewind_points_locked(&path, lock.is_some(), edit, |_, _| Ok(())).map(|_| ());
+                Self::rewrite_rewind_points_locked(&w, &path, lock.is_some(), edit, |_, _| Ok(())).map(|_| ());
             if let Some(lock) = lock {
                 let _ = lock.unlock();
             }
@@ -731,6 +821,7 @@ impl JsonlStorageAdapter {
     /// failed. `before_write` sees what the file holds and what is about to replace it, and runs before anything is
     /// replaced; an error from it leaves the file as it was (P164: the rewind's journal and durable copy).
     fn rewrite_rewind_points_locked(
+        w: &fuigo_session_writer::SessionWriter,
         path: &Path,
         append_locked: bool,
         edit: impl FnOnce(
@@ -751,8 +842,8 @@ impl JsonlStorageAdapter {
         let bytes = fuigo_workspace::session::file_state::encode_rewind_points_lines(&edit(lines))
             .map_err(io::Error::other)?;
         before_write(previous.as_deref(), &bytes)?;
-        if let Err(error) = super::write_bytes_atomic(path, &bytes) {
-            return Err(match Self::put_back_rewind_points(path, previous.as_deref()) {
+        if let Err(error) = super::write_bytes_atomic_as(w, path, &bytes) {
+            return Err(match Self::put_back_rewind_points(w, path, previous.as_deref()) {
                 Ok(()) => error,
                 Err(put_back) => io::Error::new(
                     error.kind(),
@@ -763,14 +854,14 @@ impl JsonlStorageAdapter {
         Ok((previous, bytes))
     }
     /// Make `path` hold `previous` again (`None`: remove it) when it no longer does.
-    fn put_back_rewind_points(path: &Path, previous: Option<&[u8]>) -> io::Result<()> {
+    fn put_back_rewind_points(w: &fuigo_session_writer::SessionWriter, path: &Path, previous: Option<&[u8]>) -> io::Result<()> {
         let current = std::fs::read(path).ok();
         if current.as_deref() == previous {
             return Ok(());
         }
         let outcome = match previous {
-            Some(bytes) => super::write_bytes_atomic(path, bytes),
-            None => std::fs::remove_file(path),
+            Some(bytes) => super::write_bytes_atomic_as(w, path, bytes),
+            None => w.remove_sync(w.rel_of(path)?),
         };
         if let Err(error) = &outcome {
             tracing::warn!(%error, path = %path.display(), "rewind_points.jsonl could not be put back after a failed rewrite");
@@ -786,14 +877,15 @@ impl JsonlStorageAdapter {
         Self::lock_bounded(path, path.with_extension("jsonl.rewrite.lock"), false, deadline)
     }
 
+    #[allow(clippy::disallowed_methods, reason = "lock sidecar (§5.6): .jsonl.lock / .jsonl.rewrite.lock / usage.json.lock")]
     fn lock_bounded(
         path: &Path,
         lock_path: PathBuf,
         shared: bool,
         deadline: std::time::Instant,
     ) -> io::Result<Option<HeldLock>> {
-        let lock = match super::owner_only::open(
-            OpenOptions::new().read(true).write(true).create(true).truncate(false),
+        let lock = match super::owner_only::open( // F5-A: lock sidecar (§5.6): .jsonl.lock / .jsonl.rewrite.lock / usage.json.lock
+            OpenOptions::new().read(true).write(true).create(true).truncate(false), // F5-A: lock sidecar (§5.6): .jsonl.lock / .jsonl.rewrite.lock / usage.json.lock
             &lock_path,
         ) {
             Ok(lock) => lock,
@@ -858,6 +950,7 @@ impl JsonlStorageAdapter {
     /// Append a session update to the updates.jsonl file, wrapping it in an envelope with timestamp.
     pub(super) async fn append_update_to_file(
         &self,
+        w: fuigo_session_writer::SessionWriter,
         path: PathBuf,
         update: &super::SessionUpdate,
         durability: AppendDurability,
@@ -877,6 +970,7 @@ impl JsonlStorageAdapter {
         let file_sync_probe = self.file_sync_probe.clone();
         tokio::task::spawn_blocking(move || {
             Self::append_jsonl_line_sync_with(
+                &w,
                 &path,
                 line,
                 durability,
@@ -900,7 +994,12 @@ impl JsonlStorageAdapter {
         update: &super::SessionUpdate,
         durability: AppendDurability,
     ) -> Result<(), super::AppendUpdateError> {
-        self.append_update_to_file(self.updates_file(info), update, durability)
+        self.append_update_to_file(
+            self.owner(info).map_err(super::AppendUpdateError::NotCommitted)?,
+            self.updates_file(info),
+            update,
+            durability,
+        )
             .await?;
         self.apply_summary_patch(
             info,
@@ -973,7 +1072,10 @@ impl JsonlStorageAdapter {
                 entries.flatten().all(|entry| {
                     matches!(
                         entry.file_name().to_str(),
-                        Some(name) if name == super::SUMMARY_FILE || name == lock_name
+                        Some(name) if name == super::SUMMARY_FILE
+                            || name == lock_name
+                            || name == fuigo_session_writer::lock::SESSION_WRITER_LOCK_FILE
+                            || fuigo_session_writer::LOCK_SIDECARS.contains(&name)
                     )
                 })
             })
@@ -993,7 +1095,7 @@ impl JsonlStorageAdapter {
         let summary_path = self.summary_file(info);
         let bytes = serde_json::to_vec_pretty(summary)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        super::write_bytes_atomic(&summary_path, &bytes)
+        super::write_bytes_atomic_as(&self.owner(info)?, &summary_path, &bytes)
     }
     pub(crate) fn read_summary_sync(&self, info: &Info) -> io::Result<Summary> {
         let path = self.summary_file(info);
@@ -1210,36 +1312,56 @@ impl JsonlStorageAdapter {
     /// Idempotent: newer sessions have no `reasoning` / `raw_output` / `reasoning_content` fields, so the upgrader produces no siblings.
     /// The upgrader runs only for lines that decode successfully.
     /// A skipped corrupt line therefore never emits orphaned siblings or pollutes the sibling-dedup set.
-    fn read_chat_history_sync(
+    fn read_chat_history_with(
         &self,
         path: PathBuf,
         chat_format_version: u8,
+        repair: Option<&fuigo_session_writer::SessionWriter>,
     ) -> io::Result<Vec<ConversationItem>> {
-        self.read_chat_history_counting_sync(path, chat_format_version)
+        self.read_chat_history_counting_with(path, chat_format_version, repair)
             .map(|(items, _skipped_lines)| items)
     }
-    /// [`Self::read_chat_history_sync`], also returning how many lines were skipped as unparseable.
-    /// The resume path uses the count, and the `.corrupt` copy made below, to decide whether the history needs
-    /// [`load_repair`].
+    /// Tests: [`Self::read_chat_history_with`] as an unowned reader of a folder nobody holds (a fresh claim of it).
+    #[cfg(test)]
+    fn read_chat_history_sync(&self, path: PathBuf, chat_format_version: u8) -> io::Result<Vec<ConversationItem>> {
+        let repair = test_repair_writer(&path);
+        self.read_chat_history_with(path, chat_format_version, repair.as_ref())
+    }
+    #[cfg(test)]
     fn read_chat_history_counting_sync(
         &self,
         path: PathBuf,
         chat_format_version: u8,
     ) -> io::Result<(Vec<ConversationItem>, usize)> {
+        let repair = test_repair_writer(&path);
+        self.read_chat_history_counting_with(path, chat_format_version, repair.as_ref())
+    }
+    /// [`Self::read_chat_history_sync`], also returning how many lines were skipped as unparseable.
+    /// The resume path uses the count, and the `.corrupt` copy made below, to decide whether the history needs
+    /// [`load_repair`].
+    fn read_chat_history_counting_with(
+        &self,
+        path: PathBuf,
+        chat_format_version: u8,
+        repair: Option<&fuigo_session_writer::SessionWriter>,
+    ) -> io::Result<(Vec<ConversationItem>, usize)> {
         if !path.exists() {
             return Ok((Vec::new(), 0));
         }
         let contents = std::fs::read(&path)?;
-        self.read_chat_history_counting_from_bytes(&path, &contents, chat_format_version)
+        self.read_chat_history_counting_from_bytes(&path, &contents, chat_format_version, repair)
     }
     /// [`Self::read_chat_history_counting_sync`] on bytes the caller already read from `path` (the quarantine copy, when
     /// one is needed, is still made from the file). A fork copy reads the source once, under its append locks, and parses
     /// those bytes (P123).
+    ///
+    /// `repair`: the writer the `.corrupt` copy is made through (design F5 §5.7); `None` reads only.
     fn read_chat_history_counting_from_bytes(
         &self,
         path: &Path,
         contents: &[u8],
         chat_format_version: u8,
+        repair: Option<&fuigo_session_writer::SessionWriter>,
     ) -> io::Result<(Vec<ConversationItem>, usize)> {
         let mut sibling_btc_ids_seen: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -1305,7 +1427,9 @@ impl JsonlStorageAdapter {
         if first_skipped.is_some() || stripped > 0 {
             let quarantine = path.with_extension("jsonl.corrupt");
             if !quarantine.exists()
-                && let Err(e) = super::owner_only::copy(path, &quarantine)
+                && let Some(writer) = repair
+                && let Some(rel) = quarantine.file_name()
+                && let Err(e) = writer.copy_in_sync(path, rel)
             {
                 tracing::warn!(
                     error = %e,
@@ -1361,28 +1485,85 @@ impl JsonlStorageAdapter {
         info: &Info,
         patch: super::summary_write::SummaryPatch,
     ) -> io::Result<bool> {
-        let summary_path = self.summary_file(info);
-        let lock_path = self.summary_lock_file(info);
+        // Review r1 H4: the RMW is the session writer's work. A resident session's goes through its live writer; a
+        // dormant one's through a writer claimed here and held (moved into the blocking task) until the RMW is done.
+        let writer = self.summary_writer(info).await?;
         tokio::task::spawn_blocking(move || {
-            super::summary_write::apply_patch_locked(&summary_path, &lock_path, &patch)
+            super::summary_write::apply_patch_locked(&writer, &patch)
         })
         .await
         .map_err(io::Error::other)?
     }
+    /// The writer a listing's best-effort worktree heal runs as: this adapter's own, else the live writer of the session
+    /// open in this process, else one claimed without waiting (`try_claim_reader`: a contended OS lock is not retried).
+    /// `None` when the session is held elsewhere or still closing: the heal is skipped and a later listing retries it.
+    /// A listing never blocks or fails on this.
+    fn listing_heal_writer(&self, info: &Info, session_dir: &Path) -> Option<fuigo_session_writer::SessionWriter> {
+        if let Some(writer) = self.held_writer(info)
+            && writer.dir() == session_dir
+        {
+            return Some(writer);
+        }
+        let id = info.id.to_string();
+        if let Some(writer) = fuigo_session_writer::SessionWriter::resident(&id)
+            && writer.dir() == session_dir
+        {
+            return Some(writer);
+        }
+        match fuigo_session_writer::SessionWriter::try_claim_reader(id, session_dir) {
+            Ok(writer) => Some(writer),
+            Err(_busy) => {
+                tracing::debug!("session {} is held by another writer; not healing its summary now", info.id.0);
+                None
+            }
+        }
+    }
+    /// The writer a summary patch runs as: this adapter's own, else the live writer of the session open in this process
+    /// (`SessionWriter::resident`), else one claimed for the patch (waiting a short while for a previous writer of the
+    /// id here to finish). A session another process holds is refused (`HeldElsewhere`) and nothing is written.
+    async fn summary_writer(&self, info: &Info) -> io::Result<fuigo_session_writer::SessionWriter> {
+        if let Some(writer) = self.held_writer(info) {
+            return Ok(writer);
+        }
+        let dir = self.session_dir(info);
+        let id = info.id.to_string();
+        if let Some(writer) = fuigo_session_writer::SessionWriter::resident(&id)
+            && writer.dir() == dir
+        {
+            return Ok(writer);
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        fuigo_session_writer::SessionWriter::claim(id, dir, deadline).await.map_err(|error| match error {
+            fuigo_session_writer::ClaimError::HeldElsewhere => {
+                io::Error::other(fuigo_session_writer::Refusal::HeldElsewhere)
+            }
+            fuigo_session_writer::ClaimError::StillClosing => io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the session is still closing in this window; try again",
+            ),
+        })
+    }
     /// `replace_chat_history` on the calling (blocking) thread, without the rewrite gate: the caller has just made
     /// the `.pre-repair` backup. For the load-time repair, which must hold the session lock until this I/O is done.
-    pub(super) fn replace_chat_history_after_backup_sync(
+    /// [`StorageAdapter::replace_chat_history`] through the session's writer (design F5 §5.5: the on-disk repair claims
+    /// the session and writes as that writer). The P96 rewrite gate applies as on the by-path rewrite.
+    pub(crate) fn replace_chat_history_through(
         &self,
+        session_writer: &fuigo_session_writer::SessionWriter,
         info: &Info,
         messages: &[ConversationItem],
     ) -> io::Result<()> {
-        super::write_jsonl_atomic(&self.chat_file(info), messages)?;
-        super::summary_write::apply_patch_locked(
-            &self.summary_file(info),
-            &self.summary_lock_file(info),
-            &chat_rewrite_summary_patch(messages),
-        )
-        .map(|_| ())
+        load_repair::rewrite_gate_as(&self.chat_file(info), Some(session_writer))?;
+        Self::replace_chat_history_after_backup_through(session_writer, messages)
+    }
+    /// The chat-history rewrite after the load repair's backup, through the session's writer (design F5 §5.7: the load repair
+    /// is its owner's work).
+    pub(super) fn replace_chat_history_after_backup_through(
+        session_writer: &fuigo_session_writer::SessionWriter,
+        messages: &[ConversationItem],
+    ) -> io::Result<()> {
+        super::replace_chat_history_through(session_writer, &super::to_jsonl_bytes(messages)?)?;
+        super::summary_write::apply_patch_locked(session_writer, &chat_rewrite_summary_patch(messages)).map(|_| ())
     }
 }
 /// The summary fields set by a full rewrite of `chat_history.jsonl`.
@@ -1432,8 +1613,41 @@ async fn next_compaction_segment_index(compaction_dir: &std::path::Path) -> u64 
     }
     next
 }
+/// Tests: a writer for the folder holding `path`, claimed under a fresh id (an unowned reader of a folder nobody holds).
+#[cfg(test)]
+fn test_repair_writer(path: &Path) -> Option<fuigo_session_writer::SessionWriter> {
+    let dir = path.parent()?;
+    fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).ok()
+}
+
+/// A write of a session folder with no writer (F5-C4): refused, never done by path.
+pub(crate) fn no_writer_error(dir: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("no session writer for {}: refusing to write the session folder by path", dir.display()),
+    )
+}
+#[cfg(test)]
+thread_local! {
+    static TEST_NO_WRITER_FALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Tests that prove the refusal turn the test-only writer fallback off for their thread.
+#[cfg(test)]
+pub(crate) fn set_test_no_writer_fallback(on: bool) {
+    TEST_NO_WRITER_FALLBACK.with(|cell| cell.set(on));
+}
+#[cfg(test)]
+fn test_no_writer_fallback() -> bool {
+    TEST_NO_WRITER_FALLBACK.with(std::cell::Cell::get)
+}
 #[async_trait]
 impl StorageAdapter for JsonlStorageAdapter {
+    fn release_writer(&self) {
+        self.release_writer_slot();
+    }
+    fn session_writer(&self, info: &Info) -> io::Result<fuigo_session_writer::SessionWriter> {
+        self.owner(info)
+    }
     async fn init_session(&self, info: &Info, model_id: acp::ModelId) -> io::Result<Summary> {
         self.create_session_dir_owner_only(info)?;
         let summary_path = self.summary_file(info);
@@ -1443,14 +1657,11 @@ impl StorageAdapter for JsonlStorageAdapter {
             let bytes = tokio::fs::read(&summary_path).await?;
             let mut summary = serde_json::from_slice::<Summary>(&bytes)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            if summary.session_kind.is_none() || summary.worktree_label.is_none() {
-                let lock_path = self.summary_lock_file(info);
+            if super::summary_write::worktree_repair_due(&summary).is_some() {
+                // Review r2: the heal is the session writer's work; a session held elsewhere keeps its summary as read.
+                let heal_writer = self.summary_writer(info).await.ok();
                 summary = tokio::task::spawn_blocking(move || {
-                    super::summary_write::repair_untagged_worktree_summary(
-                        &mut summary,
-                        &summary_path,
-                        &lock_path,
-                    );
+                    super::summary_write::repair_untagged_worktree_summary(&mut summary, |_| heal_writer);
                     summary
                 })
                 .await
@@ -1578,7 +1789,8 @@ impl StorageAdapter for JsonlStorageAdapter {
         info: &Info,
         message: &ConversationItem,
     ) -> Result<(), super::AppendChatError> {
-        self.append_jsonl(self.chat_file(info), message)
+        let w = self.owner(info).map_err(super::AppendChatError::NotCommitted)?;
+        self.append_jsonl(w, self.chat_file(info), message)
             .await
             .map_err(super::AppendChatError::NotCommitted)?;
         self.apply_summary_patch(
@@ -1668,7 +1880,7 @@ impl StorageAdapter for JsonlStorageAdapter {
     async fn write_plan_state(&self, info: &Info, state: &TodoState) -> io::Result<()> {
         let state_json = serde_json::to_vec_pretty(state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        super::write_bytes_atomic_async(&self.plan_file(info), state_json).await
+        super::write_bytes_atomic_as_async(&self.owner(info)?, &self.plan_file(info), state_json).await
     }
     async fn write_plan_mode_state(
         &self,
@@ -1677,7 +1889,7 @@ impl StorageAdapter for JsonlStorageAdapter {
     ) -> io::Result<()> {
         let json = serde_json::to_vec_pretty(state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        super::write_bytes_atomic_async(&self.plan_mode_state_file(info), json).await
+        super::write_bytes_atomic_as_async(&self.owner(info)?, &self.plan_mode_state_file(info), json).await
     }
     async fn write_signals(
         &self,
@@ -1686,7 +1898,7 @@ impl StorageAdapter for JsonlStorageAdapter {
     ) -> io::Result<()> {
         let signals_json = serde_json::to_vec(signals)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        super::write_bytes_atomic_async(&self.signals_file(info), signals_json).await
+        super::write_bytes_atomic_as_async(&self.owner(info)?, &self.signals_file(info), signals_json).await
     }
     async fn read_usage(
         &self,
@@ -1718,11 +1930,9 @@ impl StorageAdapter for JsonlStorageAdapter {
         use fs2::FileExt;
         let path = self.usage_file(info);
         let lock_path = path.with_file_name(format!("{}.lock", super::USAGE_FILE));
+        let w = self.owner(info)?;
         tokio::task::spawn_blocking(move || {
-            let lock = super::owner_only::open(
-                OpenOptions::new().read(true).write(true).create(true).truncate(false),
-                &lock_path,
-            )?;
+            let lock = w.open_lock(w.rel_of(&lock_path)?)?;
             lock.lock_exclusive()?;
             let result = (|| {
                 let current = match std::fs::read(&path) {
@@ -1737,7 +1947,7 @@ impl StorageAdapter for JsonlStorageAdapter {
                 let updated = update(current);
                 let json = serde_json::to_vec_pretty(&updated)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                super::write_bytes_atomic(&path, &json)?;
+                super::write_bytes_atomic_as(&w, &path, &json)?;
                 Ok(updated)
             })();
             let _ = lock.unlock();
@@ -1753,7 +1963,7 @@ impl StorageAdapter for JsonlStorageAdapter {
     ) -> io::Result<()> {
         let json = serde_json::to_vec_pretty(usage)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        super::write_bytes_atomic_async(&self.usage_file(info), json).await
+        super::write_bytes_atomic_as_async(&self.owner(info)?, &self.usage_file(info), json).await
     }
     async fn write_announcement_state(
         &self,
@@ -1762,7 +1972,7 @@ impl StorageAdapter for JsonlStorageAdapter {
     ) -> io::Result<()> {
         let json =
             serde_json::to_vec(state).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        super::write_bytes_atomic_async(&self.announcement_state_file(info), json).await
+        super::write_bytes_atomic_as_async(&self.owner(info)?, &self.announcement_state_file(info), json).await
     }
     async fn write_goal_mode_state(
         &self,
@@ -1772,17 +1982,10 @@ impl StorageAdapter for JsonlStorageAdapter {
         let json = serde_json::to_vec_pretty(state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let target = self.goal_mode_state_file(info);
-        if let Some(parent) = target.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        super::write_bytes_atomic_async(&target, json).await
+        super::write_bytes_atomic_as_async(&self.owner(info)?, &target, json).await
     }
     async fn delete_goal_mode_state(&self, info: &Info) -> io::Result<()> {
-        match tokio::fs::remove_file(self.goal_mode_state_file(info)).await {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        }
+        super::remove_file_as(&self.owner(info)?, &self.goal_mode_state_file(info))
     }
     async fn write_workflow_run_state(
         &self,
@@ -1792,11 +1995,11 @@ impl StorageAdapter for JsonlStorageAdapter {
         let json = serde_json::to_vec_pretty(manifest)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let target = self.workflow_run_state_file(info, &manifest.state.run_id)?;
-        if let Some(parent) = target.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-            if parent.join("cleared").is_file() {
-                return Ok(());
-            }
+        let w = self.owner(info)?;
+        if let Some(parent) = target.parent()
+            && parent.join("cleared").is_file()
+        {
+            return Ok(());
         }
         if target.is_file()
             && let Ok(existing) = tokio::fs::read(&target).await
@@ -1814,47 +2017,31 @@ impl StorageAdapter for JsonlStorageAdapter {
             );
             return Ok(());
         }
-        let tmp = target.with_extension(format!(
-            "json.{}.{}.tmp",
-            std::process::id(),
-            uuid::Uuid::now_v7().simple()
-        ));
-        super::owner_only::write_async(&tmp, json).await?;
-        #[cfg(windows)]
-        match tokio::fs::remove_file(&target).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                let _ = tokio::fs::remove_file(&tmp).await;
-                return Err(error);
-            }
-        }
-        if let Err(error) = tokio::fs::rename(&tmp, &target).await {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(error);
-        }
-        Ok(())
+        // The writer's atomic replace: an owner-only temporary sibling, synced, renamed over the manifest.
+        super::write_bytes_atomic_as_async(&w, &target, json).await
     }
     async fn delete_workflow_run_state(&self, info: &Info, run_id: &str) -> io::Result<()> {
         let target = self.workflow_run_state_file(info, run_id)?;
+        let w = self.owner(info)?;
         if let Some(parent) = target.parent() {
-            tokio::fs::create_dir_all(parent).await?;
             let cleared = parent.join("cleared");
             if !cleared.exists() {
-                super::owner_only::write_async(cleared, Vec::new()).await?;
+                super::write_bytes_atomic_as_async(&w, &cleared, Vec::new()).await?;
             }
         }
-        match tokio::fs::remove_file(target).await {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        }
+        super::remove_file_as(&w, &target)
     }
-    async fn load_session(&self, info: &Info) -> io::Result<PersistedData> {
+    async fn load_session(&self, info: &Info, access: super::Access<'_>) -> io::Result<PersistedData> {
         let summary = self.read_summary_sync(info)?;
         let chat_file = self.chat_file(info);
-        self.ensure_chat_history(info, summary.chat_format_version)?;
-        let chat_history = self.read_chat_history_sync(chat_file, summary.chat_format_version)?;
+        let repair = access.repair_writer(&info.id.0, &self.session_dir(info));
+        let repair = repair.as_deref();
+        let chat_history = match self.ensure_chat_history(info, summary.chat_format_version, access, repair)? {
+            Some(bytes) => {
+                self.read_chat_history_counting_from_bytes(&chat_file, &bytes, summary.chat_format_version, None)?.0
+            }
+            None => self.read_chat_history_with(chat_file, summary.chat_format_version, repair)?,
+        };
         let updates = self.read_updates_jsonl(self.updates_file(info))?;
         let plan_state = self.read_optional_json_sync::<TodoState>(&self.plan_file(info))?;
         let plan_mode_state = self
@@ -1914,13 +2101,20 @@ impl StorageAdapter for JsonlStorageAdapter {
     async fn load_session_without_updates(
         &self,
         info: &Info,
+        access: super::Access<'_>,
     ) -> io::Result<super::PersistedDataLight> {
         tracing::info!("Loading session data (without updates) from JSONL");
         let summary = self.read_summary_sync(info)?;
         let chat_file = self.chat_file(info);
-        self.ensure_chat_history(info, summary.chat_format_version)?;
+        let repair = access.repair_writer(&info.id.0, &self.session_dir(info));
+        let repair = repair.as_deref();
         let (mut chat_history, mut skipped_chat_lines) =
-            self.read_chat_history_counting_sync(chat_file, summary.chat_format_version)?;
+            match self.ensure_chat_history(info, summary.chat_format_version, access, repair)? {
+                Some(bytes) => {
+                    self.read_chat_history_counting_from_bytes(&chat_file, &bytes, summary.chat_format_version, None)?
+                }
+                None => self.read_chat_history_counting_with(chat_file, summary.chat_format_version, repair)?,
+            };
         // A compaction that committed while its rewrite of chat_history.jsonl never landed: the history is its
         // projection and the items written after it (P111, DI-03). Unreadable lines among those are counted like torn
         // lines, so the load-time repair (P96) sees them.
@@ -1989,15 +2183,11 @@ impl StorageAdapter for JsonlStorageAdapter {
             .map_err(io::Error::other)?
     }
     async fn delete_session(&self, info: &Info) -> io::Result<()> {
-        let dir = self.session_dir(info);
-        match tokio::fs::remove_dir_all(&dir).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
-        }
+        // F5-C4: the wipe is the session writer's (design §6.3: rename while held, release, remove).
+        self.owner(info)?.delete_tree().await
     }
     async fn append_rewind_point(&self, info: &Info, point: &RewindPoint) -> io::Result<()> {
-        self.append_jsonl(self.rewind_points_file(info), point)
+        self.append_jsonl(self.owner(info)?, self.rewind_points_file(info), point)
             .await
     }
     async fn load_rewind_points(&self, info: &Info) -> io::Result<Vec<RewindPoint>> {
@@ -2052,6 +2242,8 @@ impl StorageAdapter for JsonlStorageAdapter {
         let path = self.rewind_points_file(info);
         let chat_path = self.chat_file(info);
         let updates_path = self.updates_file(info);
+        // F5-C4 gap f: the journal, the durable copy and the rewrite are the session writer's.
+        let w = self.owner(info)?;
         tokio::task::spawn_blocking(move || -> io::Result<super::RewindPointsUndo> {
             // The caller holds the rewrite lock. Everything below runs under the append lock, so the durable copy, the
             // bytes kept for a put-back and the rewrite all see the same file.
@@ -2077,10 +2269,11 @@ impl StorageAdapter for JsonlStorageAdapter {
                         &chat_path,
                         &updates_path,
                     )?;
-                    super::write_bytes_atomic(&journal, &entry.to_bytes()?)?;
-                    super::write_bytes_atomic(&copy, previous)
+                    super::write_bytes_atomic_as(&w, &journal, &entry.to_bytes()?)?;
+                    super::write_bytes_atomic_as(&w, &copy, previous)
                 };
                 let (previous, written) = Self::rewrite_rewind_points_locked(
+                    &w,
                     &path,
                     append.is_some(),
                     move |lines| match rewrite {
@@ -2097,8 +2290,8 @@ impl StorageAdapter for JsonlStorageAdapter {
                     // The file is as it was (nothing changed, or it was put back), or the copy was never made: the
                     // copy and the journal are not needed. When the file is not as it was, both stay.
                     if copy.symlink_metadata().is_err() || std::fs::read(&path).ok() == std::fs::read(&copy).ok() {
-                        let _ = std::fs::remove_file(&copy);
-                        let _ = std::fs::remove_file(&journal);
+                        let _ = super::remove_file_as(&w, &copy);
+                        let _ = super::remove_file_as(&w, &journal);
                     }
                 })?;
                 Ok(super::RewindPointsUndo { previous, written })
@@ -2118,6 +2311,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         put_back: bool,
     ) -> io::Result<()> {
         let path = self.rewind_points_file(info);
+        let w = self.owner(info)?;
         tokio::task::spawn_blocking(move || -> io::Result<()> {
             // The caller still holds the rewrite lock: no other rewrite came in between. Appends may have: the
             // put-back keeps every row appended after the rewind's rewrite, behind what the file held before.
@@ -2138,9 +2332,9 @@ impl StorageAdapter for JsonlStorageAdapter {
                     }
                     restored.extend_from_slice(appended);
                     if undo.previous.is_none() && restored.is_empty() {
-                        return Self::put_back_rewind_points(&path, None);
+                        return Self::put_back_rewind_points(&w, &path, None);
                     }
-                    super::write_bytes_atomic(&path, &restored)
+                    super::write_bytes_atomic_as(&w, &path, &restored)
                 })();
                 if let Some(append) = append {
                     let _ = append.unlock();
@@ -2150,7 +2344,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             // The rewind is done either way; the durable copy is not needed any more. When the put-back failed it
             // stays (the error above returned first), and the message names it. The journal goes after the copy, so a
             // copy is never left without it (P164).
-            rewind_reconcile::remove_copy_then_journal(&path)
+            rewind_reconcile::remove_copy_then_journal(&w, &path)
         })
         .await
         .map_err(io::Error::other)?
@@ -2163,7 +2357,6 @@ impl StorageAdapter for JsonlStorageAdapter {
         let info_clone = info.clone();
         let adapter_clone = self.clone();
         tokio::task::spawn_blocking(move || -> io::Result<()> {
-            use std::fs::OpenOptions;
             let adapter = adapter_clone;
             #[cfg(test)]
             if let Some(session_sync_probe) = &adapter.session_sync_probe {
@@ -2176,12 +2369,13 @@ impl StorageAdapter for JsonlStorageAdapter {
                 (files.plan, adapter.plan_file(&info_clone)),
                 (files.rewind_points, adapter.rewind_points_file(&info_clone)),
             ];
+            let writer = adapter.owner(&info_clone)?;
             for (selected, file_path) in &files_to_sync {
                 if !selected {
                     continue;
                 }
-                match OpenOptions::new().write(true).open(file_path) {
-                    Ok(file) => super::sync_file_durable(&file)?,
+                match writer.sync_existing_sync(writer.rel_of(file_path)?) {
+                    Ok(()) => {}
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                     Err(error) => return Err(error),
                 }
@@ -2202,9 +2396,10 @@ impl StorageAdapter for JsonlStorageAdapter {
             return Ok(());
         }
         let staging = path.with_extension("jsonl.pre-strip.tmp");
-        super::owner_only::copy_async(&path, &staging).await?;
-        tokio::fs::rename(&staging, &backup).await?;
-        Ok(())
+        let w = self.owner(info)?;
+        let (staging_rel, backup_rel) = (w.rel_of(&staging)?.to_path_buf(), w.rel_of(&backup)?.to_path_buf());
+        w.copy_in(path, staging_rel.clone()).await?;
+        w.rename(staging_rel, backup_rel).await
     }
     async fn replace_chat_history(
         &self,
@@ -2213,8 +2408,9 @@ impl StorageAdapter for JsonlStorageAdapter {
     ) -> io::Result<()> {
         let chat_file = self.chat_file(info);
         // A load-time repair that could not be backed up holds back every rewrite until the backup exists (P96).
-        load_repair::rewrite_gate(&chat_file)?;
-        self.write_jsonl(chat_file, messages).await?;
+        let w = self.owner(info)?;
+        load_repair::rewrite_gate_as(&chat_file, Some(&w))?;
+        self.write_jsonl(&w, chat_file, messages).await?;
         self.apply_summary_patch(info, chat_rewrite_summary_patch(messages))
             .await
     }
@@ -2225,11 +2421,12 @@ impl StorageAdapter for JsonlStorageAdapter {
     ) -> Result<(), super::AppendChatError> {
         use super::AppendChatError::{Committed, NotCommitted};
         let chat_file = self.chat_file(info);
-        load_repair::rewrite_gate(&chat_file).map_err(NotCommitted)?;
+        let w = self.owner(info).map_err(NotCommitted)?;
+        load_repair::rewrite_gate_as(&chat_file, Some(&w)).map_err(NotCommitted)?;
         let bytes = super::to_jsonl_bytes(messages).map_err(NotCommitted)?;
         // The writer says whether its rename over the file happened (a failed directory sync after it still leaves the
         // new history in place).
-        match super::write_bytes_atomic_reporting_async(&chat_file, bytes).await {
+        match super::write_bytes_atomic_reporting_as_async(&w, &chat_file, bytes).await {
             Ok(()) => {}
             Err(super::AtomicWriteError::Replaced(error)) => return Err(Committed(error)),
             Err(super::AtomicWriteError::NotReplaced(error)) => return Err(NotCommitted(error)),
@@ -2249,6 +2446,23 @@ impl StorageAdapter for JsonlStorageAdapter {
         let target = target_info.clone();
         tokio::task::spawn_blocking(move || {
             storage.copy_session_data_sync(&source, &target, options)
+        })
+        .await
+        .map_err(|e| io::Error::other(format!("spawn_blocking panicked: {e}")))?
+    }
+    async fn copy_session_data_as(
+        &self,
+        source_info: &Info,
+        target_info: &Info,
+        options: super::CopySessionOptions,
+        target: &fuigo_session_writer::SessionWriter,
+    ) -> io::Result<super::CopySessionResult> {
+        let storage = self.clone();
+        let source = source_info.clone();
+        let target_info = target_info.clone();
+        let writer = target.clone();
+        tokio::task::spawn_blocking(move || {
+            storage.copy_session_data_as_sync(&source, &target_info, options, &writer)
         })
         .await
         .map_err(|e| io::Error::other(format!("spawn_blocking panicked: {e}")))?
@@ -2309,7 +2523,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         entry: &crate::session::persistence::LocalFeedbackEntry,
     ) -> io::Result<()> {
         let path = self.feedback_file(info);
-        self.append_jsonl(path, entry).await
+        self.append_jsonl(self.owner(info)?, path, entry).await
     }
     async fn append_btw(
         &self,
@@ -2317,7 +2531,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         entry: &crate::session::persistence::BtwEntry,
     ) -> io::Result<()> {
         let path = self.btw_history_file(info);
-        self.append_jsonl(path, entry).await
+        self.append_jsonl(self.owner(info)?, path, entry).await
     }
     async fn write_compaction_checkpoint(
         &self,
@@ -2329,18 +2543,16 @@ impl StorageAdapter for JsonlStorageAdapter {
         let bytes = serde_json::to_vec_pretty(checkpoint)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let adapter = self.clone();
+        let w = self.owner(info)?;
         tokio::task::spawn_blocking(move || {
-            super::create_dir_all_durable_with(&dir, |path| std::fs::create_dir_all(path), |dir| {
-                #[cfg(test)]
-                if let Some(probe) = &adapter.parent_sync_probe { probe()?; }
-                super::sync_dir_durable(dir)
-            })?;
+            // The probes stand for the directory and file syncs the writer does (fault injection in tests).
+            #[cfg(test)]
+            if let Some(probe) = &adapter.parent_sync_probe { probe()?; }
+            w.create_dir_sync(w.rel_of(&dir)?)?;
+            #[cfg(test)]
+            if let Some(probe) = &adapter.file_sync_probe { probe()?; }
             let _ = &adapter;
-            super::write_bytes_atomic_with(&path, &bytes, |file| {
-                #[cfg(test)]
-                if let Some(probe) = &adapter.file_sync_probe { probe()?; }
-                super::sync_file_durable(file)
-            }, || super::sync_parent_dir_durable(&path))
+            super::write_bytes_atomic_as(&w, &path, &bytes)
         }).await.map_err(io::Error::other)?
     }
     async fn write_compaction_witness(
@@ -2350,8 +2562,9 @@ impl StorageAdapter for JsonlStorageAdapter {
     ) -> io::Result<()> {
         let session_dir = self.session_dir(info);
         let checkpoint = checkpoint.clone();
+        let w = self.owner(info)?;
         tokio::task::spawn_blocking(move || {
-            compaction_witness::write_compaction_witness_sync(&session_dir, &checkpoint)
+            compaction_witness::write_compaction_witness_sync(&w, &session_dir, &checkpoint)
         })
         .await
         .map_err(io::Error::other)?
@@ -2359,8 +2572,15 @@ impl StorageAdapter for JsonlStorageAdapter {
     async fn compaction_activated(&self, info: &Info, checkpoint_id: &str) {
         let session_dir = self.session_dir(info);
         let checkpoint_id = checkpoint_id.to_string();
+        let w = match self.owner(info) {
+            Ok(w) => w,
+            Err(error) => {
+                tracing::warn!(%error, "compaction witness not updated: no session writer");
+                return;
+            }
+        };
         let _ = tokio::task::spawn_blocking(move || {
-            compaction_witness::compaction_activated_sync(&session_dir, &checkpoint_id)
+            compaction_witness::compaction_activated_sync(&w, &session_dir, &checkpoint_id)
         })
         .await;
     }
@@ -2381,11 +2601,10 @@ impl StorageAdapter for JsonlStorageAdapter {
         request: &crate::extensions::notification::CompactionRequestFile,
     ) -> io::Result<()> {
         let dir = self.session_dir(info).join("compaction_requests");
-        tokio::fs::create_dir_all(&dir).await?;
         let path = dir.join(format!("{}.json", request.request_id));
         let bytes = serde_json::to_vec_pretty(request)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        super::owner_only::write_async(path, bytes).await
+        super::write_bytes_atomic_as_async(&self.owner(info)?, &path, bytes).await
     }
     async fn write_recap_request(
         &self,
@@ -2393,11 +2612,10 @@ impl StorageAdapter for JsonlStorageAdapter {
         request: &crate::extensions::notification::RecapRequestFile,
     ) -> io::Result<()> {
         let dir = self.session_dir(info).join("recap_requests");
-        tokio::fs::create_dir_all(&dir).await?;
         let path = dir.join(format!("{}.json", request.request_id));
         let bytes = serde_json::to_vec_pretty(request)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        super::owner_only::write_async(path, bytes).await
+        super::write_bytes_atomic_as_async(&self.owner(info)?, &path, bytes).await
     }
     async fn write_compaction_segment(
         &self,
@@ -2410,7 +2628,8 @@ impl StorageAdapter for JsonlStorageAdapter {
         };
         use tokio::io::AsyncWriteExt;
         let base = self.session_dir(info).join(COMPACTION_DIR);
-        tokio::fs::create_dir_all(&base).await?;
+        let w = self.owner(info)?;
+        w.create_dir(w.rel_of(&base)?.to_path_buf()).await?;
         let index = next_compaction_segment_index(&base).await;
         let md = render_segment_md(
             &segment.items,
@@ -2419,21 +2638,18 @@ impl StorageAdapter for JsonlStorageAdapter {
             segment.detail,
             &segment.timestamp,
         );
-        super::owner_only::write_async(base.join(segment_filename(index)), md.clone().into_bytes()).await?;
+        let segment_path = base.join(segment_filename(index));
+        super::write_bytes_atomic_as_async(&w, &segment_path, md.clone().into_bytes()).await?;
         let index_path = base.join(INDEX_FILE);
         let needs_header = !tokio::fs::try_exists(&index_path).await.unwrap_or(false);
-        let mut f = tokio::fs::File::from_std(super::owner_only::open(
-            std::fs::OpenOptions::new().create(true).append(true),
-            &index_path,
-        )?);
-        if needs_header {
-            f.write_all(INDEX_HEADER.as_bytes()).await?;
-        }
         let keywords = extract_keywords(&segment.summary);
         let row = render_index_row(index, segment.items.len(), md.len(), &keywords);
-        f.write_all(row.as_bytes()).await?;
-        f.flush().await?;
-        Ok(())
+        let mut bytes = Vec::new();
+        if needs_header {
+            bytes.extend_from_slice(INDEX_HEADER.as_bytes());
+        }
+        bytes.extend_from_slice(row.as_bytes());
+        w.append(w.rel_of(&index_path)?.to_path_buf(), bytes).await
     }
     async fn read_compaction_checkpoint(
         &self,
@@ -2526,9 +2742,12 @@ fn is_valid_data_uri_image(url: &str) -> bool {
         }
     }
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod durable_tests;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod worktree_heal_tests;

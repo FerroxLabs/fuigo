@@ -215,6 +215,7 @@ fn chat_path(session: &acp::SessionId, cwd: &Path) -> PathBuf {
 /// A dropped connection leaves the agent's session actors running in this process, each holding the session's shared
 /// turn-owner lock, and load never repairs a session a live actor holds. The crashed process whose torn write this
 /// test stands for holds nothing, so the builder's actors have to be gone before the cold load.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 async fn close_and_release(conn: &acp::ClientSideConnection, session: &acp::SessionId, cwd: &Path) {
     ext_method(conn, "fuigo/session/close", json!({ "sessionId": session.to_string() })).await;
     let lock_path = session_dir(session, cwd).join("turn_owner.lock");
@@ -254,6 +255,7 @@ fn line_with<'a>(bytes: &'a [u8], needle: &str) -> (usize, Vec<&'a [u8]>) {
 
 /// Cuts the first line containing `needle` in half, as a crash in the middle of an append leaves it.
 /// Returns the damaged file's bytes.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn tear_line(path: &Path, needle: &str) -> Vec<u8> {
     let bytes = std::fs::read(path).expect("read chat history");
     let (at, lines) = line_with(&bytes, needle);
@@ -271,6 +273,7 @@ fn tear_line(path: &Path, needle: &str) -> Vec<u8> {
 }
 
 /// Removes the first line containing `needle` altogether. Every remaining line still parses.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn drop_line(path: &Path, needle: &str) -> Vec<u8> {
     let bytes = std::fs::read(path).expect("read chat history");
     let (at, lines) = line_with(&bytes, needle);
@@ -403,6 +406,7 @@ async fn destructive_rewrites_are_refused(
     failures
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn a_torn_chat_history_line_is_repaired_at_load() {
     run_agent_test(|cwd, mock| async move {

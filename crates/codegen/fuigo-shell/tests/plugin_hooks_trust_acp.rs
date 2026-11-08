@@ -66,6 +66,7 @@ fn tool_call(call_id: &str, name: &str, arguments: &str) -> ScriptedResponse {
 }
 
 /// A `read_file` call on `cwd/<file>`; the file name is what marks the call in the hook envelope.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn read_call(call_id: &str, cwd: &Path, file: &str) -> ScriptedResponse {
     let path = cwd.join(file);
     std::fs::write(&path, "probe\n").expect("probe file");
@@ -210,6 +211,7 @@ async fn run_single_read(
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn clear_logs(dir: &Path) {
     for tag in TAGS {
         let _ = std::fs::remove_file(log_path(dir, tag));
@@ -343,6 +345,7 @@ fn assert_single_read(logs: &Path, session: &acp::SessionId, label: &str, repo: 
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn plugin_hooks_follow_folder_trust_in_sessions_and_their_subagents() {
     // SAFETY: set before the harness starts any runtime; one #[test] per binary.

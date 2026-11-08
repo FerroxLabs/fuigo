@@ -322,6 +322,7 @@ pub async fn explicit_search_path_denied(cwd: &Path, globs: &[String], path: &Pa
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +467,7 @@ mod tests {
 
 /// P198 round 2: one fixture and one set of assertions that every walker and every search tool is run against, so the
 /// three `list_dir` walkers and the three grep tools are held to the same contract through their own tool entry points.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(all(test, unix))]
 pub(crate) mod fixture {
     use std::future::Future;

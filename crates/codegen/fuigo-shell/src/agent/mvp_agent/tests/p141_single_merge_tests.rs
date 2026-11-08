@@ -29,6 +29,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountLoaded {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 async fn a_session_entry_merges_the_mcp_sources_once() {
     if fuigo_test_support::env::rerun_in_own_process() {
@@ -58,6 +59,7 @@ async fn a_session_entry_merges_the_mcp_sources_once() {
 
 /// `fuigo/session/update_mcp_servers` admits a new client set: the session ACTOR gets the new hot-reload seed too (its
 /// plugin reload re-merges its own copy), with the forwarded copy marked, and BEFORE the update. Astra P141 r1, r2.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 async fn update_mcp_servers_hands_the_actor_the_new_seed() {
     if fuigo_test_support::env::rerun_in_own_process() {

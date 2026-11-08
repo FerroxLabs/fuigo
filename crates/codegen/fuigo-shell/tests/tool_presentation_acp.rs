@@ -4,6 +4,7 @@ mod acp_harness;
 
 use acp_harness::{AutoApproveClient, connect_and_auth, new_session, prompt_turn, run_agent_test};
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn compact_presentation_keeps_instructions_and_native_schemas() {
     // One test per binary; configure before mock or agent threads exist.

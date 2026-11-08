@@ -13,6 +13,7 @@ use fuigo_shell::waterfall;
 use support::*;
 use tempfile::TempDir;
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 #[ignore = "perf regression tier; drives real subagent bursts; run with --ignored --nocapture"]
 fn regression_bootstrap_cost() {

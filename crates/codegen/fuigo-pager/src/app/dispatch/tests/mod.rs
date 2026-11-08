@@ -18,6 +18,7 @@ mod status;
 mod status_line;
 mod task_result;
 mod transcript;
+mod trust;
 mod turn;
 mod voice;
 use super::billing::{

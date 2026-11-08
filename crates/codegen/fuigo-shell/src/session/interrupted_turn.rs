@@ -77,20 +77,21 @@ impl InterruptedTurn {
 
     /// Closes the open `turn_started` in `events.jsonl` so the next load does not report this turn again.
     /// Reports failure: the caller must know whether the turn is still open.
-    pub(crate) fn close_events_turn(&self, session_dir: &Path) -> std::io::Result<()> {
+    pub(crate) fn close_events_turn(&self, session_writer: &fuigo_session_writer::SessionWriter) -> std::io::Result<()> {
         close_events_turn_as(
-            session_dir,
+            session_writer,
             fuigo_session_events::TurnOutcomeLabel::Interrupted,
         )
     }
 }
 
+/// Through the session's writer (design F5 §5.4.2): the recovery's own claim, or the actor's.
 fn close_events_turn_as(
-    session_dir: &Path,
+    session_writer: &fuigo_session_writer::SessionWriter,
     outcome: fuigo_session_events::TurnOutcomeLabel,
 ) -> std::io::Result<()> {
     fuigo_session_events::append_event_checked(
-        session_dir,
+        session_writer,
         fuigo_session_events::Event::TurnEnded {
             outcome,
             cancellation_category: None,
@@ -157,13 +158,13 @@ fn take_deferred_closure(
 
 /// Closes `open` as interrupted only if it is still the newest turn event: a turn that started since (in another
 /// process that shares the session) must not be closed in its place. `Ok(false)` when it was left alone.
-fn close_if_still_open(session_dir: &Path, open: &OpenTurn) -> std::io::Result<bool> {
-    match last_turn_event(&session_dir.join("events.jsonl"))? {
+fn close_if_still_open(session_writer: &fuigo_session_writer::SessionWriter, open: &OpenTurn) -> std::io::Result<bool> {
+    match last_turn_event(&session_writer.dir().join("events.jsonl"))? {
         Some(LastTurnEvent::Started { ts, prompt_id })
             if ts == open.ts && prompt_id == open.prompt_id =>
         {
             close_events_turn_as(
-                session_dir,
+                session_writer,
                 fuigo_session_events::TurnOutcomeLabel::Interrupted,
             )?;
             Ok(true)
@@ -175,7 +176,8 @@ fn close_if_still_open(session_dir: &Path, open: &OpenTurn) -> std::io::Result<b
 /// Called by an actor right before it writes `turn_started`. If this session has a lost turn whose marker is still
 /// being written, the lost turn is closed now, so the new turn does not start inside it (and cannot later be closed
 /// by it). The marker append was queued before anything this turn persists, so it still lands ahead of the turn.
-pub(crate) fn close_deferred_turn_before_new_turn(session_dir: &Path) {
+pub(crate) fn close_deferred_turn_before_new_turn(session_writer: &fuigo_session_writer::SessionWriter) {
+    let session_dir = session_writer.dir();
     let mut closures = deferred_closures();
     if closures.is_empty() {
         return;
@@ -183,7 +185,7 @@ pub(crate) fn close_deferred_turn_before_new_turn(session_dir: &Path) {
     let Some((_, open)) = closures.remove(session_dir) else {
         return;
     };
-    match close_if_still_open(session_dir, &open) {
+    match close_if_still_open(session_writer, &open) {
         Ok(true) => tracing::warn!(
             dir = %session_dir.display(),
             "a turn is starting while the previous process's lost turn is still being recorded; closed the lost turn first"
@@ -211,6 +213,8 @@ pub(crate) struct DeferredRecovery {
     turn: InterruptedTurn,
     marker_line: String,
     session_dir: PathBuf,
+    /// The recovery's writer clone: the closure it still owes goes through it, and the session is not free until then.
+    session_writer: fuigo_session_writer::SessionWriter,
     session_id: agent_client_protocol::SessionId,
     closure_id: u64,
     /// Keeps other recoveries out until the append resolves. Dropped with this value.
@@ -278,7 +282,7 @@ impl DeferredRecovery {
         if let Some(open) = pending {
             // Still registered: no actor in this process has started a turn since, so the lost turn is still open
             // unless another process sharing the session started one (checked).
-            match close_if_still_open(&self.session_dir, &open) {
+            match close_if_still_open(&self.session_writer, &open) {
                 Ok(true) => {}
                 Ok(false) => tracing::warn!(
                     session_id = %self.session_id.0,
@@ -310,8 +314,10 @@ impl DeferredRecovery {
 /// - A failed closure is logged; the next load finds the committed marker and only retries the closure.
 /// - The append is bounded; one that outlives the bound is not abandoned (it is already queued and will land) but
 ///   handed back as [`RecoveryOutcome::Deferred`], still holding a shared lock, for the caller to finish.
+///
+/// `session_writer`: the cold load's writer (design F5 §5.5); the marker's events closure goes through it.
 pub(crate) async fn recover_interrupted_turn<A, Fut>(
-    session_dir: &Path,
+    session_writer: &fuigo_session_writer::SessionWriter,
     updates_path: Option<&Path>,
     summary: &Summary,
     session_id: &agent_client_protocol::SessionId,
@@ -323,8 +329,9 @@ where
         + 'static,
 {
     use crate::session::turn_owner_lock::{
-        RECOVERY_APPEND_TIMEOUT, RecoveryLock, report_lock_unavailable, try_recovery_lock,
+        RECOVERY_APPEND_TIMEOUT, RecoveryLock, report_lock_unavailable, try_recovery_lock_as,
     };
+    let session_dir = session_writer.dir();
 
     // Idempotence rests on finding an earlier marker in `updates.jsonl`. Every shipped storage adapter (jsonl)
     // has one; a backend without it cannot rule out a duplicate marker, so nothing is declared there.
@@ -335,7 +342,7 @@ where
         );
         return None;
     };
-    let guard = match try_recovery_lock(session_dir) {
+    let guard = match try_recovery_lock_as(session_writer) {
         RecoveryLock::Acquired(guard) => guard,
         RecoveryLock::HeldElsewhere => {
             tracing::debug!(
@@ -370,7 +377,7 @@ where
             if record.stop_reason != INTERRUPTED_STOP_REASON {
                 // The turn reached its terminal record; only its events.jsonl closure was lost. Not a crash.
                 let outcome = outcome_for_stop_reason(&record.stop_reason);
-                if let Err(error) = close_events_turn_as(session_dir, outcome) {
+                if let Err(error) = close_events_turn_as(session_writer, outcome) {
                     tracing::warn!(
                         session_id = %session_id.0,
                         %error,
@@ -421,6 +428,7 @@ where
                         turn,
                         marker_line: line,
                         session_dir: session_dir.to_path_buf(),
+                        session_writer: session_writer.clone(),
                         session_id: session_id.clone(),
                         closure_id,
                         _shared_hold: guard.into_shared(),
@@ -448,7 +456,7 @@ where
             line
         }
     };
-    if let Err(error) = turn.close_events_turn(session_dir) {
+    if let Err(error) = turn.close_events_turn(session_writer) {
         tracing::warn!(
             session_id = %session_id.0,
             %error,
@@ -787,6 +795,7 @@ fn newest_turn_completed(path: &Path) -> std::io::Result<Option<TerminalRecord>>
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "interrupted_turn_tests.rs"]
 mod tests;

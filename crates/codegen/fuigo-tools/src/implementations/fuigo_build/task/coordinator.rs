@@ -695,6 +695,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         spawn_reply: Option<oneshot::Sender<SubagentResult>>,
         registered_tx: Option<oneshot::Sender<()>>,
         origin: StartOrigin,
+        parent_writer: Option<fuigo_session_writer::SessionWriter>,
     ) {
         let id = request.id.clone();
         let cancellation = request.cancel_token.clone();
@@ -744,6 +745,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     reporter,
                     queued_for,
                     session_running,
+                    parent_writer,
                 }))
                 .catch_unwind(),
             ),
@@ -1555,6 +1557,7 @@ impl<R: ChildRunner> Drop for SubagentCoordinator<R> {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "coordinator_tests.rs"]
 mod tests;

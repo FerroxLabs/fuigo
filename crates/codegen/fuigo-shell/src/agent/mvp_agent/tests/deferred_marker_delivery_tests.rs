@@ -66,6 +66,7 @@ fn pump(
     seen
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn write_marker(updates: &std::path::Path, update: &SessionUpdate) {
     let line = serde_json::to_string(&SessionUpdateEnvelope::from_update(update).expect("envelope"))
         .expect("serialize");
@@ -79,6 +80,7 @@ fn write_marker(updates: &std::path::Path, update: &SessionUpdate) {
 
 /// Runs a deferred recovery for a resident session and a load that replayed with `target` (the loading client, or
 /// `None` for a broadcast replay), then returns what the gateway saw.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 async fn run(lands: Lands, target: Option<Value>) -> Vec<Seen> {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("events.jsonl"), format!("{TURN_STARTED}\n")).expect("events");
@@ -115,7 +117,7 @@ async fn run(lands: Lands, target: Option<Value>) -> Vec<Seen> {
         })
     };
     let Some(RecoveryOutcome::Deferred(deferred)) =
-        recover_interrupted_turn(dir.path(), Some(&updates), &summary, &sid, append).await
+        recover_interrupted_turn(&test_session_writer(dir.path()), Some(&updates), &summary, &sid, append).await
     else {
         panic!("an append past the bound must defer");
     };
@@ -191,4 +193,9 @@ fn a_marker_that_lands_after_the_replay_is_delivered_live_once() {
         assert_eq!(seen.len(), 1, "{seen:?}");
         assert!(!seen[0].replay && seen[0].stamped_for.is_none(), "{seen:?}");
     });
+}
+
+/// A writer for `dir` under a fresh id (design F5: the recovery and its closures write only through one).
+fn test_session_writer(dir: &std::path::Path) -> fuigo_session_writer::SessionWriter {
+    fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).expect("claim")
 }

@@ -51,6 +51,7 @@ pub(crate) mod event_loop;
 mod event_loop_stall;
 mod exit_timeout;
 pub(crate) mod external_editor;
+pub(crate) mod folder_trust_reload;
 mod foreign_sessions;
 #[cfg(all(test, unix))]
 mod leader_cluster;

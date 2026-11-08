@@ -1431,6 +1431,10 @@ mod tests {
         let big_json = format!(r#"{{"data":"{}"}}"#, "x".repeat(limit + 1000));
         let mut resources = Resources::new();
         resources.insert(SessionFolder(tmp.path().to_path_buf()));
+        // F5-C4: the dump goes through the session's writer; with none nothing is written by path.
+        resources.insert(crate::types::resources::SessionFolderWriter(
+            fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), tmp.path()).unwrap(),
+        ));
         let mut cfg = TruncationConfig::default();
         cfg.per_tool_max_output_bytes
             .insert("use_tool".to_string(), limit);

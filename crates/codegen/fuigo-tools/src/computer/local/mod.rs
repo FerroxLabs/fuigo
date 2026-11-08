@@ -12,10 +12,12 @@ pub mod static_shell;
 pub mod terminal;
 // Unix only, because the tests build their logs with shell tools.
 // See `computer::task_log` for the tests that run everywhere.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(all(test, unix))]
 mod terminal_snapshot_tests;
 #[cfg(all(test, unix))]
 mod placement_guard_tests;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(all(test, target_os = "linux"))]
 mod placement_cgroup_tests;
 

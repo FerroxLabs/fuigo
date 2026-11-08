@@ -568,7 +568,7 @@ async fn create_test_actor(
         hook_load_errors: std::cell::RefCell::new(Vec::new()),
         plugin_registry: std::cell::RefCell::new(None),
         plugin_registry_handle: None,
-        events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
+        events: crate::session::events::EventTracker::new_at(std::path::Path::new("/tmp")),
         _turn_owner_lock: None,
         observability_bridge: noop_observability_bridge(),
         current_turn_number: std::cell::Cell::new(0),
@@ -2445,8 +2445,9 @@ async fn an_auto_compaction_refused_for_the_backup_shows_its_note_once() {
         .run_until(async {
             let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
             let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
-            let actor =
-                Arc::new(create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await);
+            let mut actor = create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await;
+            give_test_writer(&mut actor);
+            let actor = Arc::new(actor);
             let (_chat, blocker) = owe_backup(&actor);
             let trigger = || AutoCompactTriggerInfo {
                 tokens_used: 180_000,
@@ -2484,6 +2485,7 @@ async fn an_auto_compaction_refused_for_the_backup_shows_its_note_once() {
             assert!(
                 crate::session::storage::jsonl::load_repair::history_rewrite_refusal(
                     &actor.session_info,
+                    actor.rebuild_spec.session_writer.as_ref(),
                     "compact"
                 )
                 .is_none(),

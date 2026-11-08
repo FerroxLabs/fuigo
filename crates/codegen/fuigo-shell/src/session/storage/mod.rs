@@ -18,6 +18,7 @@ pub(crate) mod owner_only;
 pub(crate) mod relocation;
 mod replay;
 pub(crate) mod snapshot_lock;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod replay_tests;
 pub mod search;
@@ -39,10 +40,136 @@ pub(crate) const ANNOUNCEMENT_STATE_FILE: &str = "announcement_state.json";
 pub(crate) const CHAT_HISTORY_FILE: &str = "chat_history.jsonl";
 pub(crate) const UPDATES_FILE: &str = "updates.jsonl";
 
+/// Who a storage read that can repair the folder runs as (design F5 §5.7). The type makes every caller choose.
+///
+/// - `Owner(w)`: the caller holds the session's writer (a cold load, the on-disk repair, the live actor's own
+///   re-reads). Every repair runs through `w`, exactly when 1.0.40 ran it, so a cold load's own writer never
+///   suppresses its history rebuild.
+/// - `Reader`: an unowned reader (a resident load, listing, preview, export, search). A repair takes the slot with
+///   `try_claim_reader`; on success it runs through that writer, which then drops. On `Busy` (a live writer here owns
+///   the folder) or `HeldElsewhere` (another process does) it reads only. A reader never waits or fails.
+#[derive(Clone, Copy)]
+pub enum Access<'a> {
+    Owner(&'a fuigo_session_writer::SessionWriter),
+    Reader,
+}
+
+impl std::fmt::Debug for Access<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Access::Owner(w) => f.debug_tuple("Owner").field(w).finish(),
+            Access::Reader => f.write_str("Reader"),
+        }
+    }
+}
+
+/// The writer one repair runs through: the owner's, or the transient claim of a reader.
+pub enum RepairWriter<'a> {
+    Owner(&'a fuigo_session_writer::SessionWriter),
+    Claimed(fuigo_session_writer::SessionWriter),
+}
+
+impl std::ops::Deref for RepairWriter<'_> {
+    type Target = fuigo_session_writer::SessionWriter;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            RepairWriter::Owner(w) => w,
+            RepairWriter::Claimed(w) => w,
+        }
+    }
+}
+
+impl<'a> Access<'a> {
+    /// The writer a repair of session `id` (folder `dir`) runs through, or `None` when this read must not repair.
+    pub(crate) fn repair_writer(self, id: &str, dir: &Path) -> Option<RepairWriter<'a>> {
+        match self {
+            Access::Owner(w) => Some(RepairWriter::Owner(w)),
+            Access::Reader => match fuigo_session_writer::SessionWriter::try_claim_reader(id, dir) {
+                Ok(w) => Some(RepairWriter::Claimed(w)),
+                Err(_busy) => {
+                    tracing::debug!(session_id = id, "storage read: a live writer owns the session; reading only");
+                    None
+                }
+            },
+        }
+    }
+
+    /// Whether `error`, from a repair write, means the session is held elsewhere and this read should go on reading
+    /// only. True for a reader only: an owner's refusal is a real error.
+    pub(crate) fn reads_on_after(self, error: &io::Error) -> bool {
+        matches!(self, Access::Reader)
+            && matches!(fuigo_session_writer::refusal(error), Some(fuigo_session_writer::Refusal::HeldElsewhere))
+    }
+}
+
 /// Write `bytes` to `path` by writing a uniquely named sibling temp file and renaming it over the target.
 /// A crash or a concurrent writer never leaves a torn file; the temp is removed on failure.
-pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    write_bytes_atomic_reporting(path, bytes).map_err(AtomicWriteError::into_io)
+/// [`write_bytes_atomic`] of a session file, as the session's writer (F5-C4): `path` must be inside `writer`'s folder.
+pub(crate) fn write_bytes_atomic_as(writer: &fuigo_session_writer::SessionWriter, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(test)]
+    jsonl::load_repair::seams::wait_if_held(path);
+    writer.replace_atomic_sync(writer.rel_of(path)?, bytes)
+}
+
+/// [`write_bytes_atomic_reporting`] of a session file, as the session's writer (F5-C4).
+pub(crate) fn write_bytes_atomic_reporting_as(
+    writer: &fuigo_session_writer::SessionWriter,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), AtomicWriteError> {
+    #[cfg(test)]
+    jsonl::load_repair::seams::wait_if_held(path);
+    let rel = writer.rel_of(path).map_err(AtomicWriteError::NotReplaced)?;
+    let result = writer.replace_atomic_reporting_sync(rel, bytes).map_err(|error| match error {
+        fuigo_session_writer::ReplaceError::NotReplaced(error) => AtomicWriteError::NotReplaced(error),
+        fuigo_session_writer::ReplaceError::Replaced(error) => AtomicWriteError::Replaced(error),
+    });
+    if matches!(&result, Ok(()) | Err(AtomicWriteError::Replaced(_))) && rel == Path::new(CHAT_HISTORY_FILE) {
+        // The whole chat history was rewritten: a compaction rewrite that had not landed is superseded (P111).
+        jsonl::compaction_witness::clear_after_chat_rewrite_through(writer, Some(bytes));
+    }
+    result
+}
+
+/// [`write_bytes_atomic_as`] on the blocking pool.
+pub(crate) async fn write_bytes_atomic_as_async(writer: &fuigo_session_writer::SessionWriter, path: &Path, bytes: Vec<u8>) -> io::Result<()> {
+    write_bytes_atomic_reporting_as_async(writer, path, bytes).await.map_err(AtomicWriteError::into_io)
+}
+
+/// [`write_bytes_atomic_reporting_as`] on the blocking pool.
+pub(crate) async fn write_bytes_atomic_reporting_as_async(
+    writer: &fuigo_session_writer::SessionWriter,
+    path: &Path,
+    bytes: Vec<u8>,
+) -> Result<(), AtomicWriteError> {
+    let (writer, path) = (writer.clone(), path.to_path_buf());
+    tokio::task::spawn_blocking(move || write_bytes_atomic_reporting_as(&writer, &path, &bytes))
+        .await
+        .map_err(|error| AtomicWriteError::NotReplaced(io::Error::other(error)))?
+}
+
+/// Remove the session file `path` as the session's writer; a missing file is success (F5-C4).
+pub(crate) fn remove_file_as(writer: &fuigo_session_writer::SessionWriter, path: &Path) -> io::Result<()> {
+    match writer.remove_sync(writer.rel_of(path)?) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// [`write_bytes_atomic_reporting`] for a caller that needs only the outcome.
+/// Like it, this needs the session's `writer` (review r2): there is no by-path atomic write of a session file that a
+/// caller can reach without one.
+pub(crate) fn write_bytes_atomic(writer: &fuigo_session_writer::SessionWriter, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_bytes_atomic_reporting(writer, path, bytes).map_err(AtomicWriteError::into_io)
+}
+
+/// A test fixture staging `path` by path: it claims a writer for the file's folder for the one write.
+#[cfg(test)]
+pub(crate) fn write_bytes_atomic_fixture(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let dir = path.parent().ok_or_else(|| io::Error::other("fixture path has no folder"))?;
+    let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+        .map_err(|_busy| io::Error::other("fixture folder is claimed"))?;
+    write_bytes_atomic(&writer, path, bytes)
 }
 
 /// How a failed [`write_bytes_atomic`] left the target.
@@ -63,40 +190,48 @@ impl AtomicWriteError {
 }
 
 /// [`write_bytes_atomic`] that says, when it fails, whether the rename over the target happened.
-pub(crate) fn write_bytes_atomic_reporting(path: &Path, bytes: &[u8]) -> Result<(), AtomicWriteError> {
+pub(crate) fn write_bytes_atomic_reporting(
+    writer: &fuigo_session_writer::SessionWriter,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), AtomicWriteError> {
     #[cfg(test)]
     jsonl::load_repair::seams::wait_if_held(path);
-    let result = write_bytes_atomic_outcome_with(path, bytes, sync_file_durable, || {
+    let result = write_bytes_atomic_outcome_with(writer, path, bytes, sync_file_durable, || {
         sync_parent_dir_durable(path)
     });
-    if matches!(&result, Ok(()) | Err(AtomicWriteError::Replaced(_)))
-        && path.file_name().is_some_and(|name| name == CHAT_HISTORY_FILE)
-        && let Some(dir) = path.parent()
-    {
-        // The whole chat history was rewritten: a compaction rewrite that had not landed is superseded (P111).
-        jsonl::compaction_witness::clear_after_chat_rewrite(dir, Some(bytes));
-    }
+    debug_assert!(
+        path.file_name().is_none_or(|name| name != CHAT_HISTORY_FILE),
+        "chat_history.jsonl is rewritten only through the session writer (write_bytes_atomic_reporting_as)"
+    );
     result
 }
 
+#[cfg(test)]
 fn write_bytes_atomic_with(
     path: &Path,
     bytes: &[u8],
     sync_file: impl Fn(&std::fs::File) -> io::Result<()>,
     sync_parent: impl Fn() -> io::Result<()>,
 ) -> io::Result<()> {
-    write_bytes_atomic_outcome_with(path, bytes, sync_file, sync_parent).map_err(AtomicWriteError::into_io)
+    let dir = path.parent().ok_or_else(|| io::Error::other("fixture path has no folder"))?;
+    let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+        .map_err(|_busy| io::Error::other("fixture folder is claimed"))?;
+    write_bytes_atomic_outcome_with(&writer, path, bytes, sync_file, sync_parent).map_err(AtomicWriteError::into_io)
 }
 
+#[allow(clippy::disallowed_methods, reason = "summary RMW (§5.5) only: its one non-test caller is summary_write::write_summary_atomic")]
 fn write_bytes_atomic_outcome_with(
+    writer: &fuigo_session_writer::SessionWriter,
     path: &Path,
     bytes: &[u8],
     sync_file: impl Fn(&std::fs::File) -> io::Result<()>,
     sync_parent: impl Fn() -> io::Result<()>,
 ) -> Result<(), AtomicWriteError> {
+    writer.rel_of(path).map_err(AtomicWriteError::NotReplaced)?;
     let tmp = temp_sibling(path);
     let write_synced = || -> io::Result<()> {
-        let mut file = owner_only::create(&tmp)?;
+        let mut file = owner_only::create(&tmp)?; // F5-A: summary RMW (§5.5) only: its one non-test caller is summary_write::write_summary_atomic
         file.write_all(bytes)?;
         // NTFS/ext4 journal a rename as old-file-or-new-file only when the new file's data is already flushed
         // Without this fsync a power loss can leave the committed rename in place with zero-length content
@@ -107,10 +242,10 @@ fn write_bytes_atomic_outcome_with(
     // Its new entry can vanish on power loss until the parent directory is synced
     // A retry after a rename whose parent sync failed sees the file present and cannot tell create from replace
     // So every successful rename pays the parent sync
-    match write_synced().and_then(|()| std::fs::rename(&tmp, path)) {
+    match write_synced().and_then(|()| std::fs::rename(&tmp, path)) { // F5-A: summary RMW (§5.5) only: its one non-test caller is summary_write::write_summary_atomic
         Ok(()) => sync_parent().map_err(AtomicWriteError::Replaced),
         Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(&tmp); // F5-A: summary RMW (§5.5) only: its one non-test caller is summary_write::write_summary_atomic
             Err(AtomicWriteError::NotReplaced(e))
         }
     }
@@ -203,6 +338,7 @@ pub(crate) fn sync_cwd_marker_if_present(cwd_dir: &Path) -> io::Result<()> {
     sync_cwd_marker_if_present_with(cwd_dir, sync_file_durable)
 }
 
+#[allow(clippy::disallowed_methods, reason = "fsync of <cwd_dir>/.cwd marker; the cwd dir parents session folders; no content written; not inside a session folder")]
 pub(crate) fn sync_cwd_marker_if_present_with(
     cwd_dir: &Path,
     sync_file: impl Fn(&std::fs::File) -> io::Result<()>,
@@ -282,23 +418,30 @@ fn is_fs_root(path: &Path) -> bool {
         .is_none_or(|parent| parent.as_os_str().is_empty())
 }
 
+#[cfg(test)]
 pub(crate) async fn write_bytes_atomic_async(path: &Path, bytes: Vec<u8>) -> io::Result<()> {
-    write_bytes_atomic_reporting_async(path, bytes)
-        .await
-        .map_err(AtomicWriteError::into_io)
-}
-
-pub(crate) async fn write_bytes_atomic_reporting_async(
-    path: &Path,
-    bytes: Vec<u8>,
-) -> Result<(), AtomicWriteError> {
     let path = path.to_owned();
-    tokio::task::spawn_blocking(move || write_bytes_atomic_reporting(&path, &bytes))
+    tokio::task::spawn_blocking(move || write_bytes_atomic_fixture(&path, &bytes))
         .await
-        .map_err(|error| AtomicWriteError::NotReplaced(io::Error::other(error)))?
+        .map_err(io::Error::other)?
 }
 
-fn to_jsonl_bytes<T: serde::Serialize>(items: &[T]) -> io::Result<Vec<u8>> {
+/// Replace `chat_history.jsonl` with `bytes` through the session's writer (design F5 §5.3), then clear a compaction
+/// witness the rewrite superseded, as [`write_bytes_atomic_reporting`] does for a by-path rewrite (P111).
+pub(crate) fn replace_chat_history_through(
+    session_writer: &fuigo_session_writer::SessionWriter,
+    bytes: &[u8],
+) -> io::Result<()> {
+    #[cfg(test)]
+    jsonl::load_repair::seams::wait_if_held(&session_writer.dir().join(CHAT_HISTORY_FILE));
+    let result = session_writer.replace_atomic_reporting_sync(CHAT_HISTORY_FILE, bytes);
+    if matches!(&result, Ok(()) | Err(fuigo_session_writer::ReplaceError::Replaced(_))) {
+        jsonl::compaction_witness::clear_after_chat_rewrite_through(session_writer, Some(bytes));
+    }
+    result.map_err(fuigo_session_writer::ReplaceError::into_io)
+}
+
+pub(crate) fn to_jsonl_bytes<T: serde::Serialize>(items: &[T]) -> io::Result<Vec<u8>> {
     let mut content = Vec::new();
     for item in items {
         serde_json::to_writer(&mut content, item)
@@ -308,16 +451,13 @@ fn to_jsonl_bytes<T: serde::Serialize>(items: &[T]) -> io::Result<Vec<u8>> {
     Ok(content)
 }
 
+#[cfg(test)]
+#[cfg(test)]
 pub(crate) fn write_jsonl_atomic<T: serde::Serialize>(path: &Path, items: &[T]) -> io::Result<()> {
-    write_bytes_atomic(path, &to_jsonl_bytes(items)?)
+    write_bytes_atomic_fixture(path, &to_jsonl_bytes(items)?)
 }
 
-pub(crate) async fn write_jsonl_atomic_async<T: serde::Serialize>(
-    path: &Path,
-    items: &[T],
-) -> io::Result<()> {
-    write_bytes_atomic_async(path, to_jsonl_bytes(items)?).await
-}
+
 
 /// A unique sibling temp path, e.g. `summary.json` becomes `summary.json.<uuid>.tmp`.
 fn temp_sibling(path: &Path) -> PathBuf {
@@ -342,18 +482,30 @@ pub(crate) mod chat_rebuild {
 
     /// Rebuild `chat_history.jsonl` from `updates.jsonl` alone. Builds a temp file and renames it over the target.
     /// A failed rebuild leaves the existing cache intact rather than a truncated partial that load would trust.
-    pub(crate) fn rebuild_chat_history(dir: &Path) -> io::Result<usize> {
+    ///
+    /// F5 (design §5.3, §5.7): the rebuild is built in memory and published with the session writer's
+    /// `replace_atomic_sync` (temp sibling + rename, as before), so it is that writer's work.
+    pub(crate) fn rebuild_chat_history(session_writer: &fuigo_session_writer::SessionWriter) -> io::Result<usize> {
+        let Some((bytes, count)) = build_chat_history(session_writer.dir())? else {
+            return Ok(0);
+        };
+        session_writer.replace_atomic_sync(CHAT_HISTORY_FILE, &bytes)?;
+        // Rebuilt from the transcript, compactions included: no compaction rewrite is outstanding (P111).
+        super::jsonl::compaction_witness::clear_after_chat_rewrite_through(session_writer, None);
+        Ok(count)
+    }
+
+    /// The rebuild's bytes and item count, in memory and writing nothing; `None` without an `updates.jsonl`. A read
+    /// that may not write (a live writer owns the session, design F5 §5.7) loads from these instead of the file.
+    pub(crate) fn build_chat_history(dir: &Path) -> io::Result<Option<(Vec<u8>, usize)>> {
         use std::io::{Seek, Write};
 
         let updates_path = dir.join(UPDATES_FILE);
         let Some(iter) = UpdatesIterator::open(&updates_path)? else {
-            return Ok(0);
+            return Ok(None);
         };
 
-        let chat_path = dir.join(CHAT_HISTORY_FILE);
-        let tmp_path = dir.join(format!("{CHAT_HISTORY_FILE}.{}.tmp", uuid::Uuid::now_v7()));
-        let file = crate::session::storage::owner_only::create(&tmp_path)?;
-        let mut writer = std::io::BufWriter::new(file);
+        let mut writer = std::io::Cursor::new(Vec::<u8>::new());
         let mut reducer = ChatReducer::new();
 
         for result in iter {
@@ -374,7 +526,7 @@ pub(crate) mod chat_rebuild {
             if reducer.should_truncate() {
                 reducer.clear_truncate_flag();
                 let _ = writer.seek(std::io::SeekFrom::Start(0));
-                let _ = writer.get_mut().set_len(0);
+                writer.get_mut().clear();
                 reducer.projection_lines = 0;
                 if let Some(file) = reducer.checkpoint_file.take() {
                     for item in compacted_projection(dir, &file) {
@@ -405,7 +557,7 @@ pub(crate) mod chat_rebuild {
             match crate::session::helpers::replay::replay_if_latest_compaction_active(&updates_path, dir) {
                 Ok(Some(conversation)) => {
                     let _ = writer.seek(std::io::SeekFrom::Start(0));
-                    let _ = writer.get_mut().set_len(0);
+                    writer.get_mut().clear();
                     reducer.item_count = 0;
                     for item in &conversation {
                         if let Ok(line) = serde_json::to_string(item) {
@@ -425,29 +577,23 @@ pub(crate) mod chat_rebuild {
             }
         }
 
-        if let Err(e) = writer.flush() {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(e);
-        }
-        drop(writer);
+        writer.flush()?;
+        let mut bytes = writer.into_inner();
         if drop_projection > 0 {
-            let rebuilt = std::fs::read_to_string(&tmp_path).and_then(|text| {
-                let kept: String = text.split_inclusive('\n').skip(drop_projection).collect();
-                crate::session::storage::owner_only::write(&tmp_path, kept)
-            });
-            if let Err(e) = rebuilt {
-                let _ = std::fs::remove_file(&tmp_path);
-                return Err(e);
-            }
+            let text = String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let kept: String = text.split_inclusive('\n').skip(drop_projection).collect();
+            bytes = kept.into_bytes();
             reducer.item_count = reducer.item_count.saturating_sub(drop_projection);
         }
-        if let Err(e) = std::fs::rename(&tmp_path, &chat_path) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(e);
-        }
-        // Rebuilt from the transcript, compactions included: no compaction rewrite is outstanding (P111).
-        super::jsonl::compaction_witness::clear_after_chat_rewrite(dir, None);
-        Ok(reducer.count())
+        Ok(Some((bytes, reducer.count())))
+    }
+
+    /// Tests: [`rebuild_chat_history`] for a folder, through a writer claimed for it under a fresh id.
+    #[cfg(test)]
+    pub(crate) fn rebuild_chat_history_for_test(dir: &Path) -> io::Result<usize> {
+        let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+            .map_err(|_| io::Error::other("slot busy"))?;
+        rebuild_chat_history(&writer)
     }
 
     /// The compacted projection a checkpoint marker activated. Without it the rebuild after that marker would hold only
@@ -904,6 +1050,7 @@ pub(crate) mod chat_rebuild {
         String::new()
     }
 
+    #[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
     #[cfg(test)]
     mod contained_checkpoint_tests {
         use super::*;
@@ -1937,6 +2084,16 @@ pub enum RewindPointsRewrite {
 /// Abstracts over different storage backends (JSONL, SQLite, etc.)
 #[async_trait]
 pub trait StorageAdapter: Send + Sync {
+    /// Drop the adapter's session writer clone (F5-C5, design F5 §6.1): the session ended or closed. Default: none held.
+    fn release_writer(&self) {}
+
+    /// The writer of `info`'s session folder (F5-C6), for the persistence task's own session-file writes outside the
+    /// adapter (disk probe, presentation hints, execution state). Default: none, refused.
+    fn session_writer(&self, info: &Info) -> io::Result<fuigo_session_writer::SessionWriter> {
+        let _ = info;
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, "no session writer: refusing to write the session folder by path"))
+    }
+
     /// Initialize a new session or load existing one
     async fn init_session(&self, info: &Info, model_id: acp::ModelId) -> io::Result<Summary>;
 
@@ -2132,12 +2289,13 @@ pub trait StorageAdapter: Send + Sync {
 
     async fn delete_workflow_run_state(&self, info: &Info, run_id: &str) -> io::Result<()>;
 
-    async fn load_session(&self, info: &Info) -> io::Result<PersistedData>;
+    /// `access`: who the read runs as, which decides whether it may repair (design F5 §5.7).
+    async fn load_session(&self, info: &Info, access: Access<'_>) -> io::Result<PersistedData>;
 
     /// Load session data WITHOUT updates (for memory efficiency when updates will be streamed).
     /// Implementations also do NOT read rewind points here.
     /// Those are deferred and lazily loaded on demand from the path returned by [`rewind_points_file_path`](StorageAdapter::rewind_points_file_path).
-    async fn load_session_without_updates(&self, info: &Info) -> io::Result<PersistedDataLight>;
+    async fn load_session_without_updates(&self, info: &Info, access: Access<'_>) -> io::Result<PersistedDataLight>;
 
     async fn load_summary(&self, info: &Info) -> io::Result<Summary>;
 
@@ -2221,6 +2379,16 @@ pub trait StorageAdapter: Send + Sync {
         source_info: &Info,
         target_info: &Info,
         options: CopySessionOptions,
+    ) -> io::Result<CopySessionResult>;
+
+    /// [`Self::copy_session_data`] as `target`, the target's writer, which the caller already holds (a subagent child,
+    /// design F5 §5.5).
+    async fn copy_session_data_as(
+        &self,
+        source_info: &Info,
+        target_info: &Info,
+        options: CopySessionOptions,
+        target: &fuigo_session_writer::SessionWriter,
     ) -> io::Result<CopySessionResult>;
 
     /// Load only user prompts from a session's updates file.
@@ -3079,6 +3247,7 @@ pub(crate) fn parse_prompt_extract_event(line: &str) -> PromptExtractEvent {
 // Tests
 // ============================================================================
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3413,7 +3582,7 @@ mod tests {
                 .map(|u| SessionUpdateEnvelope::from_update(&u).unwrap())
                 .collect();
             write_jsonl_atomic(&dir.path().join(UPDATES_FILE), &envelopes).unwrap();
-            chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+            chat_rebuild::rebuild_chat_history_for_test(dir.path()).unwrap();
             std::fs::read_to_string(dir.path().join(CHAT_HISTORY_FILE))
                 .unwrap()
                 .lines()
@@ -3618,7 +3787,7 @@ mod tests {
                 .map(|u| SessionUpdateEnvelope::from_update(u).unwrap())
                 .collect();
             write_jsonl_atomic(&dir.path().join(UPDATES_FILE), &envelopes).unwrap();
-            chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+            chat_rebuild::rebuild_chat_history_for_test(dir.path()).unwrap();
             std::fs::read_to_string(dir.path().join(CHAT_HISTORY_FILE))
                 .unwrap()
                 .lines()
@@ -3685,7 +3854,7 @@ mod tests {
                 .map(|u| SessionUpdateEnvelope::from_update(u).unwrap())
                 .collect();
             write_jsonl_atomic(&dir.path().join(UPDATES_FILE), &envelopes).unwrap();
-            chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+            chat_rebuild::rebuild_chat_history_for_test(dir.path()).unwrap();
             std::fs::read_to_string(dir.path().join(CHAT_HISTORY_FILE))
                 .unwrap()
                 .lines()

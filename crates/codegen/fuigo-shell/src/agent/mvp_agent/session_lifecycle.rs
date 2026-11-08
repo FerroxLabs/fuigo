@@ -19,11 +19,10 @@ const CLOSE_ATTACH_SETTLE_WAIT: std::time::Duration = std::time::Duration::from_
 /// Cap on the sum of every close wait.
 pub(super) const CLOSE_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
 /// Bound on delete's wait for the subagent coordinator to drain a session's children.
-/// Separate from [`DRAIN_OLD_THREAD_WAIT`] (which bounds waiting out a flushing actor thread) so the two budgets can move independently.
 const DRAIN_SUBAGENTS_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
-/// Cap on the sum of every delete wait (subagent drain and old-thread drain).
+/// Cap on the sum of every delete wait (subagent drain and the writer claim).
 /// Mirrors [`CLOSE_TOTAL_BUDGET`] so the delete toast cannot outlast it.
-const DELETE_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+pub(super) const DELETE_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
 /// `cap`, shrunk to what remains under `deadline`.
 fn stage_budget(deadline: tokio::time::Instant, cap: std::time::Duration) -> std::time::Duration {
     cap.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
@@ -34,16 +33,26 @@ fn stage_budget(deadline: tokio::time::Instant, cap: std::time::Duration) -> std
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CloseOutcome {
     Closed,
+    /// Design F5 §6.1 step 3: closed, but the session's writer was still held when the close budget ran out.
+    Timeout,
     NotResident,
     Superseded,
 }
 impl CloseOutcome {
-    /// The spelling clients see in the close response.
+    /// The spelling a client that did not opt in sees in the close response: 1.0.39's `closed` for a held writer too.
     pub(crate) fn wire_str(self) -> &'static str {
         match self {
-            Self::Closed => "closed",
+            Self::Closed | Self::Timeout => "closed",
             Self::NotResident => "notResident",
             Self::Superseded => "superseded",
+        }
+    }
+    /// F5-N (design F5 §4.1 A1): the spelling for a client that advertised `fuigo/folderTrust.reload` or `.v2`
+    /// (`reload_or_v2`): a held writer is `timeout`, so it does not reload a session that is still writing.
+    pub(crate) fn wire_str_for(self, reload_or_v2: bool) -> &'static str {
+        match self {
+            Self::Timeout if reload_or_v2 => "timeout",
+            _ => self.wire_str(),
         }
     }
 }
@@ -91,10 +100,45 @@ impl MvpAgent {
         }
         drop(intake_guard);
         self.remove_session_terminal(id, SessionLiveState::Completed);
-        self.drain_old_session_thread_within(id, stage_budget(deadline, DRAIN_OLD_THREAD_WAIT))
-            .await;
+        // Design F5 §6.1 steps 3-4: wait, under the same deadline, until the session's writer is free: the session
+        // thread has ended, the persistence task has written its tail and let go (the session's end sends it
+        // `ReleaseWriter`), `ResourcesPersistence` has flushed on channel close, every event log, append handle and
+        // terminal recorder has dropped, and no write through the writer is in flight. Nothing proceeds past a writer
+        // that is still writing: a client is told the session closed only once nothing of it writes any more, or the
+        // budget is spent.
+        let free = fuigo_session_writer::SessionWriter::wait_free(&id.0, deadline).await;
+        if free {
+            if self.session_registry.thread_is_finished(id) == Some(true) {
+                self.session_registry.clear_thread(id);
+            }
+        } else {
+            // A `reload`/`v2` client is answered `timeout` (F5-N, `CloseOutcome::wire_str_for`); every other client keeps
+            // 1.0.39's `closed`.
+            tracing::warn!(session_id = %id.0, "session close: the session's writer was still held at the close budget");
+        }
         self.finalize_session_replica(id);
-        CloseOutcome::Closed
+        if free { CloseOutcome::Closed } else { CloseOutcome::Timeout }
+    }
+    /// F5-N (design F5 §4.1 A1): whether `session/close` spells a held writer `timeout`: for a client that advertised
+    /// `fuigo/folderTrust.reload` or `.v2`, and always under the leader, which respells it `closed` for every other client.
+    pub(crate) fn close_timeout_client(&self) -> bool {
+        self.leader_mode || self.folder_trust_reload.get() || self.interactive_trust_client.get()
+    }
+    /// F5-N (design F5 §4.1): the `_meta` value a load or resume response carries while a durable grant's reload is still
+    /// owed. A cold attach (`was_resident` false) builds the session trusted, so it pays the debt and reports nothing; a
+    /// reattach to the resident session reports it, to a `reload` client only (under the leader always: the leader strips
+    /// it for every other client). Nothing is sent: the notification itself is never replayed.
+    pub(crate) fn folder_trust_reload_owed_meta(
+        &self,
+        session_id: &acp::SessionId,
+        was_resident: bool,
+    ) -> Option<serde_json::Value> {
+        if !was_resident {
+            self.folder_trust_reload_owed.borrow_mut().remove(session_id);
+            return None;
+        }
+        let owed = self.folder_trust_reload_owed.borrow().contains(session_id);
+        (owed && (self.leader_mode || self.folder_trust_reload.get())).then(|| serde_json::json!({ "owed": true }))
     }
     /// Cancel the running turn and shut the actor down; `false` when not resident.
     /// Close finalizes the replica afterward, delete must not.
@@ -117,8 +161,10 @@ impl MvpAgent {
     ///
     /// Order matches [`Self::close_active_session`]: drop residency before any await.
     /// The supervisor treats a finished still-resident actor as a crash, so awaiting the subagent drain while resident races that sweep.
-    /// Every wait spends from a shared [`DELETE_TOTAL_BUDGET`] so the two drains cannot stack into a toast twice as long as close's.
-    pub(crate) async fn teardown_live_session_before_delete(&self, id: &acp::SessionId) {
+    /// Every wait spends from a shared [`DELETE_TOTAL_BUDGET`]: the subagent drain here, then the delete's writer claim
+    /// (design F5 §6.3 step 1), which waits out the stopped actor's writer and answers `still closing` at the returned
+    /// deadline, so the two cannot stack into a toast longer than close's.
+    pub(crate) async fn teardown_live_session_before_delete(&self, id: &acp::SessionId) -> tokio::time::Instant {
         let deadline = tokio::time::Instant::now() + DELETE_TOTAL_BUDGET;
         let resident = self.hard_stop_resident(id, CancelTrigger::SessionDelete);
         if resident {
@@ -129,10 +175,7 @@ impl MvpAgent {
         )
         .teardown_session_and_drain(&id.0, stage_budget(deadline, DRAIN_SUBAGENTS_WAIT))
         .await;
-        if resident {
-            self.drain_old_session_thread_within(id, stage_budget(deadline, DRAIN_OLD_THREAD_WAIT))
-                .await;
-        }
+        deadline
     }
     /// Move the replica from `active` to `completed`.
     /// A hosting signal, not a conversation ending: only an explicit close sends it.

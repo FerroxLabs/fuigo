@@ -62,6 +62,8 @@ pub(super) struct QueuedSpawn {
     pub(super) request: Box<SubagentRequest>,
     /// Tokio clock so paused-clock tests can assert the wait.
     pub(super) queued_at: tokio::time::Instant,
+    /// The envelope's parent writer, held only while the spawn is queued (a close cancels queued spawns).
+    pub(super) parent_writer: Option<fuigo_session_writer::SessionWriter>,
     pub(super) caller: QueuedCaller,
 }
 
@@ -130,6 +132,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 let QueuedSpawn {
                     request,
                     queued_at,
+                    parent_writer,
                     caller,
                 } = queued;
                 let (spawn_reply, deadline) = match caller {
@@ -147,6 +150,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         queued_for: queued_at.elapsed(),
                         deadline,
                     },
+                    parent_writer,
                 );
             } else {
                 kept.push_back(queued);
@@ -186,6 +190,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             request,
             caller,
             queued_at,
+            parent_writer: _,
         } = queued;
         // Token observers must see command-path cancels too.
         request.cancel_token.cancel();

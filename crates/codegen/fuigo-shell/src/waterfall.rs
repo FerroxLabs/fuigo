@@ -27,6 +27,7 @@ pub fn mark(id: &str, stage: &str) {
     mark_with_clock(id, stage, now_us);
 }
 
+#[allow(clippy::disallowed_methods, reason = "trace sink file named by an env var; not inside a session folder")]
 fn mark_with_clock(id: &str, stage: &str, clock: impl FnOnce() -> u128) {
     enum Sink {
         Off,

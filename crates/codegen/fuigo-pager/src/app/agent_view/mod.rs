@@ -948,6 +948,8 @@ pub struct AgentView {
     pub(crate) deferred_subagent_finishes: HashMap<String, DeferredSubagentFinish>,
     /// Open reconnect reload window, if any. See [`SessionReload`].
     pub(crate) session_reload: Option<SessionReload>,
+    /// Where this session is in the reload a durable folder-trust grant owes it (F5-P); `None` when nothing is owed.
+    pub(crate) folder_trust_reload: Option<crate::app::folder_trust_reload::Phase>,
     /// Unexpected-replay drops since the last reload window opened. Gates the
     /// drop log to one `warn!` per incident (a late replay is one line per
     /// event, thousands for a large transcript).

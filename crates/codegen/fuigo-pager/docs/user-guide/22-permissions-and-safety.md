@@ -235,9 +235,10 @@ Your home folder and the filesystem root can never be trusted: Fuigo shows one d
 no project settings there, and every command asks. Folders trusted before 1.0.35 were trusted for their settings only,
 so Fuigo asks once more; until you answer (or in a headless run) such a folder is not trusted.
 
-To trust a folder without the question: run `fuigo --trust` in it once, type `/trust` in an ACP client session
-(`/untrust` stops trusting it: the next command asks and project settings stop), or list it in your own
-`~/.fuigo/config.toml`:
+To trust a folder without the question: run `fuigo --trust` in it once, open `/trust` in the full-screen app (it
+shows this folder's status and the folders you trusted, and trusts or stops trusting them; see
+[`/trust`](04-slash-commands.md#trust)), type `/trust` in an ACP client session (`/untrust` stops trusting it: the
+next command asks and project settings stop), or list it in your own `~/.fuigo/config.toml`:
 
 ```toml
 [folder_trust]
@@ -422,6 +423,7 @@ Supported `defaultMode` values include `default`, `auto`, `acceptEdits`, `bypass
 
 - Rules for MCP tools may use either the `mcp__server__tool` form found in `.claude/settings.json` files or the native `MCPTool(server__tool)` form (see [MCP Rules](#mcp-rules)).
 - Rules naming an unrecognized tool, and parameter rules such as `Agent(model:opus)`, are skipped with a warning rather than failing the load.
+- When a settings file or a rule does not load, Fuigo says so when the session opens, in the same place as other startup warnings (the transcript note in the TUI, a `warning:` line in headless mode): one note per file, naming the file and the reason. A file that is not valid JSON loads none of its rules, `defaultMode` or `env`; a rule that does not parse is listed with its reason and the rest of the file still applies. The session opens either way, so a deny rule that did not load is a rule you need to fix, not a block. Project files are checked only in a trusted folder.
 - `permissions.additionalDirectories` is parsed but not supported.
 
 You can import existing Claude settings interactively with **Ctrl+I** ("Import Claude settings").

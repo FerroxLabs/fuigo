@@ -1166,6 +1166,7 @@ impl ReadFileTool {
         Ok((output, streamable_text))
     }
 }
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2615,6 +2616,7 @@ impl Config {
     /// End-to-end test: write a real file to disk, read it back, format it
     /// with extract_file_content_lines — exercising the exact same pipeline
     /// that reread_file_for_compaction uses in production.
+    #[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
     #[tokio::test]
     async fn reread_file_from_disk_for_compaction() {
         let tmp = TempDir::new().unwrap();

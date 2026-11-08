@@ -245,17 +245,33 @@ impl SessionActor {
 
     /// `/trust` (`/hooks-trust`): trust the current folder (its settings and its shell commands), exactly as
     /// `fuigo --trust` and the trust question's "yes" do. Works for any folder, git or not (u35 t1: the trust key).
-    /// `Ok((key, None))` when saved (or auto-trusted); `Err` when nothing was saved (the folder stays untrusted).
+    /// `Ok((key, None))` when saved (or auto-trusted); `Err` when nothing was saved (the folder stays untrusted). The grant's
+    /// outcome comes with it, for [`Self::report_folder_trust_grant`].
+    #[allow(clippy::type_complexity)]
     pub(super) fn do_hooks_trust_project(
         cwd: &str,
-    ) -> Result<(std::path::PathBuf, Option<String>), String> {
+    ) -> (Result<(std::path::PathBuf, Option<String>), String>, fuigo_workspace::folder_trust::GrantOutcome) {
         let cwd = std::path::Path::new(cwd);
         let key = fuigo_workspace::trust::workspace_key(cwd);
         use fuigo_workspace::folder_trust::GrantResolution;
         let outcome = fuigo_workspace::folder_trust::grant_folder_trust(cwd);
-        match outcome.resolution() {
+        let result = match outcome.resolution() {
             GrantResolution::Trusted => Ok((key, None)),
             GrantResolution::Unrecorded => Err(outcome.to_string()),
+        };
+        (result, outcome)
+    }
+
+    /// Hand a grant this session made (`/trust`, the `/hooks` Trust action) to the agent, which settles it exactly as it
+    /// settles the modal's grant: after a durable save, the reload to a `reload` client and the reopen notice to a
+    /// `reopenNotice` client; nothing for any other outcome or client (design F5 §2 goal 1, §9.4 B2).
+    pub(super) fn report_folder_trust_grant(&self, outcome: fuigo_workspace::folder_trust::GrantOutcome) {
+        if let Some(grants) = &self.notifications.client_caps.folder_trust_grants {
+            let _ = grants.send(crate::session::notifications::SessionGrant {
+                session_id: self.session_info.id.clone(),
+                cwd: std::path::PathBuf::from(&self.session_info.cwd),
+                outcome,
+            });
         }
     }
 
@@ -339,6 +355,14 @@ impl SessionActor {
             })
     }
 
+    /// The `disabled-hooks` lines for a hook name: one per repo for a project hook, so disabling it affects that repo only.
+    fn hook_disable_keys(&self, name: &str) -> Vec<String> {
+        match self.hook_registry.borrow().as_ref() {
+            Some(registry) => registry.disable_keys_for_name(name),
+            None => vec![name.to_owned()],
+        }
+    }
+
     /// P169: under `allow_managed_hooks_only`, enabling or adding anything outside managed policy is refused with the
     /// policy note, before any write. Managed hooks pass: the pin never blocks them.
     fn refuse_under_managed_hooks_only<'a>(
@@ -371,26 +395,31 @@ impl SessionActor {
                     requires_restart: false,
                 }
             }
-            HooksAction::Trust => match Self::do_hooks_trust_project(&self.session_info.cwd) {
-                Err(e) => ActionOutcome {
-                    status: OutcomeStatus::ValidationError,
-                    message: e,
-                    requires_reload: false,
-                    requires_restart: false,
-                },
-                Ok((root, note)) => {
-                    let reload_msg = self.reload_hooks_impl().await;
-                    // Trusting flips the project-config gate: re-seed the repo MCP output cap so it applies without waiting for a config edit
-                    self.reseed_mcp_output_cap().await;
-                    let note = note.map(|n| format!("{n}\n")).unwrap_or_default();
-                    ActionOutcome {
-                        status: OutcomeStatus::Success,
-                        message: format!("Trusted: {}.\n{note}{reload_msg}", root.display()),
+            HooksAction::Trust => {
+                let (result, grant) = Self::do_hooks_trust_project(&self.session_info.cwd);
+                let outcome = match result {
+                    Err(e) => ActionOutcome {
+                        status: OutcomeStatus::ValidationError,
+                        message: e,
                         requires_reload: false,
                         requires_restart: false,
+                    },
+                    Ok((root, note)) => {
+                        let reload_msg = self.reload_hooks_impl().await;
+                        // Trusting flips the project-config gate: re-seed the repo MCP output cap so it applies without waiting for a config edit
+                        self.reseed_mcp_output_cap().await;
+                        let note = note.map(|n| format!("{n}\n")).unwrap_or_default();
+                        ActionOutcome {
+                            status: OutcomeStatus::Success,
+                            message: format!("Trusted: {}.\n{note}{reload_msg}", root.display()),
+                            requires_reload: false,
+                            requires_restart: false,
+                        }
                     }
-                }
-            },
+                };
+                self.report_folder_trust_grant(grant);
+                outcome
+            }
             HooksAction::Untrust => match Self::do_hooks_untrust_project(&self.session_info.cwd) {
                 Err(e) => ActionOutcome {
                     status: OutcomeStatus::ValidationError,
@@ -509,7 +538,11 @@ impl SessionActor {
                         requires_restart: false,
                     };
                 }
-                match fuigo_hooks::trust::disable_hook(&hook_name) {
+                match self
+                    .hook_disable_keys(&hook_name)
+                    .iter()
+                    .try_for_each(|key| fuigo_hooks::trust::disable_hook(key))
+                {
                     Ok(()) => ActionOutcome {
                         status: OutcomeStatus::Success,
                         message: "Hook disabled.".to_owned(),
@@ -528,7 +561,10 @@ impl SessionActor {
                 if let Some(refused) = self.refuse_under_managed_hooks_only([hook_name.as_str()]) {
                     return refused;
                 }
-                match fuigo_hooks::trust::enable_hook(&hook_name) {
+                let enabled = self.hook_disable_keys(&hook_name).iter().try_fold(false, |any, key| {
+                    fuigo_hooks::trust::enable_hook(key).map(|removed| any || removed)
+                });
+                match enabled {
                     Ok(true) => ActionOutcome {
                         status: OutcomeStatus::Success,
                         message: "Hook enabled.".to_owned(),
@@ -568,10 +604,17 @@ impl SessionActor {
                         continue;
                     }
                     let ok = if disable {
-                        fuigo_hooks::trust::disable_hook(name).is_ok()
+                        self.hook_disable_keys(name)
+                            .iter()
+                            .all(|key| fuigo_hooks::trust::disable_hook(key).is_ok())
                     } else {
                         // Only an actual removal counts (Ok(false) means it wasn't disabled)
-                        fuigo_hooks::trust::enable_hook(name) == Ok(true)
+                        self.hook_disable_keys(name)
+                            .iter()
+                            .try_fold(false, |any, key| {
+                                fuigo_hooks::trust::enable_hook(key).map(|removed| any || removed)
+                            })
+                            == Ok(true)
                     };
                     if ok {
                         toggled += 1;
@@ -1396,6 +1439,7 @@ fn managed_hooks_only_refusal<'a>(
         })
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod p07_plugin_hook_tests {
     use super::SessionActor;
@@ -1824,9 +1868,11 @@ mod p07_plugin_hook_tests {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "hooks_plugins_p141_tests.rs"]
 mod p141_tests;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "hooks_plugins_agent_mcp_tests.rs"]
 mod agent_mcp_tests;

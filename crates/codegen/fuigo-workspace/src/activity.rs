@@ -2388,7 +2388,7 @@ mod tests {
     fn tracker_with_writer(session: &str) -> (ActivityTracker, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let writers: Arc<DashMap<String, EventWriter>> = Arc::new(DashMap::new());
-        writers.insert(session.to_owned(), EventWriter::open(dir.path()));
+        writers.insert(session.to_owned(), EventWriter::open_at(dir.path()));
         let t = ActivityTracker::new();
         t.set_event_writers(writers);
         (t, dir)
@@ -2461,7 +2461,7 @@ mod tests {
         // Sink configured but the session's writer was never opened (no turn-start): no event is emitted and no start time leaks
         let dir = tempfile::tempdir().unwrap();
         let writers: Arc<DashMap<String, EventWriter>> = Arc::new(DashMap::new());
-        writers.insert("other".to_owned(), EventWriter::open(dir.path()));
+        writers.insert("other".to_owned(), EventWriter::open_at(dir.path()));
         let t = ActivityTracker::new();
         t.set_event_writers(writers);
 

@@ -532,6 +532,7 @@ pub async fn load_skill_with_body(skill: &SkillInfo) -> Result<SkillInfo, String
     Ok(loaded)
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

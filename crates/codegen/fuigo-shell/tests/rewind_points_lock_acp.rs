@@ -64,6 +64,7 @@ async fn rewind(conn: &acp::ClientSideConnection, session: &acp::SessionId, targ
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 fn a_rewind_whose_rewind_points_cannot_be_rewritten_is_refused_with_nothing_changed() {
     run_agent_test(|cwd, mock| async move {

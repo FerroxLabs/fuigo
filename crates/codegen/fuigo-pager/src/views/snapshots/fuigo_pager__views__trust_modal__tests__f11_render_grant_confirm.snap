@@ -1,0 +1,20 @@
+---
+source: crates/codegen/fuigo-pager/src/views/trust_modal_tests.rs
+expression: render(&mut state)
+---
+              ┌─ Folder trust ─────────────────────────────────────────────────────────── [✗] ─┐
+              │  This folder  Trusted folders                                                  │
+              │────────────────────────────────────────────────────────────────────────────────│
+              │  Folder     /work/app/src                                                      │
+              │  Trust key  /work/app                                                          │
+              │  Status     Not trusted: you said no. Its settings do not load; shell          │
+              │  commands ask.                                                                 │
+              │                                                                                │
+              │  Trust covers the folder's settings (MCP servers, hooks, skills, rules) and    │
+              │  its shell commands.                                                           │
+              │                                                                                │
+              │  Trust this folder? Its settings load and its shell commands run without       │
+              │  asking. y yes, any other key no                                               │
+              │                                                                                │
+              │                          y confirm  |  any key cancel                          │
+              └────────────────────────────────────────────────────────────────────────────────┘

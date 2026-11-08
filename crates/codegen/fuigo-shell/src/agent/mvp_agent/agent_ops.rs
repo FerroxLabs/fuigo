@@ -1898,6 +1898,7 @@ impl MvpAgent {
         }
         let (subagent_event_tx, subagent_event_rx) = crate::agent::subagent::subagent_coordinator_channel();
         let activity = crate::agent::activity::AgentActivity::default();
+        let (folder_trust_grant_tx, folder_trust_grant_rx) = tokio::sync::mpsc::unbounded_channel();
         let instance = MvpAgentHandle::pin(Self {
             bound_tasks: Default::default(),
             activity,
@@ -1933,6 +1934,10 @@ impl MvpAgent {
             code_nav_enabled: std::cell::Cell::new(false),
             interactive_trust_client: std::cell::Cell::new(false),
             folder_trust_reopen_notice: std::cell::Cell::new(false),
+            folder_trust_reload: std::cell::Cell::new(false),
+            folder_trust_reload_owed: Rc::new(RefCell::new(std::collections::HashSet::new())),
+            folder_trust_grant_tx,
+            folder_trust_grant_rx: RefCell::new(Some(folder_trust_grant_rx)),
             interactive_trust_prompted: Rc::new(
                 RefCell::new(std::collections::HashSet::new()),
             ),
@@ -2034,7 +2039,7 @@ impl MvpAgent {
     ///   The route/driver detach is groundwork for PR-3 (the driver/subscriber maps don't exist yet), so for now we only mark the live state.
     /// - **Fully idle sessions are unloaded to disk** to bound memory (the `sessions`/`session_threads` maps are uncapped).
     ///   This preserves the legacy unload path: `Shutdown` the actor, drop the `SessionHandle`, but KEEP the `SessionThread`.
-    ///   `drain_old_session_thread` can then drain it on reconnect.
+    ///   A reload claims the session's writer, which waits for that thread's writes to land (design F5 §6.2).
     ///   It does **not** finalize the cloud replica (the session remains resumable via `session/load`).
     ///
     /// The "live work" check is the coarse PR-2 stub (`session_has_live_work`); the full `SessionActivity` signal lands in PR-4.
@@ -2121,6 +2126,12 @@ impl MvpAgent {
             self.request_session_shutdown(&id);
             if self.take_session(&id).is_some() {
                 self.session_registry.clear_resident(&id);
+                // F5-C2: the workspace binding holds the session's toolset, whose resources hold a clone of the
+                // session writer (design F5 §5.5). Left bound, the writer outlives the actor and the next load waits,
+                // then answers `still closing`. A reload binds afresh at spawn, as close does via `remove_session`.
+                if let Some(ops) = self.workspace_ops.borrow().as_ref() {
+                    ops.end_local_session(id.0.as_ref());
+                }
                 self.set_session_live_state(&id, SessionLiveState::Dormant);
                 unloaded += 1;
                 tracing::debug!(session_id = %id.0, "idle session unloaded to disk on disconnect");
@@ -2128,61 +2139,6 @@ impl MvpAgent {
         }
         tracing::info!(kept_resident, unloaded, "client-disconnect detach complete");
         self.sweep_dead_sessions();
-    }
-    /// Wait for an old session thread to finish before reloading the same session.
-    ///
-    /// When a client disconnects and a session is *idle*, `handle_evict_sessions` unloads it.
-    /// That sends `Shutdown`, drops the `SessionHandle`, and keeps the `SessionThread`.
-    /// (Sessions with live work stay fully resident and skip this path.)
-    /// If the client reconnects and loads the same session, wait for the old actor to finish flushing to disk before replaying `updates.jsonl`.
-    ///
-    /// Uses async polling (never blocks the `LocalSet` runtime) with a 5s deadline to handle slow shutdowns (e.g., embedding API timeouts).
-    pub(super) async fn drain_old_session_thread(&self, session_id: &acp::SessionId) {
-        self.drain_old_session_thread_within(session_id, DRAIN_OLD_THREAD_WAIT).await;
-    }
-    /// [`Self::drain_old_session_thread`] under a caller-supplied budget.
-    pub(super) async fn drain_old_session_thread_within(
-        &self,
-        session_id: &acp::SessionId,
-        budget: std::time::Duration,
-    ) {
-        match self.session_registry.thread_is_finished(session_id) {
-            None => return,
-            Some(true) => {
-                self.session_registry.clear_thread(session_id);
-                return;
-            }
-            Some(false) => {}
-        }
-        tracing::info!(
-            session_id = %session_id.0,
-            "Waiting for old session thread to finish before reload"
-        );
-        let deadline = tokio::time::Instant::now() + budget;
-        loop {
-            match self.session_registry.thread_is_finished(session_id) {
-                None => return,
-                Some(true) => {
-                    self.session_registry.clear_thread(session_id);
-                    tracing::debug!(
-                        session_id = %session_id.0,
-                        "Old session thread finished cleanly"
-                    );
-                    return;
-                }
-                Some(false) => {}
-            }
-            if tokio::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    session_id = %session_id.0,
-                    budget_ms = budget.as_millis() as u64,
-                    "Old session thread still running at the drain budget; proceeding. \
-                     Session data may be incomplete if the old actor is still writing."
-                );
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
     }
     /// Mark a `session/load` as in flight for `session_id`.
     ///
@@ -2236,6 +2192,20 @@ impl MvpAgent {
         // A sandbox profile is set but this platform or build cannot enforce it: tell the user at every session start.
         // Reaches the TUI as a system note and ACP clients as the existing `ConfigNotice` session update.
         if let Some(notice) = fuigo_sandbox::unavailable_warning() {
+            let _ = handle
+                .cmd_tx
+                .send(crate::session::SessionCommand::NotifyConfigNotice { notice });
+        }
+        // Permission rules that did not load (a settings file that is not valid JSON, a rule that does not parse):
+        // say so once per file, naming the file and why. A warning only; the session opens either way.
+        let cwd = std::path::PathBuf::from(&handle.info.cwd);
+        let project_trusted = crate::agent::folder_trust::project_scope_allowed(&cwd);
+        let warnings = tokio::task::spawn_blocking(move || {
+            fuigo_workspace::permission::claude_settings::permission_load_warnings(&cwd, project_trusted)
+        })
+        .await
+        .unwrap_or_default();
+        for notice in warnings {
             let _ = handle
                 .cmd_tx
                 .send(crate::session::SessionCommand::NotifyConfigNotice { notice });
@@ -2423,6 +2393,7 @@ impl MvpAgent {
                     parent_session_id,
                     &self.gateway,
                     Some(&handle.cmd_tx),
+                    None,
                     self.session_registry.live_orphan_heal_lock(&sid),
                 )
                 .await;
@@ -3756,6 +3727,7 @@ impl MvpAgent {
             is_headless,
             is_chat_kind,
             launch_policy,
+            session_writer,
         } = spec;
         let _timer = crate::instrumentation_timer!("session.spawn_and_register");
         // 1.0.36 item a: the binding this actor runs under, checked against the id's binding when it registers.
@@ -4445,7 +4417,8 @@ impl MvpAgent {
             let client_caps = crate::session::notifications::SessionClientCaps::new(
                 Self::resolve_status_line_capability(session_meta, init),
                 Self::resolve_user_message_echo_capability(session_meta, init),
-            );
+            )
+            .with_folder_trust_grants(self.folder_trust_grant_tx.clone());
             let session_cwd = std::path::Path::new(&session_info.cwd);
             let fs_watch_caps = crate::session::fs_watch::FsWatchCapabilities::resolve(crate::session::fs_watch::CapabilityInputs {
                 client_notify: fs_notify_config.is_some(),
@@ -4580,6 +4553,7 @@ impl MvpAgent {
                     is_chat_kind,
                     None,
                     None,
+                    session_writer,
                 )
                 .await?
         };
@@ -4587,6 +4561,7 @@ impl MvpAgent {
         tracing::debug!(session_id = %session_info.id.0, "spawn_session_on_thread complete");
         self.set_session_live_state(&session_info.id, SessionLiveState::IdleResident);
         self.ensure_session_supervisor();
+        self.ensure_folder_trust_grant_listener();
         self.ensure_helper_rebuild_watcher();
         self.heap_profile_set_session_id(&session_info.id.0);
         self.push_roster_delta_upserted(&session_info.id);

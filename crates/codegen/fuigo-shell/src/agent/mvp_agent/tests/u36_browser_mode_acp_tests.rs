@@ -41,6 +41,7 @@ fn seen(notification: &acp::SessionNotification) -> Seen {
 }
 
 /// The 1.0.35 transcript of a browsing turn: the prompt, the `browser_use` mode line, the answer.
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 fn seed_updates(dir: &std::path::Path, id: &str) {
     use crate::session::storage::{SessionUpdate, SessionUpdateEnvelope};
     let session = acp::SessionId::new(id);
@@ -65,7 +66,7 @@ fn seed_updates(dir: &std::path::Path, id: &str) {
 
 fn stored_head(dir: &std::path::Path) -> String {
     let items = crate::session::storage::JsonlStorageAdapter::new()
-        .load_chat_history_from_dir(dir)
+        .load_chat_history_from_dir(dir, None)
         .expect("chat history");
     match items.first() {
         Some(ConversationItem::System(sys)) => sys.content.to_string(),
@@ -73,6 +74,7 @@ fn stored_head(dir: &std::path::Path) -> String {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[test]
 #[serial_test::serial]
 fn cold_load_repairs_a_1_0_35_browser_head() {

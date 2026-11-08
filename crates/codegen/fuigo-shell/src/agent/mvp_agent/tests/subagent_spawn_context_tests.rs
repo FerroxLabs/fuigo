@@ -271,6 +271,7 @@ async fn subagent_spawn_context_inherits_parent_process_scope() {
     );
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
 #[serial_test::serial(FUIGO_HOME)]

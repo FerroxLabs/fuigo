@@ -102,6 +102,7 @@ pub(super) fn client_accepts(stream: &LeaderStream, socket_path: &Path) -> bool 
 /// `umask` (process-wide) no other thread's file creation is affected.
 /// Not leader specific: `bind` is the only listener-specific part. [`bind_private`] is the leader's use.
 #[cfg(unix)]
+#[allow(clippy::disallowed_methods, reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder")]
 pub(crate) fn bind_private_with<L>(
     path: &Path,
     bind: impl FnOnce(&Path) -> std::io::Result<L>,

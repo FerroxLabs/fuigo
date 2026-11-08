@@ -57,6 +57,7 @@ pub fn cleanup_stale_pool_worktrees(source_git_root: Option<&Path>) {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "worktree pool dirs; not inside a session folder")]
 fn cleanup_stale_pool_worktrees_inner() {
     let pool_dir = pool_base_directory();
     tracing::info!(
@@ -183,6 +184,7 @@ fn pool_base_directory() -> PathBuf {
     fuigo_home().join("worktree_pool")
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;

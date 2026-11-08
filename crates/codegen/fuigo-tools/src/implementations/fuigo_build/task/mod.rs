@@ -827,6 +827,7 @@ fn is_default_subagent_type(subagent_type: &str) -> bool {
     subagent_type.eq_ignore_ascii_case("general-purpose")
 }
 
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
     use super::*;
