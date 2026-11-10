@@ -286,6 +286,9 @@ pub struct PersistentTextSelection {
     pub head: SelectionEndpoint,
     pub origin: SelectionOrigin,
     pub kind: SelectionKind,
+    /// `(entry_idx, range_id)` of the head when a drag ended in a different range than it started in (a cross-block selection).
+    /// `None` for every single-range selection: `entry_idx`/`range_id` then own both endpoints.
+    pub head_range: Option<(usize, u16)>,
 }
 
 impl ResolvedSelectionModel {
@@ -379,6 +382,45 @@ impl ResolvedSelectionModel {
         best.map(|(_, _, hit)| hit)
     }
 
+    /// Drag-head resolver for a text drag that may cross blocks: the nearest selectable line of ANY range to `(col, row)`, by `(|screen_y - row|, col distance)`.
+    ///
+    /// A pointer over another block's text lands in that block (distance 0), which is what extends a drag across blocks.
+    /// On a dead row (gap, padding, chrome) ties go to the anchor's own range, so releasing on a separator never grabs the start of the next block.
+    /// Within the anchor's range, full ties resolve to the line farther from the anchor, exactly as [`Self::hit_test_nearest_in_range`].
+    /// With a single range in the model this IS that function.
+    ///
+    /// `None` only when the model has no selectable line at all; callers keep the previous head then.
+    pub fn hit_test_drag_head(&self, anchor: RangeHit, col: u16, row: u16) -> Option<RangeHit> {
+        // (row distance, col distance, not-anchor-range, Reverse(anchor distance)) minimised
+        let mut best: Option<((u16, u16, bool), usize, RangeHit)> = None;
+        for range in &self.ranges {
+            let own = range.entry_idx == anchor.entry_idx && range.range_id == anchor.range_id;
+            for line in &range.lines {
+                let Some((col_distance, col_within_range)) = line.col_metrics(col) else {
+                    continue;
+                };
+                let key = (line.screen_y.abs_diff(row), col_distance, !own);
+                let anchor_distance = if own {
+                    line.block_line_idx.abs_diff(anchor.block_line_idx)
+                } else {
+                    0
+                };
+                let hit = RangeHit {
+                    entry_idx: range.entry_idx,
+                    range_id: range.range_id,
+                    block_line_idx: line.block_line_idx,
+                    col_within_range,
+                };
+                if best.as_ref().is_none_or(|(best_key, best_anchor_dist, _)| {
+                    key < *best_key || (key == *best_key && anchor_distance > *best_anchor_dist)
+                }) {
+                    best = Some((key, anchor_distance, hit));
+                }
+            }
+        }
+        best.map(|(_, _, hit)| hit)
+    }
+
     pub fn hit_test_visible_block(&self, col: u16, row: u16) -> Option<&VisibleBlockGeometry> {
         self.visible_blocks
             .iter()
@@ -452,6 +494,161 @@ pub fn drag_threshold_exceeded(pending: &PendingTextDrag, col: u16, row: u16) ->
     let dx = pending.start_col.abs_diff(col);
     let dy = pending.start_row.abs_diff(row);
     dx >= 1 || dy >= 1
+}
+
+/// True when a drag's endpoints sit in different ranges (a cross-block selection).
+pub fn is_cross_range(anchor: &RangeHit, head: &RangeHit) -> bool {
+    anchor.entry_idx != head.entry_idx || anchor.range_id != head.range_id
+}
+
+/// The two endpoints of a cross-range selection in transcript order: by `(entry_idx, block_line_idx, col)`.
+pub fn ordered_endpoints(a: RangeHit, b: RangeHit) -> (RangeHit, RangeHit) {
+    let key = |h: &RangeHit| (h.entry_idx, h.block_line_idx, h.col_within_range);
+    if key(&a) <= key(&b) { (a, b) } else { (b, a) }
+}
+
+/// Selected columns of `line` for a cross-range selection from `start` to `end` (already in transcript order).
+/// The start line is cut from its endpoint to the row end, the end line from column 0 to its endpoint, and every line between in any range is whole.
+/// `None` for lines outside the span.
+fn cross_range_cols_for_line(
+    start: &RangeHit,
+    end: &RangeHit,
+    line: &ResolvedSelectableLine,
+) -> Option<Range<u16>> {
+    let key = (line.entry_idx, line.block_line_idx);
+    if key < (start.entry_idx, start.block_line_idx) || key > (end.entry_idx, end.block_line_idx) {
+        return None;
+    }
+    let width = line
+        .selectable_cols
+        .end
+        .saturating_sub(line.selectable_cols.start);
+    let snap_src = if crate::render::bidi::is_enabled() {
+        line.painted_region.as_deref().unwrap_or(line.text.as_str())
+    } else {
+        line.text.as_str()
+    };
+    let display = display_text_for_cols(snap_src);
+    let is_start =
+        key == (start.entry_idx, start.block_line_idx) && line.range_id == start.range_id;
+    let is_end = key == (end.entry_idx, end.block_line_idx) && line.range_id == end.range_id;
+    let from = if is_start {
+        endpoint_start_col(display.as_ref(), start.col_within_range).min(width)
+    } else {
+        0
+    };
+    let to = if is_end {
+        endpoint_end_col(display.as_ref(), end.col_within_range).min(width)
+    } else {
+        width
+    };
+    Some(from..to)
+}
+
+/// Copy text of a cross-range selection from the lines currently in `model` (the visible part of the span).
+/// Used when the entries' full output is unavailable; ranges join with a newline.
+pub(crate) fn reconstruct_cross_range_selection_text_with_boundaries(
+    model: &ResolvedSelectionModel,
+    boundaries: &ResolvedSelectionBoundaries,
+    anchor: RangeHit,
+    head: RangeHit,
+) -> Option<String> {
+    let (start, end) = ordered_endpoints(anchor, head);
+    let mut out = String::new();
+    let mut any = false;
+    for range in &model.ranges {
+        let mut piece = String::new();
+        let mut first = true;
+        for line in &range.lines {
+            let Some(cols) = cross_range_cols_for_line(&start, &end, line) else {
+                continue;
+            };
+            if !first {
+                piece.push_str(line.joiner_to_previous.as_deref().unwrap_or("\n"));
+            }
+            first = false;
+            piece.push_str(&selection_slice_for_cols(
+                line,
+                cols,
+                boundaries.boundary_for_line(line),
+            ));
+        }
+        if first {
+            continue;
+        }
+        if any {
+            out.push('\n');
+        }
+        any = true;
+        out.push_str(&piece);
+    }
+    any.then_some(out)
+}
+
+/// Copy text of one entry's share of a cross-range selection, one string per selected range in line order.
+/// `block_lines` is the entry's full rendered output, so lines scrolled out of view are included.
+/// A range holding an endpoint is cut at it; every other range that starts inside the span is copied whole.
+pub(crate) fn cross_range_entry_pieces(
+    entry_idx: usize,
+    block_lines: &[crate::scrollback::types::BlockLine],
+    boundaries: &crate::scrollback::types::SelectionBoundaries,
+    start: &RangeHit,
+    end: &RangeHit,
+) -> Vec<String> {
+    // (range_id, first line, last line) in order of first appearance
+    let mut ranges: Vec<(u16, usize, usize)> = Vec::new();
+    for (idx, line) in block_lines.iter().enumerate() {
+        let Some(rid) = line.selection_range else {
+            continue;
+        };
+        match ranges.iter_mut().find(|(id, _, _)| *id == rid) {
+            Some(r) => r.2 = idx,
+            None => ranges.push((rid, idx, idx)),
+        }
+    }
+    let mut pieces = Vec::new();
+    for (rid, first, last) in ranges {
+        let is_start = entry_idx == start.entry_idx && rid == start.range_id;
+        let is_end = entry_idx == end.entry_idx && rid == end.range_id;
+        let inside = (entry_idx, first) > (start.entry_idx, start.block_line_idx)
+            && (entry_idx, first) < (end.entry_idx, end.block_line_idx);
+        if !(is_start || is_end || inside) {
+            continue;
+        }
+        let from = if is_start {
+            *start
+        } else {
+            RangeHit {
+                entry_idx,
+                range_id: rid,
+                block_line_idx: first,
+                col_within_range: 0,
+            }
+        };
+        let to = if is_end {
+            *end
+        } else {
+            RangeHit {
+                entry_idx,
+                range_id: rid,
+                block_line_idx: last,
+                col_within_range: u16::MAX,
+            }
+        };
+        let span = ActiveTextDrag {
+            anchor: from,
+            head: to,
+            kind: SelectionKind::Linear,
+            anchor_content_width: None,
+        };
+        if let Some(text) =
+            reconstruct_full_selection_text_with_boundaries(block_lines, boundaries, &span)
+            && !text.is_empty()
+        {
+            pieces.push(text);
+        }
+    }
+    pieces
 }
 
 pub fn reconstruct_selection_text(
@@ -531,6 +728,10 @@ pub fn render_active_selection_overlay(
     table: Option<&TableGeometry>,
     buf: &mut Buffer,
 ) {
+    if is_cross_range(&drag.anchor, &drag.head) {
+        render_cross_range_overlay(model, drag.anchor, drag.head, buf);
+        return;
+    }
     render_selection_overlay_impl(
         model,
         drag.anchor.entry_idx,
@@ -559,6 +760,21 @@ pub fn render_persistent_selection_overlay(
     table: Option<&TableGeometry>,
     buf: &mut Buffer,
 ) {
+    if let Some((head_entry, head_range)) = selection.head_range {
+        let hit = |entry_idx, range_id, e: SelectionEndpoint| RangeHit {
+            entry_idx,
+            range_id,
+            block_line_idx: e.block_line_idx,
+            col_within_range: e.col_within_range,
+        };
+        render_cross_range_overlay(
+            model,
+            hit(selection.entry_idx, selection.range_id, selection.anchor),
+            hit(head_entry, head_range, selection.head),
+            buf,
+        );
+        return;
+    }
     render_selection_overlay_impl(
         model,
         selection.entry_idx,
@@ -569,6 +785,33 @@ pub fn render_persistent_selection_overlay(
         table,
         buf,
     );
+}
+
+/// Highlight a cross-range selection: every visible selectable line between the endpoints, cut at the two ends.
+fn render_cross_range_overlay(
+    model: &ResolvedSelectionModel,
+    anchor: RangeHit,
+    head: RangeHit,
+    buf: &mut Buffer,
+) {
+    let (start, end) = ordered_endpoints(anchor, head);
+    let theme = Theme::current();
+    for range in &model.ranges {
+        for line in &range.lines {
+            let Some(cols) = cross_range_cols_for_line(&start, &end, line) else {
+                continue;
+            };
+            for col in cols {
+                let screen_x = line
+                    .screen_x
+                    .saturating_add(line.selectable_cols.start)
+                    .saturating_add(col);
+                if let Some(cell) = buf.cell_mut((screen_x, line.screen_y)) {
+                    apply_selection_highlight(&theme, cell);
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -882,6 +1125,15 @@ fn selection_slice_for_line_by_block_idx(
     boundary: Option<&SelectionBoundary>,
 ) -> Option<String> {
     let cols = selected_cols_for_line_by_block_idx(drag, line)?;
+    Some(selection_slice_for_cols(line, cols, boundary))
+}
+
+/// Copy text of `cols` (visual cells) of one resolved line, plain: no styling, no chrome.
+fn selection_slice_for_cols(
+    line: &ResolvedSelectableLine,
+    cols: Range<u16>,
+    boundary: Option<&SelectionBoundary>,
+) -> String {
     let visible_width = line
         .selectable_cols
         .end
@@ -911,12 +1163,12 @@ fn selection_slice_for_line_by_block_idx(
     } else {
         slice_text_cols(&line.text, cols.clone())
     };
-    Some(apply_selection_boundary(
+    apply_selection_boundary(
         selected,
         boundary,
         cols.start == 0,
         cols.end == visible_width,
-    ))
+    )
 }
 
 pub(crate) fn apply_selection_boundary(
@@ -3509,6 +3761,7 @@ mod tests {
                 col_within_range: 5,
             },
             origin: SelectionOrigin::Drag,
+            head_range: None,
             kind: SelectionKind::Linear,
         };
         let mut buf = Buffer::empty(Rect::new(0, 0, 20, 3));
@@ -3562,6 +3815,7 @@ mod tests {
                 col_within_range: 5,
             },
             origin: SelectionOrigin::DoubleClick,
+            head_range: None,
             kind: SelectionKind::Linear,
         };
         let mut buf = Buffer::empty(Rect::new(0, 0, 20, 3));
@@ -3598,6 +3852,7 @@ mod tests {
                 col_within_range: 10,
             },
             origin: SelectionOrigin::DoubleClick,
+            head_range: None,
             kind: SelectionKind::Linear,
         };
         let mut buf = Buffer::empty(Rect::new(0, 0, 30, 1));
@@ -3664,6 +3919,7 @@ mod tests {
                 col_within_range: 8,
             },
             origin: SelectionOrigin::Drag,
+            head_range: None,
             kind: SelectionKind::Linear,
         };
         // Render both overlays into separate buffers and compare results.
@@ -4263,5 +4519,192 @@ mod tests {
         assert_eq!(clip_cols_to_content("", 0..5), 0..0);
         // Wide glyphs count display columns.
         assert_eq!(clip_cols_to_content("│ 名前 │", 1..6), 2..6);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-range (cross-block) drag
+    // -----------------------------------------------------------------------
+
+    fn xline(
+        entry_idx: usize,
+        range_id: u16,
+        bl: usize,
+        y: u16,
+        text: &str,
+    ) -> ResolvedSelectableLine {
+        ResolvedSelectableLine {
+            entry_idx,
+            range_id,
+            block_line_idx: bl,
+            screen_y: y,
+            screen_x: 2,
+            selectable_cols: 0..12,
+            text: text.to_string(),
+            painted_region: None,
+            joiner_to_previous: (bl > 0).then(|| "\n".to_string()),
+        }
+    }
+
+    fn xhit(entry_idx: usize, range_id: u16, bl: usize, col: u16) -> RangeHit {
+        RangeHit {
+            entry_idx,
+            range_id,
+            block_line_idx: bl,
+            col_within_range: col,
+        }
+    }
+
+    /// Entry 0 (rows 1-2), a dead gap (row 3), entry 1 range 0 (row 4) and entry 2 range 0 (rows 6-7).
+    fn cross_model() -> ResolvedSelectionModel {
+        let mut model = ResolvedSelectionModel::default();
+        model.push_line(xline(0, 0, 0, 1, "alpha one"));
+        model.push_line(xline(0, 0, 1, 2, "alpha two"));
+        model.push_line(xline(1, 0, 0, 4, "beta"));
+        model.push_line(xline(2, 0, 0, 6, "gamma one"));
+        model.push_line(xline(2, 0, 1, 7, "gamma two"));
+        model
+    }
+
+    #[test]
+    fn drag_head_on_other_blocks_text_lands_in_that_block() {
+        let model = cross_model();
+        let anchor = xhit(0, 0, 0, 2);
+        // Column 2 + 3 on row 6 is inside entry 2's text
+        let head = model.hit_test_drag_head(anchor, 5, 6).expect("head");
+        assert_eq!(head, xhit(2, 0, 0, 3));
+    }
+
+    #[test]
+    fn drag_head_on_dead_row_tie_stays_in_anchor_range() {
+        let model = cross_model();
+        let anchor = xhit(0, 0, 0, 2);
+        // Row 3 is one row from entry 0's last line and one from entry 1's: the anchor's range wins the tie
+        let head = model.hit_test_drag_head(anchor, 5, 3).expect("head");
+        assert_eq!((head.entry_idx, head.block_line_idx), (0, 1));
+        // Row 5 is one row from entry 1 and one from entry 2, both foreign: still the nearest by col, no panic
+        let head = model.hit_test_drag_head(anchor, 5, 5).expect("head");
+        assert_ne!(head.entry_idx, 0);
+    }
+
+    #[test]
+    fn drag_head_below_every_line_snaps_to_last_line_of_transcript() {
+        let model = cross_model();
+        let head = model
+            .hit_test_drag_head(xhit(0, 0, 0, 0), 5, 20)
+            .expect("head");
+        assert_eq!((head.entry_idx, head.block_line_idx), (2, 1));
+    }
+
+    #[test]
+    fn drag_head_with_one_range_matches_nearest_in_range() {
+        let mut model = ResolvedSelectionModel::default();
+        for bl in 0..4usize {
+            model.push_line(xline(0, 0, bl, 2 + 2 * bl as u16, "text"));
+        }
+        let anchor = xhit(0, 0, 1, 0);
+        for row in 0..12u16 {
+            for col in [0u16, 4, 9, 30] {
+                assert_eq!(
+                    model.hit_test_drag_head(anchor, col, row),
+                    model.hit_test_nearest_in_range(anchor, col, row),
+                    "row {row} col {col}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ordered_endpoints_sorts_by_transcript_position() {
+        let early = xhit(0, 0, 1, 7);
+        let late = xhit(1, 0, 0, 0);
+        assert_eq!(ordered_endpoints(early, late), (early, late));
+        assert_eq!(ordered_endpoints(late, early), (early, late));
+        assert!(is_cross_range(&early, &late));
+        assert!(!is_cross_range(&early, &xhit(0, 0, 3, 0)));
+    }
+
+    #[test]
+    fn cross_range_model_copy_cuts_ends_and_keeps_middle_whole() {
+        let model = cross_model();
+        let none = ResolvedSelectionBoundaries::default();
+        let text = reconstruct_cross_range_selection_text_with_boundaries(
+            &model,
+            &none,
+            xhit(0, 0, 1, 6),
+            xhit(2, 0, 0, 4),
+        )
+        .expect("text");
+        assert_eq!(text, "two\nbeta\ngamma");
+        // Reversed endpoints copy the same span
+        let reversed = reconstruct_cross_range_selection_text_with_boundaries(
+            &model,
+            &none,
+            xhit(2, 0, 0, 4),
+            xhit(0, 0, 1, 6),
+        )
+        .expect("text");
+        assert_eq!(reversed, text);
+    }
+
+    #[test]
+    fn cross_range_overlay_paints_partial_ends_and_full_middle() {
+        let model = cross_model();
+        let drag = ActiveTextDrag {
+            anchor: xhit(0, 0, 1, 6),
+            head: xhit(2, 0, 0, 4),
+            kind: SelectionKind::Linear,
+            anchor_content_width: None,
+        };
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 10));
+        paint_marker(&mut buf);
+        let baseline = buf.clone();
+        render_active_selection_overlay(&model, &drag, None, &mut buf);
+        let painted = |x: u16, y: u16| cell_was_modified(&buf, &baseline, x, y);
+        // Start row (y 2): col 6.. of the selectable span painted from screen x 2+6
+        assert!(!painted(7, 2) && painted(8, 2) && painted(13, 2));
+        // Row 1 is before the start; row 3 is a dead row
+        assert!(!painted(2, 1) && !painted(2, 3));
+        // Middle block row (y 4): whole selectable width
+        assert!(painted(2, 4) && painted(13, 4));
+        // End row (y 6): cols 0..=4
+        assert!(painted(2, 6) && painted(6, 6) && !painted(7, 6));
+        // Row after the end
+        assert!(!painted(2, 7));
+    }
+
+    #[test]
+    fn persistent_cross_range_overlay_matches_active_overlay() {
+        let model = cross_model();
+        let drag = ActiveTextDrag {
+            anchor: xhit(0, 0, 1, 6),
+            head: xhit(2, 0, 0, 4),
+            kind: SelectionKind::Linear,
+            anchor_content_width: None,
+        };
+        let sel = PersistentTextSelection {
+            entry_idx: 0,
+            range_id: 0,
+            anchor: SelectionEndpoint {
+                block_line_idx: 1,
+                col_within_range: 6,
+            },
+            head: SelectionEndpoint {
+                block_line_idx: 0,
+                col_within_range: 4,
+            },
+            origin: SelectionOrigin::Drag,
+            head_range: Some((2, 0)),
+            kind: SelectionKind::Linear,
+        };
+        let mut active = Buffer::empty(Rect::new(0, 0, 20, 10));
+        let mut persistent = active.clone();
+        render_active_selection_overlay(&model, &drag, None, &mut active);
+        render_persistent_selection_overlay(&model, &sel, None, &mut persistent);
+        assert_eq!(active, persistent);
+        assert_ne!(
+            active,
+            Buffer::empty(Rect::new(0, 0, 20, 10)),
+            "painted something"
+        );
     }
 }

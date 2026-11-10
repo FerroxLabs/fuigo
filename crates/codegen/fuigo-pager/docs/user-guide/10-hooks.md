@@ -114,7 +114,7 @@ Events fire at three cadences: once per session (`SessionStart`, `SessionEnd`), 
 
 ### UserPromptSubmit Decision Control
 
-A `UserPromptSubmit` hook can reject a prompt: exit 2 blocks (stderr becomes the message), and so does JSON `{"decision": "block", "reason": "..."}` on stdout, on any exit code. The reason is shown to you and is never added to the model's context. Only a prompt you typed can be blocked: auto-wake turns (task and subagent completions, scheduler fires) and subagent sessions run the hook observe-only. The default timeout for this event is 30 seconds; a timed-out or crashed hook fails open and the prompt proceeds.
+A `UserPromptSubmit` hook can reject a prompt: exit 2 blocks (stderr becomes the message), and so does JSON `{"decision": "block", "reason": "..."}` on stdout, on any exit code. The reason is shown to you and is never added to the model's context. Only a prompt you typed can be blocked: auto-wake turns (task and subagent completions, scheduler fires) and subagent sessions run the hook observe-only. The default timeout for this event is 30 seconds; a timed-out or crashed hook fails open and the prompt proceeds, unless the hook sets [`failClosed`](#fail-closed-hooks), in which case the prompt is blocked.
 
 After a block, prompts already queued behind the blocked one do not auto-run: the queue holds until you act (send a prompt, or edit / remove / reorder / force-run a queued row). A blocked prompt is not recorded: it never enters the conversation history the model sees on later turns, the on-disk session record, or the session summary. It stays visible in the live scrollback and is held at the front of the queue for you to edit, resend, or discard — but after a session restart the blocked bubble is gone from the scrollback, exactly because nothing was stored. One deliberate exception: your client's local prompt history (the up-arrow recall) keeps the text, recorded at submit time before the hook runs, so a discarded prompt is still recoverable. One current limit: stdout of an allowing hook is discarded (no `additionalContext`).
 
@@ -169,7 +169,38 @@ Each `.json` file can define hooks for multiple events:
 - **matcher** (optional): A regular expression that selects which invocations trigger the hook. What it tests depends on the event: the tool name on tool events (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`), the notification type on `Notification`, the subagent type on `SubagentStart`/`SubagentStop` (e.g. `explore`), the start source on `SessionStart` (`startup`, `resume`, …), the end reason on `SessionEnd`, the compaction trigger on `PreCompact`/`PostCompact` (`manual` or `auto`), the error type on `StopFailure` (`rate_limit`, `authentication_failed`, `invalid_request`, `server_error`, `max_output_tokens`, or `unknown`), and the reason on `StopCancelled` (`user_interrupt`, `permission_rejected`, `permission_cancelled`, `max_turns`, `no_progress`, or `unknown`). A matcher on `Stop` or `UserPromptSubmit` is ignored with a warning (those events always fire). An empty or omitted matcher matches everything. A finish-thinking chime should set `matcher` to `idle_prompt` on `Notification` (any turn end, then sustained idle); `permission_prompt` fires only when a permission UI is actually waiting. The matcher tests the real tool name; MCP calls routed through the internal `use_tool` dispatcher appear as the qualified `server__tool` name (e.g. `linear__save_issue`), so match on that, not the dispatcher name.
 - **type**: `"command"` (run a script or shell one-liner) or `"http"` (POST the event to a URL).
 - **command**: Path to executable (relative to the JSON file) or inline shell command.
-- **timeout**: Seconds before killing the hook (default: 5, or 600 for `Stop`/`SubagentStop`/`PostToolUse` gates). All hook failures (timeouts, crashes, malformed output, missing required env vars) are fail-open: the failure is recorded for the UI scrollback but the tool call is not blocked. Only an explicit `deny` decision returned by the hook blocks a tool call.
+- **timeout**: Seconds before killing the hook (default: 5, or 600 for `Stop`/`SubagentStop`/`PostToolUse` gates). All hook failures (timeouts, crashes, malformed output, missing required env vars) are fail-open: the failure is recorded for the UI scrollback but the tool call is not blocked. Only an explicit `deny` decision returned by the hook blocks a tool call. To make a `PreToolUse` or `UserPromptSubmit` hook fail closed instead, see [`failClosed`](#fail-closed-hooks).
+- **failClosed**: Optional, `false` by default (see [Fail-closed hooks](#fail-closed-hooks)).
+
+### Fail-closed hooks
+
+By default every hook failure is fail-open: the failure is recorded, and the tool call or prompt goes ahead. A `PreToolUse` or `UserPromptSubmit` hook can opt in to the opposite with `"failClosed": true`:
+
+```json
+{ "type": "command", "command": "bin/policy-check.sh", "timeout": 10, "failClosed": true }
+```
+
+With `failClosed` set, a `PreToolUse` hook that fails denies the tool call, and a `UserPromptSubmit` hook that fails blocks the prompt. The denial message says that the hook failed and that `failClosed` is set, followed by the cause. A failure becomes a block, so it follows the same rule as any block: a `UserPromptSubmit` block is enforced only for a prompt you typed (subagent sessions and auto-wake turns are observe-only), while `PreToolUse` still gates every tool call there. A hook that runs cleanly decides as usual: its own `allow`, `ask` or `deny` is unchanged. `failClosed` has no effect on other events. Absent or `false` keeps the fail-open behavior above.
+
+What `failClosed` covers is a hook that is loaded and fails when it runs:
+
+- a timeout;
+- a crash, or being killed by a signal (also after it printed an `allow`);
+- a hook that cannot start: the program is missing or not executable, or a required variable is unset;
+- a non-zero exit without a decision (exit 2 is the hook's own denial);
+- output that starts like a JSON object but cannot be parsed, or output with something after the decision, for example `{"decision":"deny"}oops` (plain text on exit 0 is still not a decision);
+- output that the size cap cut off, for a command or an HTTP hook;
+- a JSON object that holds a key Fuigo does not recognise for the event, at the top level or inside `hookSpecificOutput`, for example a misspelled field such as `{"decison":"deny"}` (an object of recognised keys only, such as `{}` or `{"systemMessage":"hi"}`, is handled as usual and allows when it decides nothing).
+
+Under the flag a recognised key must also have its documented type (`continue` and `suppressOutput` booleans, `stopReason` and `systemMessage` strings), and an explicit `null` counts as the wrong type.
+
+The output is judged strictly on the exact bytes the hook sent: it must be valid UTF-8, and a JSON document must not repeat a key in any object at any depth, or the hook counts as failed.
+
+A hook configuration that fails to load (a schema error, an invalid `matcher`, an invalid handler) is not covered. It is reported at session start, and the hook is not loaded, so nothing runs and nothing blocks. Check `/hooks` or the session-start report after you add or edit a hook, to see that your hook loaded.
+
+If the same hook is loaded from two places, the copy that is kept inherits `failClosed` from either one, so a duplicate entry anywhere can switch the kept copy to fail-closed (it can only strengthen, never relax).
+
+Two limits to know. A hook that is not loaded never blocks: with `allow_managed_hooks_only` (or `FUIGO_MANAGED_HOOKS_ONLY`) or in an untrusted folder, a user `failClosed` hook is not loaded, like every other non-managed hook, and the call goes ahead; likewise, if the disabled-hooks file cannot be read, non-managed hooks (including `failClosed` ones) are skipped, and Fuigo logs that. And the flag needs a server that knows it: an older remote workspace server ignores `failClosed`, so in that workspace the hook stays fail-open (Fuigo warns once when it receives hooks from such a server).
 
 ### Tool Name Aliases
 
@@ -194,7 +225,7 @@ When an event fires, Fuigo resolves it in four steps:
 1. **Select matching groups.** For that event, each matcher group whose `matcher` matches the event's field runs. The matcher tests the tool name on tool events, the notification type on `Notification`, and so on (see [Key Fields](#key-fields)). An empty or omitted matcher matches everything.
 2. **Run the handlers in order.** Handlers in the selected groups run in config order, each receiving the event as JSON on stdin, until one returns `deny` (which stops the chain). Handlers from different sources (global, project, plugin, config) are merged, and identical handlers are deduplicated. Every handler sees the model's original tool input; a `PreToolUse` `updatedInput` is applied only after all handlers finish, so one handler cannot see another's rewrite (the last rewrite wins).
 3. **Apply the decision.** For a `PreToolUse` gate, the first `deny` blocks the call and its reason is shown to the model, an `updatedInput` rewrites the tool input, and otherwise the call proceeds. For `Stop` and `SubagentStop`, a `block` keeps the agent working. For `PostToolUse` the tool has already run, so nothing is blocked and every hook runs: a `block` reason and any `additionalContext` are delivered to the model with the tool result, and an output replacement rewrites the model's copy of that result. Every other event is passive: its output is recorded but does not change control flow.
-4. **Fail open.** A handler that times out, crashes, or emits malformed output is recorded in the scrollback but never blocks the action. The one exception is a `PreToolUse` `updatedInput` that fails the tool's schema: the rewrite cannot run safely, so the call is blocked and reported as an invalid-input error. Otherwise only an explicit `deny` blocks a tool call.
+4. **Fail open.** A handler that times out, crashes, or emits malformed output is recorded in the scrollback but never blocks the action. The one exception is a `PreToolUse` `updatedInput` that fails the tool's schema: the rewrite cannot run safely, so the call is blocked and reported as an invalid-input error. Otherwise only an explicit `deny` blocks a tool call, unless the failing hook sets [`failClosed`](#fail-closed-hooks).
 
 ---
 
@@ -648,7 +679,7 @@ echo '{"decision": "allow"}'
 ## Best Practices
 
 1. **Keep hooks fast**: long-running hooks block the UI. Use background processes (`&`) or async where possible.
-2. **Use explicit `deny` to block**: hooks fail-open on any error, so a hook that crashes will not block the tool. To enforce policy, your hook must run to completion and emit `{"decision":"deny","reason":"..."}` on stdout. Always handle errors inside your script so it can return an explicit decision.
+2. **Use explicit `deny` to block**: hooks fail-open on any error by default, so a hook that crashes will not block the tool (set [`failClosed`](#fail-closed-hooks) on a `PreToolUse` or `UserPromptSubmit` hook to change that). To enforce policy, your hook must run to completion and emit `{"decision":"deny","reason":"..."}` on stdout. Always handle errors inside your script so it can return an explicit decision.
 3. **Use absolute paths or relative to hook file**: scripts in `bin/` next to the JSON file are portable.
 4. **Test with the modal**: press `Ctrl+L` (non–VS Code family) or run `/hooks` to verify hooks are loaded and matching before relying on them.
 5. **Version control project hooks**: commit `.fuigo/hooks/` (but never secrets).

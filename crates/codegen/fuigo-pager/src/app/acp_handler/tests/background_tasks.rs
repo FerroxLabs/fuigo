@@ -831,3 +831,53 @@
         assert!(agent.session.bg_tasks["task-replay"].restored_from_replay);
     }
 
+
+/// 74.B4: a replayed completion carries the run time the snapshot recorded, not about 0 s (both handlers stamp "now").
+#[test]
+fn u42_b4_replayed_background_task_keeps_its_real_run_time() {
+    let mut app = make_app_with_agent("sess-1");
+    handle_task_backgrounded(
+        &make_replayed_task_backgrounded_notif("sess-1", "tc-r", "task-r", "sleep 90"),
+        &mut app,
+    );
+    let end = std::time::SystemTime::now();
+    let start = end - std::time::Duration::from_secs(90);
+    let notif = {
+        use fuigo_tools::types::TaskSnapshot;
+        let update = FuigoSessionUpdate::TaskCompleted {
+            task_snapshot: TaskSnapshot {
+                task_id: "task-r".into(),
+                command: "sleep 90".into(),
+                display_command: None,
+                cwd: "/tmp".into(),
+                start_time: start,
+                end_time: Some(end),
+                output: String::new(),
+                output_file: "/tmp/out.log".into(),
+                truncated: false,
+                exit_code: Some(0),
+                signal: None,
+                completed: true,
+                kind: Default::default(),
+                block_waited: false,
+                explicitly_killed: false,
+                kill_result_delivered: false,
+                owner_session_id: None,
+                description: None,
+                is_backgrounded: false,
+                output_total_bytes: 0,
+            },
+            will_wake: false,
+        };
+        let notif = SessionNotification {
+            session_id: acp::SessionId::new("sess-1"),
+            update,
+            meta: Some(crate::acp::meta::ReplayMetaStamp::replayed()),
+        };
+        let raw = serde_json::value::to_raw_value(&notif).unwrap();
+        acp::ExtNotification::new("fuigo/session/update", std::sync::Arc::from(raw))
+    };
+    handle_task_completed(&notif, &mut app);
+    let task = &app.agents[&AgentId(0)].session.bg_tasks["task-r"];
+    assert_eq!(task.elapsed(), std::time::Duration::from_secs(90));
+}

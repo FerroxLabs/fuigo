@@ -507,9 +507,12 @@ async fn pop_checkout_auto_stash_restores_dirty_tree() {
         std::fs::read_to_string(tmp.path().join("README.md")).unwrap(),
         "hello\n"
     );
+    let oid = git_cli(tmp.path(), &["rev-parse", "stash@{0}"]).await.unwrap();
     let response = pop_checkout_auto_stash(
         tmp.path(),
+        "feature",
         true,
+        Some(oid.trim()),
         false,
         "targeted fetch timed out".to_owned(),
     )
@@ -1705,4 +1708,188 @@ async fn push_branch_ok_then_conflict_on_divergence() {
     git_cli(&work, &["commit", "-m", "p3"]).await.unwrap();
     let conflict = push_branch(&work, Some("conv/t")).await.unwrap();
     assert_eq!(PushStatus::Conflict, conflict.status);
+}
+
+// ---- 73.B4 / 73.B13: a failed --restore-code gives the user's files back, using its own stash ----
+
+async fn dirty_tree(dir: &Path) {
+    std::fs::write(dir.join("README.md"), "tracked edit\n").unwrap();
+    std::fs::write(dir.join("untracked.txt"), "untracked\n").unwrap();
+}
+
+async fn assert_changes_in_tree_and_no_stash(dir: &Path) {
+    assert_eq!(std::fs::read_to_string(dir.join("README.md")).unwrap(), "tracked edit\n");
+    assert_eq!(std::fs::read_to_string(dir.join("untracked.txt")).unwrap(), "untracked\n");
+    assert!(git_cli(dir, &["stash", "list"]).await.unwrap().trim().is_empty());
+}
+
+/// Second commit on top of init, then HEAD back on the first. Returns (first, second).
+async fn two_commits_head_on_first(dir: &Path) -> (String, String) {
+    let first = init_repo_with_commit(dir).await;
+    std::fs::write(dir.join("two.txt"), "two\n").unwrap();
+    git_cli(dir, &["add", "."]).await.unwrap();
+    git_cli(dir, &["commit", "-q", "-m", "two"]).await.unwrap();
+    let second = git_cli(dir, &["rev-parse", "HEAD"]).await.unwrap().trim().to_owned();
+    git_cli(dir, &["checkout", "-q", &first]).await.unwrap();
+    (first, second)
+}
+
+#[cfg(unix)]
+fn install_hook(dir: &Path, name: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let hooks = dir.join(".git").join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let path = hooks.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A second worktree of `repo` with its own stash entry pushed on top of the shared stash list.
+async fn push_stash_from_second_worktree(repo: &Path, wt: &Path) {
+    git_cli(repo, &["worktree", "add", "-q", "-b", "other", &wt.to_string_lossy()])
+        .await
+        .unwrap();
+    std::fs::write(wt.join("README.md"), "other worktree edit\n").unwrap();
+    git_cli(wt, &["stash", "push", "-q", "-m", "other worktree"]).await.unwrap();
+}
+
+#[tokio::test]
+async fn checkout_session_commit_failed_restore_puts_changes_back_in_tree() {
+    if bazel_skip("checkout_session_commit_failed_restore_puts_changes_back_in_tree") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_with_commit(tmp.path()).await;
+    // A blob id is a full object id that exists locally but cannot be checked out.
+    let blob = git_cli(tmp.path(), &["rev-parse", "HEAD:README.md"]).await.unwrap();
+    dirty_tree(tmp.path()).await;
+
+    let outcome = checkout_session_commit(tmp.path(), blob.trim(), true, "sess-fail").await;
+
+    assert!(!outcome.checked_out);
+    assert!(outcome.stash_ref.is_none(), "restored, so nothing is left stashed: {outcome:?}");
+    assert_changes_in_tree_and_no_stash(tmp.path()).await;
+}
+
+#[tokio::test]
+async fn pop_stash_by_ref_restores_own_stash_when_another_worktree_pushed_on_top() {
+    if bazel_skip("pop_stash_by_ref_restores_own_stash_when_another_worktree_pushed_on_top") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo_with_commit(&repo).await;
+    dirty_tree(&repo).await;
+    let StashOutcome::Stashed(own) = stash_before_destructive_op(&repo, "test", "sess-own").await else {
+        panic!("expected a stash");
+    };
+    push_stash_from_second_worktree(&repo, &tmp.path().join("wt")).await;
+
+    pop_stash_by_ref(&repo, &own).await.unwrap();
+
+    assert_eq!(std::fs::read_to_string(repo.join("README.md")).unwrap(), "tracked edit\n");
+    assert_eq!(std::fs::read_to_string(repo.join("untracked.txt")).unwrap(), "untracked\n");
+    let list = git_cli(&repo, &["stash", "list"]).await.unwrap();
+    assert!(list.contains("other worktree"), "the other worktree's stash must stay: {list}");
+    assert_eq!(list.lines().count(), 1, "{list}");
+}
+
+#[tokio::test]
+async fn pop_stash_by_ref_keeps_everything_when_its_stash_is_gone() {
+    if bazel_skip("pop_stash_by_ref_keeps_everything_when_its_stash_is_gone") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_with_commit(tmp.path()).await;
+    std::fs::write(tmp.path().join("README.md"), "kept\n").unwrap();
+    git_cli(tmp.path(), &["stash", "push", "-q", "-m", "someone else"]).await.unwrap();
+    let missing = "0123456789abcdef0123456789abcdef01234567";
+
+    assert!(pop_stash_by_ref(tmp.path(), missing).await.is_err());
+
+    assert_eq!(git_cli(tmp.path(), &["stash", "list"]).await.unwrap().lines().count(), 1);
+}
+
+/// Fetch of a branch the remote lacks fails after the stash is taken; a hook-like `uploadpack` script stashes in a second worktree meanwhile.
+#[cfg(unix)]
+#[tokio::test]
+async fn checkout_commit_with_fetch_failure_restores_own_stash_after_stash_list_changed() {
+    if bazel_skip("checkout_commit_with_fetch_failure_restores_own_stash_after_stash_list_changed") {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let remote = tmp.path().join("remote");
+    std::fs::create_dir_all(&remote).unwrap();
+    init_repo_with_commit(&remote).await;
+    let repo = tmp.path().join("repo");
+    git_cli(tmp.path(), &["clone", "-q", &remote.to_string_lossy(), &repo.to_string_lossy()])
+        .await
+        .unwrap();
+    git_cli(&repo, &["config", "user.email", "t@t.com"]).await.unwrap();
+    git_cli(&repo, &["config", "user.name", "t"]).await.unwrap();
+    let wt = tmp.path().join("wt");
+    git_cli(&repo, &["worktree", "add", "-q", "-b", "other", &wt.to_string_lossy()]).await.unwrap();
+    let script = tmp.path().join("uploadpack.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho 'other worktree edit' > '{wt}/README.md'\ngit -C '{wt}' stash push -q -m 'other worktree'\nexec git-upload-pack \"$@\"\n",
+            wt = wt.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    git_cli(&repo, &["config", "remote.origin.uploadpack", &script.to_string_lossy()]).await.unwrap();
+    dirty_tree(&repo).await;
+
+    let resp = checkout_commit_with_fetch(&repo, "no-such-branch", true).await;
+
+    assert!(!resp.checked_out);
+    assert!(!resp.stashed, "{resp:?}");
+    assert_eq!(std::fs::read_to_string(repo.join("README.md")).unwrap(), "tracked edit\n");
+    assert_eq!(std::fs::read_to_string(repo.join("untracked.txt")).unwrap(), "untracked\n");
+    let list = git_cli(&repo, &["stash", "list"]).await.unwrap();
+    assert!(list.contains("other worktree"), "the other worktree's stash must stay: {list}");
+    assert_eq!(list.lines().count(), 1, "{list}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn checkout_session_commit_hook_failure_keeps_changes_stashed() {
+    if bazel_skip("checkout_session_commit_hook_failure_keeps_changes_stashed") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (_first, second) = two_commits_head_on_first(tmp.path()).await;
+    install_hook(tmp.path(), "post-checkout", "exit 1");
+    dirty_tree(tmp.path()).await;
+
+    let outcome = checkout_session_commit(tmp.path(), &second, true, "sess-hook").await;
+
+    assert!(outcome.checked_out, "HEAD moved before the hook failed: {outcome:?}");
+    assert!(outcome.stash_ref.is_some());
+    assert_eq!(git_cli(tmp.path(), &["rev-parse", "HEAD"]).await.unwrap().trim(), second);
+    assert_eq!(git_cli(tmp.path(), &["stash", "list"]).await.unwrap().lines().count(), 1);
+    assert!(!tmp.path().join("untracked.txt").exists(), "changes stay stashed, not applied");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn checkout_commit_with_fetch_hook_failure_keeps_changes_stashed() {
+    if bazel_skip("checkout_commit_with_fetch_hook_failure_keeps_changes_stashed") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (_first, second) = two_commits_head_on_first(tmp.path()).await;
+    install_hook(tmp.path(), "post-checkout", "exit 1");
+    dirty_tree(tmp.path()).await;
+
+    let resp = checkout_commit_with_fetch(tmp.path(), &second, true).await;
+
+    assert!(resp.checked_out, "{resp:?}");
+    assert!(resp.stashed);
+    assert_eq!(git_cli(tmp.path(), &["rev-parse", "HEAD"]).await.unwrap().trim(), second);
+    assert_eq!(git_cli(tmp.path(), &["stash", "list"]).await.unwrap().lines().count(), 1);
 }

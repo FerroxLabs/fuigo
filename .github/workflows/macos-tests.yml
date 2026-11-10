@@ -47,7 +47,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-osx-aarch_64.zip -o "$RUNNER_TEMP/protoc.zip"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 30 --max-time 300 https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-osx-aarch_64.zip -o "$RUNNER_TEMP/protoc.zip"
           echo "2b8a3403cd097f95f3ba656e14b76c732b6b26d7f183330b11e36ef2bc028765  $RUNNER_TEMP/protoc.zip" | shasum -a 256 -c -
           unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
           chmod +x "$RUNNER_TEMP/protoc/bin/protoc"

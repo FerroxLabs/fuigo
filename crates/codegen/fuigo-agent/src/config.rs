@@ -1366,7 +1366,8 @@ impl AgentDefinition {
         let path = path.as_ref();
         let content =
             fuigo_dirs::contained::read_scoped(path, root).map_err(AgentBuildError::IoError)?;
-        let trimmed = content.trim_start();
+        // A leading UTF-8 byte order mark (Windows editors add one) is not whitespace to `trim_start`.
+        let trimmed = content.trim_start_matches('\u{feff}').trim_start();
         if !trimmed.starts_with("---") {
             return Err(AgentBuildError::ParseError(
                 "missing frontmatter delimiters".to_string(),
@@ -1391,7 +1392,8 @@ impl AgentDefinition {
     }
     /// Parse from string content (for testing and inline definitions).
     pub fn parse(content: &str) -> Result<Self, AgentBuildError> {
-        let trimmed = content.trim_start();
+        // A leading UTF-8 byte order mark (Windows editors add one) is not whitespace to `trim_start`.
+        let trimmed = content.trim_start_matches('\u{feff}').trim_start();
         if !trimmed.starts_with("---") {
             return Err(AgentBuildError::ParseError(
                 "missing frontmatter delimiters".to_string(),
@@ -1731,6 +1733,28 @@ impl AgentDefinition {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn agent_file_with_utf8_bom_parses() {
+        let content = "\u{feff}---\nname: bom-agent\ndescription: Has a BOM\n---\n\nBody.\n";
+        let def = AgentDefinition::parse(content).unwrap();
+        assert_eq!(def.name, "bom-agent");
+        assert_eq!(def.prompt_body.as_deref(), Some("Body."));
+    }
+
+    #[test]
+    fn agent_file_with_utf8_bom_parses_frontmatter_only() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("bom-agent.md");
+        std::fs::write(
+            &path,
+            "\u{feff}---\nname: bom-agent\ndescription: Has a BOM\n---\n\nBody.\n",
+        )
+        .unwrap();
+        let def = AgentDefinition::from_file_frontmatter_only(&path).unwrap();
+        assert_eq!(def.name, "bom-agent");
+        let full = AgentDefinition::from_file(&path).unwrap();
+        assert_eq!(full.prompt_body.as_deref(), Some("Body."));
+    }
     use super::*;
 
     /// Astra r4 High: project and local agent memory (`<project>/.fuigo/agent-memory{,-local}/<name>/MEMORY.md`) is

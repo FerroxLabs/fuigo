@@ -24,6 +24,7 @@ tokio = { workspace = true, features = ["fs", "process", "io-util", "macros", "t
 tracing = { workspace = true }
 url = { workspace = true }
 fuigo-dirs = { workspace = true }
+fuigo-sandbox = { path = "../fuigo-sandbox", default-features = false }
 fuigo-shell = { workspace = true }
 fuigo-telemetry = { workspace = true }
 fuigo-tools = { workspace = true }

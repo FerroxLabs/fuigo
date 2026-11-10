@@ -468,8 +468,11 @@ fn ct_w7_delete_tree_order_and_gone_after() {
     let log: Arc<Mutex<Vec<String>>> = Arc::default();
     let tombstone = dir.path().join(format!("{}{id}-{}", crate::DELETING_PREFIX, std::process::id()));
     let (log2, session2, tomb2) = (log.clone(), session.clone(), tombstone.clone());
-    crate::delete_observer::set(Some(Box::new(move |step| {
+    crate::delete_observer::set(Some(Box::new(move |step, dir| {
         // Only this test's steps: the observer is process-wide.
+        if dir != session2 {
+            return;
+        }
         let state = match step {
             "local_rename" => format!("{step}:orig={}:tomb={}:held={}", session2.exists(), tomb2.exists(), !foreign_could_take(&tomb2)),
             _ => step.to_owned(),

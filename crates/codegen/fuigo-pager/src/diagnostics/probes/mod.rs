@@ -67,7 +67,7 @@ pub struct DoctorProbeSnapshot<'a> {
     pub color_level: crate::theme::color_support::ColorLevel,
 }
 
-/// Whether the caller will read the colour-passthrough fact.
+/// Whether the caller will read the `/doctor`-only tmux facts (colour passthrough, `escape-time`).
 /// Only `view()` reads it, and the startup path never calls `view()`, so probing there spends ~116ms before first paint on a value that is dropped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ColorPassthroughProbe {
@@ -84,6 +84,8 @@ pub struct TmuxProbeFacts {
     pub control_mode: TmuxProbeResult<bool>,
     /// Comma-separated `client_termfeatures` for the attached client.
     pub client_features: TmuxProbeResult<String>,
+    /// tmux server `escape-time` in milliseconds. Read only for `/doctor`.
+    pub escape_time: TmuxProbeResult<String>,
 }
 
 #[derive(Clone)]
@@ -213,6 +215,7 @@ fn collect_tmux_fix(
         allow_passthrough,
         control_mode: TmuxProbeResult::Unavailable,
         client_features,
+        escape_time: TmuxProbeResult::Unavailable,
     }
 }
 
@@ -292,6 +295,7 @@ fn unavailable_tmux() -> TmuxProbeFacts {
         allow_passthrough: TmuxProbeResult::Unavailable,
         control_mode: TmuxProbeResult::Unavailable,
         client_features: TmuxProbeResult::Unavailable,
+        escape_time: TmuxProbeResult::Unavailable,
     }
 }
 
@@ -381,6 +385,11 @@ fn collect_tmux(
             ColorPassthroughProbe::Run => tmux.client_features(),
             ColorPassthroughProbe::Skip => TmuxProbeResult::Unavailable,
         },
+        // Same gate as the colour fact: only `/doctor` reads it, so startup never spends a tmux subprocess on it
+        escape_time: match color_probe {
+            ColorPassthroughProbe::Run => tmux.show_server_option("escape-time"),
+            ColorPassthroughProbe::Skip => TmuxProbeResult::Unavailable,
+        },
     }
 }
 
@@ -419,6 +428,14 @@ mod tests {
         fn control_mode(&self) -> TmuxProbeResult<bool> {
             self.calls.borrow_mut().push("control-mode".to_owned());
             self.control_mode.clone()
+        }
+
+        fn show_server_option(&self, option: &str) -> TmuxProbeResult<String> {
+            self.calls.borrow_mut().push(format!("server:{option}"));
+            self.values
+                .get(option)
+                .cloned()
+                .unwrap_or(TmuxProbeResult::Unavailable)
         }
 
         fn client_features(&self) -> TmuxProbeResult<String> {
@@ -522,6 +539,7 @@ mod tests {
                 "set-clipboard",
                 "control-mode",
                 "client-features",
+                "server:escape-time",
             ]
         );
     }

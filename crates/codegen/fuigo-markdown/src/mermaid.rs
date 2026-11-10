@@ -456,17 +456,34 @@ fn read_shape(
             continue;
         }
         if !in_quotes && chars[i..].starts_with(closer.as_slice()) {
-            let label = clean_label(&text);
+            let label = clean_node_label(&text);
             return (Some(shape), Some(label), i + closer.len());
         }
         text.push(c);
         i += 1;
     }
-    (Some(shape), Some(clean_label(&text)), chars.len())
+    (Some(shape), Some(clean_node_label(&text)), chars.len())
 }
 
+/// A label with its hard line breaks kept as `\n`. `<br>` tags and a literal backslash-n both break the line.
+/// The caller must draw a label like this over several rows (see [`wrap_label`]).
+fn clean_node_label(raw: &str) -> String {
+    clean_label_with(raw, "\n")
+        .replace("\\n", "\n")
+        .split('\n')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A one-line label: a `<br>` tag reads as a space.
 fn clean_label(raw: &str) -> String {
-    let stripped = strip_html_tags(raw.trim());
+    clean_label_with(raw, " ")
+}
+
+fn clean_label_with(raw: &str, br: &str) -> String {
+    let stripped = strip_html_tags(raw.trim(), br);
     let trimmed = stripped.trim();
     let unquoted = trimmed
         .strip_prefix('"')
@@ -568,7 +585,7 @@ const HTML_FORMAT_TAGS: &[&str] = &[
     "sup", "code", "kbd", "samp", "var", "tt", "span", "font", "q", "abbr", "cite", "pre",
 ];
 
-fn strip_html_tags(s: &str) -> String {
+fn strip_html_tags(s: &str, br: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
@@ -578,7 +595,7 @@ fn strip_html_tags(s: &str) -> String {
         {
             let lower = name.to_ascii_lowercase();
             if lower == "br" {
-                out.push(' ');
+                out.push_str(br);
                 i = end;
                 continue;
             }
@@ -2616,7 +2633,19 @@ fn wrap_label(label: &str, width: usize, max_lines: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut cur = String::new();
     let mut cur_w = 0usize;
-    for word in label.split_whitespace() {
+    // `None` is a hard line break (`\n` in the label).
+    let words = label.split('\n').enumerate().flat_map(|(i, para)| {
+        (i > 0)
+            .then_some(None)
+            .into_iter()
+            .chain(para.split_whitespace().map(Some))
+    });
+    for word in words {
+        let Some(word) = word else {
+            lines.push(std::mem::take(&mut cur));
+            cur_w = 0;
+            continue;
+        };
         let ww = word.width();
         if ww > width {
             if !cur.is_empty() {
@@ -3668,7 +3697,30 @@ mod tests {
     #[test]
     fn br_tag_becomes_a_space() {
         let g = parse_graph("flowchart TD\n  A[\"Line1<br/>Line2<br>Line3\"]").unwrap();
-        assert_eq!(g.nodes[0].label, "Line1 Line2 Line3");
+        assert_eq!(g.nodes[0].label, "Line1\nLine2\nLine3");
+    }
+
+    #[test]
+    fn literal_backslash_n_breaks_the_label_line() {
+        let g = parse_graph("flowchart TD\n  A[\"first\\nsecond\"]").unwrap();
+        assert_eq!(g.nodes[0].label, "first\nsecond");
+    }
+
+    #[test]
+    fn br_and_backslash_n_are_drawn_on_separate_rows() {
+        for src in [
+            "flowchart TD\n  A[\"alpha<br/>beta\"]",
+            "flowchart TD\n  A[\"alpha\\nbeta\"]",
+        ] {
+            let art = plain(src);
+            assert!(art.contains("alpha") && art.contains("beta"), "{art}");
+            assert!(!art.contains("<br"), "{art}");
+            assert!(!art.contains("\\n"), "{art}");
+            assert!(
+                art.lines().all(|l| !(l.contains("alpha") && l.contains("beta"))),
+                "alpha and beta must not share a row:\n{art}"
+            );
+        }
     }
 
     #[test]
@@ -3819,7 +3871,7 @@ mod tests {
         .unwrap();
         assert_eq!(g.nodes.len(), 1, "inner brackets must not split the node");
         assert_eq!(g.edges.len(), 0, "no phantom edges from <br/> + brackets");
-        assert_eq!(g.nodes[0].label, "Token IDs [ 464, 3797 ] indices");
+        assert_eq!(g.nodes[0].label, "Token IDs\n[ 464, 3797 ]\nindices");
     }
 
     #[test]

@@ -96,6 +96,24 @@ fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<P
         interactivity,
     })
 }
+/// What `fuigo update` does about the startup sandbox.
+#[derive(Debug, PartialEq, Eq)]
+enum UpdateSandbox {
+    /// Not an update, or no special handling: install the sandbox as usual.
+    Apply,
+    /// Update runs unconfined, like `fuigo wrap`: it must write the install under the Fuigo home.
+    Skip,
+    /// Already running confined (re-exec'd inside the sandbox): an update would inherit the confinement and fail.
+    RefuseConfined,
+}
+fn update_sandbox_plan(command: Option<&Command>, inside_bwrap: bool) -> UpdateSandbox {
+    match command {
+        Some(Command::Update { check: true, .. }) => UpdateSandbox::Skip,
+        Some(Command::Update { .. }) if inside_bwrap => UpdateSandbox::RefuseConfined,
+        Some(Command::Update { .. }) => UpdateSandbox::Skip,
+        _ => UpdateSandbox::Apply,
+    }
+}
 /// True when this command later boots an agent (`spawn_fuigo_shell` / agent subcommand) that heals managed policy after `apply_sandbox`.
 fn command_needs_pre_sandbox_policy_heal(command: Option<&Command>) -> bool {
     match command {
@@ -2657,11 +2675,21 @@ async fn async_main(args: PagerArgs) -> Result<HeadlessOutcome> {
     {
         fuigo_shell::session::disable_session_persistence();
     }
-    fuigo_shell::config::apply_sandbox(
-        None,
-        sandbox_profile_arg.as_deref(),
-        args.cwd.as_deref(),
-    );
+    match update_sandbox_plan(args.command.as_ref(), fuigo_sandbox::is_confined()) {
+        UpdateSandbox::Apply => fuigo_shell::config::apply_sandbox(
+            None,
+            sandbox_profile_arg.as_deref(),
+            args.cwd.as_deref(),
+        ),
+        UpdateSandbox::Skip => {}
+        UpdateSandbox::RefuseConfined => {
+            fuigo_tty_utils::cli_eprintln!(
+                "error: Fuigo is running confined in a sandbox, so `fuigo update` cannot install here. \
+                 Run `fuigo update` outside the sandbox."
+            );
+            std::process::exit(1);
+        }
+    }
     flag_dashboard_at_startup_if_requested(&mut args)?;
     let is_interactive = args.command.is_none()
         && args.single.is_none()
@@ -3701,6 +3729,21 @@ mod tests {
                 command_needs_pre_sandbox_policy_heal(args.command.as_ref()),
                 "{args:?}"
             );
+        }
+    }
+    #[test]
+    fn update_runs_unconfined_unless_already_confined() {
+        let plan = |argv: &[&str], inside_bwrap: bool| {
+            let args = PagerArgs::try_parse_from(argv).unwrap();
+            update_sandbox_plan(args.command.as_ref(), inside_bwrap)
+        };
+        assert_eq!(plan(&["fuigo", "update"], false), UpdateSandbox::Skip);
+        assert_eq!(plan(&["fuigo", "update"], true), UpdateSandbox::RefuseConfined);
+        assert_eq!(plan(&["fuigo", "update", "--check"], true), UpdateSandbox::Skip);
+        // Every other command, and the interactive default, still installs the sandbox.
+        for argv in [vec!["fuigo"], vec!["fuigo", "version"], vec!["fuigo", "models"], vec!["fuigo", "agent", "stdio"]] {
+            assert_eq!(plan(&argv, false), UpdateSandbox::Apply, "{argv:?}");
+            assert_eq!(plan(&argv, true), UpdateSandbox::Apply, "{argv:?}");
         }
     }
     #[test]

@@ -15,8 +15,8 @@ Type `@` for a fuzzy file picker — line ranges work too:
 
 ## Paste images
 
-Paste a screenshot straight into the prompt: `Cmd+V` on macOS, `Ctrl+V` on
-Linux, `Alt+V` on Windows. Great for error dialogs, designs, and diagrams.
+Paste a screenshot straight into the prompt: `Ctrl+V` on macOS and Linux,
+`Alt+V` on Windows. Great for error dialogs, designs, and diagrams.
 
 ## Run shell commands yourself
 

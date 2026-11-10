@@ -347,6 +347,7 @@ mod tests {
             url: url.map(str::to_string),
             url_raw: url_raw.map(str::to_string),
             timeout_ms: 5000,
+            fail_closed: false,
             source_dir: PathBuf::from("/tmp"),
             extra_env: HashMap::new(),
             layer: fuigo_hooks::config::HookProvenance::File,

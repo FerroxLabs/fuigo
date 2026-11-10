@@ -232,3 +232,30 @@ fn manual_title_opt_ignores_stale_flag_over_blank_generated_title() {
         Some("auto first-prompt summary")
     );
 }
+
+/// 74.B23: an effort this build does not know (a newer build wrote it) must not make the summary unreadable; the session
+/// resumes with no stored effort, i.e. the default. A known effort and an absent one still read as before.
+#[test]
+fn u42_b23_unknown_reasoning_effort_reads_as_default_and_known_ones_still_parse() {
+    let mut base = serde_json::to_value(
+        Summary::new(
+            &Info {
+                id: acp::SessionId::new("u42-b23"),
+                cwd: "/tmp".into(),
+            },
+            default_model_id(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let obj = base.as_object_mut().unwrap();
+    obj.insert("reasoning_effort".into(), serde_json::json!("ludicrous"));
+    let unknown: Summary = serde_json::from_value(base.clone()).expect("an unknown effort must not fail the summary");
+    assert_eq!(unknown.reasoning_effort, None);
+    base.as_object_mut().unwrap().insert("reasoning_effort".into(), serde_json::json!("high"));
+    let known: Summary = serde_json::from_value(base.clone()).unwrap();
+    assert_eq!(known.reasoning_effort, Some(ReasoningEffort::High));
+    base.as_object_mut().unwrap().remove("reasoning_effort");
+    let absent: Summary = serde_json::from_value(base).unwrap();
+    assert_eq!(absent.reasoning_effort, None);
+}

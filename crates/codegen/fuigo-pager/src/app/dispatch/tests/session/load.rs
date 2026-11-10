@@ -1336,7 +1336,7 @@ fn duplicate_load_unbind_invalidates_old_minimal_btw_response() {
     {
         [
             Effect::SendBtw {
-                minimal_request_id: Some(id),
+                request_id: Some(id),
                 ..
             },
         ] => *id,
@@ -1353,7 +1353,7 @@ fn duplicate_load_unbind_invalidates_old_minimal_btw_response() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: old_owner,
             result: Ok("old answer".into()),
-            minimal_request_id: Some(request_id),
+            request_id: Some(request_id),
         }),
         &mut app,
     );

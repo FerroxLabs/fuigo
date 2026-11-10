@@ -186,6 +186,7 @@ impl SessionActor {
                 conflicts: vec![],
                 prompt_text: None,
                 error: Some(error),
+                context_tokens: None,
             });
         }
         self.signals_handle().mark_reverted();
@@ -216,6 +217,7 @@ impl SessionActor {
                     current_prompt_index,
                     current_prompt_index.saturating_sub(1)
                 )),
+                context_tokens: None,
             });
         }
 
@@ -248,6 +250,7 @@ impl SessionActor {
                         conflicts: vec![],
                         prompt_text: None,
                         error: Some(unavailable.refusal_message(target_index, valid_targets_below, true)),
+                        context_tokens: None,
                     });
                 }
             };
@@ -314,6 +317,7 @@ impl SessionActor {
                 conflicts,
                 prompt_text: None,
                 error,
+                context_tokens: None,
             });
         }
 
@@ -335,6 +339,7 @@ impl SessionActor {
                         conflicts: vec![],
                         prompt_text: None,
                         error: Some(error),
+                        context_tokens: None,
                     });
                 }
             }
@@ -364,6 +369,7 @@ impl SessionActor {
                          (rewind_points.jsonl) could not be locked for the rewind ({error}). Another Fuigo process \
                          may be writing it. Nothing was changed; run the same rewind again."
                     )),
+                    context_tokens: None,
                 });
             }
         };
@@ -391,6 +397,7 @@ impl SessionActor {
                      removed. Then run the rewind again. Nothing was changed.",
                     pre_rewind.display()
                 )),
+                context_tokens: None,
             });
         }
 
@@ -422,6 +429,7 @@ impl SessionActor {
                             "Rewind to prompt #{target_index} was not started: the rewound conversation cannot be \
                              written ({error}). Nothing was changed."
                         )),
+                        context_tokens: None,
                     });
                 }
             },
@@ -498,6 +506,7 @@ impl SessionActor {
                      same rewind again.",
                     failed_files.len(),
                 )),
+                context_tokens: None,
             });
         }
 
@@ -543,6 +552,7 @@ impl SessionActor {
                              (rewind_points.jsonl) could not be updated ({error}).{conversation_note}{restored} The \
                              saved file contents are kept; fix the cause and run the same rewind again."
                         )),
+                        context_tokens: None,
                     });
                 }
             }
@@ -605,6 +615,7 @@ impl SessionActor {
                          ({error}), so the conversation was not rewound.{restored} The saved file contents are kept; \
                          fix the cause and run the same rewind again.{points_note}"
                     )),
+                    context_tokens: None,
                 });
             }
             self.withheld_pending
@@ -671,6 +682,13 @@ impl SessionActor {
         }
         drop(rewind_points_lock);
 
+        // The conversation shrank, so the footer's context usage must follow it rather than keep the pre-rewind value
+        let context_tokens = if wants_conversation_rewind {
+            Some(fuigo_chat_state::estimate_conversation_tokens(&self.chat_state_handle.get_conversation_for_model().await))
+        } else {
+            None
+        };
+
         Ok(RewindResponse {
             success: true,
             target_prompt_index: target_index,
@@ -680,6 +698,7 @@ impl SessionActor {
             conflicts,
             prompt_text,
             error: None,
+            context_tokens,
         })
     }
 
@@ -974,6 +993,7 @@ impl SessionActor {
             conflicts: vec![],
             prompt_text: None,
             error: Some(format!("killed by the test seam at {stage:?}")),
+            context_tokens: None,
         })
     }
 

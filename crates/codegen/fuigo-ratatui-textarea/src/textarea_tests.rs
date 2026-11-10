@@ -6652,3 +6652,19 @@ fn typing_beside_a_huge_paste_chip_stays_bounded() {
     assert_eq!(scans, 0, "typing walked the buffer from its start {scans} times");
     assert!(copied <= 3 * size, "copied {copied} bytes of a {size} byte buffer");
 }
+
+#[test]
+fn text_revision_changes_on_text_edits_and_not_on_cursor_moves() {
+    let mut t = ta_with("hello");
+    let r0 = t.text_revision();
+    t.move_cursor_left();
+    t.set_cursor(0);
+    assert_eq!(t.text_revision(), r0, "cursor moves leave the text marker alone");
+    t.insert_str("x");
+    let r1 = t.text_revision();
+    assert_ne!(r1, r0);
+    assert!(t.undo());
+    assert_ne!(t.text_revision(), r1, "undo replaces the text");
+    t.set_text("other");
+    assert_ne!(t.text_revision(), r0);
+}

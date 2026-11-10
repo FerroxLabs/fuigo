@@ -63,7 +63,7 @@ subagent_rate_limit_max_attempts = 8
 stream_tool_calls = true
 
 [ui]
-simple_mode = true                     # readline-style prompt editing (default); false = vim editing in the prompt
+simple_mode = true                     # /settings switch for [keys] vim: true = readline prompt (default); false = vim editing in the prompt
 vim_mode = false                       # vim-style scrollback navigation keys (default: false)
 max_thoughts_width = 120               # max column width for reasoning display
 default_selected_permission = "allow_once" # preselected row on the FIRST approval prompt
@@ -122,21 +122,14 @@ respect_gitignore = false              # default: false; set true to make every 
 
 #### Input mode
 
-`[ui] simple_mode` controls how you edit text in the **prompt** — the input editor. It has nothing to do with how you move around the scrollback; that's [`vim_mode`](#vim-mode).
+`[ui] simple_mode` is the `/settings` switch (**Disable vim input mode**) for [Vim editing in the prompt](#vim-editing-in-the-prompt), and it is an alias of `[keys] vim`. It has no separate behavior of its own.
 
 | Value | Behavior |
 |-------|----------|
-| `true` (default) | **Readline editing.** Plain readline-style text entry. |
-| `false` | **Vim editing (experimental).** Vim-style modal editing (normal and insert modes). When the prompt is empty it starts in normal mode with focus on the scrollback. |
+| `true` (default) | **Readline editing.** Plain readline-style text entry. Turning it on in `/settings` turns prompt vim off (`[keys] vim = "nav"` if it was `"all"`). |
+| `false` | **Vim editing.** The same as `[keys] vim = "all"`: scrollback vim keys plus Insert and Normal modes in the prompt. Turning it off in `/settings` writes `[keys] vim = "all"`. |
 
-To switch the prompt to vim-style editing:
-
-```toml
-[ui]
-simple_mode = false
-```
-
-You can also flip it from the settings pane (`/settings` → **Disable vim input mode**); Fuigo writes your choice to `[ui] simple_mode`. `simple_mode` and `vim_mode` are independent — one governs the prompt editor, the other governs scrollback navigation. See [Keyboard Shortcuts](03-keyboard-shortcuts.md) for the full binding reference.
+Set the level in `config.toml` with `[keys] vim` (that is what Fuigo reads at start-up), or flip it from `/settings` → **Disable vim input mode** or with `/vim-mode all|nav|off`; all three change the same prompt editor. See [Keyboard Shortcuts](03-keyboard-shortcuts.md) for the full binding reference.
 
 #### Default selected permission
 
@@ -169,7 +162,24 @@ You can also override this with `FUIGO_DEFAULT_SELECTED_PERMISSION`, which is ha
 | `false` (default) | Bare-letter and `Shift+letter` keys (`j`/`k`, `h`/`l`, `g`/`G`, `y`/`Y`, `o`/`O`, `r`, `x`, `e`/`E`, `H`/`L`, plus `i`) are suppressed in the scrollback: pressing one focuses the prompt and types the character. Arrows, `Tab`, `Space`, `PageUp`/`PageDown`, and every `Ctrl+letter` shortcut still navigate. `Esc` is **not** a scrollback key — it never cancels a running turn (`Ctrl+C` does), and while idle follows the clear / rewind policy (see [Keyboard Shortcuts](03-keyboard-shortcuts.md#escape)). |
 | `true` | All vim-style scrollback bindings are active, exactly as listed in [Keyboard Shortcuts](03-keyboard-shortcuts.md). Esc behavior is the same in both settings. |
 
-Toggle it at runtime with `/vim-mode`, or from `/settings` → **Vim scrollback navigation**. Fuigo writes the change to `[ui] vim_mode` immediately and applies it to every future pager session, including new agents and subagents in the same process. There's no per-session override — `config.toml` is the source of truth on next launch. `vim_mode` is independent of `simple_mode`.
+Toggle it at runtime with `/vim-mode`, or from `/settings` → **Vim scrollback navigation**. To also edit the prompt with Vim keys, see [Vim editing in the prompt](#vim-editing-in-the-prompt) below. Fuigo writes the change to `[ui] vim_mode` immediately and applies it to every future pager session, including new agents and subagents in the same process. There's no per-session override — `config.toml` is the source of truth on next launch. `vim_mode` is independent of the prompt editor switch except that prompt vim needs it on.
+
+#### Vim editing in the prompt
+
+`[keys] vim` sets how much of the interface speaks vim. It is off by default.
+
+```toml
+[keys]
+vim = "all"   # "off" (default), "nav" (scrollback keys only) or "all" (scrollback keys and Vim editing in the prompt)
+```
+
+| Value | Behavior |
+|-------|----------|
+| `"off"` (default) | No vim keys. |
+| `"nav"` | Vim keys in the scrollback, the same as `[ui] vim_mode = true`. The prompt is unchanged. |
+| `"all"` | `"nav"`, plus Insert and Normal modes in the prompt with motions, operators, counts and undo. The info line shows `NORMAL` or `INSERT`, and the cursor is a block in Normal mode and a bar in Insert mode. |
+
+`[ui] vim_mode`, when set, wins for the scrollback keys: `[ui] vim_mode = false` turns `"all"` off as well, since prompt editing needs the scrollback keys. Set it at runtime with `/vim-mode all`, `/vim-mode nav` or `/vim-mode off`; the choice is written to `[keys] vim`. The keys are listed in [Keyboard Shortcuts](03-keyboard-shortcuts.md#vim-editing-in-the-prompt).
 
 #### Screen mode
 

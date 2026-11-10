@@ -215,15 +215,31 @@ impl Theme {
     /// On 256-color terminals they are mapped to the nearest indexed palette entry.
     /// On 16-color terminals they map to ANSI names.
     pub fn quantized(self, level: color_support::ColorLevel) -> Self {
-        use color_support::quantize_color;
-        let q = |c: ratatui::style::Color| quantize_color(c, level);
+        let eight =
+            level == color_support::ColorLevel::Basic && color_support::eight_color_terminal();
+        self.quantized_for(level, eight)
+    }
+
+    /// [`Self::quantized`] with the 8-colour fold chosen by the caller: when `eight_color` is set the bright half of the ANSI 16 palette folds onto the 8 colours.
+    pub(crate) fn quantized_for(self, level: color_support::ColorLevel, eight_color: bool) -> Self {
+        use color_support::{ColorRole, fold_bright_for_eight_colors, quantize_color};
+        let fold = |c: ratatui::style::Color, role: ColorRole| {
+            let c = quantize_color(c, level);
+            if eight_color {
+                fold_bright_for_eight_colors(c, role)
+            } else {
+                c
+            }
+        };
+        let q = |c: ratatui::style::Color| fold(c, ColorRole::Foreground);
+        let qb = |c: ratatui::style::Color| fold(c, ColorRole::Background);
         Self {
-            bg_base: q(self.bg_base),
-            bg_light: q(self.bg_light),
-            bg_dark: q(self.bg_dark),
-            bg_highlight: q(self.bg_highlight),
-            bg_hover: q(self.bg_hover),
-            bg_terminal: q(self.bg_terminal),
+            bg_base: qb(self.bg_base),
+            bg_light: qb(self.bg_light),
+            bg_dark: qb(self.bg_dark),
+            bg_highlight: qb(self.bg_highlight),
+            bg_hover: qb(self.bg_hover),
+            bg_terminal: qb(self.bg_terminal),
 
             accent_user: q(self.accent_user),
             accent_assistant: q(self.accent_assistant),
@@ -262,19 +278,19 @@ impl Theme {
 
             accent_model: q(self.accent_model),
 
-            scrollbar_bg: q(self.scrollbar_bg),
+            scrollbar_bg: qb(self.scrollbar_bg),
             scrollbar_fg: q(self.scrollbar_fg),
 
-            diff_delete_bg: q(self.diff_delete_bg),
+            diff_delete_bg: qb(self.diff_delete_bg),
             diff_delete_fg: q(self.diff_delete_fg),
-            diff_insert_bg: q(self.diff_insert_bg),
+            diff_insert_bg: qb(self.diff_insert_bg),
             diff_insert_fg: q(self.diff_insert_fg),
             diff_equal_fg: q(self.diff_equal_fg),
             diff_gutter_fg: q(self.diff_gutter_fg),
 
-            bg_visual: q(self.bg_visual),
+            bg_visual: qb(self.bg_visual),
 
-            paste_bg: q(self.paste_bg),
+            paste_bg: qb(self.paste_bg),
             paste_fg: q(self.paste_fg),
             paste_dim: q(self.paste_dim),
 
@@ -294,7 +310,7 @@ impl Theme {
             md_task_checked: q(self.md_task_checked),
             md_task_unchecked: q(self.md_task_unchecked),
             md_muted: q(self.md_muted),
-            md_code_bg: q(self.md_code_bg),
+            md_code_bg: qb(self.md_code_bg),
             md_text: q(self.md_text),
             link_fg: q(self.link_fg),
         }
@@ -348,14 +364,25 @@ impl Theme {
         // Both arms require `has_color()` so that `NO_COLOR` (which produces `ColorLevel::None`) keeps suppressing all SGR output
         // Without the explicit gate on the legacy-Windows arm, `ansi16_chrome_overrides` would repaint `Color::Reset` slots with named ANSI colors
         // That would partially defeat the user's opt-out on ConHost
-        if level.has_color()
+        let themed = if level.has_color()
             && (level == color_support::ColorLevel::Basic
                 || (crate::glyphs::is_legacy_windows_console() && !level.has_truecolor()))
         {
             adapted.ansi16_chrome_overrides(dark)
         } else {
             adapted
+        };
+        // The chrome overrides name bright colours again, so the 8-colour fold runs last
+        if level == color_support::ColorLevel::Basic && color_support::eight_color_terminal() {
+            themed.eight_color_folded()
+        } else {
+            themed
         }
+    }
+
+    /// This theme with the bright half of the ANSI 16 palette folded onto the 8 colours an 8-colour terminal can show.
+    pub(crate) fn eight_color_folded(self) -> Self {
+        self.quantized_for(color_support::ColorLevel::TrueColor, true)
     }
 
     pub fn current_kind() -> ThemeKind {
@@ -655,6 +682,22 @@ pub fn reset_cursor_color() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eight_color_fold_leaves_no_bright_colour_in_the_theme() {
+        // The theme `Theme::current` builds on a 16-colour terminal: quantized, then the ANSI16 chrome overrides
+        let basic = Theme::fuigonight()
+            .quantized_for(color_support::ColorLevel::Basic, false)
+            .ansi16_chrome_overrides(true);
+        let plain = format!("{basic:?}");
+        assert!(
+            plain.contains("DarkGray"),
+            "the 16-colour theme uses bright black, so the fold has something to do"
+        );
+        let folded = format!("{:?}", basic.eight_color_folded());
+        assert!(!folded.contains("DarkGray"), "{folded}");
+        assert!(!folded.contains("Light"), "{folded}");
+    }
 
     #[test]
     fn from_name_auto() {

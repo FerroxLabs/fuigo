@@ -124,6 +124,8 @@ pub enum WarningCategory {
     LimitedColorSupport,
     /// tmux is attached to a client it believes cannot render 24-bit color, so it rewrites every truecolor cell to the client terminfo's palette.
     TmuxColorReduced,
+    /// tmux holds a lone Esc for longer than `ESCAPE_TIME_WARN_ABOVE_MS` waiting to see whether an escape sequence follows, so Esc feels laggy.
+    TmuxEscapeTimeSlow,
     SandboxProfileConflict,
     /// The session runs over SSH without `fuigo wrap` on the local end.
     /// Clipboard forwarding and terminal-mode restore on dropped connections are then not guaranteed.
@@ -902,6 +904,40 @@ pub fn format_clipboard_diagnostics(input: ClipboardDiagnosticsInput<'_>) -> Cli
     }
 }
 
+/// Longest `escape-time` (milliseconds) that does not make Esc feel laggy.
+/// tmux's own default is 500.
+const ESCAPE_TIME_WARN_ABOVE_MS: u64 = 50;
+
+/// Explicit `/doctor` warning when tmux holds a lone Esc for more than 50 ms.
+///
+/// tmux waits `escape-time` after an Esc byte to see whether an escape sequence follows, so a high value delays every Esc press (closing a dialog, leaving vim mode).
+/// Only an explicit, parseable value above the threshold warns; an unreadable or missing value says nothing.
+pub fn tmux_escape_time_warning(
+    escape_time: &probes::TmuxProbeResult<String>,
+    tmux_config_path: &str,
+) -> Option<TerminalWarning> {
+    let probes::TmuxProbeResult::Available(value) = escape_time else {
+        return None;
+    };
+    let millis: u64 = value.trim().parse().ok()?;
+    if millis <= ESCAPE_TIME_WARN_ABOVE_MS {
+        return None;
+    }
+    let mut warning = TerminalWarning::new(
+        WarningCategory::TmuxEscapeTimeSlow,
+        &format!(
+            "tmux waits {millis} ms after Esc before passing it on, so the Esc key feels slow"
+        ),
+        Some("set -sg escape-time 10"),
+        Some(tmux_config_path),
+    );
+    warning.note = Some(format!(
+        "Add the line to your tmux config to make tmux pass Esc on after 10 ms. {}",
+        tmux_reload_note(tmux_config_path)
+    ));
+    Some(warning)
+}
+
 /// Explicit `/doctor` warning when truecolor themes are locked out.
 ///
 /// Not in `collect_startup_warnings`: limited color is normal on some emulators and would spam the welcome banner.
@@ -1102,6 +1138,7 @@ mod tests {
                 allow_passthrough: query.show_option("allow-passthrough"),
                 control_mode: probes::TmuxProbeResult::Available(control_mode),
                 client_features: probes::TmuxProbeResult::Unavailable,
+                escape_time: probes::TmuxProbeResult::Unavailable,
             },
             wayland: probes::WaylandProbeFacts {
                 is_wayland: false,
@@ -2459,6 +2496,7 @@ mod tests {
             allow_passthrough: probes::TmuxProbeResult::Available("off".to_owned()),
             control_mode: probes::TmuxProbeResult::Available(true),
             client_features: probes::TmuxProbeResult::Unavailable,
+            escape_time: probes::TmuxProbeResult::Unavailable,
         };
         let mut warnings = collect_startup_warnings_from(&terminal, &tmux, Some(false));
         warnings.push(wezterm_kitty_keyboard_warning_from(&wezterm_ctx(), false, None).unwrap());
@@ -2620,6 +2658,45 @@ mod tests {
         assert_eq!(w[0].category, WarningCategory::DcsPassthrough);
         assert!(w[0].message.contains("notification"));
         assert_eq!(w[0].fix.as_deref(), Some("set -wg allow-passthrough on"));
+    }
+
+    fn doctor_view_with_escape_time(
+        ctx: &TerminalContext,
+        escape_time: probes::TmuxProbeResult<String>,
+    ) -> DiagnosticReport {
+        let query = FakeTmuxQuery::healthy_modern();
+        let mut common = test_snapshot(ctx, &query, false, true, false, None);
+        common.tmux.escape_time = escape_time;
+        let runtime = test_snapshot(ctx, &query, false, true, false, None).runtime;
+        view::view(DiagnosticSnapshot::from_parts(
+            common,
+            probes::ClipboardProbeFacts {
+                route: crate::clipboard::resolve_clipboard_route(ctx),
+                native_tool: "pbcopy",
+                osc52_sink_active: false,
+            },
+            crate::host::HostOs::Macos,
+            crate::host::DisplayServer::Unknown,
+            false,
+            ColorLevel::TrueColor,
+            runtime.into(),
+        ))
+    }
+
+    #[test]
+    fn doctor_reports_slow_tmux_escape_time_only_inside_tmux() {
+        let id = DiagnosticId::new("terminal", "tmux-escape-time");
+        let tmux_ctx = plain_tmux_ctx();
+        let slow = doctor_view_with_escape_time(&tmux_ctx, escape_time_fact("500"));
+        let finding = slow.findings.iter().find(|f| f.id == id).expect("finding");
+        assert!(finding.message.contains("500 ms"));
+        // Default behaviour unchanged: a fast or unread value adds nothing, and neither does a session outside tmux
+        let fast = doctor_view_with_escape_time(&tmux_ctx, escape_time_fact("10"));
+        assert!(fast.findings.iter().all(|f| f.id != id));
+        let unread = doctor_view_with_escape_time(&tmux_ctx, probes::TmuxProbeResult::Unavailable);
+        assert!(unread.findings.iter().all(|f| f.id != id));
+        let outside = doctor_view_with_escape_time(&TerminalContext::default(), escape_time_fact("500"));
+        assert!(outside.findings.iter().all(|f| f.id != id));
     }
 
     #[test]
@@ -2963,6 +3040,49 @@ mod tests {
         .expect("warn");
         assert_eq!(w.fix.as_deref(), Some("export COLORTERM=truecolor"));
         assert!(w.config_path.is_none());
+    }
+
+    fn escape_time_fact(value: &str) -> probes::TmuxProbeResult<String> {
+        probes::TmuxProbeResult::Available(value.to_owned())
+    }
+
+    #[test]
+    fn escape_time_above_50ms_warns_with_the_fix() {
+        let w = tmux_escape_time_warning(&escape_time_fact("500"), "~/.tmux.conf").expect("warn");
+        assert_eq!(w.category, WarningCategory::TmuxEscapeTimeSlow);
+        assert!(w.message.contains("500 ms"));
+        assert_eq!(w.fix.as_deref(), Some("set -sg escape-time 10"));
+        assert_eq!(w.config_path.as_deref(), Some("~/.tmux.conf"));
+        assert!(tmux_escape_time_warning(&escape_time_fact("51"), "~/.tmux.conf").is_some());
+    }
+
+    #[test]
+    fn escape_time_at_or_below_50ms_or_unreadable_is_silent() {
+        for value in ["0", "10", "50", " 50\n", "junk", ""] {
+            assert!(
+                tmux_escape_time_warning(&escape_time_fact(value), "~/.tmux.conf").is_none(),
+                "{value:?}"
+            );
+        }
+        for fact in [
+            probes::TmuxProbeResult::Unavailable,
+            probes::TmuxProbeResult::Unsupported,
+            probes::TmuxProbeResult::Error("boom".to_owned()),
+        ] {
+            assert!(tmux_escape_time_warning(&fact, "~/.tmux.conf").is_none());
+        }
+    }
+
+    #[test]
+    fn escape_time_warning_has_a_stable_doctor_finding() {
+        let w = tmux_escape_time_warning(&escape_time_fact("500"), "~/.tmux.conf").unwrap();
+        let finding = view::finding_from_warning(w).expect("canonical finding");
+        assert_eq!(finding.id.to_string(), "terminal.tmux-escape-time");
+        assert_eq!(finding.disposition, FindingDisposition::Issue);
+        assert_eq!(
+            finding.remediation.as_ref().map(|r| r.fix.as_str()),
+            Some("set -sg escape-time 10")
+        );
     }
 
     /// Regression: a tmux client that reduces color used to be invisible to Doctor whenever Fuigo's own detection reported truecolor.

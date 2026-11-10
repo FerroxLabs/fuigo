@@ -10,7 +10,8 @@ use crate::scrollback::text_selection::{
     PendingTextDrag, PersistentTextSelection, RangeHit, ResolvedSelectionModel, SelectionEndpoint,
     SelectionKind, SelectionOrigin, TableSelectionGeometry, apply_selection_boundary,
     block_drag_threshold_exceeded, compute_autoscroll, configured_word_separators,
-    drag_threshold_exceeded, reconstruct_full_selection_text,
+    cross_range_entry_pieces, drag_threshold_exceeded, is_cross_range, ordered_endpoints,
+    reconstruct_cross_range_selection_text_with_boundaries, reconstruct_full_selection_text,
     reconstruct_full_selection_text_with_boundaries, reconstruct_selection_text,
     reconstruct_selection_text_with_boundaries, reconstruct_table_selection_text_with_meta,
     resolve_table_drag_kind, semantic_selection_at,
@@ -268,8 +269,22 @@ impl AgentView {
         head: &RangeHit,
         prev: SelectionKind,
     ) -> SelectionKind {
+        // A selection that leaves its block is a plain linear sweep: table shapes are single-block
+        if is_cross_range(anchor, head) {
+            return SelectionKind::Linear;
+        }
         let geom = self.drag_table_geometry_for(anchor.entry_idx, anchor.range_id);
         resolve_table_drag_kind(geom, anchor, head, prev)
+    }
+
+    /// Drag head for the pointer at `(col, row)`: any block's text in the main transcript, the anchor's own range inside `/btw`.
+    fn drag_head_hit(&self, anchor: RangeHit, col: u16, row: u16) -> Option<RangeHit> {
+        let model = self.selection_model_for_hit(&anchor);
+        if anchor.entry_idx == BTW_OVERLAY_ENTRY_IDX {
+            model.hit_test_nearest_in_range(anchor, col, row)
+        } else {
+            model.hit_test_drag_head(anchor, col, row)
+        }
     }
 
     /// Whether drag autoscroll is currently active and needs ticking.
@@ -314,8 +329,7 @@ impl AgentView {
             && drag.anchor.entry_idx != BTW_OVERLAY_ENTRY_IDX
         {
             let head = self
-                .last_scrollback_selection_model
-                .hit_test_nearest_in_range(drag.anchor, col, row)
+                .drag_head_hit(drag.anchor, col, row)
                 .unwrap_or(drag.head);
             let kind = self.resolve_drag_kind(&drag.anchor, &head, drag.kind);
             if let Some(ref mut drag) = self.drag_selection {
@@ -379,8 +393,7 @@ impl AgentView {
         if (drag.anchor.entry_idx == BTW_OVERLAY_ENTRY_IDX) != btw_rebuilt {
             return;
         }
-        let model = self.selection_model_for_hit(&drag.anchor);
-        let Some(head) = model.hit_test_nearest_in_range(drag.anchor, col, row) else {
+        let Some(head) = self.drag_head_hit(drag.anchor, col, row) else {
             return;
         };
         if head == drag.head {
@@ -405,8 +418,17 @@ impl AgentView {
             || self.deferred_text_press.is_some()
     }
 
+    /// Record each visible block's content width while a text drag is active, so a block that later scrolls out can still be copied at its last on-screen width.
+    pub(super) fn remember_drag_entry_widths(&mut self, model: &ResolvedSelectionModel) {
+        for block in &model.visible_blocks {
+            self.drag_entry_widths
+                .insert(block.entry_idx, block.content_width);
+        }
+    }
+
     /// Discard any in-progress scrollback drag and mouse-down latch (recovery path).
     pub(super) fn clear_stuck_scrollback_drag(&mut self) {
+        self.drag_entry_widths.clear();
         self.left_mouse_down = false;
         self.scrollbar_dragging = false;
         self.pending_text_drag = None;
@@ -527,21 +549,6 @@ impl AgentView {
         true
     }
 
-    fn drag_model(&self) -> &ResolvedSelectionModel {
-        let is_btw = self
-            .pending_text_drag
-            .is_some_and(|p| p.anchor.entry_idx == BTW_OVERLAY_ENTRY_IDX)
-            || self
-                .drag_selection
-                .as_ref()
-                .is_some_and(|d| d.anchor.entry_idx == BTW_OVERLAY_ENTRY_IDX);
-        if is_btw {
-            &self.last_btw_selection_model
-        } else {
-            &self.last_scrollback_selection_model
-        }
-    }
-
     fn update_text_drag(&mut self, mouse: &MouseEvent) -> bool {
         let Some(pending) = self.pending_text_drag else {
             return false;
@@ -558,9 +565,8 @@ impl AgentView {
         if !threshold {
             return false;
         }
-        let model = self.drag_model();
-        let head = model
-            .hit_test_nearest_in_range(pending.anchor, mouse.column, mouse.row)
+        let head = self
+            .drag_head_hit(pending.anchor, mouse.column, mouse.row)
             .unwrap_or(pending.anchor);
         tracing::debug!(
             event = "promote_text_drag",
@@ -602,6 +608,12 @@ impl AgentView {
             });
         }
         let kind = self.resolve_drag_kind(&anchor, &head, SelectionKind::Linear);
+        self.drag_entry_widths.clear();
+        if anchor.entry_idx != BTW_OVERLAY_ENTRY_IDX {
+            let model = std::mem::take(&mut self.last_scrollback_selection_model);
+            self.remember_drag_entry_widths(&model);
+            self.last_scrollback_selection_model = model;
+        }
         self.drag_selection = Some(ActiveTextDrag {
             anchor,
             head,
@@ -654,8 +666,7 @@ impl AgentView {
         };
         let is_btw = drag.anchor.entry_idx == BTW_OVERLAY_ENTRY_IDX;
         let head = self
-            .selection_model_for_hit(&drag.anchor)
-            .hit_test_nearest_in_range(drag.anchor, mouse.column, mouse.row)
+            .drag_head_hit(drag.anchor, mouse.column, mouse.row)
             .unwrap_or(drag.head);
         let kind = self.resolve_drag_kind(&drag.anchor, &head, drag.kind);
         let changed = head != drag.head || kind != drag.kind;
@@ -767,6 +778,11 @@ impl AgentView {
         {
             return Some((text, drag.kind));
         }
+        if is_cross_range(&drag.anchor, &drag.head) {
+            return self
+                .reconstruct_cross_range_copy(drag)
+                .map(|text| (text, SelectionKind::Linear));
+        }
         if drag.anchor.entry_idx == BTW_OVERLAY_ENTRY_IDX {
             // Same wrap as table detect/copy (`MarkdownContent::output` + trimmed selection text)
             if let Some(text) = self
@@ -820,6 +836,60 @@ impl AgentView {
         .map(|text| (text, SelectionKind::Linear))
     }
 
+    /// Plain-text copy of a drag that crossed blocks: the span from the start endpoint to the end endpoint in transcript order.
+    /// Entries between are read from their full rendered output (not just the visible rows), so a drag autoscrolled past the viewport still copies everything.
+    /// Each block's share is cut at the endpoints, blocks join with a newline, and only selectable text is copied (never gutters, borders, badges or buttons).
+    fn reconstruct_cross_range_copy(&self, drag: &ActiveTextDrag) -> Option<String> {
+        let (start, end) = ordered_endpoints(drag.anchor, drag.head);
+        let scrollback = if let Some(ref child_id) = self.active_subagent
+            && let Some(child) = self.subagent_views.get(child_id)
+        {
+            &child.scrollback
+        } else {
+            &self.scrollback
+        };
+        let visible_start = scrollback.visible_entry_range().start;
+        let model = &self.last_scrollback_selection_model;
+        let mut pieces: Vec<String> = Vec::new();
+        let mut complete = true;
+        for entry_idx in start.entry_idx..=end.entry_idx {
+            // Blocks in view use their own width; one that scrolled out uses the width it last had on screen during the drag, then the drag-start snapshot, then the pane width
+            let width = model
+                .visible_block_content_width(entry_idx)
+                .or(if entry_idx == drag.anchor.entry_idx {
+                    drag.anchor_content_width
+                } else {
+                    None
+                })
+                .or_else(|| self.drag_entry_widths.get(&entry_idx).copied())
+                .or(drag.anchor_content_width)
+                .or_else(|| (model.content_area.width > 0).then_some(model.content_area.width));
+            let (Some(entry), Some(width)) = (scrollback.get(entry_idx + visible_start), width)
+            else {
+                complete = false;
+                break;
+            };
+            entry.ensure_cached(width, scrollback.appearance(), false, scrollback.cwd());
+            let rendered = entry.cached_rendered_output_ref();
+            pieces.extend(cross_range_entry_pieces(
+                entry_idx,
+                &rendered.output.lines,
+                &rendered.boundaries,
+                &start,
+                &end,
+            ));
+        }
+        if complete && !pieces.is_empty() {
+            return Some(pieces.join("\n"));
+        }
+        reconstruct_cross_range_selection_text_with_boundaries(
+            model,
+            &self.last_scrollback_selection_boundaries,
+            drag.anchor,
+            drag.head,
+        )
+    }
+
     /// Persist a finished drag as the highlight.
     /// `kind` is the copied shape, not `drag.kind`: a degraded table drag persists `Linear` and drops its orphaned side-car.
     fn persist_drag_selection(&mut self, drag: &ActiveTextDrag, kind: SelectionKind) {
@@ -846,6 +916,8 @@ impl AgentView {
                 col_within_range: drag.head.col_within_range,
             },
             origin: SelectionOrigin::Drag,
+            head_range: is_cross_range(&drag.anchor, &drag.head)
+                .then_some((drag.head.entry_idx, drag.head.range_id)),
             kind,
         });
         self.selection_created_at = Some(Instant::now());
@@ -895,6 +967,7 @@ impl AgentView {
     pub(in crate::app) fn finish_text_drag(&mut self) -> bool {
         let drag = self.drag_selection;
         let copied = drag.and_then(|d| self.reconstruct_drag_copy(&d));
+        self.drag_entry_widths.clear();
         self.pending_text_drag = None;
         self.drag_selection = None;
         self.drag_autoscroll = None;
@@ -1299,6 +1372,7 @@ impl AgentView {
             anchor: selection.anchor,
             head: selection.head,
             origin: SelectionOrigin::DoubleClick,
+            head_range: None,
             kind: SelectionKind::Linear,
         });
         self.selection_created_at = Some(Instant::now());
@@ -1357,6 +1431,7 @@ impl AgentView {
                 col_within_range: width.saturating_sub(1),
             },
             origin: SelectionOrigin::TripleClick,
+            head_range: None,
             kind: SelectionKind::Linear,
         });
         self.selection_created_at = Some(Instant::now());
@@ -1478,6 +1553,7 @@ impl AgentView {
                 col_within_range: last_width.saturating_sub(1),
             },
             origin: SelectionOrigin::TripleClick,
+            head_range: None,
             kind: SelectionKind::Linear,
         });
         self.selection_created_at = Some(Instant::now());
@@ -1525,6 +1601,7 @@ impl AgentView {
                 col_within_range: band.end.saturating_sub(1),
             },
             origin: SelectionOrigin::TripleClick,
+            head_range: None,
             kind: SelectionKind::TableCell,
         });
         self.table_selection_geometry = Some(TableSelectionGeometry {
@@ -1574,6 +1651,7 @@ impl AgentView {
                 col_within_range: geometry.band(head_cell.col).end.saturating_sub(1),
             },
             origin: SelectionOrigin::TripleClick,
+            head_range: None,
             kind: SelectionKind::TableGrid {
                 anchor: anchor_cell,
                 head: head_cell,
@@ -1935,6 +2013,7 @@ mod tests {
                     col_within_range: 9,
                 },
                 origin: SelectionOrigin::DoubleClick,
+                head_range: None,
                 kind: SelectionKind::Linear,
             })
         );
@@ -2956,10 +3035,52 @@ mod tests {
         assert!(agent.block_drag_selection.is_none(), "no block re-arm");
         assert!(agent.pending_block_drag.is_none());
 
+        // Row 9 is the next block's chrome row: three rows from entry 0's text, one from entry 1's.
+        // The head now follows the nearest line across blocks (cross-block drag), so it moves into entry 1.
         let _ = agent.handle_input(&Event::Mouse(mouse_drag(6, 9)), &reg);
         let drag = agent.drag_selection.expect("still a text drag");
-        assert_eq!(drag.head.block_line_idx, 1, "head follows nearest line");
+        assert_eq!(
+            (drag.head.entry_idx, drag.head.block_line_idx),
+            (1, 0),
+            "head follows nearest line"
+        );
         assert_eq!(drag.anchor.entry_idx, 0, "anchor pinned to entry 0");
+
+        // A dead row nearer to the anchor's own block keeps the head there
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(6, 7)), &reg);
+        let drag = agent.drag_selection.expect("still a text drag");
+        assert_eq!(drag.head.entry_idx, 0, "gap row nearer entry 0 stays in it");
+        assert_eq!(drag.head.block_line_idx, 1);
+    }
+
+    /// A finished cross-block drag persists its head's block so the highlight keeps spanning both blocks.
+    /// A single-block drag leaves `head_range` empty.
+    #[test]
+    fn persist_drag_selection_records_head_block_only_when_crossing() {
+        let mut agent = agent_with_chrome_and_gap();
+        let hit = |entry_idx: usize, bl: usize| RangeHit {
+            entry_idx,
+            range_id: 0,
+            block_line_idx: bl,
+            col_within_range: 3,
+        };
+        let crossing = ActiveTextDrag {
+            anchor: hit(0, 1),
+            head: hit(1, 0),
+            kind: SelectionKind::Linear,
+            anchor_content_width: None,
+        };
+        agent.persist_drag_selection(&crossing, SelectionKind::Linear);
+        let sel = agent.persistent_text_selection.expect("persisted");
+        assert_eq!((sel.entry_idx, sel.range_id), (0, 0));
+        assert_eq!(sel.head_range, Some((1, 0)));
+        let inside = ActiveTextDrag {
+            head: hit(0, 0),
+            ..crossing
+        };
+        agent.persist_drag_selection(&inside, SelectionKind::Linear);
+        let sel = agent.persistent_text_selection.expect("persisted");
+        assert_eq!(sel.head_range, None);
     }
 
     /// The latch clears on the recovery path and on the stale-latch guard (any non-drag event, e.g. Esc, while latched).
@@ -3728,6 +3849,7 @@ mod tests {
                 col_within_range: 4,
             },
             origin: SelectionOrigin::Drag,
+            head_range: None,
             kind: SelectionKind::TableCell,
         });
         agent.table_selection_geometry = Some(TableSelectionGeometry {
@@ -3748,5 +3870,243 @@ mod tests {
         assert!(agent.table_selection_geometry.is_none());
         assert!(agent.drag_table_geometry.is_none());
         assert!(agent.btw_selection_wrap_width.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-block text drag (real rendered transcript)
+    // -----------------------------------------------------------------------
+
+    /// User prompt, then a styled assistant message (bold + inline code, two paragraphs), then a short assistant message.
+    /// Entries 0, 1, 2 of the main scrollback.
+    fn cross_block_agent() -> (AgentView, ratatui::buffer::Buffer) {
+        let mut agent = make_agent();
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("hi there friend"));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "**bold** and `code` text\n\nsecond paragraph here",
+        ));
+        agent
+            .scrollback
+            .push_block(RenderBlock::agent_message("tail end of reply"));
+        agent.pane_areas.scrollback = Rect::new(0, 0, 80, 30);
+        agent.active_pane = AgentPane::Scrollback;
+        let buf = render_agent_scrollback(&mut agent, 80, 30);
+        (agent, buf)
+    }
+
+    /// Render the agent's scrollback and install the resulting model, as `draw` does each frame.
+    fn render_agent_scrollback(agent: &mut AgentView, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        let area = Rect::new(0, 0, w, h);
+        agent.scrollback.prepare_layout(w, h);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let mut scratch = crate::scrollback::render::ScratchBuffer::default();
+        let rendered = crate::scrollback::ScrollbackPane::new()
+            .active(true)
+            .render_with_scratch_and_selection_boundaries(
+                area,
+                &mut buf,
+                &agent.scrollback,
+                &mut scratch,
+            );
+        agent.update_scrollback_selection_state(
+            rendered.output.selection_model,
+            rendered.selection_boundaries,
+        );
+        buf
+    }
+
+    /// Screen `(col, row)` of the first cell of `needle`'s `nth` byte inside the first selectable line containing it.
+    fn text_pos(agent: &AgentView, needle: &str, nth: usize) -> (u16, u16) {
+        for range in &agent.last_scrollback_selection_model.ranges {
+            for line in &range.lines {
+                if let Some(i) = line.text.find(needle) {
+                    return (
+                        line.screen_x + line.selectable_cols.start + (i + nth) as u16,
+                        line.screen_y,
+                    );
+                }
+            }
+        }
+        panic!("no selectable line contains {needle:?}");
+    }
+
+    fn drag_between(agent: &mut AgentView, from: (u16, u16), to: (u16, u16)) -> ActiveTextDrag {
+        let reg = ActionRegistry::defaults();
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(from.0, from.1)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(to.0, to.1)), &reg);
+        agent.drag_selection.expect("text drag active")
+    }
+
+    /// Dragging from one block's text into the next block's text moves the head into that block.
+    /// Before the cross-block change the head stayed clamped to the starting block.
+    #[test]
+    fn drag_from_text_into_next_block_moves_head_into_that_block() {
+        let (mut agent, _) = cross_block_agent();
+        let from = text_pos(&agent, "there", 0);
+        let to = text_pos(&agent, "second", 3);
+        let drag = drag_between(&mut agent, from, to);
+        assert_eq!(drag.anchor.entry_idx, 0, "anchored in the user block");
+        assert_eq!(
+            drag.head.entry_idx, 1,
+            "head follows into the assistant block"
+        );
+        assert_eq!(drag.kind, SelectionKind::Linear);
+    }
+
+    /// Forward drag copies the partial first block, whole blocks between, and the partial last block as plain text.
+    #[test]
+    fn cross_block_forward_copy_has_partial_ends_and_full_middle() {
+        let (mut agent, _) = cross_block_agent();
+        let from = text_pos(&agent, "there", 0);
+        let to = text_pos(&agent, "tail", 3);
+        let drag = drag_between(&mut agent, from, to);
+        let (text, kind) = agent.reconstruct_drag_copy(&drag).expect("copy text");
+        assert_eq!(kind, SelectionKind::Linear);
+        assert_eq!(
+            text, "there friend\nbold and code text\n\nsecond paragraph here\ntail",
+            "partial first block, full middle block, partial last block, newline-joined"
+        );
+    }
+
+    /// Dragging upward (anchor in the later block) copies the same span as the forward drag over the same endpoints.
+    #[test]
+    fn cross_block_backward_copy_matches_forward() {
+        let (mut agent, _) = cross_block_agent();
+        let upper = text_pos(&agent, "there", 0);
+        let lower = text_pos(&agent, "second", 5);
+        let forward = drag_between(&mut agent, upper, lower);
+        let forward_text = agent.reconstruct_drag_copy(&forward).expect("forward").0;
+        agent.drag_selection = None;
+        agent.pending_text_drag = None;
+        let backward = drag_between(&mut agent, lower, upper);
+        assert_eq!(backward.anchor.entry_idx, 1, "backward drag anchors low");
+        assert_eq!(backward.head.entry_idx, 0);
+        let backward_text = agent.reconstruct_drag_copy(&backward).expect("backward").0;
+        assert_eq!(backward_text, forward_text);
+        assert!(
+            backward_text.starts_with("there friend\n"),
+            "{backward_text:?}"
+        );
+        assert!(backward_text.ends_with("second"), "{backward_text:?}");
+    }
+
+    /// Styled spans (bold, inline code) copy as plain text: no escapes, no markdown markers, no UI chrome.
+    #[test]
+    fn cross_block_copy_is_plain_text_without_styling_or_chrome() {
+        let (mut agent, buf) = cross_block_agent();
+        let from = text_pos(&agent, "there", 0);
+        let to = text_pos(&agent, "tail", 3);
+        let drag = drag_between(&mut agent, from, to);
+        let text = agent.reconstruct_drag_copy(&drag).expect("copy text").0;
+        assert!(text.contains("bold and code text"), "{text:?}");
+        for banned in ["\x1b", "**", "`", "│", "┃", "▌", "▎", "╭", "╰", "┌", "└"] {
+            assert!(!text.contains(banned), "{banned:?} leaked into {text:?}");
+        }
+        // The painted rows do carry chrome or styling the copy must not: prove the fixture is not trivially chrome-free
+        let painted: String = (0..30u16)
+            .flat_map(|y| (0..80u16).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        assert!(painted.contains("bold"), "fixture rendered");
+    }
+
+    /// A drag that stays inside one block is unchanged: head stays in the block and copy is that block's slice only.
+    #[test]
+    fn single_block_drag_stays_in_block() {
+        let (mut agent, _) = cross_block_agent();
+        let from = text_pos(&agent, "bold", 0);
+        let to = text_pos(&agent, "code", 3);
+        let drag = drag_between(&mut agent, from, to);
+        assert_eq!(drag.anchor.entry_idx, drag.head.entry_idx);
+        assert_eq!(drag.anchor.range_id, drag.head.range_id);
+        let (text, kind) = agent.reconstruct_drag_copy(&drag).expect("copy text");
+        assert_eq!(text, "bold and code");
+        assert_eq!(kind, SelectionKind::Linear);
+    }
+
+    /// Dragging back into the starting block shrinks the selection to that block again.
+    #[test]
+    fn dragging_back_into_start_block_shrinks_selection() {
+        let (mut agent, _) = cross_block_agent();
+        let reg = ActionRegistry::defaults();
+        let from = text_pos(&agent, "bold", 0);
+        let far = text_pos(&agent, "tail", 3);
+        let back = text_pos(&agent, "code", 3);
+        let drag = drag_between(&mut agent, from, far);
+        assert_eq!(drag.head.entry_idx, 2, "setup: crossed into the last block");
+        let _ = agent.handle_input(&Event::Mouse(mouse_drag(back.0, back.1)), &reg);
+        let drag = agent.drag_selection.expect("still dragging");
+        assert_eq!(drag.head.entry_idx, 1, "head returned to the start block");
+        let text = agent.reconstruct_drag_copy(&drag).expect("copy text").0;
+        assert_eq!(text, "bold and code");
+    }
+
+    /// The live highlight follows a cross-block drag: cells in both blocks are painted, not just the starting block's.
+    #[test]
+    fn cross_block_drag_highlight_covers_both_blocks() {
+        use crate::scrollback::text_selection::render_active_selection_overlay;
+        let (mut agent, mut buf) = cross_block_agent();
+        let from = text_pos(&agent, "there", 0);
+        let to = text_pos(&agent, "second", 5);
+        let drag = drag_between(&mut agent, from, to);
+        let before = buf.clone();
+        render_active_selection_overlay(
+            &agent.last_scrollback_selection_model,
+            &drag,
+            None,
+            &mut buf,
+        );
+        let changed_rows: std::collections::BTreeSet<u16> = (0..30u16)
+            .flat_map(|y| (0..80u16).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[(x, y)] != before[(x, y)])
+            .map(|(_, y)| y)
+            .collect();
+        assert!(changed_rows.contains(&from.1), "start row highlighted");
+        assert!(changed_rows.contains(&to.1), "end row highlighted");
+        assert!(
+            changed_rows.len() >= 3,
+            "highlight spans the rows between: {changed_rows:?}"
+        );
+    }
+
+    /// Blocks that scrolled out of the frame before mouse-up still copy: the span is read from each entry's full output, not the visible rows.
+    #[test]
+    fn cross_block_copy_survives_blocks_scrolled_out_of_view() {
+        let (mut agent, _) = cross_block_agent();
+        let from = text_pos(&agent, "there", 0);
+        let to = text_pos(&agent, "tail", 3);
+        let drag = drag_between(&mut agent, from, to);
+        let in_view = agent.reconstruct_drag_copy(&drag).expect("in view").0;
+        agent.last_scrollback_selection_model = ResolvedSelectionModel::default();
+        let scrolled_out = agent.reconstruct_drag_copy(&drag).expect("scrolled out").0;
+        assert_eq!(scrolled_out, in_view);
+    }
+
+    /// A scrolled-out middle block whose layout depends on width (a table) copies at the width it last had on screen, not the drag-start width.
+    #[test]
+    fn cross_block_copy_uses_last_visible_width_of_scrolled_out_middle_block() {
+        let mut agent = make_agent();
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("hi there friend"));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "| alpha column header | beta column header | gamma column header |\n|---|---|---|\n| first cell with long words | second cell with long words | third cell with long words |",
+        ));
+        agent
+            .scrollback
+            .push_block(RenderBlock::agent_message("tail end of reply"));
+        agent.pane_areas.scrollback = Rect::new(0, 0, 80, 30);
+        agent.active_pane = AgentPane::Scrollback;
+        let _ = render_agent_scrollback(&mut agent, 80, 30);
+        let from = text_pos(&agent, "there", 0);
+        let to = text_pos(&agent, "tail", 3);
+        let mut drag = drag_between(&mut agent, from, to);
+        let in_view = agent.reconstruct_drag_copy(&drag).expect("in view").0;
+        // The block scrolls out, and the drag-start width no longer matches what the middle block had on screen
+        agent.last_scrollback_selection_model = ResolvedSelectionModel::default();
+        drag.anchor_content_width = Some(30);
+        let scrolled_out = agent.reconstruct_drag_copy(&drag).expect("scrolled out").0;
+        assert_eq!(scrolled_out, in_view);
     }
 }

@@ -874,6 +874,7 @@ pub(crate) fn pre_tool_use_spec(
         url: None,
         url_raw: None,
         timeout_ms: 5000,
+        fail_closed: false,
         source_dir: std::path::PathBuf::from("/tmp"),
         extra_env: std::collections::HashMap::new(),
         layer: fuigo_hooks::config::HookProvenance::File,

@@ -5,6 +5,12 @@ pub type TmuxProbeResult<T> = tmux_probe::TmuxQueryResult<T>;
 pub trait TmuxOptionQuery {
     fn show_option(&self, option: &str) -> TmuxProbeResult<String>;
 
+    /// A server-scope option such as `escape-time`.
+    /// Defaults to unavailable so implementors that never read one stay silent.
+    fn show_server_option(&self, _option: &str) -> TmuxProbeResult<String> {
+        TmuxProbeResult::Unavailable
+    }
+
     fn option_support(&self, option: &str) -> TmuxProbeResult<()>;
 
     fn control_mode(&self) -> TmuxProbeResult<bool>;
@@ -19,6 +25,10 @@ pub struct LiveTmuxProbe;
 impl TmuxOptionQuery for LiveTmuxProbe {
     fn show_option(&self, option: &str) -> TmuxProbeResult<String> {
         tmux_probe::query_option(option)
+    }
+
+    fn show_server_option(&self, option: &str) -> TmuxProbeResult<String> {
+        tmux_probe::query_server_option(option)
     }
 
     fn option_support(&self, option: &str) -> TmuxProbeResult<()> {

@@ -2617,7 +2617,7 @@ fn render_empty_state(buf: &mut Buffer, area: Rect, theme: &Theme, loading: bool
 /// The badge therefore neither prepends a glyph nor forces a colour.
 /// Prepending doubled the glyph (`✗ ✓ …`), and a forced colour painted non-errors (like "Session closed") red.
 /// The glyph, not the colour, conveys severity, mirroring the per-agent toast in [`crate::app::agent_view`].
-/// The badge ends one column before the right corner (`╮`) and is truncated to fit.
+/// The badge ends one column before the right corner (`╮`); a message too long for one row wraps onto the rows above.
 /// No-op when there's no toast or the box is too narrow.
 fn paint_dispatch_feedback_badge(
     buf: &mut Buffer,
@@ -2635,20 +2635,42 @@ fn paint_dispatch_feedback_badge(
     }
     // Leading/trailing spaces pad the chip away from the surrounding border glyphs
     // No glyph is prepended; the message already owns one (see the doc comment)
-    let label = format!(" {err} ");
-    let trunc = truncate_str(&label, max_w as usize);
-    let label_w = UnicodeWidthStr::width(trunc.as_str()) as u16;
+    // A message too long for the border wraps onto the rows above it (up to the top of the buffer), so a whole refusal stays readable
+    let inner_w = max_w as usize - 2;
+    let mut lines: Vec<String> = if UnicodeWidthStr::width(err) <= inner_w {
+        vec![err.to_string()]
+    } else {
+        crate::views::welcome::wrap_toast_lines(err, inner_w)
+    };
+    let avail_rows = (area.y.saturating_sub(buf.area.y) + 1) as usize;
+    if lines.len() > avail_rows {
+        lines.truncate(avail_rows);
+        if let Some(last) = lines.last_mut() {
+            *last = truncate_str(&format!("{last}\u{2026}"), inner_w);
+        }
+    }
+    let block_w = lines
+        .iter()
+        .map(|l| UnicodeWidthStr::width(l.as_str()))
+        .max()
+        .unwrap_or(0)
+        + 2;
     // Right-align so the badge ends one column before the `╮` corner.
-    let x = area.x + area.width.saturating_sub(1 + label_w);
-    buf.set_string(
-        x,
-        area.y,
-        &trunc,
-        Style::default()
-            .fg(theme.accent_user)
-            .bg(theme.bg_base)
-            .add_modifier(Modifier::BOLD),
-    );
+    let x = area.x + area.width.saturating_sub(1 + block_w as u16);
+    let top_y = area.y + 1 - lines.len() as u16;
+    for (i, line) in lines.iter().enumerate() {
+        let pad = block_w - 2 - UnicodeWidthStr::width(line.as_str());
+        let label = format!(" {line}{} ", " ".repeat(pad));
+        buf.set_string(
+            x,
+            top_y + i as u16,
+            &label,
+            Style::default()
+                .fg(theme.accent_user)
+                .bg(theme.bg_base)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
 }
 
 /// Paint the model and mode indicator onto the dispatch box's **bottom border**.

@@ -16,19 +16,39 @@ use super::{
 
 const RESPONSE_PREVIEW_MAX: usize = 200;
 
-async fn read_body_capped(mut response: reqwest::Response) -> reqwest::Result<String> {
+/// The raw body bytes, cut at the size cap, and whether the cap cut anything off. Only a `failClosed` hook (`look_ahead`) reads
+/// past the cap to find out; any other hook stops at the cap without another read, so a stalled or broken stream after a
+/// full-size body cannot discard what was already read.
+async fn read_body_capped(
+    mut response: reqwest::Response,
+    look_ahead: bool,
+) -> reqwest::Result<(Vec<u8>, bool)> {
+    if !look_ahead {
+        let mut buf: Vec<u8> = Vec::new();
+        while buf.len() < MAX_OUTPUT_BYTES {
+            let Some(chunk) = response.chunk().await? else {
+                break;
+            };
+            let take = chunk.len().min(MAX_OUTPUT_BYTES - buf.len());
+            buf.extend_from_slice(&chunk[..take]);
+            if take < chunk.len() {
+                break;
+            }
+        }
+        return Ok((buf, false));
+    }
     let mut buf: Vec<u8> = Vec::new();
-    while buf.len() < MAX_OUTPUT_BYTES {
-        let Some(chunk) = response.chunk().await? else {
-            break;
-        };
-        let take = chunk.len().min(MAX_OUTPUT_BYTES - buf.len());
-        buf.extend_from_slice(&chunk[..take]);
-        if take < chunk.len() {
+    let mut truncated = false;
+    while let Some(chunk) = response.chunk().await? {
+        let room = MAX_OUTPUT_BYTES - buf.len();
+        if chunk.len() > room {
+            buf.extend_from_slice(&chunk[..room]);
+            truncated = true;
             break;
         }
+        buf.extend_from_slice(&chunk);
     }
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    Ok((buf, truncated))
 }
 
 fn is_blocked_ip(ip: &IpAddr) -> bool {
@@ -284,7 +304,7 @@ pub async fn run_http_hook(
         "http hook completed"
     );
 
-    let response_text = match read_body_capped(response).await {
+    let (response_bytes, body_truncated) = match read_body_capped(response, spec.fail_closed).await {
         Ok(t) => t,
         Err(e) => {
             return (
@@ -300,6 +320,8 @@ pub async fn run_http_hook(
         }
     };
 
+    // Normal handling reads a lossy copy; a `failClosed` hook is judged on the raw bytes.
+    let response_text = String::from_utf8_lossy(&response_bytes).into_owned();
     let response_preview = if response_text.trim().is_empty() {
         None
     } else {
@@ -317,6 +339,14 @@ pub async fn run_http_hook(
         GateKind::Observe if status.is_success() => HookRunnerResult::Success,
         GateKind::Observe => HookRunnerResult::Failed(format!("HTTP status {status}")),
     };
+    // `failClosed`: a non-success status or an unreadable decision must not pass as an allow.
+    let result = super::enforce_fail_closed(
+        spec,
+        mode,
+        result,
+        super::gate_output_flaw(mode, &response_bytes, true, body_truncated),
+        (!status.is_success()).then(|| format!("HTTP status {status}")),
+    );
     (result, elapsed, http_info, system_message)
 }
 
@@ -1015,10 +1045,87 @@ mod tests {
             url: Some(raw_url.to_string()),
             url_raw: Some(raw_url.to_string()),
             timeout_ms,
+            fail_closed: false,
             source_dir: std::env::temp_dir(),
             extra_env,
             layer: crate::config::HookProvenance::File,
         }
+    }
+
+    /// `failClosed` on an HTTP hook: an allow with a non-success status, or an unreadable body, is refused; the same
+    /// responses stay allows without the flag, and a clean allow and an empty 200 are untouched.
+    #[test]
+    fn fail_closed_http_does_not_accept_unreadable_or_failed_allows() {
+        let mut spec = http_pre_tool_use_spec("https://example.com/hook", 5000, Default::default());
+        let enforce = |spec: &HookSpec, body: &str, status: StatusCode| {
+            let result = parse_http_blocking_result(body, status, "test-http-hook");
+            crate::runner::enforce_fail_closed(
+                spec,
+                GateKind::Tool,
+                result,
+                crate::runner::gate_output_flaw(GateKind::Tool, body.as_bytes(), true, false),
+                (!status.is_success()).then(|| format!("HTTP status {status}")),
+            )
+        };
+        let allowing = |result: &HookRunnerResult| matches!(result, HookRunnerResult::Allow { .. });
+
+        for (body, status) in [
+            (r#"{"decision":"#, StatusCode::OK),
+            ("<html>captive portal</html>", StatusCode::OK),
+            (r#"{"decision":"allow"}"#, StatusCode::BAD_GATEWAY),
+            (r#"{"decison":"deny"}"#, StatusCode::OK),
+        ] {
+            assert!(allowing(&enforce(&spec, body, status)), "default keeps today's allow: {body}");
+        }
+        spec.fail_closed = true;
+        for (body, status) in [
+            (r#"{"decision":"#, StatusCode::OK),
+            (r#"{"decision":"deny"}oops"#, StatusCode::OK),
+            (r#"{"decison":"deny"}"#, StatusCode::OK),
+            ("<html>captive portal</html>", StatusCode::OK),
+            (r#"{"decision":"allow"}"#, StatusCode::BAD_GATEWAY),
+        ] {
+            assert!(
+                matches!(enforce(&spec, body, status), HookRunnerResult::Failed(_)),
+                "fail-closed must not allow: {body} {status}"
+            );
+        }
+        // Non-JSON whitespace around a deny: the lenient parser cannot read it (so it is "treated as allow"), and the
+        // strict check must not trim it away either.
+        let deny = r#"{"decision":"deny","reason":"no"}"#;
+        let odd: Vec<String> = ["\u{0c}", "\u{a0}", "\u{2028}"]
+            .iter()
+            .flat_map(|w| [format!("{deny}{w}"), format!("{w}{deny}"), format!("{w}{deny}{w}")])
+            .collect();
+        for body in &odd {
+            for mode in [GateKind::Tool, GateKind::Prompt] {
+                assert!(
+                    crate::runner::gate_output_flaw(mode, body.as_bytes(), true, false).is_some(),
+                    "strict check must flag {body:?} on {mode:?}"
+                );
+            }
+            assert!(
+                matches!(enforce(&spec, body, StatusCode::OK), HookRunnerResult::Failed(_)),
+                "fail-closed must not allow {body:?}"
+            );
+        }
+        for body in [format!(" \t\r\n{deny}\n"), String::new()] {
+            for mode in [GateKind::Tool, GateKind::Prompt] {
+                assert_eq!(crate::runner::gate_output_flaw(mode, body.as_bytes(), true, false), None, "{body:?}");
+            }
+        }
+        spec.fail_closed = false;
+        for body in &odd {
+            assert!(allowing(&enforce(&spec, body, StatusCode::OK)), "flag off keeps today\u{27}s allow: {body:?}");
+        }
+        spec.fail_closed = true;
+        for (body, status) in [("", StatusCode::OK), (r#"{"decision":"allow"}"#, StatusCode::OK)] {
+            assert!(allowing(&enforce(&spec, body, status)), "{body}");
+        }
+        assert!(matches!(
+            enforce(&spec, r#"{"decision":"deny","reason":"no"}"#, StatusCode::OK),
+            HookRunnerResult::Deny { .. }
+        ));
     }
 
     fn http_pre_tool_use_envelope() -> HookEventEnvelope {
@@ -1195,6 +1302,174 @@ mod tests {
             1,
             "client must not issue a second request to the redirect target"
         );
+    }
+
+    /// A 200 body the size cap cut off (1 MiB of spaces, then the start of a decision) fails a fail-closed HTTP gate; it
+    /// is an allow without the flag, as before. A body of exactly the cap is complete, not truncated.
+    #[allow(clippy::disallowed_methods)] // local mock-server test; no TLS policy applies
+    #[tokio::test]
+    async fn fail_closed_http_denies_a_body_cut_off_by_the_size_cap() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let first_line_long = String::from_utf8_lossy(&buf).contains("POST /long");
+                let body = if first_line_long {
+                    format!("{}{{\"decision\":", " ".repeat(MAX_OUTPUT_BYTES + 1))
+                } else {
+                    format!("{}{}", " ".repeat(MAX_OUTPUT_BYTES - 20), r#"{"decision":"allow"}"#)
+                };
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(body.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let run = |path: &str, fail_closed: bool| {
+            let mut spec = http_pre_tool_use_spec(&format!("http://{addr}{path}"), 20000, Default::default());
+            spec.fail_closed = fail_closed;
+            async move {
+                run_http_hook(&spec, &http_pre_tool_use_envelope(), &http_test_ctx(), GateKind::Tool).await.0
+            }
+        };
+        assert!(matches!(run("/long", false).await, HookRunnerResult::Allow { .. }), "default keeps today's allow");
+        match run("/long", true).await {
+            HookRunnerResult::Failed(reason) => assert!(reason.contains("size cap"), "{reason}"),
+            other => panic!("fail-closed must not allow a truncated body: {other:?}"),
+        }
+        assert!(
+            matches!(run("/exact", true).await, HookRunnerResult::Allow { .. }),
+            "a body of exactly the cap is complete"
+        );
+    }
+
+    /// Without the flag an HTTP hook that sends a valid deny padded to exactly the cap, and then breaks the stream, must
+    /// still deny: the reader stops at the cap without another read, as before. With the flag the look-ahead error fails closed.
+    #[allow(clippy::disallowed_methods)] // local mock-server test; no TLS policy applies
+    #[tokio::test]
+    async fn http_deny_at_exactly_the_cap_survives_a_broken_stream_without_the_flag() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let deny = r#"{"decision":"deny","reason":"stop"}"#;
+                let body = format!("{deny}{}", " ".repeat(MAX_OUTPUT_BYTES - deny.len()));
+                assert_eq!(body.len(), MAX_OUTPUT_BYTES);
+                let head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(format!("{:x}\r\n", body.len()).as_bytes()).await;
+                let _ = socket.write_all(body.as_bytes()).await;
+                let _ = socket.write_all(b"\r\n").await;
+                let _ = socket.flush().await;
+                // no terminating chunk: end the stream early (the client sees an incomplete message)
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let run = |fail_closed: bool| {
+            let mut spec = http_pre_tool_use_spec(&format!("http://{addr}/deny"), 20000, Default::default());
+            spec.fail_closed = fail_closed;
+            async move {
+                run_http_hook(&spec, &http_pre_tool_use_envelope(), &http_test_ctx(), GateKind::Tool).await.0
+            }
+        };
+        assert!(matches!(run(false).await, HookRunnerResult::Deny { .. }), "the deny read before the break must stand");
+        assert!(!matches!(run(true).await, HookRunnerResult::Allow { .. }), "fail-closed must not allow");
+    }
+
+    /// A 200 body that is not valid UTF-8 (a raw 0xFF in an allow's reason) or that repeats a key (the first copy holding
+    /// a typo) fails a fail-closed HTTP hook on both gates: lossy decoding and last-copy-wins must not repair the flaw
+    /// away. Without the flag both stay allows, as before; valid non-ASCII UTF-8 is an allow either way.
+    #[allow(clippy::disallowed_methods)] // local mock-server test; no TLS policy applies
+    #[tokio::test]
+    async fn fail_closed_http_judges_the_raw_body_on_both_gates() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let request = String::from_utf8_lossy(&buf);
+                let body: Vec<u8> = if request.contains("POST /tool-utf8") {
+                    b"{\"decision\":\"allow\",\"reason\":\"\xff\"}".to_vec()
+                } else if request.contains("POST /prompt-utf8") {
+                    b"{\"decision\":\"approve\",\"reason\":\"\xff\"}".to_vec()
+                } else if request.contains("POST /dup") {
+                    br#"{"hookSpecificOutput":{"permissionDecison":"deny"},"hookSpecificOutput":{}}"#.to_vec()
+                } else {
+                    r#"{"systemMessage":"café ✓ 日本語"}"#.as_bytes().to_vec()
+                };
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(&body).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let run = |path: &str, mode: GateKind, fail_closed: bool| {
+            let mut spec = http_pre_tool_use_spec(&format!("http://{addr}{path}"), 20000, Default::default());
+            spec.fail_closed = fail_closed;
+            async move { run_http_hook(&spec, &http_pre_tool_use_envelope(), &http_test_ctx(), mode).await.0 }
+        };
+        let allowing = |result: &HookRunnerResult| {
+            matches!(result, HookRunnerResult::Allow { .. } | HookRunnerResult::Success)
+        };
+        for (path, mode) in [
+            ("/tool-utf8", GateKind::Tool),
+            ("/dup", GateKind::Tool),
+            ("/prompt-utf8", GateKind::Prompt),
+            ("/dup", GateKind::Prompt),
+        ] {
+            let result = run(path, mode, false).await;
+            assert!(allowing(&result), "default keeps today's allow: {path} {mode:?}: {result:?}");
+            match run(path, mode, true).await {
+                HookRunnerResult::Failed(reason) => {
+                    assert!(reason.contains("UTF-8") || reason.contains("duplicate key"), "{path} {mode:?}: {reason}")
+                }
+                other => panic!("fail-closed must not allow {path} {mode:?}: {other:?}"),
+            }
+        }
+        for mode in [GateKind::Tool, GateKind::Prompt] {
+            for flag in [true, false] {
+                let result = run("/ok", mode, flag).await;
+                assert!(allowing(&result), "valid UTF-8 stays an allow: {mode:?} flag {flag}: {result:?}");
+            }
+        }
+    }
+
+    /// The upstream-shaped prompt document (context only, no decision) is an allow under the flag on an HTTP prompt hook;
+    /// an unknown key in it is a failure.
+    #[test]
+    fn fail_closed_http_prompt_accepts_the_upstream_context_shape() {
+        let ok = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"ctx"}}"#;
+        assert_eq!(crate::runner::gate_output_flaw(GateKind::Prompt, ok.as_bytes(), true, false), None);
+        assert!(matches!(
+            parse_http_prompt_result(ok, StatusCode::OK, "h"),
+            HookRunnerResult::Success
+        ));
+        let typo = r#"{"hookSpecificOutput":{"additionalContxt":"ctx"}}"#;
+        assert!(crate::runner::gate_output_flaw(GateKind::Prompt, typo.as_bytes(), true, false).is_some());
+        assert_eq!(crate::runner::gate_output_flaw(GateKind::Prompt, b"{}", true, false), None);
     }
 
     #[tokio::test]

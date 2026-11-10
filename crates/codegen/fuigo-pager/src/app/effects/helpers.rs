@@ -302,6 +302,14 @@ pub(crate) fn is_disk_full_error(raw: &str) -> bool {
 ///
 /// Strips protocol jargon (ACP, JSON-RPC) and other technical noise that would be meaningless in a toast, and collapses known disk-full markers.
 pub(crate) fn sanitize_user_error(raw: &str) -> String {
+    sanitize_user_error_with_cap(raw, true)
+}
+/// [`sanitize_user_error`] without the 200-character cut, for a refusal or load reason that has to reach the person whole
+/// (held elsewhere, a copy or rename refusal, a session load failure). Those render in scrollback, which wraps.
+pub(crate) fn sanitize_user_error_whole(raw: &str) -> String {
+    sanitize_user_error_with_cap(raw, false)
+}
+fn sanitize_user_error_with_cap(raw: &str, cap: bool) -> String {
     if is_disk_full_error(raw) {
         return fuigo_fast_worktree::ENOSPC_OS_MESSAGE.to_string();
     }
@@ -319,7 +327,7 @@ pub(crate) fn sanitize_user_error(raw: &str) -> String {
     for (pattern, replacement) in REPLACEMENTS {
         result = result.replace(pattern, replacement);
     }
-    if result.chars().count() > 200 {
+    if cap && result.chars().count() > 200 {
         let truncated: String = result.chars().take(180).collect();
         result = format!("{truncated}...");
     }
@@ -847,6 +855,28 @@ pub(super) async fn send_auth_cancel(tx: &AcpAgentTx, request_seq: u64) -> TaskR
         tracing::debug!(error = %acp_error_text(&e), "auth cancel ext request failed (ignored)");
     }
     TaskResult::AuthCancelComplete
+}
+/// Best-effort `fuigo/btw/cancel`: the shell stops the side question's model call. Errors are ignored; the panel is already gone.
+pub(super) async fn send_btw_cancel(
+    tx: &AcpAgentTx,
+    session_id: &acp::SessionId,
+    request_id: uuid::Uuid,
+) -> TaskResult {
+    let req = acp::ExtRequest::new(
+        "fuigo/btw/cancel",
+        serde_json::value::to_raw_value(
+                &serde_json::json!({
+                    "sessionId": session_id.0.to_string(),
+                    "requestId": request_id.to_string(),
+                }),
+            )
+            .expect("serialize btw/cancel params")
+            .into(),
+    );
+    if let Err(e) = acp_send(req, tx).await {
+        tracing::debug!(error = %acp_error_text(&e), "btw cancel ext request failed (ignored)");
+    }
+    TaskResult::BtwCancelComplete
 }
 pub(super) async fn send_check_subscription(
     tx: &AcpAgentTx,
@@ -1604,6 +1634,19 @@ pub(super) fn persist_hint(
             }
             TaskResult::CancelComplete
         });
+}
+/// Fire-and-forget blocking write of `[keys].vim` to config.toml.
+pub(super) fn persist_keys_vim(tasks: &mut JoinSet<TaskResult>, value: &'static str) {
+    tasks.spawn(async move {
+        match tokio::task::spawn_blocking(move || crate::config_toml_edit::set_keys_vim(value))
+            .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!("failed to persist [keys] vim: {e}"),
+            Err(e) => tracing::warn!("failed to persist [keys] vim (join error): {e}"),
+        }
+        TaskResult::CancelComplete
+    });
 }
 /// Map a billing config into a [`CreditBalance`].
 ///

@@ -1063,6 +1063,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         } => handle_auth_url_ready(app, request_seq, auth_url, external, mode),
         TaskResult::AuthCodeSubmitted { .. } => vec![],
         TaskResult::AuthCancelComplete => vec![],
+        TaskResult::BtwCancelComplete => vec![],
         TaskResult::McpsListLoaded { agent_id, result } => {
             use crate::views::extensions_modal::TabDataState;
             if let Some(agent) = app.agents.get_mut(&agent_id)
@@ -1438,7 +1439,24 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             error,
         } => {
             tracing::warn!(source, session_id = %session_id, error = %error, "session delete failed");
-            app.show_toast(&format!("Couldn't delete session: {error}"));
+            let text = delete_failed_text(&error);
+            // The toast is one line and cut to the width; the refusal can be a sentence long, so the open session it
+            // belongs to (else the focused one) also gets it whole in scrollback, as a failed rename does
+            let target = app
+                .agents
+                .iter()
+                .find(|(_, a)| a.session.session_id.as_ref().is_some_and(|s| s.0.as_ref() == session_id))
+                .map(|(id, _)| *id)
+                .or(match app.active_view {
+                    ActiveView::Agent(id) => Some(id),
+                    _ => None,
+                });
+            if let Some(agent) = target.and_then(|id| app.agents.get_mut(&id)) {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(text.clone()));
+            }
+            app.show_toast(&text);
             vec![]
         }
         TaskResult::ContextInfoComplete {
@@ -1611,8 +1629,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::BtwResponse {
             agent_id,
             result,
-            minimal_request_id,
-        } => handle_btw_response(app, agent_id, result, minimal_request_id),
+            request_id,
+        } => handle_btw_response(app, agent_id, result, request_id),
         TaskResult::InterjectQueued { .. } => vec![],
         TaskResult::RecapRequested {
             session_id,
@@ -1894,4 +1912,15 @@ fn feedback_outcome_on_active_tab(app: &mut AppView, message: String) {
             .scrollback
             .push_block(crate::scrollback::block::RenderBlock::system(message));
     }
+}
+
+/// The line for a failed session delete: one "Couldn't delete session:" prefix whatever the reason already starts with.
+pub(crate) fn delete_failed_text(reason: &str) -> String {
+    const PREFIX: &str = "couldn't delete session:";
+    let reason = reason.trim();
+    let reason = match reason.get(..PREFIX.len()) {
+        Some(head) if head.eq_ignore_ascii_case(PREFIX) => reason[PREFIX.len()..].trim_start(),
+        _ => reason,
+    };
+    format!("Couldn't delete session: {reason}")
 }

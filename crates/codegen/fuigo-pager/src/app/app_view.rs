@@ -3437,6 +3437,14 @@ impl AppView {
                 {
                     return outcome;
                 }
+                // `ui.single_ctrl_c_quit`: one Ctrl+C quits when nothing would be lost; off by default
+                if !overlay_active
+                    && let Event::Key(key) = ev
+                    && key.kind != KeyEventKind::Release
+                    && self.single_ctrl_c_quits(&id, key)
+                {
+                    return InputOutcome::Action(Action::Quit);
+                }
                 let prompt_paging = !overlay_active && !self.screen_mode.is_minimal();
                 let outcome = match self.agents.get_mut(&id) {
                     Some(agent) => {
@@ -3752,6 +3760,23 @@ impl AppView {
             InputOutcome::Action(action)
         }
     }
+    /// Whether `key` is a Ctrl+C that `ui.single_ctrl_c_quit` turns into an immediate quit.
+    /// Needs the setting on, the cancel key, an agent with nothing to lose, and no workflow run that quitting would stop.
+    pub(crate) fn single_ctrl_c_quits(
+        &self,
+        id: &AgentId,
+        key: &crossterm::event::KeyEvent,
+    ) -> bool {
+        self.current_ui.single_ctrl_c_quit.unwrap_or(false)
+            && key!('c', CONTROL).matches(key)
+            && self.registry.matches_id(ActionId::CancelTurn, key)
+            && self.running_workflow_count() == 0
+            && self
+                .agents
+                .get(id)
+                .is_some_and(|agent| agent.nothing_lost_on_quit())
+    }
+
     /// Workflow runs across all sessions that quitting would stop (active ones; finished and paused runs are not counted).
     pub(crate) fn running_workflow_count(&self) -> usize {
         self.agents
@@ -4992,6 +5017,7 @@ impl AppView {
     ///   It otherwise auto-hides once all todos are done (`minimal::live::todo_panel_visible`); the pin keeps a finished list visible for review.
     ///   The full-TUI Ctrl+T toggles the todo overlay pane, which minimal never renders.
     /// - `Ctrl+E` re-prints the most-recently committed folded block fully expanded below the conversation.
+    ///   While the composer holds a draft it is left to the prompt, where it moves the cursor to the end of the line.
     ///   Committed terminal text can't be mutated, so expansion is an honest re-print.
     ///   The full-TUI Ctrl+E toggles the scrollback-pane fold.
     /// - `Ctrl+O` opens the whole conversation fully expanded in `$PAGER`.
@@ -5011,6 +5037,15 @@ impl AppView {
     ///   The pane never renders in minimal, so the toggle focused an *invisible* pane that ate every keystroke.
     ///   (The same class of trap as the never-rendered `/mcps` modal.)
     ///   Queue edits stay full-TUI-only; in minimal, panes become committed blocks.
+    /// Whether the active agent's composer holds any text (a draft being edited).
+    fn minimal_composer_has_text(&self) -> bool {
+        let ActiveView::Agent(id) = &self.active_view else {
+            return false;
+        };
+        self.agents
+            .get(id)
+            .is_some_and(|agent| !agent.prompt.text().is_empty())
+    }
     fn minimal_key_intercept(&mut self, key: &crossterm::event::KeyEvent) -> Option<InputOutcome> {
         if key!('t', CONTROL).matches(key) {
             self.minimal_state.show_todos = !self.minimal_state.show_todos;
@@ -5020,6 +5055,11 @@ impl AppView {
         {
             return Some(InputOutcome::Action(crate::app::actions::Action::ShowQueue));
         } else if key!('e', CONTROL).matches(key) {
+            // With a draft in the composer, Ctrl+E is the readline "end of line" key: let the prompt have it.
+            // `/expand` still re-prints the folded block.
+            if self.minimal_composer_has_text() {
+                return None;
+            }
             self.minimal_expand_last();
         } else if key!('o', CONTROL).matches(key) {
             if crate::minimal_api::minimal_ctrl_o_opens_transcript(self) {

@@ -103,6 +103,12 @@ pub fn view(snapshot: DiagnosticSnapshot<'_>) -> DiagnosticReport {
         &snapshot.common,
     ));
     warnings.extend(wezterm_warning);
+    if ctx.is_tmux_backed() {
+        warnings.extend(super::tmux_escape_time_warning(
+            &snapshot.common.tmux.escape_time,
+            &ctx.tmux_config_path(),
+        ));
+    }
     warnings.extend(super::color_support_warning(
         snapshot.color_level,
         ctx.brand,
@@ -534,6 +540,7 @@ pub(crate) const fn id_for(category: WarningCategory) -> Option<DiagnosticId> {
         WarningCategory::WezTermKittyKeyboardOff => "wezterm-kitty",
         WarningCategory::LimitedColorSupport => "limited-color",
         WarningCategory::TmuxColorReduced => "tmux-truecolor",
+        WarningCategory::TmuxEscapeTimeSlow => "tmux-escape-time",
         WarningCategory::SshWithoutWrap => "ssh-wrap",
         WarningCategory::NotificationProtocolFallback => {
             return Some(crate::diagnostics::NOTIFICATION_PROTOCOL_FALLBACK_ID);

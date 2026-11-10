@@ -77,6 +77,7 @@ fn tmux_facts(
         allow_passthrough: TmuxProbeResult::Available("on".to_owned()),
         control_mode,
         client_features: TmuxProbeResult::Unavailable,
+        escape_time: TmuxProbeResult::Unavailable,
     }
 }
 
@@ -89,6 +90,7 @@ fn unavailable_tmux_facts() -> TmuxProbeFacts {
         allow_passthrough: TmuxProbeResult::Unavailable,
         control_mode: TmuxProbeResult::Unavailable,
         client_features: TmuxProbeResult::Unavailable,
+        escape_time: TmuxProbeResult::Unavailable,
     }
 }
 

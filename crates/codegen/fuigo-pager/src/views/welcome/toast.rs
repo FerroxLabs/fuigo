@@ -9,8 +9,59 @@ use crate::render::SafeBuf;
 use crate::theme::Theme;
 use crate::views::goal_detail::truncate_to_width;
 
-/// Prefer one row above the prompt, right-aligned to it.
-/// With no prompt (login / gate), paint the last row of `area`.
+/// Greedy word wrap by display width; a word wider than `width` is broken, so no text is dropped.
+pub(crate) fn wrap_toast_lines(msg: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    for word in msg.split_whitespace() {
+        let mut word = word;
+        let mut ww = UnicodeWidthStr::width(word);
+        loop {
+            let gap = usize::from(cur_w > 0);
+            if cur_w + gap + ww <= width {
+                if gap == 1 {
+                    cur.push(' ');
+                }
+                cur.push_str(word);
+                cur_w += gap + ww;
+                break;
+            }
+            if cur_w > 0 {
+                lines.push(std::mem::take(&mut cur));
+                cur_w = 0;
+                continue;
+            }
+            // A single word wider than the line: break it at the width
+            let mut head = String::new();
+            let mut hw = 0usize;
+            let mut rest_at = word.len();
+            for (i, ch) in word.char_indices() {
+                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if hw + cw > width && !head.is_empty() {
+                    rest_at = i;
+                    break;
+                }
+                head.push(ch);
+                hw += cw;
+            }
+            lines.push(head);
+            word = &word[rest_at..];
+            ww = UnicodeWidthStr::width(word);
+            if word.is_empty() {
+                break;
+            }
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
+/// Prefer rows just above the prompt, right-aligned to it; a message wider than the screen wraps onto more rows (up to the area) instead of being cut.
+/// With no prompt (login / gate), paint up from the last row of `area`.
 /// Stacked welcome layouts put the version badge there, so the toast may overlay it briefly.
 pub(crate) fn paint_welcome_toast(
     buf: &mut Buffer,
@@ -23,28 +74,46 @@ pub(crate) fn paint_welcome_toast(
     if max_msg == 0 || area.height == 0 {
         return;
     }
-    let body = if UnicodeWidthStr::width(msg) <= max_msg {
-        std::borrow::Cow::Borrowed(msg)
-    } else {
-        std::borrow::Cow::Owned(truncate_to_width(msg, max_msg))
+    let prompt = prompt_rect.filter(|r| r.width > 0 && r.y > area.y);
+    let bottom_y = match prompt {
+        Some(prompt) => prompt.y.saturating_sub(1),
+        None => area.bottom().saturating_sub(1),
     };
-    let toast = format!(" {body} ");
-    let w = UnicodeWidthStr::width(toast.as_str()) as u16;
-    let (x, y) = if let Some(prompt) = prompt_rect.filter(|r| r.width > 0 && r.y > area.y) {
-        let max_x = area.right().saturating_sub(w).max(area.x);
-        let x = prompt.right().saturating_sub(w + 1).clamp(area.x, max_x);
-        (x, prompt.y.saturating_sub(1))
+    let avail_rows = (bottom_y.saturating_sub(area.y) + 1) as usize;
+    let mut lines: Vec<String> = if UnicodeWidthStr::width(msg) <= max_msg {
+        vec![msg.to_string()]
     } else {
-        (
-            area.right().saturating_sub(w.saturating_add(1)),
-            area.bottom().saturating_sub(1),
-        )
+        wrap_toast_lines(msg, max_msg)
+    };
+    if lines.len() > avail_rows {
+        lines.truncate(avail_rows);
+        if let Some(last) = lines.last_mut() {
+            *last = truncate_to_width(&format!("{last}\u{2026}"), max_msg);
+        }
+    }
+    let block_w = lines
+        .iter()
+        .map(|l| UnicodeWidthStr::width(l.as_str()))
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let w = block_w as u16;
+    let x = if let Some(prompt) = prompt {
+        let max_x = area.right().saturating_sub(w).max(area.x);
+        prompt.right().saturating_sub(w + 1).clamp(area.x, max_x)
+    } else {
+        area.right().saturating_sub(w.saturating_add(1))
     };
     let style = Style::default()
         .fg(theme.accent_user)
         .bg(theme.bg_base)
         .add_modifier(Modifier::BOLD);
-    buf.set_string_safe(x, y, &toast, style);
+    let top_y = bottom_y + 1 - lines.len() as u16;
+    for (i, line) in lines.iter().enumerate() {
+        let pad = block_w - 2 - UnicodeWidthStr::width(line.as_str());
+        let toast = format!(" {line}{} ", " ".repeat(pad));
+        buf.set_string_safe(x, top_y + i as u16, &toast, style);
+    }
 }
 
 #[cfg(test)]
@@ -69,15 +138,15 @@ mod tests {
         );
 
         paint_welcome_toast(&mut buf, area, &long, Some(prompt));
-        let y = prompt.y.saturating_sub(1);
-        let long_row = toast_row(&buf, area, y);
+        let rows: Vec<String> = (0..prompt.y)
+            .map(|y| toast_row(&buf, area, y).trim().to_string())
+            .filter(|r| !r.is_empty())
+            .collect();
+        assert!(rows.len() > 1, "narrow width must wrap: {rows:?}");
+        assert_eq!(rows.join(" "), long, "the whole message must show");
         assert!(
-            long_row.contains('\u{2026}'),
-            "narrow width must truncate with ellipsis: {long_row:?}"
-        );
-        assert!(
-            long_row.contains("https://x.ai"),
-            "URL-first message should keep the URL prefix under truncation: {long_row:?}"
+            rows[0].contains("https://x.ai"),
+            "URL-first message should keep the URL at the start: {rows:?}"
         );
         assert!(
             !toast_row(&buf, area, prompt.y).contains("https://"),
@@ -107,6 +176,25 @@ mod tests {
         assert!(
             !toast_row(&buf, area, prompt.y).contains('你'),
             "must not spill into prompt row"
+        );
+    }
+
+    #[test]
+    fn paint_welcome_toast_wraps_a_long_refusal_whole() {
+        let msg = "Couldn't delete session: This session is open in another Fuigo window. Close it there, or turn on the shared leader (`--leader`) to use it from several windows.";
+        let area = Rect::new(0, 0, 80, 12);
+        let prompt = Rect::new(2, 9, 76, 3);
+        let mut buf = Buffer::empty(area);
+        paint_welcome_toast(&mut buf, area, msg, Some(prompt));
+        let text: Vec<String> = (0..prompt.y)
+            .map(|y| toast_row(&buf, area, y).trim().to_string())
+            .filter(|r| !r.is_empty())
+            .collect();
+        assert!(text.len() > 1, "a long message must wrap: {text:?}");
+        assert_eq!(text.join(" "), msg, "the whole refusal must show");
+        assert!(
+            !toast_row(&buf, area, prompt.y).contains("Couldn't"),
+            "must not spill into the prompt row"
         );
     }
 

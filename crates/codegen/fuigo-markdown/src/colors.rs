@@ -189,11 +189,55 @@ pub fn adapt_color(color: Color) -> Option<Color> {
             Color::Rgb(rgb) => Color::Ansi256(rgb_to_ansi256(rgb)),
             other => other,
         }),
-        ColorLevel::Basic => Some(match color {
-            Color::Rgb(rgb) => Color::Ansi(rgb_to_ansi16(rgb)),
-            Color::Ansi256(idx) => Color::Ansi(ansi256_to_ansi16(idx)),
-            Color::Ansi(ansi) => Color::Ansi(ansi),
-        }),
+        ColorLevel::Basic => {
+            let ansi = match color {
+                Color::Rgb(rgb) => rgb_to_ansi16(rgb),
+                Color::Ansi256(idx) => ansi256_to_ansi16(idx),
+                Color::Ansi(ansi) => ansi,
+            };
+            Some(Color::Ansi(if eight_color_terminal() {
+                fold_bright_for_eight_colors(ansi)
+            } else {
+                ansi
+            }))
+        }
+    }
+}
+
+/// `TERM` of an 8-colour terminal: bare `screen` / `tmux` (and their dotted variants) without a colour-depth suffix.
+/// Such a terminal has no bright SGR 90-97 colours; tmux turns them into bold or drops them.
+fn term_is_eight_color(term: &str) -> bool {
+    let term = term.to_ascii_lowercase();
+    let is_multiplexer = term == "screen"
+        || term == "tmux"
+        || term.starts_with("screen.")
+        || term.starts_with("tmux.");
+    is_multiplexer
+        && !term.contains("256color")
+        && !term.contains("direct")
+        && !term.contains("16color")
+}
+
+fn eight_color_terminal() -> bool {
+    static EIGHT: OnceLock<bool> = OnceLock::new();
+    *EIGHT.get_or_init(|| {
+        std::env::var("TERM").is_ok_and(|term| term_is_eight_color(&term))
+            && std::env::var_os("COLORTERM").is_none()
+    })
+}
+
+/// Fold a bright ANSI colour onto its normal twin, so text stays visible on an 8-colour terminal.
+/// Bright black would be black on the usual black background, so it becomes grey (`White` is SGR 37).
+fn fold_bright_for_eight_colors(ansi: AnsiColor) -> AnsiColor {
+    match ansi {
+        AnsiColor::BrightBlack => AnsiColor::White,
+        AnsiColor::BrightRed => AnsiColor::Red,
+        AnsiColor::BrightGreen => AnsiColor::Green,
+        AnsiColor::BrightYellow => AnsiColor::Yellow,
+        AnsiColor::BrightBlue => AnsiColor::Blue,
+        AnsiColor::BrightMagenta => AnsiColor::Magenta,
+        AnsiColor::BrightCyan => AnsiColor::Cyan,
+        other => other,
     }
 }
 
@@ -329,6 +373,34 @@ pub fn ansi256_to_ansi16(idx: Ansi256Color) -> AnsiColor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn eight_color_terms_are_bare_screen_and_tmux_only() {
+        for term in ["screen", "tmux", "screen.linux"] {
+            assert!(super::term_is_eight_color(term), "{term}");
+        }
+        for term in [
+            "screen-256color",
+            "tmux-256color",
+            "xterm-256color",
+            "xterm",
+            "",
+        ] {
+            assert!(!super::term_is_eight_color(term), "{term}");
+        }
+    }
+
+    #[test]
+    fn bright_ansi_folds_to_visible_twins_for_eight_colors() {
+        use anstyle::AnsiColor::*;
+        assert_eq!(super::fold_bright_for_eight_colors(BrightBlack), White);
+        assert_eq!(super::fold_bright_for_eight_colors(BrightBlue), Blue);
+        assert_eq!(super::fold_bright_for_eight_colors(Red), Red);
+        assert_eq!(
+            super::fold_bright_for_eight_colors(BrightWhite),
+            BrightWhite
+        );
+    }
+
     use super::*;
 
     #[test]

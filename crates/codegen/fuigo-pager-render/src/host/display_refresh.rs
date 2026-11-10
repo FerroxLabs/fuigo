@@ -140,16 +140,40 @@ fn accept_hz(
     (Some(hz), source, "")
 }
 
+/// Longest startup waits for CoreGraphics. In a sandbox that blocks the window server the call can hang forever.
+#[cfg(any(target_os = "macos", test))]
+const MACOS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Runs `f` on its own thread and gives up after `timeout`; the thread is left to finish (or hang) on its own.
+#[cfg(any(target_os = "macos", test))]
+fn run_time_boxed<T: Send + 'static>(
+    timeout: std::time::Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("display-refresh-probe".into())
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .ok()?;
+    rx.recv_timeout(timeout).ok()
+}
+
 #[cfg(target_os = "macos")]
 fn probe_macos() -> Result<u32, &'static str> {
-    // Fail-closed if FFI panics (abort builds still abort).
-    match std::panic::catch_unwind(|| {
-        // SAFETY: read-only CoreGraphics display query; no mode mutation.
-        unsafe { macos_main_display_refresh_hz() }
-    }) {
-        Ok(inner) => inner,
-        Err(_) => Err("error"),
-    }
+    // Time-boxed so a blocked window server cannot stall startup; a timeout skips the probe like any other failure.
+    run_time_boxed(MACOS_PROBE_TIMEOUT, || {
+        // Fail-closed if FFI panics (abort builds still abort).
+        match std::panic::catch_unwind(|| {
+            // SAFETY: read-only CoreGraphics display query; no mode mutation.
+            unsafe { macos_main_display_refresh_hz() }
+        }) {
+            Ok(inner) => inner,
+            Err(_) => Err("error"),
+        }
+    })
+    .unwrap_or(Err("timeout"))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -276,6 +300,21 @@ mod tests {
         let r2 = probe_display_refresh();
         assert_eq!(r.hz, r2.hz);
         assert_eq!(r.outcome(), r2.outcome());
+    }
+
+    #[test]
+    fn time_boxed_probe_gives_up_on_a_hung_call() {
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let hung = run_time_boxed(Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_secs(5));
+            Ok::<u32, &'static str>(60)
+        });
+        assert!(hung.is_none(), "a hung probe must time out");
+        assert!(start.elapsed() < Duration::from_secs(2));
+        let quick = run_time_boxed(Duration::from_secs(5), || Ok::<u32, &'static str>(120));
+        assert_eq!(quick, Some(Ok(120)));
+        assert!(MACOS_PROBE_TIMEOUT <= Duration::from_secs(1));
     }
 
     #[test]

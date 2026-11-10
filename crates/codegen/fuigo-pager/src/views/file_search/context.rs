@@ -127,6 +127,12 @@ pub fn detect_with_drill(
     })
 }
 
+/// Whether a matcher query names a folder outside the workspace root: it starts with `/`, `~/` or `../`.
+/// The picker lists such a folder directly instead of fuzzy-searching the workspace tree.
+pub fn is_outside_query(query: &str) -> bool {
+    query.starts_with('/') || query.starts_with("~/") || query.starts_with("../")
+}
+
 /// Normalize a display path (strip leading `./`).
 pub fn normalize_display_path(path: &str) -> &str {
     path.strip_prefix("./").unwrap_or(path)
@@ -227,6 +233,16 @@ mod tests {
     #[test]
     fn cursor_at_zero() {
         assert!(detect("@foo", 0).is_none());
+    }
+
+    #[test]
+    fn outside_queries_are_absolute_home_or_parent_relative() {
+        for q in ["/", "/etc/ho", "~/", "~/Doc", "../", "../sib/x"] {
+            assert!(is_outside_query(q), "{q}");
+        }
+        for q in ["", "src/", "~", "..", "~user/x", ".hidden", "a/../b", "./x"] {
+            assert!(!is_outside_query(q), "{q}");
+        }
     }
 
     #[test]

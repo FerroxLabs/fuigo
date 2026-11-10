@@ -357,6 +357,10 @@ pub fn acp_error_text(err: &acp::Error) -> String {
         Some(detail) if err.message.is_empty() => detail,
         // Overload copy (and any future error whose own message is the user-facing text) says it once, not twice
         Some(detail) if detail == err.message => detail,
+        // A detail that already carries the message (an auth failure's cause text) reads once, as does a message that
+        // already carries the detail.
+        Some(detail) if detail.contains(err.message.as_str()) => detail,
+        Some(detail) if err.message.contains(detail.as_str()) => err.message.clone(),
         Some(detail) => format!("{}: {detail}", err.message),
         None => headline(),
     }
@@ -1595,6 +1599,29 @@ mod tests {
             SamplingErrorKind::Api,
         ));
         assert_eq!(acp_error_text(&distinct), "Internal error: boom");
+    }
+
+    /// Sign-in failures: the detail embeds the message, or the message embeds the detail. The cause shows once.
+    #[test]
+    fn acp_error_text_does_not_repeat_a_cause_embedded_in_the_other_half() {
+        let detail_has_message = acp::Error::new(
+            acp::ErrorCode::InternalError.into(),
+            "Sign-in failed",
+        )
+        .data(serde_json::json!({"message": "Sign-in failed: token endpoint returned 401"}));
+        assert_eq!(
+            acp_error_text(&detail_has_message),
+            "Sign-in failed: token endpoint returned 401"
+        );
+        let message_has_detail = acp::Error::new(
+            acp::ErrorCode::InternalError.into(),
+            "Sign-in failed: token endpoint returned 401",
+        )
+        .data(serde_json::json!({"message": "token endpoint returned 401"}));
+        assert_eq!(
+            acp_error_text(&message_has_detail),
+            "Sign-in failed: token endpoint returned 401"
+        );
     }
 
     /// A cancelled request is not an auth rejection: JSON-RPC `-32800` (request cancelled), never `-32000`, with `error_kind: cancelled`.

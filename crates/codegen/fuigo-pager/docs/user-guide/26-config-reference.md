@@ -558,6 +558,7 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | --- | --- | --- | --- | --- |
 | `ui.animations` | `boolean` | `yes` | `user` | Master switch for decorative animation (default true). False shows the settled background mark from the first frame, whatever `ui.background_mark_animate` says. |
 | `ui.approval_mode` | `string` | `yes` | `user` | Deprecated; use `ui.permission_mode`. |
+| `ui.at_picker_outside_workspace` | `boolean` | `yes` | `user` | An `@` path that starts with `/`, `~/` or `../` lists the files in that folder. Set `false` to keep the picker to the workspace. Default `true`. Listing shows names only; attaching a file works as for any `@` path. |
 | `ui.auto_dark_theme` | `string` | `yes` | `user` | Theme when `theme = auto` and the OS is dark. |
 | `ui.auto_light_theme` | `string` | `yes` | `user` | Theme when `theme = auto` and the OS is light. |
 | `ui.background_mark` | `boolean` | `yes` | `user` | Faint dot-matrix Wind mark above the text column of the welcome screen (default true). It takes only the rows the text leaves and never overlaps the text. Hidden under 70x24 (the welcome layout itself starts at 60 columns), when too few rows are spare, with `NO_COLOR`, and while the prompt holds text. |
@@ -602,12 +603,13 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | `ui.show_thinking_blocks` | `boolean` | `yes` | `user` | Show thinking/reasoning blocks while streaming. Also FUIGO_SHOW_THINKING_BLOCKS. |
 | `ui.show_timeline` | `boolean` | `yes` | `user` | Per-turn tick rail instead of the scrollbar. |
 | `ui.show_timestamps` | `boolean` | `yes` | `user` | Clock time next to messages. Also `/timestamps`. |
-| `ui.simple_mode` | `boolean` | `yes` | `user` | Readline prompt editing when true; experimental vim prompt keys when false. |
+| `ui.simple_mode` | `boolean` | `yes` | `user` | Alias of `[keys] vim` for the `/settings` switch: readline prompt when true, Vim editing in the prompt (`[keys] vim = "all"`) when false. |
+| `ui.single_ctrl_c_quit` | `boolean` | `yes` | `user` | One Ctrl+C quits when nothing would be lost: no running turn, an empty draft, no queued prompts and no pending question. Default `false`, where Ctrl+C on an idle session asks for a second press. |
 | `ui.status_line.command` | `string` | `yes` | `user` | Script for a `command` status line. Campaigns strip this path; a requirements layer still merges it. |
 | `ui.status_line.type` | `disabled / command` | `yes` | `user` | Optional status-line row above the shortcuts bar. Off by default. See the status-line user guide. |
 | `ui.theme` | `string` | `yes` | `user` | Color theme name, or `auto`/`system` to follow the OS. Also `/theme` and FUIGO_THEME. |
 | `ui.ui_theme` | `string` | `yes` | `user` | Legacy alias for `ui.theme`. |
-| `ui.vim_mode` | `boolean` | `yes` | `user` | Vim keys in the scrollback, not the prompt. Also `/vim-mode`. |
+| `ui.vim_mode` | `boolean` | `yes` | `user` | Vim keys in the scrollback, not the prompt. Also `/vim-mode`. For Vim editing in the prompt, set `[keys] vim = "all"` (see below). |
 | `ui.voice_capture_mode` | `hold / toggle` | `yes` | `user` | Hold-to-talk or press-to-toggle voice capture. |
 | `ui.voice_keybind_enabled` | `boolean` | `yes` | `user` | Enable Ctrl+Space / F8 for voice dictation. `/voice` still works when false. |
 | `ui.voice_stt_language` | `string` | `yes` | `user` | Speech-to-text language code or `auto`. Overrides `[voice].language` for the session. |
@@ -638,6 +640,8 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | Key | Type / Values | Requirements | Managed | Details |
 | --- | --- | --- | --- | --- |
 | `worktree.auto_gc` | `table` | `yes` | `user` | Automatic worktree garbage collection policy. |
+
+**Vim keys (`[keys] vim`).** The pager reads `[keys] vim` from `config.toml`: `"off"` (default), `"nav"` (vim keys in the scrollback, like `ui.vim_mode = true`) or `"all"` (scrollback keys plus Vim editing in the prompt, with `NORMAL`/`INSERT` on the info line). `ui.vim_mode`, when set, wins for the scrollback keys, and `ui.vim_mode = false` turns `"all"` off. `/vim-mode all|nav|off` writes both. See [Configuration](05-configuration.md#vim-editing-in-the-prompt).
 
 ## managed_config.toml
 

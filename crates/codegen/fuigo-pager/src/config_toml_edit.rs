@@ -114,11 +114,66 @@ fn set_hint_at(path: &Path, key: &str, value: impl Into<toml_edit::Value>) -> st
     .map_err(std::io::Error::from)
 }
 
+/// Set `[keys].vim` to `value` in `~/.fuigo/config.toml`, preserving every other key and table.
+/// Same locking, atomic-write and "never clobber a malformed file" behaviour as [`set_hint`].
+/// Performs blocking I/O.
+pub(crate) fn set_keys_vim(value: &str) -> std::io::Result<()> {
+    let path = fuigo_tools::util::fuigo_home::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
+    set_keys_vim_at(&path, value)
+}
+
+/// Core of [`set_keys_vim`]; takes the path so tests can point it at a temp dir.
+fn set_keys_vim_at(path: &Path, value: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    use fuigo_config::fs_atomic::Edit;
+    fuigo_config::fs_atomic::edit_locked(
+        path,
+        |bytes| fuigo_config::fs_atomic::stage_atomically_from_existing(path, bytes, 0o600),
+        |current| {
+            let Some(mut doc) = config_document_for_edit(path, current) else {
+                return Ok::<_, std::io::Error>(Edit::Keep(()));
+            };
+            doc["keys"]["vim"] = toml_edit::value(value);
+            Ok(Edit::Replace {
+                contents: doc.to_string().into_bytes(),
+                value: (),
+            })
+        },
+    )
+    .map_err(std::io::Error::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn set_keys_vim_at_writes_the_value_and_preserves_siblings() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
+        fs::write(&path, "[ui]\ncompact_mode = false\n\n[keys]\nother = 1\n").unwrap();
+        set_keys_vim_at(&path, "all").unwrap();
+        let doc = read_config_document_for_edit(&path).expect("parse");
+        assert_eq!(doc["keys"]["vim"].as_str(), Some("all"));
+        assert_eq!(doc["keys"]["other"].as_integer(), Some(1));
+        assert_eq!(doc["ui"]["compact_mode"].as_bool(), Some(false));
+        set_keys_vim_at(&path, "off").unwrap();
+        let doc = read_config_document_for_edit(&path).expect("parse");
+        assert_eq!(doc["keys"]["vim"].as_str(), Some("off"));
+    }
+
+    #[test]
+    fn set_keys_vim_at_creates_a_missing_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nested").join(fuigo_config::USER_CONFIG_FILENAME);
+        set_keys_vim_at(&path, "nav").unwrap();
+        let doc = read_config_document_for_edit(&path).expect("parse");
+        assert_eq!(doc["keys"]["vim"].as_str(), Some("nav"));
+    }
 
     #[test]
     fn merge_round_trip_preserves_sibling_tables() {

@@ -564,6 +564,11 @@ pub(super) fn dispatch_rewind_success(
     // The summary describes turns the rewind just removed (the shell clears its persisted copy on the same branch)
     // Bump gen so a late SessionMetaFromDisk hydrate cannot restore the pre-rewind summary.json value into the cleared field
     agent.set_last_turn_summary(None);
+    // The footer's context usage follows the shortened conversation instead of keeping the pre-rewind value
+    if let Some(used) = response.context_tokens {
+        let total = agent.session.models.get_context_window().unwrap_or(0);
+        agent.apply_context_used(used, total);
+    }
     let target_idx = find_user_prompt_entry_for_shell_index(&agent.scrollback, target);
     // The images the rewound prompt carried: recorded when it was sent in this run, else rebuilt from the stored session on resume
     let target_entry = target_idx.and_then(|idx| agent.scrollback.get(idx));

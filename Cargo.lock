@@ -5589,6 +5589,7 @@ dependencies = [
  "fuigo-auth",
  "fuigo-dirs",
  "fuigo-extra-ca",
+ "fuigo-sandbox",
  "fuigo-secrets",
  "fuigo-shell",
  "fuigo-telemetry",
@@ -5617,7 +5618,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.41"
+version = "1.0.42"
 dependencies = [
  "semver",
 ]

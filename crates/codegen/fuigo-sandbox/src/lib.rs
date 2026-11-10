@@ -83,6 +83,18 @@ const BWRAP_ENV_VAR: &str = "__FUIGO_INSIDE_BWRAP";
 pub fn is_inside_bwrap() -> bool {
     std::env::var(BWRAP_ENV_VAR).is_ok()
 }
+/// Set in this process, and so inherited by everything it spawns, once Fuigo has applied a kernel confinement (Landlock or Seatbelt) to it.
+/// Landlock leaves no other trace a child can read, so `fuigo update` and the auto-updater use this to see they are already confined.
+pub const CONFINED_ENV_VAR: &str = "__FUIGO_CONFINED";
+/// True when this process is confined by Fuigo: inside the bwrap re-exec, or after a kernel confinement it applied itself or inherited.
+pub fn is_confined() -> bool {
+    is_inside_bwrap() || std::env::var_os(CONFINED_ENV_VAR).is_some()
+}
+#[cfg(all(feature = "enforce", unix))]
+fn mark_confined() {
+    // SAFETY: called from `apply`, at startup, before the process spawns the threads that read the environment.
+    unsafe { std::env::set_var(CONFINED_ENV_VAR, "1") };
+}
 pub fn trust_bwrap_marker_for_devbox() -> bool {
     false
 }
@@ -249,6 +261,7 @@ impl SandboxManager {
         match Sandbox::apply(&caps) {
             Ok(_) => {
                 self.applied = true;
+                mark_confined();
                 self.logger.log(SandboxEvent::profile_applied(
                     &self.profile.to_string(),
                     workspace,
@@ -775,6 +788,20 @@ mod tests {
                 None => unsafe { std::env::remove_var(self.key) },
             }
         }
+    }
+    #[test]
+    #[serial(bwrap_env)]
+    fn is_confined_sees_the_bwrap_and_the_kernel_confinement_markers() {
+        let _b = EnvGuard::remove(BWRAP_ENV_VAR);
+        let _c = EnvGuard::remove(CONFINED_ENV_VAR);
+        assert!(!is_confined(), "no sandbox: not confined");
+        {
+            let _g = EnvGuard::set(CONFINED_ENV_VAR, "1");
+            assert!(is_confined(), "Landlock-only confinement leaves just the confined marker");
+            assert!(!is_inside_bwrap());
+        }
+        let _g = EnvGuard::set(BWRAP_ENV_VAR, "1");
+        assert!(is_confined());
     }
     #[test]
     #[serial(bwrap_env)]

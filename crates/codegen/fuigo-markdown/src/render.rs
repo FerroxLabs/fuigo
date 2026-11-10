@@ -2828,6 +2828,37 @@ mod math_tests {
     }
 
     #[test]
+    fn link_destination_dollar_does_not_open_math_across_the_link() {
+        // `$5 … /$` used to pair into one math span that swallowed the link markup
+        let lines = pretty_lines("Costs $5 [site](https://example.com/$x) and $6 total.\n\n");
+        assert_eq!(
+            lines,
+            vec!["Costs $5 site (https://example.com/%24x) and $6 total."],
+            "got: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn link_destination_with_backslash_parens_keeps_its_url() {
+        let lines = pretty_lines("A [f](https://en.wikipedia.org/wiki/F\\(x\\)) end.\n\n");
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("https://en.wikipedia.org/wiki/F%28x%29"),
+            "got: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn math_in_link_label_still_converts() {
+        let lines = pretty_lines("A [the $x^2$ formula](https://example.com/a) end.\n\n");
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("x²") && joined.contains("https://example.com/a"),
+            "got: {lines:#?}"
+        );
+    }
+
+    #[test]
     fn bracket_math_inside_link_label_keeps_link_target() {
         // The normalizer rewrites `\[x\]` to `$$x$$` outside code, so display math inside a link label now converts (like a literal `$$…$$`)
         // That construct is degenerate and exceedingly rare in model output; the invariant we keep is that the link target survives

@@ -2078,6 +2078,34 @@ fn minimal_ctrl_backslash_is_inert_while_full_modes_open_dashboard() {
         ));
     }
 }
+/// With a draft in the composer, minimal-mode Ctrl+E is the readline "end of line" key, not the folded-block re-print.
+#[test]
+fn minimal_ctrl_e_with_a_draft_moves_the_cursor_to_end_of_line() {
+    let mut app = test_app_with_agent();
+    app.screen_mode = ScreenMode::Minimal;
+    let id = super::super::agent::AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.active_pane = crate::views::agent::ActivePane::Prompt;
+        agent.prompt.set_text("hello world");
+        agent.prompt.set_cursor(3);
+        assert_eq!(agent.prompt.cursor(), 3, "cursor parked mid-line");
+    }
+    let _ = app.handle_input(&key_event(KeyCode::Char('e'), KeyModifiers::CONTROL));
+    assert_eq!(
+        app.agents[&id].prompt.cursor(),
+        "hello world".len(),
+        "Ctrl+E goes to the end of the draft line"
+    );
+}
+/// With an empty composer Ctrl+E still belongs to the folded-block re-print.
+#[test]
+fn minimal_ctrl_e_with_an_empty_composer_stays_the_expand_key() {
+    let mut app = test_app_with_agent();
+    app.screen_mode = ScreenMode::Minimal;
+    let out = app.handle_input(&key_event(KeyCode::Char('e'), KeyModifiers::CONTROL));
+    assert!(matches!(out, InputOutcome::Changed), "intercepted: {out:?}");
+}
 #[test]
 fn minimal_ctrl_t_toggles_todo_panel() {
     let mut app = test_app_with_agent();
@@ -3209,6 +3237,87 @@ fn ctrl_c_then_other_key_resets_pending() {
     assert!(app.pending_action.is_some());
     let _ = app.handle_input(&key_event(KeyCode::Char('j'), KeyModifiers::NONE));
     assert!(app.pending_action.is_none());
+}
+fn single_ctrl_c_app(setting: Option<bool>) -> AppView {
+    crate::appearance::cache::set_simple_mode(true);
+    let mut app = test_app_with_agent();
+    app.current_ui.single_ctrl_c_quit = setting;
+    let id = super::super::agent::AgentId(0);
+    app.agents.get_mut(&id).unwrap().active_pane = crate::views::agent::ActivePane::Prompt;
+    app
+}
+/// `ui.single_ctrl_c_quit` on: one Ctrl+C on an idle session with nothing to lose quits at once, with no confirmation step.
+#[test]
+fn single_ctrl_c_quit_quits_on_one_press_when_nothing_would_be_lost() {
+    let mut app = single_ctrl_c_app(Some(true));
+    let outcome = app.handle_input(&ctrl_c());
+    assert!(matches!(outcome, InputOutcome::Action(Action::Quit)), "got {outcome:?}");
+    assert!(app.pending_action.is_none());
+}
+/// Default behaviour unchanged: unset and `false` both keep the existing arm-then-confirm quit.
+#[test]
+fn single_ctrl_c_quit_off_keeps_the_two_press_quit() {
+    for setting in [None, Some(false)] {
+        let mut app = single_ctrl_c_app(setting);
+        let outcome = app.handle_input(&ctrl_c());
+        assert!(matches!(outcome, InputOutcome::Changed), "{setting:?}: {outcome:?}");
+        assert_pending_quit(&app);
+    }
+    assert!(!fuigo_shell::agent::config::UiConfig::default().single_ctrl_c_quit.unwrap_or(false));
+}
+#[test]
+fn single_ctrl_c_quit_never_quits_a_running_turn() {
+    let mut app = single_ctrl_c_app(Some(true));
+    let id = super::super::agent::AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+    let outcome = app.handle_input(&ctrl_c());
+    assert!(matches!(outcome, InputOutcome::Action(Action::CancelTurn)), "got {outcome:?}");
+}
+#[test]
+fn single_ctrl_c_quit_never_quits_over_a_draft() {
+    let mut app = single_ctrl_c_app(Some(true));
+    let id = super::super::agent::AgentId(0);
+    app.agents.get_mut(&id).unwrap().prompt.textarea.set_text("draft prompt");
+    let outcome = app.handle_input(&ctrl_c());
+    assert!(matches!(outcome, InputOutcome::Changed), "got {outcome:?}");
+    assert!(app.agents[&id].prompt.textarea.text().is_empty());
+    assert!(app.pending_action.is_none());
+}
+#[test]
+fn single_ctrl_c_quit_never_quits_with_a_queued_prompt() {
+    let mut app = single_ctrl_c_app(Some(true));
+    let id = super::super::agent::AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.enqueue_bash_command("ls".to_owned());
+    let outcome = app.handle_input(&ctrl_c());
+    assert!(!matches!(outcome, InputOutcome::Action(Action::Quit)), "got {outcome:?}");
+}
+#[test]
+fn single_ctrl_c_quit_never_quits_with_a_question_pending() {
+    use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
+    let mut app = single_ctrl_c_app(Some(true));
+    let id = super::super::agent::AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let stashed = agent.prompt.stash();
+        agent.question_view = Some(crate::views::question_view::QuestionViewState::new(
+            "card-1".to_string(),
+            vec![Question {
+                question: "Proceed?".into(),
+                id: None,
+                options: vec![QuestionOption {
+                    label: "Yes".into(),
+                    description: "go".into(),
+                    preview: None,
+                    id: None,
+                }],
+                multi_select: Some(false),
+            }],
+            stashed,
+        ));
+    }
+    assert!(!app.agents[&id].nothing_lost_on_quit());
+    let outcome = app.handle_input(&ctrl_c());
+    assert!(!matches!(outcome, InputOutcome::Action(Action::Quit)), "got {outcome:?}");
 }
 #[test]
 fn ctrl_c_idle_prompt_with_text_clears_text() {

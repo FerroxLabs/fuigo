@@ -2563,3 +2563,28 @@ fn gh_release_asset_names_match_release_layout_script() {
     let (os, arch) = super::detect_platform().unwrap();
     assert!(table.iter().any(|(_, o, a)| *o == os && *a == arch));
 }
+
+#[test]
+fn only_lasting_smoke_failures_latch_the_version() {
+    assert!(
+        SmokeTestFailure::NonZero {
+            status: "1".into(),
+            stderr: String::new(),
+        }
+        .latches_start_failure()
+    );
+    assert!(SmokeTestFailure::Spawn("os error 8".into()).latches_start_failure());
+    assert!(!SmokeTestFailure::Timeout.latches_start_failure());
+    assert!(!SmokeTestFailure::SpawnBusy("Text file busy".into()).latches_start_failure());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn smoke_test_of_a_missing_binary_is_a_latching_spawn_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = smoke_test_binary(&dir.path().join("nope"))
+        .await
+        .expect_err("missing binary cannot start");
+    assert!(matches!(err, SmokeTestFailure::Spawn(_)), "{err:?}");
+    assert!(err.latches_start_failure());
+}

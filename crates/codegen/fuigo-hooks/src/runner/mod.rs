@@ -99,6 +99,16 @@ impl GateHookJson {
             })
     }
 
+    /// A key this document carries that Fuigo does not recognise on a tool gate, at the top level or inside
+    /// `hookSpecificOutput`: the flattened `rest` maps hold exactly the keys the typed fields did not take.
+    fn unknown_key(&self) -> Option<String> {
+        if let Some(key) = first_unknown(&self.rest, RECOGNISED_EXTRA_TOP_LEVEL_KEYS, &[]) {
+            return Some(key);
+        }
+        let nested = self.hook_specific_output.as_ref()?;
+        first_unknown(&nested.rest, &["hookEventName"], &[]).map(|key| format!("hookSpecificOutput.{key}"))
+    }
+
     fn permission_decision(&self) -> Option<&str> {
         non_empty(
             self.hook_specific_output
@@ -189,8 +199,25 @@ impl GateHookJson {
     }
 }
 
+/// Keys Fuigo reads or knowingly ignores that the typed gate/prompt structs do not hold as fields (they arrive in the
+/// flattened `rest` map): the event name, the stop request and its reason, and the two message keys.
+const RECOGNISED_EXTRA_TOP_LEVEL_KEYS: &[&str] =
+    &["hookEventName", "continue", "stopReason", "systemMessage", "suppressOutput"];
+/// What a prompt hook's `hookSpecificOutput` may hold (the upstream shape carries context).
+const PROMPT_NESTED_KEYS: &[&str] = &["hookEventName", "additionalContext"];
+
+fn first_unknown(
+    rest: &serde_json::Map<String, serde_json::Value>,
+    allowed: &[&str],
+    also_allowed: &[&str],
+) -> Option<String> {
+    rest.keys()
+        .find(|key| !allowed.contains(&key.as_str()) && !also_allowed.contains(&key.as_str()))
+        .map(|key| key.chars().take(60).collect())
+}
+
 const SILENTLY_IGNORED_TOP_LEVEL_KEYS: &[&str] =
-    &["hookEventName", "continue", "stopReason", "systemMessage"];
+    &["hookEventName", "continue", "stopReason", "systemMessage", "suppressOutput"];
 const SILENTLY_IGNORED_NESTED_KEYS: &[&str] = &["hookEventName"];
 
 fn non_empty(text: Option<&str>) -> Option<&str> {
@@ -394,6 +421,24 @@ pub(crate) struct PromptHookJson {
     pub continue_: Option<bool>,
     #[serde(default, rename = "stopReason")]
     pub stop_reason: Option<String>,
+    /// Every other key, kept only so a `failClosed` hook can be judged on keys Fuigo does not read.
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
+}
+
+impl PromptHookJson {
+    /// A key this document carries that Fuigo does not recognise on a prompt hook, at the top level or inside
+    /// `hookSpecificOutput`.
+    fn unknown_key(&self) -> Option<String> {
+        if let Some(key) = first_unknown(&self.rest, RECOGNISED_EXTRA_TOP_LEVEL_KEYS, &["hookSpecificOutput"]) {
+            return Some(key);
+        }
+        match self.rest.get("hookSpecificOutput")? {
+            serde_json::Value::Object(nested) => first_unknown(nested, PROMPT_NESTED_KEYS, &[])
+                .map(|key| format!("hookSpecificOutput.{key}")),
+            _ => Some("hookSpecificOutput".to_string()),
+        }
+    }
 }
 
 pub(crate) fn prompt_json_to_block(
@@ -589,6 +634,246 @@ pub(crate) fn post_tool_use_json_to_outcome(
 
 pub type HookRunOutput = (HookRunnerResult, Duration, Option<HttpInfo>, Option<String>);
 
+const FLAW_TRUNCATED: &str = "output was cut off by the size cap";
+const FLAW_UNPARSED: &str = "printed a decision that could not be parsed";
+const FLAW_UNKNOWN_KEY: &str = "printed a JSON object with a key Fuigo does not recognise";
+const FLAW_NOT_UTF8: &str = "printed output that is not valid UTF-8";
+const FLAW_DUPLICATE_KEY: &str = "printed a JSON object with a duplicate key";
+
+/// What is wrong with a `PreToolUse` / `UserPromptSubmit` hook's output, for a `failClosed` hook: `None` when it is
+/// fine. It judges the RAW bytes the hook sent, before any lenient decoding: normal handling reads a lossy UTF-8 copy
+/// and keeps the last of duplicate keys, so a flaw judged on that copy can be repaired away. `truncated` is the reader's
+/// own flag that the size cap cut the output off (never guessed from the text): what was kept may be a complete-looking
+/// allow in front of a decision that was lost. Bytes that are not valid UTF-8 are a flaw. A command hook's plain text on
+/// exit 0 is not a decision (it never was), so `strict` is false there and only output that starts like a JSON object
+/// counts; an HTTP hook answers in JSON, so with `strict` any non-empty body counts. Output that counts must be exactly
+/// one JSON value with no duplicate key at any depth and nothing after it, and an object fails closed when it holds any
+/// key Fuigo does not recognise for the event, at the top level or inside `hookSpecificOutput` (a typo such as `decison`
+/// or `permissionDecison`); a document of recognised keys only follows normal handling, and one that decides nothing is
+/// an allow.
+pub(crate) fn gate_output_flaw(
+    mode: GateKind,
+    raw: &[u8],
+    strict: bool,
+    truncated: bool,
+) -> Option<String> {
+    if truncated {
+        return Some(FLAW_TRUNCATED.to_string());
+    }
+    if !matches!(mode, GateKind::Tool | GateKind::Prompt) {
+        return None;
+    }
+    let Ok(text) = std::str::from_utf8(raw) else {
+        return Some(FLAW_NOT_UTF8.to_string());
+    };
+    // Judge the text with only JSON whitespace trimmed: the lenient parser accepts nothing else around a document, so
+    // any other leading or trailing character (form feed, NBSP, U+2028) must reach the strict parser and be a flaw.
+    let text = text.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r'));
+    // "Looks like JSON" (command hooks): after any run of invisible characters (whitespace, control characters,
+    // Unicode format characters such as a BOM or a zero-width space), an object opens.
+    let looks_like_json = text.trim_start_matches(is_invisible_prefix_char).starts_with('{');
+    if text.is_empty() || !(strict || looks_like_json) {
+        return None;
+    }
+    let value = match strict_json_value(text) {
+        Ok(value) => value,
+        Err(StrictJsonError::DuplicateKey(key)) => {
+            return Some(format!("{FLAW_DUPLICATE_KEY} ('{key}')"));
+        }
+        Err(StrictJsonError::Invalid) => return Some(FLAW_UNPARSED.to_string()),
+    };
+    // The value holds every key exactly once, so the typed documents built from it are faithful to what was sent.
+    let unknown = match mode {
+        GateKind::Tool => match serde_json::from_value::<GateHookJson>(value) {
+            Ok(json) => json.unknown_key().map(KeyFlaw::Unknown).or_else(|| wrong_typed_key(&json.rest)),
+            Err(_) => return Some(FLAW_UNPARSED.to_string()),
+        },
+        _ => match serde_json::from_value::<PromptHookJson>(value) {
+            Ok(json) => json.unknown_key().map(KeyFlaw::Unknown).or_else(|| wrong_typed_key(&json.rest)),
+            Err(_) => return Some(FLAW_UNPARSED.to_string()),
+        },
+    };
+    match unknown {
+        Some(KeyFlaw::WrongType(key)) => Some(format!("{FLAW_WRONG_TYPE} ('{key}')")),
+        Some(KeyFlaw::Unknown(key)) => Some(format!("{FLAW_UNKNOWN_KEY} ('{key}')")),
+        None => None,
+    }
+}
+
+const FLAW_WRONG_TYPE: &str = "printed a recognised key with the wrong JSON type";
+
+/// What the key check found: a key Fuigo does not recognise, or a recognised key with the wrong JSON type.
+enum KeyFlaw {
+    Unknown(String),
+    WrongType(String),
+}
+
+/// A character that shows nothing when printed: whitespace, a control character, or a Unicode format character (Cf).
+fn is_invisible_prefix_char(c: char) -> bool {
+    c.is_whitespace()
+        || c.is_control()
+        || matches!(c,
+            '\u{00AD}' | '\u{0600}'..='\u{0605}' | '\u{061C}' | '\u{06DD}' | '\u{070F}' | '\u{180E}'
+            | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}' | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}' | '\u{E0020}'..='\u{E007F}')
+}
+
+/// A recognised extra top-level key (it sits in the flattened `rest` map, so serde did not type it) whose JSON type is
+/// not the one Fuigo reads: `continue` and `suppressOutput` are booleans, `stopReason` and `systemMessage` strings.
+fn wrong_typed_key(rest: &serde_json::Map<String, serde_json::Value>) -> Option<KeyFlaw> {
+    rest.iter().find_map(|(key, value)| {
+        let ok = match key.as_str() {
+            "continue" | "suppressOutput" => value.is_boolean(),
+            "stopReason" | "systemMessage" | "hookEventName" => value.is_string(),
+            _ => true,
+        };
+        (!ok).then(|| KeyFlaw::WrongType(key.clone()))
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StrictJsonError {
+    /// The first key seen twice in one object (clipped), at any depth.
+    DuplicateKey(String),
+    /// Not exactly one JSON value (a syntax error, a lone surrogate escape, trailing bytes, too deep).
+    Invalid,
+}
+
+/// Parse `text` as exactly one JSON value, refusing a key repeated in any object at any depth and anything after the
+/// value but whitespace.
+fn strict_json_value(text: &str) -> Result<serde_json::Value, StrictJsonError> {
+    use serde::de::DeserializeSeed;
+    let duplicate = std::cell::RefCell::new(None);
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let parsed = StrictValue { duplicate: &duplicate }
+        .deserialize(&mut deserializer)
+        .and_then(|value| deserializer.end().map(|()| value));
+    match (parsed, duplicate.into_inner()) {
+        (_, Some(key)) => Err(StrictJsonError::DuplicateKey(key)),
+        (Ok(value), None) => Ok(value),
+        (Err(_), None) => Err(StrictJsonError::Invalid),
+    }
+}
+
+/// Builds a `serde_json::Value` as `Value`'s own deserializer does, except that an object with a repeated key is an
+/// error (recorded in `duplicate`) instead of keeping the last copy.
+#[derive(Clone, Copy)]
+struct StrictValue<'a> {
+    duplicate: &'a std::cell::RefCell<Option<String>>,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for StrictValue<'_> {
+    type Value = serde_json::Value;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for StrictValue<'_> {
+    type Value = serde_json::Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::from(value))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::from(value))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+        serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| E::custom("a number that is not finite"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::String(value.to_string()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::String(value))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(item) = seq.next_element_seed(self)? {
+            items.push(item);
+        }
+        Ok(serde_json::Value::Array(items))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut object = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if object.contains_key(&key) {
+                let clipped: String = key.chars().take(60).collect();
+                *self.duplicate.borrow_mut() = Some(clipped.clone());
+                return Err(serde::de::Error::custom(format!("duplicate key '{clipped}'")));
+            }
+            let value = map.next_value_seed(self)?;
+            object.insert(key, value);
+        }
+        Ok(serde_json::Value::Object(object))
+    }
+}
+
+/// Opt-in `failClosed` enforcement, applied after the output is parsed and before a result that lets the call or prompt
+/// through (allow, ask, defer, plain success) is accepted. Only an allowing result is overridden: a denial or block is
+/// already the safe answer. `exec_failure` is the execution failure (killed by a signal, a non-zero exit that is not the
+/// gate's exit 2, a non-success HTTP status) carried apart from the parsed output, so a decision printed before the crash
+/// cannot launder it. `flaw` is what `gate_output_flaw` found wrong with the output (unreadable, truncated, not a decision). Without `fail_closed` the result is returned untouched.
+pub(crate) fn enforce_fail_closed(
+    spec: &HookSpec,
+    mode: GateKind,
+    result: HookRunnerResult,
+    flaw: Option<String>,
+    exec_failure: Option<String>,
+) -> HookRunnerResult {
+    if !spec.fail_closed || !matches!(mode, GateKind::Tool | GateKind::Prompt) {
+        return result;
+    }
+    // A `continue: false` stop is a refusal, but one printed before the hook crashed or exited badly is still a
+    // run-time failure and is reported as one.
+    if matches!(result, HookRunnerResult::GateStop { .. }) {
+        return exec_failure.map_or(result, HookRunnerResult::Failed);
+    }
+    if !matches!(
+        result,
+        HookRunnerResult::Allow { .. }
+            | HookRunnerResult::Ask { .. }
+            | HookRunnerResult::Defer
+            | HookRunnerResult::Success
+    ) {
+        return result;
+    }
+    if let Some(failure) = exec_failure {
+        return HookRunnerResult::Failed(failure);
+    }
+    if let Some(flaw) = flaw {
+        return HookRunnerResult::Failed(format!("hook '{}' {flaw}", spec.name));
+    }
+    result
+}
+
 pub async fn run_hook(
     spec: &HookSpec,
     envelope: &HookEventEnvelope,
@@ -637,6 +922,7 @@ mod tests {
                 vec!["permissionDecision"],
             ),
             (r#"{"decision":"allow","continue":false}"#, vec![]),
+            (r#"{"decision":"allow","suppressOutput":true}"#, vec![]),
             (
                 r#"{"decision":"allow","reason":"why"}"#,
                 vec!["reason (only a deny or an ask has one)"],
@@ -822,6 +1108,185 @@ mod tests {
         );
         let decision = document.resolve_decision().token;
         assert_eq!(document.ignored_parts(&decision), vec!["additionalContext"]);
+    }
+
+    /// A command hook\u{27}s output that opens like a JSON object after a byte-order mark and/or Unicode whitespace is
+    /// judged as JSON (and is a flaw under the flag), not dismissed as plain text; plain text still is not.
+    #[test]
+    fn gate_output_flaw_command_bom_and_unicode_whitespace_look_like_json() {
+        for mode in [GateKind::Tool, GateKind::Prompt] {
+            for doc in [
+                "\u{FEFF}{\"decision\":\"deny\"}",
+                "\n\u{FEFF}{\"decision\":\"deny\"}\n",
+                " \u{FEFF} {\"decision\":\"deny\"}",
+                "\u{a0}{\"decision\":\"deny\"}",
+                "\u{0c}{\"decision\":\"deny\"}",
+                "{\"decision\":\"deny\"}\u{2028}",
+            ] {
+                assert_eq!(
+                    gate_output_flaw(mode, doc.as_bytes(), false, false).as_deref(),
+                    Some(FLAW_UNPARSED),
+                    "{mode:?} {doc:?}"
+                );
+            }
+            for text in ["\u{FEFF}hello", "plain text", "\u{FEFF}", "  \u{a0} "] {
+                assert_eq!(gate_output_flaw(mode, text.as_bytes(), false, false), None, "{mode:?} {text:?}");
+            }
+        }
+    }
+
+    /// Any number of byte-order marks mixed with Unicode whitespace before the opening brace still reads as JSON.
+    #[test]
+    fn gate_output_flaw_command_multiple_boms_look_like_json() {
+        for mode in [GateKind::Tool, GateKind::Prompt] {
+            for doc in [
+                "\u{FEFF}\u{FEFF}{\"decision\":\"deny\"}",
+                "\u{FEFF} \u{FEFF}{\"decision\":\"deny\"}",
+                "\u{FEFF}\u{a0}\u{FEFF}\n{\"decision\":\"deny\"}",
+                "\u{FEFF}\u{FEFF}\u{FEFF}{\"decision\":\"deny\"}",
+            ] {
+                assert_eq!(
+                    gate_output_flaw(mode, doc.as_bytes(), false, false).as_deref(),
+                    Some(FLAW_UNPARSED),
+                    "{mode:?} {doc:?}"
+                );
+            }
+            for text in ["\u{FEFF}\u{FEFF}hello", "\u{FEFF}\u{FEFF}"] {
+                assert_eq!(gate_output_flaw(mode, text.as_bytes(), false, false), None, "{mode:?} {text:?}");
+            }
+        }
+    }
+
+    /// Every invisible prefix character (format characters, control characters) before the brace still reads as JSON,
+    /// on both gates; plain text that starts with them and has no `{` stays plain.
+    #[test]
+    fn gate_output_flaw_command_invisible_prefix_chars_look_like_json() {
+        let invisible = ["\u{200B}", "\u{2060}", "\u{180E}", "\u{00AD}", "\u{202E}", "\u{0}", "\u{E0020}", "\u{1D173}"];
+        for mode in [GateKind::Tool, GateKind::Prompt] {
+            for ch in invisible {
+                for doc in [
+                    format!("{ch}{{\"decision\":\"deny\"}}"),
+                    format!("\u{FEFF}{ch}\u{FEFF}{{\"decision\":\"deny\"}}"),
+                    format!("{ch}{ch} \u{FEFF}{ch}{{\"decision\":\"deny\"}}"),
+                ] {
+                    assert_eq!(
+                        gate_output_flaw(mode, doc.as_bytes(), false, false).as_deref(),
+                        Some(FLAW_UNPARSED),
+                        "{mode:?} {doc:?}"
+                    );
+                }
+                for text in [format!("{ch}hello"), format!("\u{FEFF}{ch}"), format!("{ch}{ch}")] {
+                    assert_eq!(gate_output_flaw(mode, text.as_bytes(), false, false), None, "{mode:?} {text:?}");
+                }
+            }
+        }
+    }
+
+    /// An unknown key that literally starts with the old internal marker text is still worded as unknown.
+    #[test]
+    fn gate_output_flaw_unknown_key_named_like_the_old_marker_is_worded_unknown() {
+        let doc = "{\"\\u0000wrong-type:x\":1}";
+        for mode in [GateKind::Tool, GateKind::Prompt] {
+            let flaw = gate_output_flaw(mode, doc.as_bytes(), false, false).unwrap();
+            assert!(flaw.starts_with(FLAW_UNKNOWN_KEY), "{mode:?} {flaw}");
+            assert!(!flaw.starts_with(FLAW_WRONG_TYPE), "{mode:?} {flaw}");
+        }
+    }
+
+    fn spec_with_flag(fail_closed: bool) -> HookSpec {
+        HookSpec {
+            name: "typed".into(),
+            event: crate::event::HookEventName::PreToolUse,
+            handler_type: crate::config::HandlerType::Command,
+            configured_matcher: None,
+            matcher: None,
+            enabled: true,
+            command: None,
+            command_raw: None,
+            args: None,
+            shell: None,
+            url: None,
+            url_raw: None,
+            timeout_ms: 1000,
+            fail_closed,
+            source_dir: std::env::temp_dir(),
+            extra_env: Default::default(),
+            layer: crate::config::HookProvenance::File,
+        }
+    }
+
+    /// A recognised extra key with the wrong JSON type is a flaw on the tool gate under the flag (it used to resolve to an
+    /// allow), the same document is unchanged without the flag, and correctly typed keys still behave as before.
+    #[test]
+    fn gate_output_flaw_wrong_typed_recognised_keys_fail_closed_on_the_tool_gate() {
+        let allow = || HookRunnerResult::Allow { updated_input: None, additional_context: None };
+        for doc in [
+            r#"{"continue":"false"}"#,
+            r#"{"continue":0}"#,
+            r#"{"systemMessage":5}"#,
+            r#"{"suppressOutput":"yes"}"#,
+            r#"{"stopReason":false}"#,
+        ] {
+            let flaw = gate_output_flaw(GateKind::Tool, doc.as_bytes(), false, false);
+            assert!(flaw.as_deref().is_some_and(|f| f.starts_with(FLAW_WRONG_TYPE)), "{doc}: {flaw:?}");
+            let on = enforce_fail_closed(&spec_with_flag(true), GateKind::Tool, allow(), flaw.clone(), None);
+            assert!(matches!(on, HookRunnerResult::Failed(_)), "flag on denies {doc}");
+            let off = enforce_fail_closed(&spec_with_flag(false), GateKind::Tool, allow(), flaw, None);
+            assert!(matches!(off, HookRunnerResult::Allow { .. }), "flag off unchanged {doc}");
+            assert!(matches!(gate(doc), GateOutcome::Allow { .. }), "normal handling unchanged {doc}");
+        }
+        for doc in [r#"{"systemMessage":"x"}"#, r#"{"continue":true}"#, r#"{"suppressOutput":true,"stopReason":"r"}"#] {
+            assert_eq!(gate_output_flaw(GateKind::Tool, doc.as_bytes(), false, false), None, "{doc}");
+            assert!(matches!(gate(doc), GateOutcome::Allow { .. }), "{doc}");
+        }
+        let stop = r#"{"continue":false}"#;
+        assert_eq!(gate_output_flaw(GateKind::Tool, stop.as_bytes(), false, false), None);
+        assert!(matches!(gate(stop), GateOutcome::Stop(_)));
+        // the prompt gate already rejected typed `continue`; the untyped keys now match
+        for doc in [r#"{"continue":"false"}"#, r#"{"systemMessage":5}"#] {
+            assert!(gate_output_flaw(GateKind::Prompt, doc.as_bytes(), false, false).is_some(), "{doc}");
+        }
+    }
+
+    /// `failClosed` judges the raw bytes: invalid UTF-8 and a key repeated at any depth are flaws on both gates, in both
+    /// the lenient (command) and strict (HTTP) modes, while valid non-ASCII UTF-8 and a clean document are not.
+    #[test]
+    fn gate_output_flaw_judges_raw_bytes_strictly() {
+        let bad_utf8: &[u8] = b"{\"decision\":\"allow\",\"reason\":\"\xff\"}";
+        let duplicates: &[(&str, &str)] = &[
+            (r#"{"hookSpecificOutput":{"permissionDecison":"deny"},"hookSpecificOutput":{}}"#, "hookSpecificOutput"),
+            (r#"{"systemMessage":"a","systemMessage":"b"}"#, "systemMessage"),
+            (r#"{"hookSpecificOutput":{"additionalContext":"a","additionalContext":"b"}}"#, "additionalContext"),
+            (
+                r#"{"hookSpecificOutput":{"updatedInput":{"command":"rm -rf /","command":"ls"}},"decision":"allow"}"#,
+                "command",
+            ),
+            (r#"{"decision":"allow","x":[{"a":1,"a":2}]}"#, "a"),
+        ];
+        for mode in [GateKind::Tool, GateKind::Prompt] {
+            for strict in [true, false] {
+                let flaw = gate_output_flaw(mode, bad_utf8, strict, false);
+                assert_eq!(flaw.as_deref(), Some(FLAW_NOT_UTF8), "{mode:?} strict={strict}");
+                for &(doc, key) in duplicates {
+                    let flaw = gate_output_flaw(mode, doc.as_bytes(), strict, false).unwrap_or_default();
+                    assert_eq!(flaw, format!("{FLAW_DUPLICATE_KEY} ('{key}')"), "{mode:?} strict={strict} {doc}");
+                }
+                for ok in [r#"{"decision":"block","reason":"café — 日本語 ✓"}"#, r#"{"systemMessage":"naïve"}"#, "{}"] {
+                    let flaw = gate_output_flaw(mode, ok.as_bytes(), strict, false);
+                    assert_eq!(flaw, None, "{mode:?} strict={strict} {ok}");
+                }
+            }
+        }
+        // a lone surrogate escape is not a string JSON can carry; trailing bytes are not one value
+        for doc in [r#"{"decision":"allow","reason":"\ud800"}"#, r#"{"decision":"allow"} {}"#] {
+            assert_eq!(gate_output_flaw(GateKind::Tool, doc.as_bytes(), true, false).as_deref(), Some(FLAW_UNPARSED));
+        }
+        // the decoded key is what counts: an escaped spelling of the same key is still a duplicate
+        assert_eq!(
+            strict_json_value(r#"{"decision":"allow","decision":"deny"}"#),
+            Err(StrictJsonError::DuplicateKey("decision".into()))
+        );
+        assert_eq!(strict_json_value(r#"[1,{"a":null}]"#), Ok(serde_json::json!([1, {"a": null}])));
     }
 
     #[test]

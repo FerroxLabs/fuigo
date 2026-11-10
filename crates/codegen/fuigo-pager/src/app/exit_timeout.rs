@@ -11,6 +11,17 @@ const HARD_EXIT_GRACE: Duration = Duration::from_secs(5);
 const TEST_HOLD_TEARDOWN_ENV: &str = "FUIGO_TEST_HOLD_TEARDOWN_SECS";
 
 static ARMED: AtomicBool = AtomicBool::new(false);
+/// Set once teardown finished and the process continues on purpose (update install, screen-mode relaunch).
+static DISARMED: AtomicBool = AtomicBool::new(false);
+
+/// Cancel a pending forced exit: teardown is done and the process keeps running by design.
+pub(crate) fn disarm() {
+    DISARMED.store(true, Ordering::Release);
+}
+
+fn should_fire(disarmed: &AtomicBool) -> bool {
+    !disarmed.load(Ordering::Acquire)
+}
 
 /// The first caller to spawn the timer fixes the exit code.
 /// A failed spawn clears `ARMED` so a later quit path can retry.
@@ -28,6 +39,9 @@ pub(crate) fn arm(exit_code: i32) {
         .name("exit-timeout".into())
         .spawn(move || {
             std::thread::sleep(timeout);
+            if !should_fire(&DISARMED) {
+                return;
+            }
             spawn_hard_exit(exit_code);
             super::signal_handler::force_exit(exit_code);
         });
@@ -43,6 +57,9 @@ fn spawn_hard_exit(exit_code: i32) {
         .name("quit-hard-exit".into())
         .spawn(move || {
             std::thread::sleep(HARD_EXIT_GRACE);
+            if !should_fire(&DISARMED) {
+                return;
+            }
             hard_exit(exit_code);
         });
     if spawned.is_err() {
@@ -81,6 +98,14 @@ fn parse_timeout(env: Option<&str>) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disarm_cancels_the_forced_exit() {
+        let flag = AtomicBool::new(false);
+        assert!(should_fire(&flag));
+        flag.store(true, Ordering::Release);
+        assert!(!should_fire(&flag));
+    }
 
     #[test]
     fn parse_timeout_cases() {

@@ -106,6 +106,7 @@ pub(crate) const EXT_METHODS: &[&str] = &[
     "fuigo/auto-topup-rule",
     "fuigo/billing",
     "fuigo/btw",
+    "fuigo/btw/cancel",
     "fuigo/bundle/",
     "fuigo/cloud/env/create",
     "fuigo/cloud/env/delete",
@@ -2600,7 +2601,7 @@ impl acp::Agent for MvpAgent {
                 crate::extensions::session_park::handle_unpark(self, &args).await
             }
             "fuigo/feedback" | "fuigo/feedback/dismiss" | "fuigo/feedback/upload-trace"
-            | "fuigo/btw" => crate::extensions::feedback::handle(self, &args).await,
+            | "fuigo/btw" | "fuigo/btw/cancel" => crate::extensions::feedback::handle(self, &args).await,
             "fuigo/recap" => crate::extensions::recap::handle(self, &args).await,
             "fuigo/cloud/terminate" => {
                 crate::extensions::auth_gate::require_fuigo_auth(

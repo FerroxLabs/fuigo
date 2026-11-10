@@ -6009,6 +6009,95 @@ fn dashboard_stop_running_bg_task_emits_teardown_kill() {
         "dashboard stop-all must not emit ClientUi, got {effects:?}"
     );
 }
+/// A row that is Working only because of a background subagent: Ctrl+X kills it instead of reporting nothing to stop.
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_stop_running_subagent_row_kills_the_subagent() {
+    let mut app = test_app();
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let target = *app.agents.keys().next().unwrap();
+    {
+        let agent = app.agents.get_mut(&target).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("sa-stop"));
+        agent.session.state = AgentState::Idle;
+        agent.subagent_sessions.insert(
+            "child-1".into(),
+            crate::app::agent_view::test_fixtures::running_subagent_info("child-1"),
+        );
+    }
+    open_dashboard(&mut app);
+    if let Some(d) = app.dashboard.as_mut() {
+        d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(target));
+    }
+    let effects = dispatch_dashboard_stop(&mut app);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::KillSubagent { .. })),
+        "dashboard stop must end the running subagent, got {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::DeleteSession { .. })),
+        "must not delete a Working row, got {effects:?}"
+    );
+}
+/// A row that is Working only because a workflow run is going: Ctrl+X ends the run through `/workflow stop`.
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_stop_running_workflow_row_stops_the_workflow() {
+    let mut app = test_app();
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let target = *app.agents.keys().next().unwrap();
+    let run = |run_id: &str, status: &str| crate::views::workflows::WorkflowRunSnapshot {
+        run_id: run_id.to_owned(),
+        name: "deep-research".to_owned(),
+        objective: "obj".to_owned(),
+        status: status.to_owned(),
+        management_available: true,
+        builtin: false,
+        phases: Vec::new(),
+        current_phase: None,
+        agents: Vec::new(),
+        agent_budget: None,
+        agents_used: 0,
+        agents_reserved: 0,
+        agents_remaining: None,
+        agent_usage_incomplete: false,
+        active_agents: 0,
+        elapsed_ms: 1_000,
+        received_at: std::time::Instant::now(),
+        pause_message: None,
+        result_summary: None,
+    };
+    {
+        let agent = app.agents.get_mut(&target).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("wf-stop"));
+        agent.session.state = AgentState::Idle;
+        agent.workflow_runs.push(run("wf_done", "complete"));
+        agent.workflow_runs.push(run("wf_live", "active"));
+    }
+    open_dashboard(&mut app);
+    if let Some(d) = app.dashboard.as_mut() {
+        d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(target));
+    }
+    let effects = dispatch_dashboard_stop(&mut app);
+    let sent: Vec<&str> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::SendPrompt { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        ["/workflow stop wf_live"],
+        "dashboard stop must stop the running workflow run and only that one, got {effects:?}"
+    );
+}
 /// A row that's `Working` only because of a queued (unsent) prompt: Ctrl+X
 /// drops the queue (local, no effect) rather than toasting, and never arms,
 /// so the row settles to idle and can then be deleted.

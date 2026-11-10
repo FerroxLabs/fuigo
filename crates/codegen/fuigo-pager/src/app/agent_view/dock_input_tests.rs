@@ -2220,3 +2220,32 @@ fn compact_mode_hides_an_enabled_dock() {
     draw_frame(&mut agent);
     assert!(agent.dock_shown, "leaving compact mode brings the dock back");
 }
+
+/// Typing any character (non-ASCII, digits, punctuation) while the transcript has focus moves it to the prompt.
+#[test]
+fn typing_any_character_in_transcript_focuses_prompt() {
+    let registry = ActionRegistry::defaults();
+    for c in ['é', 'ß', '日', '7', '%', '.'] {
+        let mut agent = make_agent();
+        agent.vim_mode = false;
+        agent.active_pane = AgentPane::Scrollback;
+        let outcome =
+            agent.handle_scrollback_key(&key(KeyCode::Char(c), KeyModifiers::NONE), &registry);
+        assert!(
+            matches!(outcome, InputOutcome::ActionThenForward(Action::FocusPrompt)),
+            "`{c}` must move to the prompt, got {outcome:?}"
+        );
+    }
+    // Keys with an agent-level meaning keep it
+    for c in ['?', '!', '#', ' '] {
+        let mut agent = make_agent();
+        agent.vim_mode = false;
+        agent.active_pane = AgentPane::Scrollback;
+        let outcome =
+            agent.handle_scrollback_key(&key(KeyCode::Char(c), KeyModifiers::NONE), &registry);
+        assert!(
+            !matches!(outcome, InputOutcome::ActionThenForward(Action::FocusPrompt)),
+            "`{c}` must keep its own binding, got {outcome:?}"
+        );
+    }
+}

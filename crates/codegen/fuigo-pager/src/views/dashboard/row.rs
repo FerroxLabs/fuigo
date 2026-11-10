@@ -452,21 +452,16 @@ pub fn classify_top_level(agent: &AgentView) -> RowState {
     RowState::Idle
 }
 /// Whether `agent` has live background work that keeps it out of the `Idle` group even when its turn is idle.
-/// That means a running background task (`run_terminal_command` with `background=true`, which includes `monitor`s) or an active scheduled `/loop`.
-/// Mirrors the agent view's idle "watching" cue (`crate::views::turn_status::Watchers`) minus subagents, which the dashboard lists as their own rows.
-/// Any running background work the user dispatched reads as "Working" on the dashboard.
+/// That means a running background task (`run_terminal_command` with `background=true`, which includes `monitor`s), an active scheduled `/loop`, a running background subagent, or an active workflow run.
+/// It is the same set as the agent view's idle "watching" cue (`crate::views::turn_status::Watchers`).
+/// The live dashboard lists no rows for subagents, so they must keep the parent row Working.
 pub fn has_background_work(agent: &AgentView) -> bool {
-    agent
-        .session
-        .bg_tasks
-        .values()
-        .any(|t| t.status == crate::app::agent::BgTaskStatus::Running)
-        || !agent.session.scheduled_tasks.is_empty()
+    agent.watchers().total() > 0
 }
 /// Compact `"… still running"` label for a turn-idle agent's live background work, e.g. `"1 monitor · 2 loops still running"`.
 /// `None` when there's no background work (the caller then falls back to a bare `"Working"`).
 /// Formats through the agent view's idle-cue helper ([`crate::views::turn_status::format_still_running`]).
-/// Keeps the dashboard's own nouns ("task", not "command") and omits subagents, which dashboard rows list separately.
+/// Keeps the dashboard's own nouns ("task", not "command").
 /// Counts come from local state, not backend content, so nothing needs sanitising.
 fn background_work_label(agent: &AgentView) -> Option<String> {
     let w = agent.watchers();
@@ -474,6 +469,8 @@ fn background_work_label(agent: &AgentView) -> Option<String> {
         (w.monitors, "monitor"),
         (w.loops, "loop"),
         (w.commands, "task"),
+        (w.subagents, "subagent"),
+        (w.workflows, "workflow"),
     ])
 }
 /// Classify a subagent.
@@ -2077,6 +2074,19 @@ mod tests {
         assert_eq!(row.activity.as_deref(), Some("1 monitor still running"));
     }
     /// An active scheduled `/loop` keeps the agent `Working` even with a fully idle turn, labelled as a loop.
+    /// A turn-idle session whose only live work is a background subagent or a workflow run stays Working.
+    #[test]
+    fn background_subagent_or_workflow_keeps_the_row_working() {
+        let mut agent = make_idle_agent_with_model(None);
+        assert_eq!(classify_top_level(&agent), RowState::Idle);
+        agent.subagent_sessions.insert(
+            "child-1".into(),
+            crate::app::agent_view::test_fixtures::running_subagent_info("child-1"),
+        );
+        assert_eq!(classify_top_level(&agent), RowState::Working);
+        let row = top_level_row(AgentId(0), &agent, false, None);
+        assert_eq!(row.activity.as_deref(), Some("1 subagent still running"));
+    }
     #[test]
     fn scheduled_loop_classifies_as_working_with_label() {
         let mut agent = make_idle_agent_with_model(None);

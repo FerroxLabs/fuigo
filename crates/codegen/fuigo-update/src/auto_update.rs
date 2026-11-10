@@ -149,7 +149,9 @@ pub fn classify_install_error(err: &anyhow::Error) -> CliUpdateErrorKind {
     if let Some(smoke) = err.downcast_ref::<SmokeTestFailure>() {
         return match smoke {
             SmokeTestFailure::Timeout => CliUpdateErrorKind::SmokeTimeout,
-            SmokeTestFailure::Spawn(_) => CliUpdateErrorKind::SmokeSpawn,
+            SmokeTestFailure::Spawn(_) | SmokeTestFailure::SpawnBusy(_) => {
+                CliUpdateErrorKind::SmokeSpawn
+            }
             SmokeTestFailure::NonZero { .. } => CliUpdateErrorKind::SmokeNonzero,
         };
     }
@@ -361,6 +363,7 @@ pub async fn auto_update_target(update_config: &UpdateConfig) -> Option<(&'stati
     )
     .unwrap_or(false)
     .then_some((installer, target))
+    .filter(|(_, target)| auto_update_block(target).is_none())
 }
 
 /// Outcome of [`ensure_latest_on_disk`].
@@ -409,6 +412,13 @@ pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<Ensur
         allow_downgrade,
     )
     .unwrap_or(false)
+        && match auto_update_block(&target) {
+            Some(block) => {
+                tracing::warn!("{}", auto_update_block_notice(block, &target));
+                false
+            }
+            None => true,
+        }
     {
         run_install_script(
             installer,
@@ -659,7 +669,18 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
     };
 
     // Kick off a non-blocking download so the binary is ready when the user restarts (or accepts the in-TUI restart prompt)
-    let download = if disk_needs_download {
+    let blocked = if disk_needs_download {
+        auto_update_block(&target_version)
+    } else {
+        None
+    };
+    if let Some(block) = blocked {
+        tracing::warn!("{}", auto_update_block_notice(block, &target_version));
+        if block == AutoUpdateBlock::FailedToStart {
+            return BackgroundUpdateCheck::none();
+        }
+    }
+    let download = if disk_needs_download && blocked.is_none() {
         match run_update_subcommand(UpdateRunMode::NonBlocking, CliUpdateTrigger::AutoBackground)
             .await
         {
@@ -745,6 +766,10 @@ pub async fn run_update_if_available(
     }
 
     let channel_label = format!(" [{}]", update_config.channel);
+    if auto_update && let Some(block) = auto_update_block(&latest_version) {
+        fuigo_tty_utils::cli_eprintln!("{}", auto_update_block_notice(block, &latest_version));
+        return Ok(false);
+    }
     if auto_update {
         fuigo_tty_utils::cli_eprintln!(
             "A new version of Fuigo is available: {} -> {}{}",
@@ -930,6 +955,13 @@ pub async fn run_install_script(
     update_config: &UpdateConfig,
     trigger: CliUpdateTrigger,
 ) -> Result<()> {
+    // An automatic check must not retry a version that just failed to start on this machine.
+    if !matches!(trigger, CliUpdateTrigger::UserCommand)
+        && let Some(version) = target
+        && auto_update_block_for(false, latched_start_failure().as_deref(), version).is_some()
+    {
+        anyhow::bail!(auto_update_block_notice(AutoUpdateBlock::FailedToStart, version));
+    }
     // What's on disk is being replaced, not this (possibly stale) process's version; npm has no trustworthy disk version, so it falls back
     let from_version =
         disk_version_for_installer(installer).unwrap_or_else(get_installed_fuigo_version);
@@ -1525,8 +1557,22 @@ enum SmokeTestFailure {
          Your current version is unchanged."
     )]
     Spawn(String),
+    /// Every attempt hit ETXTBSY (a racing writer still held the file); transient, so it never latches.
+    #[error(
+        "downloaded binary failed to run (could not start: {0}).\n\
+         Your current version is unchanged."
+    )]
+    SpawnBusy(String),
     #[error("{}", nonzero_message(status, stderr))]
     NonZero { status: String, stderr: String },
+}
+
+impl SmokeTestFailure {
+    /// Only a binary that ran and exited nonzero, or one that cannot be spawned for a lasting reason, is evidence the version will not start here.
+    /// A timeout (slow disk, antivirus) and ETXTBSY exhaustion are transient and must not block automatic updates to this version.
+    fn latches_start_failure(&self) -> bool {
+        matches!(self, Self::NonZero { .. } | Self::Spawn(_))
+    }
 }
 
 /// `--version` exited nonzero; include stderr only when there is any.
@@ -1579,7 +1625,7 @@ async fn smoke_test_binary(binary_path: &std::path::Path) -> Result<(), SmokeTes
         }
     }
     // Reached only when every attempt hit ETXTBSY; `last_spawn` holds the final spawn error
-    Err(SmokeTestFailure::Spawn(last_spawn))
+    Err(SmokeTestFailure::SpawnBusy(last_spawn))
 }
 
 /// Test-only entry point: same as [`install_internal`] but reads from
@@ -1647,6 +1693,9 @@ async fn download_verified_from_base(
     // A truncated or corrupt download is caught here and never becomes the active fuigo
     if let Err(fail) = smoke_test_binary(&binary_path).await {
         let _ = tokio::fs::remove_file(&binary_path).await;
+        if fail.latches_start_failure() {
+            record_start_failure(&version);
+        }
         // No prefix: run_install_script's wrap adds "Auto-update failed:".
         return Err(fail.into());
     }
@@ -1675,6 +1724,8 @@ async fn activate_verified_download(download: &VerifiedDownload) -> Result<()> {
     // Clean up old versioned binaries (keeps the current and one previous)
     cleanup_old_downloads(&download_dir, "fuigo", &download.version).await;
     cleanup_old_downloads(&download_dir, "fuigo-pager", &download.version).await;
+
+    clear_start_failure_for(&download.version);
 
     // Persist installer to config.toml so future runs auto-detect internal.
     let _ = config::update_config(|st| {
@@ -2768,6 +2819,80 @@ fn setup_failed_recently(version: &str) -> bool {
         return false;
     };
     v == version && unix_now().saturating_sub(ts) < NPM_SETUP_BACKOFF.as_secs()
+}
+
+/// Marker holding the one version whose binary downloaded fine but would not start on this machine.
+fn start_failure_marker() -> std::path::PathBuf {
+    fuigo_home().join(".update-start-failed")
+}
+
+/// Latch `version`: automatic updates leave it alone until a newer version is out.
+/// An explicit `fuigo update` still tries it (and shows why it fails).
+fn record_start_failure(version: &str) {
+    let path = start_failure_marker();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, format!("{version}\n"));
+}
+
+fn latched_start_failure() -> Option<String> {
+    let text = std::fs::read_to_string(start_failure_marker()).ok()?;
+    let v = text.lines().next()?.trim();
+    (!v.is_empty()).then(|| v.to_owned())
+}
+
+/// Drop the latch once `version` (the latched one) has installed and started.
+fn clear_start_failure_for(version: &str) {
+    if latched_start_failure().as_deref() == Some(version) {
+        let _ = std::fs::remove_file(start_failure_marker());
+    }
+}
+
+/// Why an automatic (unprompted) update must not start for a target version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoUpdateBlock {
+    /// A sandbox profile confines this process, and an update started from it would inherit the confinement.
+    Confined,
+    /// That exact version already failed to start on this machine.
+    FailedToStart,
+}
+
+fn auto_update_block_for(confined: bool, latched: Option<&str>, target: &str) -> Option<AutoUpdateBlock> {
+    if confined {
+        Some(AutoUpdateBlock::Confined)
+    } else if latched == Some(target) {
+        Some(AutoUpdateBlock::FailedToStart)
+    } else {
+        None
+    }
+}
+
+fn auto_update_block(target: &str) -> Option<AutoUpdateBlock> {
+    auto_update_block_for(
+        fuigo_sandbox::requested_confinement_profile().is_some() || fuigo_sandbox::is_confined(),
+        latched_start_failure().as_deref(),
+        target,
+    )
+}
+
+fn auto_update_block_notice(block: AutoUpdateBlock, target: &str) -> String {
+    match block {
+        AutoUpdateBlock::Confined => format!(
+            "Fuigo is running confined in a sandbox, so it does not update on its own. \
+             Run `fuigo update` to install {target}."
+        ),
+        AutoUpdateBlock::FailedToStart => format!(
+            "Fuigo {target} failed to start on this machine, so automatic updates skip it until a newer \
+             version is out. Run `fuigo update` to see why."
+        ),
+    }
+}
+
+/// Test hook: the notice an automatic update of `target` would give instead of starting, if any.
+#[doc(hidden)]
+pub fn auto_update_block_notice_for_test(target: &str) -> Option<String> {
+    auto_update_block(target).map(|b| auto_update_block_notice(b, target))
 }
 
 /// The registry to record in config.toml by the setup step: only one without embedded credentials.

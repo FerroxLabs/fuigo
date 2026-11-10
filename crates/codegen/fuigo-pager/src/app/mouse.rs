@@ -14,6 +14,39 @@ use crate::views::prompt_widget::PromptEvent;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use std::time::Instant;
 impl AgentView {
+    /// A click on the dock's stop button: the stop action, or `Changed` when the button is covered or stale.
+    /// `None` when the pointer is not on the button.
+    /// Shared by the dock click path and the permission card, which otherwise takes every mouse event.
+    pub(super) fn dock_stop_click(&mut self, col: u16, row: u16) -> Option<InputOutcome> {
+        let hit = self
+            .dock_stop_button
+            .clone()
+            .filter(|hit| hit.rect.contains((col, row).into()))?;
+        if self.pos_occluded(col, row) {
+            return Some(InputOutcome::Changed);
+        }
+        let Some(item) = self.dock_item_at(self.pane_areas.dock, row) else {
+            return Some(InputOutcome::Changed);
+        };
+        let Some(action) = self.dock_stop_action(item) else {
+            return Some(InputOutcome::Changed);
+        };
+        if super::agent_view::DockKillId::from_action(&action).as_ref() != Some(&hit.id) {
+            return Some(InputOutcome::Changed);
+        }
+        Some(InputOutcome::Action(action))
+    }
+    /// Remember a press on a view's close button, so the second press of a double-click there can be swallowed.
+    pub(super) fn note_view_close_click(&mut self, col: u16, row: u16) {
+        self.last_view_close_click = Some((Instant::now(), col, row));
+    }
+    /// True for the second press of a double-click on the spot a view was just closed from.
+    /// That press would land on whatever the closed view uncovered (a task's stop button, the cancel button) and act on it.
+    fn is_double_click_on_closed_view(&mut self, col: u16, row: u16) -> bool {
+        self.last_view_close_click.take().is_some_and(|(at, c, r)| {
+            c == col && r == row && at.elapsed().as_millis() < MULTI_CLICK_TIMEOUT_MS
+        })
+    }
     /// Multi-click check for the prompt textarea, paired by time only (no coordinates); a mispaired action is one undo step.
     /// Records the click for the next pairing.
     pub(super) fn prompt_click_is_double(&mut self) -> bool {
@@ -30,8 +63,12 @@ impl AgentView {
     pub(super) fn handle_mouse(&mut self, mouse: &MouseEvent) -> InputOutcome {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                if self.is_double_click_on_closed_view(mouse.column, mouse.row) {
+                    return InputOutcome::Unchanged;
+                }
                 self.left_mouse_down = true;
                 if self.hit_todo_close.contains(mouse.column, mouse.row) {
+                    self.note_view_close_click(mouse.column, mouse.row);
                     self.todo.overlay.escape();
                     self.todo.on_state_change();
                     if self.active_pane == AgentPane::Todo {
@@ -40,6 +77,7 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 if self.hit_queue_close.contains(mouse.column, mouse.row) {
+                    self.note_view_close_click(mouse.column, mouse.row);
                     self.queue.overlay.escape();
                     self.queue.on_state_change();
                     if self.active_pane == AgentPane::Queue {
@@ -105,6 +143,7 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 if self.hit_catalog_close.contains(mouse.column, mouse.row) {
+                    self.note_view_close_click(mouse.column, mouse.row);
                     self.catalog.overlay.escape();
                     self.catalog.on_state_change();
                     if self.active_pane == AgentPane::Catalog {
@@ -113,6 +152,7 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 if self.hit_bg_close.contains(mouse.column, mouse.row) {
+                    self.note_view_close_click(mouse.column, mouse.row);
                     self.tasks.overlay.escape();
                     self.tasks.on_state_change();
                     if self.active_pane == AgentPane::Tasks {
@@ -431,26 +471,8 @@ impl AgentView {
                 match self.pane_areas.hit_test(mouse.column, mouse.row) {
                     Some(AgentPane::Dock) => {
                         let item = self.dock_item_at(self.pane_areas.dock, mouse.row);
-                        if let Some(hit) = self
-                            .dock_stop_button
-                            .clone()
-                            .filter(|hit| hit.rect.contains((mouse.column, mouse.row).into()))
-                        {
-                            if self.pos_occluded(mouse.column, mouse.row) {
-                                return InputOutcome::Changed;
-                            }
-                            let Some(item) = item else {
-                                return InputOutcome::Changed;
-                            };
-                            let Some(action) = self.dock_stop_action(item) else {
-                                return InputOutcome::Changed;
-                            };
-                            if super::agent_view::DockKillId::from_action(&action).as_ref()
-                                != Some(&hit.id)
-                            {
-                                return InputOutcome::Changed;
-                            }
-                            return InputOutcome::Action(action);
+                        if let Some(outcome) = self.dock_stop_click(mouse.column, mouse.row) {
+                            return outcome;
                         }
                         match item {
                             Some(item) => {
@@ -955,7 +977,12 @@ impl AgentView {
                         }
                     }
                 } else {
-                    self.pending_scrollback_click = None;
+                    // The mouse-down could not move focus to the transcript (a queued prompt with unsaved edits holds it): a click on a `[Copy]` or other inline button still lands, and the edit stays open
+                    if let Some((click_col, click_row)) = self.pending_scrollback_click.take()
+                        && let Some(outcome) = self.handle_inline_media_click(click_col, click_row)
+                    {
+                        return outcome;
+                    }
                 }
                 if self.active_pane == AgentPane::Todo {
                     self.todo.handle_mouse(
@@ -1295,6 +1322,33 @@ impl AgentView {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn double_click_on_a_view_close_does_not_press_what_was_underneath() {
+        use crate::app::agent_view::test_fixtures::make_running_agent;
+        use crossterm::event::KeyModifiers;
+        let mut agent = make_running_agent();
+        let spot = ratatui::layout::Rect::new(10, 3, 4, 1);
+        agent.hit_todo_close.rect = Some(spot);
+        agent.hit_cancel_button.rect = Some(spot);
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 11,
+            row: 3,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert!(matches!(agent.handle_mouse(&down), InputOutcome::Changed));
+        // The closed view no longer paints its close button, and the cancel button sits under the same cells
+        agent.hit_todo_close.rect = None;
+        assert!(
+            matches!(agent.handle_mouse(&down), InputOutcome::Unchanged),
+            "the second press of the double-click must not reach the button underneath"
+        );
+        // A later, separate click still works
+        assert!(matches!(
+            agent.handle_mouse(&down),
+            InputOutcome::Action(Action::CancelTurn)
+        ));
+    }
     use super::*;
     use crate::app::agent::AgentState;
     use crate::app::agent_view::PromptMode;

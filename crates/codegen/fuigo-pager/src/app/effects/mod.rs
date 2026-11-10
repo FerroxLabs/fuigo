@@ -15,7 +15,7 @@ pub(super) use helpers::{
 pub(crate) use helpers::{
     EffectMeta, RestoreProgressMsg, SessionFlags, acp_error_user_text, acp_send_bounded,
     compact_error, is_disk_full_error, parse_worktree_restore_payload,
-    persist_permission_mode_and_notify, persist_setting, sanitize_user_error,
+    persist_permission_mode_and_notify, persist_setting, sanitize_user_error, sanitize_user_error_whole,
 };
 use helpers::*;
 use std::path::{Path, PathBuf};
@@ -493,7 +493,7 @@ pub(crate) fn execute(
                             TaskResult::SessionLoadFailed {
                                 agent_id,
                                 session_id: acp_session_id,
-                                error: acp_error_user_text(&e),
+                                error: sanitize_user_error_whole(&error),
                                 attempt,
                             }
                         }
@@ -2171,6 +2171,9 @@ pub(crate) fn execute(
                 TaskResult::ProviderConfigWritten { report_to, result }
             });
         }
+        Effect::PersistKeysVim { value } => {
+            persist_keys_vim(tasks, value);
+        }
         Effect::PersistWorktreeMode { mode, config_key } => {
             debug_assert!(
                 config_key == "fork_worktree_mode" || config_key == "new_session_worktree_mode",
@@ -3592,9 +3595,8 @@ pub(crate) fn execute(
                             TaskResult::DeleteSessionFailed {
                                 source,
                                 session_id,
-                                error: sanitize_user_error(
-                                    &format!("couldn't delete session: {}", acp_error_text(&e)),
-                                ),
+                                // The reason alone: the handler adds the one "Couldn't delete session:" prefix
+                                error: sanitize_user_error_whole(&acp_error_text(&e)),
                             }
                         }
                     }
@@ -3898,12 +3900,12 @@ pub(crate) fn execute(
                     TaskResult::MemoryNoteSaved { agent_id, result }
                 });
         }
-        Effect::SendBtw { agent_id, session_id, question, blocks, minimal_request_id } => {
+        Effect::SendBtw { agent_id, session_id, question, blocks, request_id } => {
             let tx = acp_tx.clone();
             let is_api_key_auth = session_flags.is_api_key_auth;
             tasks
                 .spawn(async move {
-                    let params = build_btw_params(&session_id, &question, blocks.as_deref());
+                    let params = build_btw_params(&session_id, &question, blocks.as_deref(), request_id);
                     let request = acp::ExtRequest::new(
                         "fuigo/btw",
                         serde_json::value::to_raw_value(&params)
@@ -3925,18 +3927,22 @@ pub(crate) fn execute(
                             TaskResult::BtwResponse {
                                 agent_id,
                                 result: Ok(answer),
-                                minimal_request_id,
+                                request_id,
                             }
                         }
                         Err(e) => {
                             TaskResult::BtwResponse {
                                 agent_id,
                                 result: Err(format_acp_error(&e, is_api_key_auth)),
-                                minimal_request_id,
+                                request_id,
                             }
                         }
                     }
                 });
+        }
+        Effect::CancelBtw { session_id, request_id } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move { send_btw_cancel(&tx, &session_id, request_id).await });
         }
         Effect::SendRecap { session_id, auto } => {
             let tx = acp_tx.clone();
@@ -4390,7 +4396,7 @@ pub(crate) fn execute(
                                 let msg = err.trim_matches('"').to_string();
                                 return TaskResult::ForkSessionFailed {
                                     agent_id,
-                                    error: sanitize_user_error(&format!("fork failed: {msg}")),
+                                    error: sanitize_user_error_whole(&format!("fork failed: {msg}")),
                                 };
                             }
                             match crate::app::session_startup::fork_response_new_session_id(
@@ -4415,7 +4421,7 @@ pub(crate) fn execute(
                         Err(e) => {
                             TaskResult::ForkSessionFailed {
                                 agent_id,
-                                error: sanitize_user_error(&format!("fork failed: {}", acp_error_text(&e))),
+                                error: sanitize_user_error_whole(&format!("fork failed: {}", acp_error_text(&e))),
                             }
                         }
                     }
@@ -4824,7 +4830,7 @@ async fn session_rename_rpc(
 /// The reason a failed `fuigo/session/rename` reports. The line that shows it already says what failed ("Couldn't
 /// rename session: ..." / "Couldn't reset session title: ..."), so this is the reason alone.
 pub(crate) fn session_rename_error_text(error: &acp::Error) -> String {
-    sanitize_user_error(&acp_error_text(error))
+    sanitize_user_error_whole(&acp_error_text(error))
 }
 /// Session title from local persistence: loads only this session's summary, never the all-sessions list.
 /// `cwd` comes from the `fuigo/session/info` response.
@@ -4835,6 +4841,17 @@ async fn lookup_session_title(session_id: &acp::SessionId, cwd: &str) -> Option<
             cwd,
         )
         .await
+}
+/// The title `--resume <id>` shows before the session loads: that one session's summary, in its original workspace when the
+/// launch resolved one, else in the launch folder. Never lists the other sessions.
+pub(crate) async fn session_title_for_resume(
+    root: std::path::PathBuf,
+    session_id: &str,
+    original_cwd: Option<&std::path::Path>,
+    launch_cwd: &std::path::Path,
+) -> Option<String> {
+    let cwd = original_cwd.unwrap_or(launch_cwd).to_string_lossy().into_owned();
+    lookup_session_title_in(root, &acp::SessionId::new(session_id), &cwd).await
 }
 /// [`lookup_session_title`] against an explicit root, for tests.
 async fn lookup_session_title_in(
@@ -5049,11 +5066,15 @@ fn build_btw_params(
     session_id: &acp::SessionId,
     question: &str,
     blocks: Option<&[acp::ContentBlock]>,
+    request_id: Option<uuid::Uuid>,
 ) -> serde_json::Value {
     let mut params = serde_json::json!({
         "sessionId": session_id.0.to_string(),
         "question": question,
     });
+    if let Some(request_id) = request_id {
+        params["requestId"] = serde_json::Value::String(request_id.to_string());
+    }
     if let Some(blocks) = blocks {
         params["content"] = serde_json::to_value(blocks)
             .expect("serialize btw content");

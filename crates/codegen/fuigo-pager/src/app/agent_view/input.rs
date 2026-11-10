@@ -396,6 +396,7 @@ impl AgentView {
                     .hit_subagent_frame_close
                     .contains(mouse.column, mouse.row)
             {
+                self.note_view_close_click(mouse.column, mouse.row);
                 self.close_subagent_fullscreen();
                 return InputOutcome::Changed;
             }
@@ -818,6 +819,10 @@ impl AgentView {
                             }
                         }
                         MouseEventKind::Down(MouseButton::Left) => {
+                            // The dock stop buttons stay live under an approval card
+                            if let Some(outcome) = self.dock_stop_click(mouse.column, mouse.row) {
+                                return outcome;
+                            }
                             if let Some(idx) = self.permission_item_at(mouse.column, mouse.row) {
                                 let now = Instant::now();
                                 let is_double_click =

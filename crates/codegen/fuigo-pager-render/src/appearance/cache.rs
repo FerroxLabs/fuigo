@@ -313,6 +313,8 @@ pub fn set_simple_mode(enabled: bool) {
 thread_local! {
     static VIM_MODE_CURRENT: Cell<bool> = const { Cell::new(VIM_MODE_DEFAULT) };
     static VIM_MODE_LOADED: Cell<bool> = const { Cell::new(false) };
+    static VIM_PROMPT_CURRENT: Cell<bool> = const { Cell::new(false) };
+    static VIM_PROMPT_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Read cached `vim_mode`, seeding from disk on first call.
@@ -350,7 +352,7 @@ fn vim_mode_from_config(root: &toml::Value) -> bool {
         .and_then(|keys| keys.get("vim"))
         .and_then(toml::Value::as_str)
     {
-        Some("nav") => true,
+        Some("nav" | "all") => true,
         Some("off") => false,
         _ => VIM_MODE_DEFAULT,
     }
@@ -360,6 +362,39 @@ fn vim_mode_from_config(root: &toml::Value) -> bool {
 pub fn set_vim_mode(enabled: bool) {
     VIM_MODE_CURRENT.with(|c| c.set(enabled));
     VIM_MODE_LOADED.with(|l| l.set(true));
+}
+
+/// Read cached prompt-vim flag (`[keys] vim = "all"`), seeding from disk on first call.
+///
+/// Off by default. It implies scrollback vim (`vim_mode`): a config that turns scrollback vim off also turns this off.
+pub fn load_vim_prompt() -> bool {
+    VIM_PROMPT_LOADED.with(|loaded| {
+        if !loaded.get() {
+            VIM_PROMPT_CURRENT.with(|c| {
+                c.set(
+                    fuigo_config::load_effective_config_disk_only()
+                        .is_ok_and(|root| vim_prompt_from_config(&root)),
+                )
+            });
+            loaded.set(true);
+        }
+    });
+    VIM_PROMPT_CURRENT.with(|c| c.get())
+}
+
+/// `[keys] vim = "all"` turns prompt vim on, unless `[ui].vim_mode = false` explicitly turns vim off.
+fn vim_prompt_from_config(root: &toml::Value) -> bool {
+    root.get("keys")
+        .and_then(|keys| keys.get("vim"))
+        .and_then(toml::Value::as_str)
+        == Some("all")
+        && vim_mode_from_config(root)
+}
+
+/// Replace cached prompt-vim flag.
+pub fn set_vim_prompt(enabled: bool) {
+    VIM_PROMPT_CURRENT.with(|c| c.set(enabled));
+    VIM_PROMPT_LOADED.with(|l| l.set(true));
 }
 
 // -- Show thinking blocks ----------------------------------------------------
@@ -734,6 +769,7 @@ pub fn prime(ui: &UiConfig) {
     // These keys live in the layered config, not the `UiConfig` arg; seed them so the first frame skips disk
     // `load_*` is a no-op when already set (e.g. by the startup resolve).
     let _ = load_vim_mode();
+    let _ = load_vim_prompt();
     let _ = load_scroll_speed();
     let _ = load_scroll_mode();
     let _ = load_invert_scroll();
@@ -966,6 +1002,31 @@ mod tests {
         assert!(vim_mode_from_config(&cfg(
             "[ui]\nvim_mode = true\n[keys]\nvim = \"off\"\n"
         )));
+    }
+
+    #[test]
+    fn keys_vim_all_enables_prompt_vim_and_nav() {
+        let cfg = |t: &str| -> toml::Value { toml::from_str(t).unwrap() };
+        assert!(vim_mode_from_config(&cfg("[keys]\nvim = \"all\"\n")));
+        assert!(vim_prompt_from_config(&cfg("[keys]\nvim = \"all\"\n")));
+        assert!(!vim_prompt_from_config(&cfg("")));
+        assert!(!vim_prompt_from_config(&cfg("[keys]\nvim = \"nav\"\n")));
+        assert!(!vim_prompt_from_config(&cfg("[keys]\nvim = \"off\"\n")));
+        assert!(!vim_prompt_from_config(&cfg(
+            "[ui]\nvim_mode = false\n[keys]\nvim = \"all\"\n"
+        )));
+    }
+
+    #[test]
+    fn set_then_load_round_trips_vim_prompt() {
+        std::thread::spawn(|| {
+            set_vim_prompt(true);
+            assert!(load_vim_prompt());
+            set_vim_prompt(false);
+            assert!(!load_vim_prompt());
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

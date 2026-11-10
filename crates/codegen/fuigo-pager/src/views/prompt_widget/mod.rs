@@ -36,6 +36,13 @@ use crate::views::suggestion_controller::{
     AcceptMode, CompletionSplice, SuggestionController, SuggestionSource,
 };
 
+mod vim;
+mod vim_cursor;
+#[cfg(test)]
+mod vim_tests;
+pub(crate) use vim::VimMode;
+pub(crate) use vim_cursor::shape_escape as vim_cursor_escape;
+
 /// Element kind tag for pasted multi-line content.
 pub const KIND_PASTE: ElementKind = ElementKind(1);
 /// Element kind tag for @-file references (future use).
@@ -607,6 +614,8 @@ pub struct PromptWidget {
     pub(crate) slash_controller: crate::slash::SlashController,
     /// Slash command completion snapshot (for dropdown rendering).
     pub(crate) slash_state: crate::slash::SlashState,
+    /// Prompt text the user closed the slash menu on with `Esc`. A command-list refresh over the same text must not reopen it.
+    slash_dismissed_for: Option<String>,
     /// Mouse-hovered slash dropdown item index (`None` = no hover).
     pub(crate) slash_hovered: Option<usize>,
     /// Last input delta for the flight recorder (read by AgentView after handle_key).
@@ -666,6 +675,8 @@ pub struct PromptWidget {
     /// One-shot: the last `handle_key` accepted an @-file completion, which can shrink a long `@query` into a short ref/chip.
     /// That big shrink is NOT a user wipe, so the clear detector must skip observing it (it resyncs on the next genuine edit).
     completion_accepted: bool,
+    /// Vim editing state (`[keys] vim = "all"`). Idle and never consulted unless prompt vim is on.
+    vim: vim::VimState,
 }
 
 /// Prefix display width (`"❯ "` or `"> "`, both 2 columns).
@@ -693,6 +704,7 @@ impl PromptWidget {
             history_search: HistorySearchState::new(),
             slash_controller: crate::slash::SlashController::with_builtins(cwd.to_path_buf()),
             slash_state: crate::slash::SlashState::default(),
+            slash_dismissed_for: None,
             slash_hovered: None,
             last_input_delta: crate::input_log::LastInputDelta::default(),
             slash_preview_original: None,
@@ -714,6 +726,7 @@ impl PromptWidget {
             undo_tip_fire: false,
             plan_nudge_fire: false,
             completion_accepted: false,
+            vim: vim::VimState::default(),
         }
     }
 
@@ -1069,6 +1082,8 @@ impl PromptWidget {
             // Revert any in-progress preview while the command text is still in the textarea (parse_invocation needs it)
             self.slash_cancel_preview();
         }
+        // A vim Insert session still open over the old draft must not swallow the replacement into its undo step
+        self.vim.close_group(&mut self.textarea);
         self.textarea.set_text(text);
         // Suggestion state (ghost, dropdown items, pending fetches) is tied to a SPECIFIC draft
         // Every wholesale content swap (empty or not) invalidates it, so nothing stale survives into (or lands over) the new text
@@ -1177,6 +1192,10 @@ impl PromptWidget {
         // We don't pay two trigger rebuilds when the toolset arrived alongside fresh ACP commands
         let registry = self.slash_controller.registry_mut();
         registry.set_acp_state(commands, tools.cloned());
+        // A menu closed with Esc stays closed while the text is unchanged; typing reopens it through the normal refresh
+        if self.slash_dismissed_for.as_deref() == Some(self.textarea.text()) {
+            return;
+        }
         self.refresh_slash(models);
     }
 
@@ -1244,6 +1263,12 @@ impl PromptWidget {
     /// Whether the slash dropdown is currently open.
     pub fn slash_open(&self) -> bool {
         self.slash_state.snapshot().open
+    }
+
+    /// Close the slash dropdown because the user pressed `Esc`, and keep it closed across command-list refreshes of the same text.
+    pub fn slash_dismiss(&mut self) {
+        self.slash_dismissed_for = Some(self.textarea.text().to_string());
+        self.slash_close();
     }
 
     /// Close the slash dropdown.
@@ -1535,6 +1560,29 @@ impl PromptWidget {
         None
     }
 
+    /// Turn the file chip that ends exactly at the cursor back into plain editable text, keeping its `@path[:range]` characters.
+    /// Returns whether a chip was dissolved. One undo step restores the chip.
+    fn dissolve_file_chip_before_cursor(&mut self) -> bool {
+        let cursor = self.textarea.cursor();
+        let Some(range) = self
+            .textarea
+            .elements()
+            .iter()
+            .find(|e| e.kind == KIND_FILE_REF && e.range.end == cursor)
+            .map(|e| e.range.clone())
+        else {
+            return false;
+        };
+        let Some(text) = self.textarea.get_range(range.clone()).map(str::to_owned) else {
+            return false;
+        };
+        self.textarea.begin_undo_group();
+        self.textarea.replace_range(range.clone(), &text);
+        self.textarea.set_cursor(range.start + text.len());
+        self.textarea.end_undo_group();
+        true
+    }
+
     /// Find a file ref element when cursor is at an element boundary.
     ///
     /// Used by the ':' trigger: fires when the cursor is at element.range.start (on the `@` char) or element.range.end (right after the element).
@@ -1630,6 +1678,35 @@ impl PromptWidget {
 }
 
 impl PromptWidget {
+    /// Whether prompt vim is on (`[keys] vim = "all"` or `/vim-mode all`).
+    pub(crate) fn vim_enabled() -> bool {
+        crate::appearance::cache::load_vim_prompt()
+    }
+
+    /// Current vim mode (Insert until a command says otherwise).
+    pub(crate) fn vim_mode(&self) -> VimMode {
+        self.vim.mode()
+    }
+
+    /// Offer a key to the vim layer. Returns true when the key was consumed.
+    ///
+    /// With prompt vim off this returns false without touching any state, so the key goes through the usual handling unchanged.
+    /// Turning vim off while in Normal mode (or with an Insert session open) drops back to plain Insert here.
+    pub(crate) fn vim_handle_key(&mut self, key: &KeyEvent) -> bool {
+        if !Self::vim_enabled() {
+            if !self.vim.is_idle() {
+                self.vim.reset(&mut self.textarea);
+            }
+            return false;
+        }
+        let before = self.textarea.text_revision();
+        let consumed = self.vim.handle_key(&mut self.textarea, key) == vim::VimKey::Consumed;
+        if consumed && self.textarea.text_revision() != before {
+            self.sync_images_with_textarea();
+        }
+        consumed
+    }
+
     /// Handle a key event for text editing only.
     ///
     /// This does NOT handle send/submit; that's routed through the action registry and [`try_send()`].
@@ -1653,21 +1730,27 @@ impl PromptWidget {
         if !self.contextual_hint_undo && !self.contextual_hint_plan_mode {
             return self.handle_key_inner(key);
         }
-        let before = self.textarea.text().chars().count();
+        // Char counts only feed the undo clear-detector; the plan-nudge path never needs them (O(text) per key)
+        let before = if self.contextual_hint_undo {
+            self.textarea.text().chars().count()
+        } else {
+            0
+        };
         let had_images = !self.images.is_empty();
         // Read the pre-edit keyword state fresh every key (the matcher is non-allocating), and only when the plan-nudge detector is on
         // Reading it here, not from a stored latch, keeps the rising edge correct for EVERY text writer
         // A completion-accept, paste, or programmatic restore that already put a keyword in the buffer leaves before == after == true on the next key
         // So nothing fires, with no per-writer resync to forget
         let before_kw = self.contextual_hint_plan_mode
+            && crate::tips::plan_nudge::is_scannable(self.textarea.text())
             && crate::tips::plan_nudge::prompt_mentions_planning(self.textarea.text());
         let event = self.handle_key_inner(key);
         // Accepting an @-file completion replaces a long `@query` with a short ref/chip: a big shrink, but a completion, not a wipe
         // Skip the detector entirely on that keypress; it resyncs on the next genuine edit (`before != last_len`) without firing on the stale peak
         if event == PromptEvent::Edited && !self.completion_accepted {
-            let after = self.textarea.text().chars().count();
             // Undo clear-detector only when the undo tip is on.
             if self.contextual_hint_undo {
+                let after = self.textarea.text().chars().count();
                 let wiped = self.clear_detector.observe_user_edit(before, after);
                 // Honesty guards: never advertise a recovery the textarea can't do, and never one that lost image payloads
                 // Ctrl+C's `set_text("")` drains both image lists (undo would restore dead chips), while kill-style wipes stash and restore fully
@@ -1692,7 +1775,9 @@ impl PromptWidget {
             return false;
         }
         let text = self.textarea.text();
+        // A long draft is past the "starting to plan" moment, and a key-delivered paste would make this scan quadratic
         !before_kw
+            && crate::tips::plan_nudge::is_scannable(text)
             && crate::tips::plan_nudge::prompt_mentions_planning(text)
             && !text.starts_with('/')
             && !text.starts_with('!')
@@ -1778,6 +1863,16 @@ impl PromptWidget {
             return PromptEvent::Edited;
         }
         // Not at an element boundary: fall through to type ':' normally
+
+        // Typing a path character right at the end of a file chip edits the chip in place: it turns back into plain `@path` text and the picker reopens on it
+        // Backspace, whitespace and `:` keep their chip behaviour
+        if let KeyCode::Char(c) = key.code
+            && !c.is_whitespace()
+            && c != ':'
+            && crate::input::key::is_text_input_key(key)
+        {
+            self.dissolve_file_chip_before_cursor();
+        }
 
         // ── Normal key handling ─────────────────────────────────────────
 

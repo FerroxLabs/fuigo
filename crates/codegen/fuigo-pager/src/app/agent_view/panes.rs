@@ -123,7 +123,10 @@ impl AgentView {
         }
         if !self.vim_mode
             && let KeyCode::Char(c) = key.code
-            && (c.is_ascii_alphabetic() || c == '/')
+            && !c.is_control()
+            && !c.is_whitespace()
+            // `?`, `!` and `#` keep their agent-level meaning (palette, shell and stash prefixes)
+            && !matches!(c, '?' | '!' | '#')
             && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
         {
             return InputOutcome::ActionThenForward(Action::FocusPrompt);

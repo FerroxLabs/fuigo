@@ -290,10 +290,6 @@ fn doctor_fix_all_cancel_keys_restore_prompt_without_effect() {
             crossterm::event::KeyCode::Char('X'),
             crossterm::event::KeyModifiers::SHIFT,
         ),
-        crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('y'),
-            crossterm::event::KeyModifiers::CONTROL,
-        ),
     ] {
         let mut app = doctor_question_app(temp.path());
         let id = AgentId(0);
@@ -5991,6 +5987,7 @@ fn rewind_to(app: &mut AppView, id: AgentId, target: usize, prompt_text: &str) {
                 error: None,
                 mode: Some("conversation_only".into()),
                 prompt_text: Some(prompt_text.into()),
+                context_tokens: None,
             },
         }),
         app,

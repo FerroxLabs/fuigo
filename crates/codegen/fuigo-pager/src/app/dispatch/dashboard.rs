@@ -1891,7 +1891,11 @@ pub(super) fn dispatch_dashboard_stop(app: &mut AppView) -> Vec<Effect> {
                     d.delete_confirm = None;
                 }
                 return match stopped {
-                    Some(effects) => effects,
+                    Some(mut effects) => {
+                        // The `/workflow stop` lines queued by the stop go out now when the row is idle, or when its turn ends
+                        effects.extend(super::queue::maybe_drain_queue_and_note_peek(app, id));
+                        effects
+                    }
                     None => {
                         app.show_toast("Stop the session before deleting");
                         vec![]
@@ -1953,7 +1957,7 @@ pub(super) fn dispatch_dashboard_stop(app: &mut AppView) -> Vec<Effect> {
     }
 }
 
-/// Stop what keeps a busy top-level row out of Idle: a running turn, background tasks/monitors, scheduled `/loop`s, and queued (unsent) prompts.
+/// Stop what keeps a busy top-level row out of Idle: a running turn, background tasks/monitors, scheduled `/loop`s, running subagents, and queued (unsent) prompts.
 /// Marks local state optimistically (mirroring the agent view's own kill paths).
 /// Returns `Some(effects)` when it stopped something (empty if only the local prompt queue was dropped); `None` when nothing was stoppable.
 fn stop_top_level_activity(agent: &mut crate::app::agent_view::AgentView) -> Option<Vec<Effect>> {
@@ -2011,6 +2015,19 @@ fn stop_top_level_activity(agent: &mut crate::app::agent_view::AgentView) -> Opt
         }
     }
 
+    // Running subagents (background ones keep the row Working) end with the row's stop
+    if let Some(session_id) = agent.session.session_id.clone() {
+        let now = std::time::Instant::now();
+        for info in agent.subagent_sessions.values_mut().filter(|i| i.is_running()) {
+            info.pending_kill = true;
+            info.kill_requested_at = Some(now);
+            effects.push(Effect::KillSubagent {
+                session_id: session_id.clone(),
+                subagent_id: info.subagent_id.to_string(),
+            });
+        }
+    }
+
     // Queued prompts are local (unsent), so dropping them needs no effect and works even before the session exists (a just-dispatched row)
     let dropped_queue = !agent.session.pending_prompts.is_empty();
     if dropped_queue {
@@ -2018,7 +2035,23 @@ fn stop_top_level_activity(agent: &mut crate::app::agent_view::AgentView) -> Opt
         agent.sync_queue_pane();
     }
 
-    (!effects.is_empty() || dropped_queue).then_some(effects)
+    // Running workflow runs end with the row's stop, through the same `/workflow stop` the dock and task list send
+    // Queued after the queue was cleared above so they survive it; the run id picks the run exactly even when two share a name
+    let stop_lines: Vec<String> = agent
+        .workflow_runs
+        .iter()
+        .filter(|run| run.can_stop())
+        .map(|run| format!("/workflow stop {}", run.run_id))
+        .collect();
+    let stopped_workflows = !stop_lines.is_empty();
+    for line in stop_lines {
+        agent.session.enqueue_prompt_with_skill_tokens(line, Vec::new());
+    }
+    if stopped_workflows {
+        agent.sync_queue_pane();
+    }
+
+    (!effects.is_empty() || dropped_queue || stopped_workflows).then_some(effects)
 }
 
 /// A live arm on `sel` confirms and deletes; otherwise (re)arm.

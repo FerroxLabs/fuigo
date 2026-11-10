@@ -44,6 +44,7 @@ fn unavailable_tmux() -> TmuxProbeFacts {
         allow_passthrough: TmuxProbeResult::Unavailable,
         control_mode: TmuxProbeResult::Unavailable,
         client_features: TmuxProbeResult::Unavailable,
+        escape_time: TmuxProbeResult::Unavailable,
     }
 }
 
@@ -173,6 +174,7 @@ fn tmux_config_and_reload_notes_output_is_stable() {
             allow_passthrough: TmuxProbeResult::Available("off".to_owned()),
             control_mode: TmuxProbeResult::Available(false),
             client_features: TmuxProbeResult::Unavailable,
+            escape_time: TmuxProbeResult::Unavailable,
         },
         &TMUX_ROUTE,
         "pbcopy",
@@ -396,6 +398,7 @@ fn unavailable_and_error_probes_do_not_create_false_issues() {
             allow_passthrough: TmuxProbeResult::Error("query failed".to_owned()),
             control_mode: TmuxProbeResult::Unavailable,
             client_features: TmuxProbeResult::Unavailable,
+            escape_time: TmuxProbeResult::Unavailable,
         },
         &TMUX_ROUTE,
         "pbcopy",
@@ -492,6 +495,7 @@ fn runtime_merge_does_not_duplicate_view_findings() {
                 allow_passthrough: TmuxProbeResult::Available("off".to_owned()),
                 control_mode: TmuxProbeResult::Available(false),
                 client_features: TmuxProbeResult::Unavailable,
+                escape_time: TmuxProbeResult::Unavailable,
             },
             &TMUX_ROUTE,
             "pbcopy",

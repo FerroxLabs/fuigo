@@ -15,7 +15,7 @@ fn send_minimal_btw(app: &mut AppView, question: &str) -> uuid::Uuid {
     {
         [
             Effect::SendBtw {
-                minimal_request_id: Some(id),
+                request_id: Some(id),
                 ..
             },
         ] => *id,
@@ -220,6 +220,150 @@ fn recap_request_transport_failure_with_turns_uses_generic_toast() {
 }
 
 #[test]
+fn fullscreen_btw_response_after_esc_does_not_reopen_the_panel() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let _ = dispatch(Action::SendPrompt("/btw side question".to_owned()), &mut app);
+    assert!(matches!(
+        app.agents[&id].btw_state,
+        Some(crate::views::btw_overlay::BtwOverlayState::Loading { .. })
+    ));
+    app.agents.get_mut(&id).unwrap().active_pane = crate::app::agent_view::AgentPane::Prompt;
+
+    let request_id = app.agents[&id].btw_request_id.expect("fullscreen /btw has an id");
+
+    let _ = app.handle_input(&esc());
+    assert!(app.agents[&id].btw_state.is_none());
+
+    dispatch(
+        Action::TaskComplete(TaskResult::BtwResponse {
+            agent_id: id,
+            result: Ok("late".into()),
+            request_id: Some(request_id),
+        }),
+        &mut app,
+    );
+
+    assert!(
+        app.agents[&id].btw_state.is_none(),
+        "a late answer must not reopen a cancelled /btw panel"
+    );
+}
+
+/// Esc on a loading fullscreen `/btw` sends the shell-side cancel for exactly that request.
+#[test]
+fn fullscreen_btw_esc_while_loading_sends_the_shell_cancel() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let session_id = app.agents[&id].session.session_id.clone().expect("session");
+    let effects = dispatch(
+        Action::SendBtw { question: "side question".into(), images: Vec::new() },
+        &mut app,
+    );
+    let [Effect::SendBtw { request_id: Some(request_id), .. }] = effects.as_slice() else {
+        panic!("expected one correlated /btw send, got {effects:?}");
+    };
+    let request_id = *request_id;
+    app.agents.get_mut(&id).unwrap().active_pane = crate::app::agent_view::AgentPane::Prompt;
+    app.pending_effects.clear();
+
+    let _ = app.handle_input(&esc());
+
+    assert!(
+        matches!(
+            app.pending_effects.as_slice(),
+            [Effect::CancelBtw { session_id: sid, request_id: rid }] if *sid == session_id && *rid == request_id
+        ),
+        "Esc must queue the cancel, got {:?}",
+        app.pending_effects
+    );
+}
+
+/// Esc on an already-answered panel has nothing to cancel.
+#[test]
+fn fullscreen_btw_esc_after_answer_sends_no_cancel() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let _ = dispatch(
+        Action::SendBtw { question: "side question".into(), images: Vec::new() },
+        &mut app,
+    );
+    let request_id = app.agents[&id].btw_request_id;
+    dispatch(
+        Action::TaskComplete(TaskResult::BtwResponse {
+            agent_id: id,
+            result: Ok("answer".into()),
+            request_id,
+        }),
+        &mut app,
+    );
+    app.agents.get_mut(&id).unwrap().active_pane = crate::app::agent_view::AgentPane::Prompt;
+
+    let _ = app.handle_input(&esc());
+
+    assert!(app.agents[&id].btw_state.is_none());
+    assert!(app.pending_effects.is_empty());
+}
+
+/// A second `/btw` while the first still loads: the first answer, delivered late, is dropped and the second panel keeps waiting for its own answer.
+#[test]
+fn fullscreen_late_first_btw_answer_never_lands_in_the_second_panel() {
+    use crate::views::btw_overlay::BtwOverlayState;
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let send = |app: &mut AppView, q: &str| {
+        dispatch(Action::SendBtw { question: q.into(), images: Vec::new() }, app)
+    };
+    let first_effects = send(&mut app, "first question");
+    let [Effect::SendBtw { request_id: Some(first), .. }] = first_effects.as_slice() else {
+        panic!("expected one /btw send, got {first_effects:?}");
+    };
+    let first = *first;
+    let second_effects = send(&mut app, "second question");
+    let [Effect::CancelBtw { request_id: cancelled, .. }, Effect::SendBtw { request_id: Some(second), .. }] =
+        second_effects.as_slice()
+    else {
+        panic!("expected cancel of the first then send of the second, got {second_effects:?}");
+    };
+    let second = *second;
+    assert_eq!(*cancelled, first, "the superseded request is cancelled on the shell");
+    assert_ne!(first, second, "every /btw request has its own id");
+
+    dispatch(
+        Action::TaskComplete(TaskResult::BtwResponse {
+            agent_id: id,
+            result: Ok("first answer".into()),
+            request_id: Some(first),
+        }),
+        &mut app,
+    );
+    assert!(
+        matches!(
+            &app.agents[&id].btw_state,
+            Some(BtwOverlayState::Loading { question }) if question == "second question"
+        ),
+        "a late first answer must leave the second panel waiting, got {:?}",
+        app.agents[&id].btw_state
+    );
+
+    dispatch(
+        Action::TaskComplete(TaskResult::BtwResponse {
+            agent_id: id,
+            result: Ok("second answer".into()),
+            request_id: Some(second),
+        }),
+        &mut app,
+    );
+    assert!(
+        matches!(
+            &app.agents[&id].btw_state,
+            Some(BtwOverlayState::Done { question, .. }) if question == "second question"
+        ),
+        "the second panel takes its own answer"
+    );
+}
+
+#[test]
 fn minimal_btw_response_after_esc_is_ignored() {
     let mut app = test_app_with_agent();
     app.screen_mode = crate::app::ScreenMode::Minimal;
@@ -234,7 +378,7 @@ fn minimal_btw_response_after_esc_is_ignored() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: id,
             result: Ok("late".into()),
-            minimal_request_id: Some(request_id),
+            request_id: Some(request_id),
         }),
         &mut app,
     );
@@ -253,7 +397,7 @@ fn minimal_done_dismisses_to_exactly_one_btw_block() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: id,
             result: Ok("original answer".into()),
-            minimal_request_id: Some(request_id),
+            request_id: Some(request_id),
         }),
         &mut app,
     );
@@ -292,7 +436,7 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: first,
             result: Ok("stale first answer".into()),
-            minimal_request_id: Some(first_old),
+            request_id: Some(first_old),
         }),
         &mut app,
     );
@@ -305,7 +449,7 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: first,
             result: Ok("current first answer".into()),
-            minimal_request_id: Some(first_current),
+            request_id: Some(first_current),
         }),
         &mut app,
     );
@@ -327,7 +471,7 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: second,
             result: Ok("late second answer".into()),
-            minimal_request_id: Some(second_request),
+            request_id: Some(second_request),
         }),
         &mut app,
     );
@@ -348,7 +492,7 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: second,
             result: Ok("second reverse answer".into()),
-            minimal_request_id: Some(second_request),
+            request_id: Some(second_request),
         }),
         &mut app,
     );
@@ -356,7 +500,7 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: first,
             result: Ok("first reverse answer".into()),
-            minimal_request_id: Some(first_request),
+            request_id: Some(first_request),
         }),
         &mut app,
     );
@@ -373,7 +517,7 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
 }
 
 #[test]
-fn fullscreen_btw_response_after_dismiss_keeps_existing_behavior() {
+fn fullscreen_btw_response_after_dismiss_is_dropped() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let effects = dispatch(
@@ -386,26 +530,26 @@ fn fullscreen_btw_response_after_dismiss_keeps_existing_behavior() {
     assert!(matches!(
         effects.as_slice(),
         [Effect::SendBtw {
-            minimal_request_id: None,
+            request_id: Some(_),
             ..
         }]
     ));
+    let sent_id = app.agents[&id].btw_request_id;
     app.agents.get_mut(&id).unwrap().btw_state = None;
 
     dispatch(
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: id,
             result: Ok("late".into()),
-            minimal_request_id: None,
+            request_id: sent_id,
         }),
         &mut app,
     );
 
-    assert!(matches!(
-        app.agents[&id].btw_state,
-        Some(crate::views::btw_overlay::BtwOverlayState::Done { ref question, .. })
-            if question.is_empty()
-    ));
+    assert!(
+        app.agents[&id].btw_state.is_none(),
+        "a late answer must not reopen a dismissed /btw panel"
+    );
 }
 
 #[test]
@@ -1149,7 +1293,7 @@ fn acp_question_displacing_trace_card_still_sends_report() {
     );
 }
 
-/// Ctrl-Y (and any other `dismiss_question_view` caller) on the trace-consent card must send the committed report without a trace, like Esc/skip.
+/// Esc (and any other `dismiss_question_view` caller) on the trace-consent card must send the committed report without a trace, like skip.
 /// It must never drop the report silently.
 #[test]
 fn dismissing_the_trace_card_still_sends_the_report() {
@@ -1158,12 +1302,12 @@ fn dismissing_the_trace_card_still_sends_the_report() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     let mut app = app_with_feedback_trace_question("clipboard is broken over ssh");
-    let ctrl_y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
     let outcome = app
         .agents
         .get_mut(&AgentId(0))
         .unwrap()
-        .handle_question_key_for_test(&ctrl_y);
+        .handle_question_key_for_test(&esc);
     assert!(
         matches!(
             outcome,
@@ -1417,7 +1561,7 @@ fn casual_commenting_keeps_its_parked_draft_when_a_card_closes() {
         "a parked casual comment does not block the pane"
     );
     agent.prompt.set_text("a report");
-    agent.handle_question_key_for_test(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    agent.handle_question_key_for_test(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     assert_eq!(
         agent.prompt.text(),
@@ -2270,11 +2414,11 @@ fn permission_holding_the_composer_gets_the_draft_back_not_the_report() {
     agent.prompt.set_text("");
 
     agent.handle_question_key_for_test(&crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Char('y'),
-        crossterm::event::KeyModifiers::CONTROL,
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
     ));
 
-    assert!(agent.question_view.is_none(), "Ctrl+Y closes the pane");
+    assert!(agent.question_view.is_none(), "Esc closes the pane");
     assert_eq!(
         agent
             .permission_stashed_prompt
@@ -2414,4 +2558,35 @@ fn btw_without_a_session_says_its_images_were_dropped() {
         toast.as_deref().is_some_and(|t| t.contains("attached image(s) were not sent")),
         "{toast:?}"
     );
+}
+
+/// Ctrl+Y on a question card must not close it unanswered; while typing an answer it pastes back text cut with Ctrl+K.
+#[test]
+fn ctrl_y_on_question_card_does_not_close_and_yanks_in_input_mode() {
+    use crate::views::question_view::QuestionFocus;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let _ = dispatch(
+        Action::OpenFeedbackPane {
+            prefill: None,
+            images: Default::default(),
+        },
+        &mut app,
+    );
+    let agent = app.agents.get_mut(&id).unwrap();
+    let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+    // Navigation focus: closing is off the table
+    agent.question_view.as_mut().unwrap().focus = QuestionFocus::Navigation;
+    agent.handle_question_key_for_test(&ctrl('y'));
+    assert!(agent.question_view.is_some(), "Ctrl+Y must not close the card");
+    // Input focus: kill then yank restores the text
+    agent.question_view.as_mut().unwrap().focus = QuestionFocus::InputMode;
+    agent.prompt.set_text("cut me");
+    agent.handle_question_key_for_test(&ctrl('a'));
+    agent.handle_question_key_for_test(&ctrl('k'));
+    assert_eq!(agent.prompt.text(), "");
+    agent.handle_question_key_for_test(&ctrl('y'));
+    assert!(agent.question_view.is_some(), "Ctrl+Y must not close the card");
+    assert_eq!(agent.prompt.text(), "cut me", "Ctrl+Y pastes the cut text back");
 }

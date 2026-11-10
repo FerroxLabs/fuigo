@@ -5251,3 +5251,69 @@ async fn hunks_survive_rebase_and_refresh_all_baselines() {
         "unchanged git state must skip"
     );
 }
+
+// =========================================================================
+// Reject keeps edits the user saved, even when the tracker missed the save
+// =========================================================================
+
+#[tokio::test]
+async fn test_reject_hunk_keeps_saved_edit_the_tracker_missed() {
+    let mut harness = TestHarness::new();
+
+    harness.write_baseline("saved.rs", "a\nb\nc\n");
+    harness.agent_write("saved.rs", "a\nB\nc\n", 0);
+    harness.settle().await;
+    let hunks = harness.get_all_hunks().await;
+    assert_eq!(hunks.len(), 1);
+
+    // The user edits another line and saves; the tracker is never told.
+    std::fs::write(harness.working_dir.join("saved.rs"), "a\nB\nUSER\n").unwrap();
+
+    assert!(harness.reject_hunk(&hunks[0].id).await);
+    harness.settle().await;
+
+    let content = std::fs::read_to_string(harness.working_dir.join("saved.rs")).unwrap();
+    assert_eq!(content, "a\nb\nUSER\n", "the saved edit must survive the reject");
+}
+
+#[tokio::test]
+async fn test_reject_file_keeps_saved_edit_the_tracker_missed() {
+    let mut harness = TestHarness::new();
+
+    harness.write_baseline("saved2.rs", "a\nb\nc\nd\ne\n");
+    harness.agent_write("saved2.rs", "a\nB\nc\nd\nE\n", 0);
+    harness.settle().await;
+    assert_eq!(harness.get_all_hunks().await.len(), 2);
+
+    std::fs::write(harness.working_dir.join("saved2.rs"), "a\nB\nUSER\nd\nE\n").unwrap();
+
+    harness
+        .handle
+        .file_action(harness.abs_path("saved2.rs"), HunkAction::Reject)
+        .await
+        .unwrap();
+    harness.settle().await;
+
+    let content = std::fs::read_to_string(harness.working_dir.join("saved2.rs")).unwrap();
+    assert_eq!(content, "a\nb\nUSER\nd\ne\n", "the saved edit must survive a file-level reject");
+}
+
+#[tokio::test]
+async fn test_reject_hunk_does_not_overwrite_when_saved_edit_changed_the_hunk() {
+    let mut harness = TestHarness::new();
+
+    harness.write_baseline("moved.rs", "a\nb\nc\n");
+    harness.agent_write("moved.rs", "a\nB\nc\n", 0);
+    harness.settle().await;
+    let hunks = harness.get_all_hunks().await;
+    assert_eq!(hunks.len(), 1);
+
+    // The user rewrote the very line the agent changed.
+    std::fs::write(harness.working_dir.join("moved.rs"), "a\nMINE\nc\n").unwrap();
+
+    let _ = harness.reject_hunk(&hunks[0].id).await;
+    harness.settle().await;
+
+    let content = std::fs::read_to_string(harness.working_dir.join("moved.rs")).unwrap();
+    assert_eq!(content, "a\nMINE\nc\n", "an edit the tracker missed must never be overwritten");
+}

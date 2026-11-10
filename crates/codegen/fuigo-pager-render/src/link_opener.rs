@@ -138,8 +138,24 @@ fn spawn_url_opener(url: &str) -> bool {
     result as usize > 32
 }
 
+/// Spawn `command` and wait for it on a short-lived thread, so each click leaves no zombie behind while this process keeps running.
+/// Returns the child's pid and the reaper thread.
 #[cfg(not(target_os = "windows"))]
-#[allow(clippy::disallowed_methods)] // fire and forget; the child is reaped when this process exits
+#[allow(clippy::disallowed_methods)] // fire and forget; a reaper thread waits for the child
+fn spawn_and_reap(
+    command: &mut std::process::Command,
+) -> std::io::Result<(u32, std::thread::JoinHandle<()>)> {
+    let mut child = command.spawn()?;
+    let pid = child.id();
+    let reaper = std::thread::Builder::new()
+        .name("opener-reaper".into())
+        .spawn(move || {
+            let _ = child.wait();
+        })?;
+    Ok((pid, reaper))
+}
+
+#[cfg(not(target_os = "windows"))]
 fn spawn_url_opener(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     let cmd = "open";
@@ -153,7 +169,7 @@ fn spawn_url_opener(url: &str) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     fuigo_tools::util::detach_std_command(&mut command);
-    match command.spawn() {
+    match spawn_and_reap(&mut command) {
         Ok(_) => true,
         Err(e) => {
             tracing::debug!(error = %e, "URL opener failed to spawn");
@@ -190,7 +206,6 @@ fn build_open_path_command(path: &std::path::Path) -> std::process::Command {
 /// - **Windows**: `explorer.exe /select,<path>` reveals and highlights the file in Explorer.
 ///   We avoid `cmd /c start`: its `%VAR%` expansion would corrupt the percent-encoded session-directory segment in imagine media paths.
 /// - **macOS / Linux**: `open` / `xdg-open` open the file in its default app.
-#[allow(clippy::disallowed_methods)] // fire and forget; the child is reaped when this process exits
 pub fn open_path(path: &std::path::Path) -> bool {
     // Never launch a real GUI app in tests.
     #[cfg(test)]
@@ -203,7 +218,7 @@ pub fn open_path(path: &std::path::Path) -> bool {
     }
     #[cfg(all(not(test), not(target_os = "windows")))]
     {
-        match build_open_path_command(path).spawn() {
+        match spawn_and_reap(&mut build_open_path_command(path)) {
             Ok(_) => true,
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "failed to open file natively");
@@ -324,6 +339,19 @@ mod tests {
         let command = build_open_path_command(path);
         let args: Vec<_> = command.get_args().map(|a| a.to_os_string()).collect();
         assert!(args.contains(&path.as_os_str().to_os_string()));
+    }
+
+    /// Each opener child is waited for: a finished child must not linger as a zombie in this process.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn opener_child_is_reaped_not_left_as_a_zombie() {
+        let mut command = std::process::Command::new("true");
+        let (pid, reaper) = spawn_and_reap(&mut command).unwrap();
+        reaper.join().unwrap();
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "pid {pid} is still in the process table (zombie)"
+        );
     }
 
     #[test]

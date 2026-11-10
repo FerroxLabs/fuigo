@@ -155,7 +155,8 @@ fn scan_path_from(path_var: &str) -> Vec<String> {
         };
 
         for entry in entries.filter_map(Result::ok) {
-            let meta = match entry.metadata() {
+            // `fs::metadata` follows symlinks (Homebrew, npm, rustup, alternatives); a broken link errors and is skipped.
+            let meta = match std::fs::metadata(entry.path()) {
                 Ok(m) => m,
                 Err(_) => continue,
             };
@@ -354,6 +355,28 @@ mod tests {
 
         let result = scan_path_from(bin.to_str().unwrap());
         assert_eq!(result, vec!["aaa_cmd", "mmm_cmd", "zzz_cmd"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_includes_symlinked_executables_and_skips_broken_links() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let real = dir.path().join("real");
+        let bin = dir.path().join("bin");
+        fs::create_dir(&real).unwrap();
+        fs::create_dir(&bin).unwrap();
+        let target = real.join("tool");
+        fs::write(&target, "").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(&target, bin.join("linked_tool")).unwrap();
+        std::os::unix::fs::symlink(real.join("missing"), bin.join("broken_link")).unwrap();
+
+        let result = scan_path_from(bin.to_str().unwrap());
+        assert_eq!(result, vec!["linked_tool"]);
     }
 
     #[cfg(unix)]

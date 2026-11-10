@@ -161,6 +161,16 @@ pub struct UiConfig {
     /// Config-file-only knob (no /settings row).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_blink: Option<bool>,
+    /// One Ctrl+C quits when nothing would be lost: no running turn, an empty draft, no queued prompts and no pending question.
+    /// `None` and `Some(false)` keep the default, where Ctrl+C never quits an idle session on a single press.
+    /// Config-file-only knob (no /settings row).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub single_ctrl_c_quit: Option<bool>,
+    /// An `@` path starting `/`, `~/` or `../` lists files from that folder in the picker.
+    /// `None` means on; `Some(false)` keeps the picker to the workspace tree.
+    /// Config-file-only knob (no /settings row).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_picker_outside_workspace: Option<bool>,
     /// `"fullscreen"` | `"minimal"`; unset uses the product default, fullscreen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_mode: Option<String>,
@@ -308,6 +318,8 @@ impl Default for UiConfig {
             collapsed_edit_blocks: None,
             prompt_suggestions: None,
             cursor_blink: None,
+            single_ctrl_c_quit: None,
+            at_picker_outside_workspace: None,
             screen_mode: None,
             tool_density: None,
             double_click_action: None,

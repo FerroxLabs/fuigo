@@ -1,7 +1,7 @@
-//! Rewrites a plain submission carrying an opted-in `/command` token into a leading
-//! `/command <message-without-token>` line. The caller decides what counts as a plain submission
-//! (raw text not starting with `/`); `text` is chip-stripped, so a `/` at index 0 here is an
-//! ordinary token after a leading image chip (`[Image #1] /btw q` arrives as ` /btw q`).
+//! Recognizes an opted-in `/command` token that begins a submission once its leading image chips are stripped
+//! (`[Image #1] /btw q` arrives as ` /btw q`), and rewrites it to `/command <message-without-token>`.
+//! The caller decides what counts as a plain submission (raw text not starting with `/`).
+//! A token later in the text is not an invocation: the message goes to the main conversation as typed.
 
 use crate::slash::registry::CommandRegistry;
 use crate::slash::scan_inline_slash_tokens;
@@ -12,6 +12,10 @@ pub(crate) fn hoist_mid_text_command(text: &str, registry: &CommandRegistry) -> 
     let (token, command) = scan_inline_slash_tokens(text, 0)
         .into_iter()
         .find_map(|token| {
+            // A command starts a side question only when it begins the message; later in the text it is plain text
+            if !text.get(..token.range.start)?.trim().is_empty() {
+                return None;
+            }
             let command = registry.get_for_dispatch(&token.name)?;
             command
                 .can_hoist_from_mid_text()

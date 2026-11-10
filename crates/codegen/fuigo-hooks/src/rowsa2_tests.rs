@@ -49,6 +49,7 @@ fn spec_with(handler_type: HandlerType) -> HookSpec {
         url: None,
         url_raw: None,
         timeout_ms: 5_000,
+        fail_closed: false,
         source_dir: std::env::temp_dir(),
         extra_env: Default::default(),
         layer: HookProvenance::File,

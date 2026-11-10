@@ -762,6 +762,17 @@ mod tests {
         }
     }
 
+    /// The toggle persists `[ui] permission_mode`, so its help says the setting is saved rather than "for this session".
+    #[test]
+    fn yolo_help_says_the_setting_is_saved_to_config() {
+        let help = ActionRegistry::defaults_for(crate::app::ScreenMode::Fullscreen)
+            .find(ActionId::ToggleYolo)
+            .and_then(|def| def.long_help)
+            .expect("yolo help");
+        assert!(help.contains("saved to config"), "{help}");
+        assert!(!help.contains("for this session"), "{help}");
+    }
+
     #[test]
     fn send_to_background_help_is_mode_accurate() {
         let fullscreen = ActionRegistry::defaults_for(crate::app::ScreenMode::Fullscreen)

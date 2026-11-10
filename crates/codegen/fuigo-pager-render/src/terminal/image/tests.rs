@@ -160,7 +160,7 @@ fn low_level_overlay_deletes_then_transmits() {
     let escape =
         build_overlay_image_escapes_for_protocol(GraphicsProtocol::Kitty, &png, 20, 10, 0, 0)
             .unwrap();
-    assert!(escape.contains("a=d,d=i"));
+    assert!(escape.contains("a=d,d=I"));
     assert!(escape.contains("a=T"));
     assert!(!escape.contains("a=t,"));
     assert!(!escape.contains("a=p"));
@@ -186,4 +186,11 @@ fn unchanged_static_overlay_skips_payload() {
     let _ = first.commit();
     let subsequent = crate::terminal::overlay::static_image(&png, 40, 20, 0, 0, 9).unwrap();
     assert!(subsequent.as_str().is_empty());
+}
+
+#[test]
+fn clear_kitty_image_frees_image_data() {
+    let esc = clear_kitty_image(7);
+    assert!(esc.contains("a=d,d=I,i=7"), "must free data (d=I): {esc:?}");
+    assert!(!esc.contains("d=i,"), "lower-case d=i keeps the data: {esc:?}");
 }

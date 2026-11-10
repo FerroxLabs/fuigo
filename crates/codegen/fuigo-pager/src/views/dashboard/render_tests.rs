@@ -1735,6 +1735,33 @@ fn render_dispatch_paints_feedback_badge_on_top_border() {
     );
 }
 
+/// A long refusal (a deleted session held by another window) is not cut to one row: it wraps onto the rows above the box.
+#[test]
+fn long_feedback_badge_wraps_and_shows_the_whole_refusal() {
+    let _theme = crate::theme::cache::pin_theme();
+    let msg = "This session is open in another Fuigo window. Close it there, or turn on the shared leader (`--leader`) to use it from several windows.";
+    let mut buf = Buffer::empty(Rect::new(0, 0, 80, 12));
+    let theme = Theme::current();
+    let mut state = DashboardState::new();
+    state.list_focused = true;
+    state.error_toast = Some(format!("Couldn't delete session: {msg}"));
+    let _ = render_dispatch(&mut buf, Rect::new(0, 8, 80, 3), &theme, &mut state, None);
+    let text: String = (0..12u16)
+        .flat_map(|y| {
+            (0..80u16)
+                .map(move |x| (x, y))
+                .map(|(x, y)| buf[(x, y)].symbol().to_string())
+                .chain(std::iter::once(" ".to_string()))
+        })
+        .filter(|c| !"\u{256d}\u{2500}\u{256e}\u{2502}\u{2570}\u{256f}".contains(c.as_str()))
+        .collect();
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains(&format!("Couldn't delete session: {msg}")),
+        "the whole refusal must show, got: {flat:?}"
+    );
+}
+
 /// The badge paints the toast VERBATIM in the neutral accent colour, never in the error red.
 /// A message that already carries its own glyph (as the `show_toast` builders produce, e.g. `✓ Theme: …`) keeps that single glyph.
 /// No `✗` is prepended (regression guard for the `✗ ✓ …` doubling).
