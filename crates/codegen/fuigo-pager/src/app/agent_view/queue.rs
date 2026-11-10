@@ -277,6 +277,14 @@ impl AgentView {
         })
     }
 
+    /// Entry id of the queued row open in the prompt bar for editing, if any.
+    pub(crate) fn editing_queue_row_id(&self) -> Option<u64> {
+        match &self.prompt_mode {
+            crate::app::queue_edit::PromptMode::EditingQueued { id, .. } => Some(*id),
+            _ => None,
+        }
+    }
+
     /// Rebuild the queue pane, applying the [`visible_held_server_row`] filter.
     pub(crate) fn sync_queue_pane(&mut self) {
         self.queue.sync_from_merged(

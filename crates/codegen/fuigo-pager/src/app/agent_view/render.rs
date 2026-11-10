@@ -21,7 +21,9 @@ use crate::views::agent::AgentViewLayoutParams;
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
 use crate::views::modal;
 use crate::views::plan_approval_view::PlanApprovalFocus;
-use crate::views::prompt_widget::{PromptBg, PromptFlag, PromptInfo, PromptStyle, mode_flags};
+use crate::views::prompt_widget::{
+    PromptBg, PromptFlag, PromptInfo, PromptStyle, PromptWidget, mode_flags,
+};
 use crate::views::question_view::{QUESTION_VIEW_HPAD, feedback_input};
 use crate::views::shortcuts_bar::{HintItem, PendingHint, ShortcutsBar};
 use crate::views::{agent, turn_status};
@@ -65,6 +67,9 @@ impl AgentView {
         model: ResolvedSelectionModel,
         boundaries: ResolvedSelectionBoundaries,
     ) {
+        if self.drag_selection.is_some() {
+            self.remember_drag_entry_widths(&model);
+        }
         self.last_scrollback_selection_model = model;
         self.last_scrollback_selection_boundaries = boundaries;
     }
@@ -1064,16 +1069,19 @@ impl AgentView {
             bg: PromptBg::Default,
             accent_color_override: if let Some(c) = self.prompt_input_mode.accent_color(&theme) {
                 Some(c)
-            } else if effective_plan || casual_commenting {
-                Some(theme.accent_plan)
             } else {
-                None
+                mode_tint(
+                    &theme,
+                    effective_plan || casual_commenting,
+                    self.session.permission_label(),
+                )
             },
-            border_color_override: if effective_plan || casual_commenting {
-                crate::render::color::blend_color(theme.bg_base, theme.accent_plan, 0.4)
-            } else {
-                None
-            },
+            border_color_override: mode_tint(
+                &theme,
+                effective_plan || casual_commenting,
+                self.session.permission_label(),
+            )
+            .and_then(|tint| crate::render::color::blend_color(theme.bg_base, tint, 0.4)),
             prefix_override: if let Some(p) = self.prompt_input_mode.prefix_override(&theme) {
                 Some(p)
             } else if casual_commenting
@@ -2217,6 +2225,7 @@ impl AgentView {
         }
         if queue_height > 0 {
             let queue_focused = self.active_pane == ActivePane::Queue && !overlay_focused;
+            self.queue.set_editing_row(self.editing_queue_row_id());
             self.queue.render(
                 layout.queue,
                 buf,
@@ -2247,6 +2256,7 @@ impl AgentView {
             let queue_body = crate::views::dock::queue_body_rect(layout.dock, dock);
             if queue_body.height > 0 {
                 let queue_focused = self.active_pane == ActivePane::Queue && !overlay_focused;
+                self.queue.set_editing_row(self.editing_queue_row_id());
                 self.queue.render(
                     queue_body,
                     buf,
@@ -2676,8 +2686,19 @@ impl AgentView {
             None
         };
         // Plan and permission are independent axes: entering plan mode never hides the permission flag
-        let mode_flags_vec: Vec<PromptFlag> =
+        let mut mode_flags_vec: Vec<PromptFlag> =
             mode_flags(plan_label, self.session.permission_label(), &theme);
+        // Prompt vim (`[keys] vim = "all"`): NORMAL / INSERT on the info line, in every screen mode
+        let vim_label = (!self.is_subagent_view && PromptWidget::vim_enabled())
+            .then(|| self.prompt.vim_mode().label());
+        let vim_flag = |label: &'static str| PromptFlag {
+            text: label,
+            color: None,
+            bold: true,
+        };
+        if let Some(label) = vim_label {
+            mode_flags_vec.insert(0, vim_flag(label));
+        }
         let mode_flags: &[PromptFlag] = &mode_flags_vec;
         let multiline = self.multiline_mode;
         let warning = self.credit_balance.as_ref().and_then(|bal| {
@@ -2720,10 +2741,11 @@ impl AgentView {
                 }
             }
         };
+        let override_flags: Vec<PromptFlag> = vim_label.map(vim_flag).into_iter().collect();
         let info = if let Some(label) = self.prompt_input_mode.prompt_info_override() {
             PromptInfo {
                 model_name: label,
-                flags: &[],
+                flags: &override_flags,
                 multiline: false,
                 usage_warning,
                 usage_warning_critical,
@@ -3231,6 +3253,23 @@ impl AgentView {
             prompt_cursor_pos = prompt_result_inner.cursor_pos;
             if let Some(escapes) = prompt_result_inner.post_flush_escapes {
                 prompt_post_flush = Some(escapes.into());
+            }
+            // Block cursor in Normal mode, bar in Insert mode; nothing is written while prompt vim is off
+            if !self.is_subagent_view
+                && let Some(shape) = crate::views::prompt_widget::vim_cursor_escape(
+                    PromptWidget::vim_enabled(),
+                    self.prompt.vim_mode(),
+                    crate::app::CURSOR_BLINK_REQUESTED.load(std::sync::atomic::Ordering::Acquire),
+                )
+            {
+                crate::app::CURSOR_STYLE_FORCED.store(true, std::sync::atomic::Ordering::Release);
+                match prompt_post_flush.as_mut() {
+                    Some(post) => post.append_plain(shape),
+                    None => {
+                        prompt_post_flush =
+                            Some(crate::terminal::overlay::PostFlush::plain(shape.to_string()));
+                    }
+                }
             }
         }
         if self.prompt.file_search_visible() {
@@ -4574,9 +4613,13 @@ impl AgentView {
                 }
             }
         }
-        if !dropdown_active {
-            self.paint_diagram_affordances(buf, scrollback_diagram_affordances, &theme);
-        }
+        // `[Copy]` rows stay painted and clickable under an open menu; only the ones the menu panel covers are dropped
+        let affordances = if dropdown_active {
+            retain_uncovered_affordances(scrollback_diagram_affordances, &self.frame_occluder_rects)
+        } else {
+            scrollback_diagram_affordances
+        };
+        self.paint_diagram_affordances(buf, affordances, &theme);
         if !self.inline_media_active
             && prompt_post_flush.is_none()
             && let Some(clear) = crate::terminal::overlay::clear()
@@ -4708,6 +4751,70 @@ impl AgentView {
 /// Draw one ▼/▲ scroll-indicator arrow centered on row `y`, or clear its hit area when hidden (`y: None`).
 /// The unconditional set-or-clear is the point: a hit rect must never outlive the frame that painted its arrow.
 /// An invisible click target would keep firing under whatever covers it (e.g. an open block viewer).
+/// Accent that tints the whole prompt bar: plan wins, then auto-review (blue, like its flag); `None` leaves the bar untinted.
+/// Keep the affordance rows no overlay panel covers, so a row a menu hides is neither painted over it nor clickable through it.
+fn retain_uncovered_affordances(
+    mut placements: Vec<crate::scrollback::render::DiagramAffordancePlacement>,
+    occluders: &[ratatui::layout::Rect],
+) -> Vec<crate::scrollback::render::DiagramAffordancePlacement> {
+    placements.retain(|p| !occluders.iter().any(|r| p.screen_rect.intersects(*r)));
+    placements
+}
+
+#[cfg(test)]
+mod affordance_occlusion_tests {
+    use super::retain_uncovered_affordances;
+    use crate::scrollback::render::DiagramAffordancePlacement;
+    use ratatui::layout::Rect;
+
+    fn row(y: u16) -> DiagramAffordancePlacement {
+        DiagramAffordancePlacement {
+            screen_rect: Rect::new(2, y, 60, 1),
+            source: String::new(),
+            copy: None,
+        }
+    }
+
+    #[test]
+    fn copy_rows_outside_an_open_menu_survive_and_covered_ones_drop() {
+        let menu = Rect::new(0, 20, 80, 8);
+        let kept = retain_uncovered_affordances(vec![row(5), row(19), row(20), row(27)], &[menu]);
+        let ys: Vec<u16> = kept.iter().map(|p| p.screen_rect.y).collect();
+        assert_eq!(ys, vec![5, 19]);
+    }
+}
+
+fn mode_tint(
+    theme: &Theme,
+    plan_like: bool,
+    permission: crate::app::actions::PermissionLabel,
+) -> Option<ratatui::style::Color> {
+    if plan_like {
+        Some(theme.accent_plan)
+    } else if permission == crate::app::actions::PermissionLabel::Auto {
+        Some(theme.accent_system)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod mode_tint_tests {
+    use super::mode_tint;
+    use crate::app::actions::PermissionLabel;
+
+    #[test]
+    fn auto_review_tints_the_bar_blue_and_plan_keeps_precedence() {
+        let _theme = crate::theme::cache::pin_theme();
+        let theme = crate::theme::Theme::current();
+        assert_eq!(mode_tint(&theme, false, PermissionLabel::Auto), Some(theme.accent_system));
+        assert_eq!(mode_tint(&theme, true, PermissionLabel::Auto), Some(theme.accent_plan));
+        assert_eq!(mode_tint(&theme, true, PermissionLabel::Ask), Some(theme.accent_plan));
+        assert_eq!(mode_tint(&theme, false, PermissionLabel::Ask), None);
+        assert_eq!(mode_tint(&theme, false, PermissionLabel::AlwaysApprove), None);
+    }
+}
+
 fn draw_scroll_arrow(
     buf: &mut Buffer,
     theme: &Theme,

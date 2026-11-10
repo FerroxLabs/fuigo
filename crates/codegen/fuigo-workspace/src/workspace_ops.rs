@@ -1046,6 +1046,9 @@ fn wire_to_hook_registry(
             "dropping unknown hook event keys from peer wire registry"
         );
     }
+    if wire.gate_hooks_without_fail_closed() {
+        warn_fail_closed_not_enforced();
+    }
     let known = HookRegistryWire {
         hooks: wire
             .hooks
@@ -1060,6 +1063,14 @@ fn wire_to_hook_registry(
         serde_json::from_value(value).map_err(|e| WorkspaceError::HubError(e.to_string()))?;
     registry.recompile_matchers();
     Ok(registry)
+}
+/// Say once per process that the workspace server predates `failClosed`: its gate hooks arrived without the field, so a
+/// hook configured fail-closed is decoded as fail-open.
+fn warn_fail_closed_not_enforced() {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::warn!("{}", fuigo_workspace_types::rpc::hooks::FAIL_CLOSED_NOT_ENFORCED_WARNING);
+    }
 }
 #[async_trait]
 impl WorkspaceOp for HookRegistryReq {
@@ -2235,6 +2246,7 @@ mod tests {
             url: None,
             url_raw: None,
             timeout_ms: 5000,
+            fail_closed: false,
             source_dir: std::path::PathBuf::from("/home/u/.fuigo/hooks"),
             extra_env: std::collections::HashMap::from([("FOO".to_string(), "bar".to_string())]),
             layer: fuigo_hooks::config::HookProvenance::File,
@@ -2251,6 +2263,30 @@ mod tests {
             serde_json::to_value(&back).unwrap(),
             serde_json::to_value(&registry).unwrap()
         );
+    }
+    /// A server that predates `fail_closed` omits it: its gate hooks decode as fail-open (as before) and the registry is
+    /// flagged for the not-enforced warning; a server that sends the field keeps it.
+    #[test]
+    fn hook_registry_from_a_server_without_fail_closed_decodes_fail_open_and_is_flagged() {
+        let json = |fail_closed: Option<bool>| {
+            let mut spec = serde_json::json!({
+                "name": "h", "event": "pre_tool_use", "handler_type": "command", "configured_matcher": null,
+                "enabled": true, "command": "/bin/h.sh", "command_raw": "/bin/h.sh", "url": null, "url_raw": null,
+                "timeout_ms": 5000, "source_dir": "/tmp", "extra_env": {}, "layer": "file"
+            });
+            if let Some(flag) = fail_closed {
+                spec["fail_closed"] = serde_json::json!(flag);
+            }
+            serde_json::json!({ "hooks": { "pre_tool_use": [spec] } })
+        };
+        let old: HookRegistryWire = serde_json::from_value(json(None)).unwrap();
+        assert!(old.gate_hooks_without_fail_closed());
+        let registry = wire_to_hook_registry(&old).expect("an older server's registry still decodes");
+        assert!(!registry.hooks_for(fuigo_hooks::event::HookEventName::PreToolUse)[0].fail_closed);
+        let new: HookRegistryWire = serde_json::from_value(json(Some(true))).unwrap();
+        assert!(!new.gate_hooks_without_fail_closed());
+        let registry = wire_to_hook_registry(&new).expect("decodes");
+        assert!(registry.hooks_for(fuigo_hooks::event::HookEventName::PreToolUse)[0].fail_closed);
     }
     /// Compile-time drift guard: the lean `HookEventNameWire` can't depend on upstream `HookEventName`.
     /// `hook_registry_to_wire`/`wire_to_hook_registry` only couple them at runtime.
@@ -2329,6 +2365,7 @@ mod tests {
                 url,
                 url_raw,
                 timeout_ms,
+                fail_closed,
                 source_dir,
                 extra_env,
                 layer,
@@ -2347,6 +2384,7 @@ mod tests {
                 url,
                 url_raw,
                 timeout_ms,
+                fail_closed: Some(fail_closed),
                 source_dir,
                 extra_env,
                 layer: layer.as_str().to_string(),
@@ -2366,6 +2404,7 @@ mod tests {
             url: None,
             url_raw: None,
             timeout_ms: 5000,
+            fail_closed: false,
             source_dir: std::path::PathBuf::from("/home/u/.fuigo/hooks"),
             extra_env: std::collections::HashMap::from([("FOO".to_string(), "bar".to_string())]),
             layer: fuigo_hooks::config::HookProvenance::Managed,

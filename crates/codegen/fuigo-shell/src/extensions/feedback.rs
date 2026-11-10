@@ -22,6 +22,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             tracing::info!("handling /btw side question");
             super::btw::handle_btw(agent, args).await
         }
+        "fuigo/btw/cancel" => super::btw::handle_btw_cancel(args).await,
         "fuigo/feedback" | "fuigo/feedback/dismiss" => {
             tracing::info!("handling user feedback");
             handle_feedback(agent, args).await

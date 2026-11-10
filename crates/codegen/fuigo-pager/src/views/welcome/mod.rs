@@ -31,7 +31,7 @@ pub(crate) mod wind_mark_data;
 mod wind_spin;
 
 use menu::render_menu;
-pub(crate) use toast::paint_welcome_toast;
+pub(crate) use toast::{paint_welcome_toast, wrap_toast_lines};
 pub(crate) use top_bar::location_line_at;
 use top_bar::render_top_bar;
 pub(crate) use wind_spin::{mark_frame, note_visible, set_focused, snap_to_rest, spin_pending};

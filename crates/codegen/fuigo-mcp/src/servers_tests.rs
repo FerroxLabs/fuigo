@@ -34,6 +34,32 @@ async fn resilient_transport_skips_undecodable_line_and_keeps_stream_alive() {
     );
 }
 
+#[tokio::test]
+async fn a_dropped_receive_mid_line_does_not_lose_the_start_of_the_line() {
+    let (mut server_out, client_in) = tokio::io::duplex(64 * 1024);
+    let mut transport = ResilientRwTransport::new(
+        client_in,
+        tokio::io::sink(),
+        "dropped".to_string(),
+        fuigo_session_events::EventWriter::noop(),
+    );
+    let line = r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#;
+    let (head, tail) = line.split_at(20);
+    server_out.write_all(head.as_bytes()).await.unwrap();
+    // The caller gives up on this receive while the line is only half there.
+    let first = tokio::time::timeout(std::time::Duration::from_millis(50), transport.receive()).await;
+    assert!(first.is_err(), "no complete line yet, so the receive is still pending");
+    server_out.write_all(format!("{tail}\n").as_bytes()).await.unwrap();
+    drop(server_out);
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), transport.receive())
+        .await
+        .expect("receive must not hang");
+    assert!(
+        matches!(msg, Some(rmcp::model::JsonRpcMessage::Notification(_))),
+        "the next receive yields the whole line, got {msg:?}"
+    );
+}
+
 /// Feed `bytes` (one wire line) to the production stdio transport and return what `receive` makes of it.
 async fn receive_one_line(bytes: &[u8]) -> Option<RxJsonRpcMessage<RoleClient>> {
     let (mut server_out, client_in) = tokio::io::duplex(64 * 1024);

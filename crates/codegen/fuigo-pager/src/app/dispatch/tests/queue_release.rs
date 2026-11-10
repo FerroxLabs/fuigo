@@ -74,6 +74,8 @@ fn send_while_waiting_goes_through_when_btw_overlay_is_open() {
     );
 }
 
+const BTW_REQUEST: uuid::Uuid = uuid::Uuid::from_u128(7);
+
 /// A prompt queued *before* `/btw` (a follow-up typed while the model was thinking) must stay queued when the answer lands.
 /// The send path is what releases a message typed while parked; `/btw` completion must not flush the queue.
 #[test]
@@ -85,6 +87,7 @@ fn btw_response_does_not_flush_an_unrelated_queued_prompt() {
         agent.btw_state = Some(BtwOverlayState::Loading {
             question: "status?".into(),
         });
+        agent.btw_request_id = Some(BTW_REQUEST);
     }
     enqueue_local(&mut app, AgentId(0), "queued before btw");
 
@@ -92,7 +95,7 @@ fn btw_response_does_not_flush_an_unrelated_queued_prompt() {
         TaskResult::BtwResponse {
             agent_id: AgentId(0),
             result: Ok("still waiting".into()),
-            minimal_request_id: None,
+            request_id: Some(BTW_REQUEST),
         },
         &mut app,
     );

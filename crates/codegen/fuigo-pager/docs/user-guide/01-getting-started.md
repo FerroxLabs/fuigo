@@ -78,7 +78,7 @@ Once authenticated, Fuigo presents a full-screen TUI with two main areas:
 
 Type a message and press `Enter` to send it. Fuigo reads files, runs commands, and edits code as needed. Each tool run streams into the scrollback in real time.
 
-Press `Tab` to move focus between the prompt and the scrollback. While a turn is running, `Ctrl+C` cancels it once the composer is empty — with a draft, the first press only clears it. `Esc` never cancels a turn; mid-turn it shows a reminder to use `Ctrl+C`. Idle, press `Esc` twice within 800ms to clear a non-empty prompt, or (with an empty prompt and conversation messages) to open rewind — see [Keyboard Shortcuts](03-keyboard-shortcuts.md#escape). With the scrollback focused, use the arrow keys to select entries and to collapse or expand them. To navigate with `j`/`k` and fold with `h`/`l` instead, enable Vim mode.
+Press `Tab` to move focus between the prompt and the scrollback. While a turn is running, `Ctrl+C` cancels it once the composer is empty — with a draft, the first press only clears it. Idle, `Ctrl+C` asks for a second press to quit; set `single_ctrl_c_quit = true` under `[ui]` to quit on one press when nothing would be lost (no running turn, an empty draft, no queued prompts and no pending question). `Esc` never cancels a turn; mid-turn it shows a reminder to use `Ctrl+C`. Idle, press `Esc` twice within 800ms to clear a non-empty prompt, or (with an empty prompt and conversation messages) to open rewind — see [Keyboard Shortcuts](03-keyboard-shortcuts.md#escape). With the scrollback focused, use the arrow keys to select entries and to collapse or expand them. To navigate with `j`/`k` and fold with `h`/`l` instead, enable Vim mode.
 
 ### File References
 
@@ -96,6 +96,20 @@ The `@` operator opens a fuzzy file picker. By default it respects `.gitignore` 
 @!.github                 # Search hidden files
 @!.env                    # Attach a .env file
 ```
+
+A line suffix takes one line (`@src/main.rs:42`) or a range (`@src/main.rs:10-50`).
+
+An `@` path that starts with `/`, `~/` or `../` lists the files in that folder, so you can attach a file outside the workspace. `~/` is your home folder:
+
+```
+@~/notes/todo.md          # A file in your home folder
+@~/                       # Browse your home folder
+@../shared/               # A sibling folder
+```
+
+The picker only lists names. Set `at_picker_outside_workspace = false` under `[ui]` in `config.toml` to keep it to the workspace.
+
+A picked file shows as a chip. To edit it, put the cursor at the end of the chip and type: the chip turns back into plain `@path` text and the picker reopens on it. Backspace still removes a whole chip.
 
 ### Permissions
 

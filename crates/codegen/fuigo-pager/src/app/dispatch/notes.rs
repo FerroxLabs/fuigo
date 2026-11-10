@@ -733,7 +733,8 @@ pub(super) fn start_side_question(
     question: String,
     mut images: Vec<crate::prompt_images::PastedImage>,
 ) -> Vec<Effect> {
-    let (session_id, minimal_request_id, blocks) = {
+    let mut effects = Vec::new();
+    let (session_id, request_id, blocks) = {
         let Some(session_id) = agent.session.session_id.clone() else {
             let notice = if images.is_empty() {
                 NO_SESSION_NOTICE.to_string()
@@ -771,30 +772,37 @@ pub(super) fn start_side_question(
 
         // Composer clearing belongs to the submit funnel: `dispatch_send_prompt_inner` clears it when `consume_input` is set
         // Draft-preserving callers (the palette, an edited queue row) keep theirs
-        let minimal_request_id = if minimal {
+        let request_id = if minimal {
             Some(crate::minimal_api::start_minimal_btw(
                 agent,
                 question.clone(),
             ))
         } else {
+            // A question still loading is replaced: stop its model call, and its late answer no longer matches
+            if let Some(old) = agent.btw_request_id.take() {
+                effects.push(Effect::CancelBtw { session_id: session_id.clone(), request_id: old });
+            }
             agent.clear_btw_owned_selection();
             agent.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::Loading {
                 question: question.clone(),
             });
             // Prompt keeps focus while the answer is in flight (panel focuses on Done).
             agent.btw_focused = false;
-            None
+            let request_id = uuid::Uuid::new_v4();
+            agent.btw_request_id = Some(request_id);
+            Some(request_id)
         };
-        (session_id, minimal_request_id, blocks)
+        (session_id, request_id, blocks)
     };
 
-    vec![Effect::SendBtw {
+    effects.push(Effect::SendBtw {
         agent_id: id,
         session_id,
         question,
         blocks,
-        minimal_request_id,
-    }]
+        request_id,
+    });
+    effects
 }
 
 /// Side-question payload cap. Matches the shell's per-request bound so one screenshot
@@ -971,18 +979,24 @@ pub(super) fn handle_btw_response(
     app: &mut AppView,
     agent_id: AgentId,
     result: Result<String, String>,
-    minimal_request_id: Option<uuid::Uuid>,
+    request_id: Option<uuid::Uuid>,
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         use crate::views::btw_overlay::BtwOverlayState;
-        if let Some(request_id) = minimal_request_id {
+        // Every answer carries the id of the request that asked; one that is not this panel's current request is stale
+        let Some(request_id) = request_id else {
+            return vec![];
+        };
+        if agent.btw_request_id != Some(request_id) {
             crate::minimal_api::finish_minimal_btw(agent, request_id, result);
             return vec![];
         }
-        let question = match &agent.btw_state {
-            Some(BtwOverlayState::Loading { question }) => question.clone(),
-            _ => String::new(),
+        // Esc on an unanswered side question cancels it: a late answer must not bring the panel back
+        let Some(BtwOverlayState::Loading { question }) = &agent.btw_state else {
+            return vec![];
         };
+        agent.btw_request_id = None;
+        let question = question.clone();
         match result {
             Ok(response) => {
                 // Answer arrived: show it (until Esc) and focus the panel so Up/Down scroll it until the user returns to the prompt

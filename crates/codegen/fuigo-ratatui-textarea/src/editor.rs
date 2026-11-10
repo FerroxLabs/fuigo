@@ -214,6 +214,13 @@ pub struct EditBuffer {
     cursor_byte: usize,
     identity: Arc<BufferIdentity>,
     generation: u64,
+    /// Process-unique marker of the current text; changes whenever the text may have changed (cursor-only moves keep it).
+    text_rev: u64,
+}
+
+fn next_text_rev() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Default for EditBuffer {
@@ -223,6 +230,7 @@ impl Default for EditBuffer {
             cursor_byte: 0,
             identity: Arc::new(BufferIdentity),
             generation: 0,
+            text_rev: next_text_rev(),
         }
     }
 }
@@ -234,6 +242,7 @@ impl Clone for EditBuffer {
             cursor_byte: self.cursor_byte,
             identity: Arc::new(BufferIdentity),
             generation: 0,
+            text_rev: next_text_rev(),
         }
     }
 }
@@ -267,6 +276,7 @@ impl EditBuffer {
             cursor_byte,
             identity: Arc::new(BufferIdentity),
             generation: 0,
+            text_rev: next_text_rev(),
         }
     }
 
@@ -279,11 +289,17 @@ impl EditBuffer {
             cursor_byte,
             identity: Arc::new(BufferIdentity),
             generation: 0,
+            text_rev: next_text_rev(),
         }
     }
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Cheap change marker for the text: equal markers mean the text was not edited in between, with no string copy.
+    pub fn text_revision(&self) -> u64 {
+        self.text_rev
     }
 
     pub fn into_text(self) -> String {
@@ -553,6 +569,7 @@ impl EditBuffer {
         if text_changed {
             self.text
                 .replace_range(plan.replaced_byte_range.clone(), &plan.replacement);
+            self.text_rev = next_text_rev();
         }
         self.cursor_byte = match plan.cursor_affinity {
             PostEditCursorAffinity::Exact => plan.cursor_byte,

@@ -274,6 +274,7 @@ fn rewind_success(target: usize, prompt_text: &str) -> crate::views::rewind::Rew
         error: None,
         mode: Some("conversation_only".into()),
         prompt_text: Some(prompt_text.into()),
+        context_tokens: None,
     }
 }
 
@@ -728,6 +729,7 @@ fn rewind_success_truncation_releases_retained_memory() {
         error: None,
         mode: Some("conversation_only".into()),
         prompt_text: Some("alpha".into()),
+        context_tokens: None,
     };
 
     let mut app = test_app_with_agent();
@@ -756,6 +758,29 @@ fn rewind_success_truncation_releases_retained_memory() {
     );
 }
 
+/// The footer's context usage follows the rewound conversation instead of keeping the pre-rewind value.
+#[test]
+fn rewind_success_updates_footer_context_usage() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.scrollback.push_block(user_block("alpha", Some(0)));
+        agent.scrollback.push_block(RenderBlock::agent_message("a"));
+        agent.apply_context_used(90_000, 200_000);
+    }
+    let mut response = rewind_success(0, "alpha");
+    response.context_tokens = Some(1_234);
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindExecuteComplete {
+            agent_id: id,
+            response,
+        }),
+        &mut app,
+    );
+    let used = app.agents[&id].context_state.as_ref().map(|c| c.used);
+    assert_eq!(used, Some(1_234), "footer must show the post-rewind size");
+}
+
 /// A successful rewind confirms via a toast in the full TUI; minimal mode keeps the scrollback system block (it never renders toasts).
 #[test]
 fn rewind_success_toasts_in_full_tui_and_commits_system_block_in_minimal() {
@@ -768,6 +793,7 @@ fn rewind_success_toasts_in_full_tui_and_commits_system_block_in_minimal() {
         error: None,
         mode: Some("conversation_only".into()),
         prompt_text: None,
+        context_tokens: None,
     };
 
     let mut app = test_app_with_agent();
@@ -944,6 +970,7 @@ fn files_response(
         error: None,
         mode: Some(mode.to_string()),
         prompt_text: None,
+        context_tokens: None,
     }
 }
 

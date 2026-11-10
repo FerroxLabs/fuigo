@@ -171,6 +171,7 @@ impl App {
             anchor: sel.anchor,
             head: sel.head,
             origin: SelectionOrigin::DoubleClick,
+            head_range: None,
             kind: Default::default(),
         });
         self.selection_created_at = Some(Instant::now());
@@ -205,6 +206,7 @@ impl App {
                 col_within_range: width.saturating_sub(1),
             },
             origin: SelectionOrigin::TripleClick,
+            head_range: None,
             kind: Default::default(),
         });
         self.selection_created_at = Some(Instant::now());

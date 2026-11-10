@@ -700,6 +700,11 @@ impl TextArea {
         self.text.text()
     }
 
+    /// Cheap marker that changes whenever the text may have changed (edit, undo, redo, `set_text`); a cursor move leaves it alone.
+    pub fn text_revision(&self) -> u64 {
+        self.text.text_revision()
+    }
+
     pub fn insert_str(&mut self, text: &str) {
         if text.is_empty() {
             return;

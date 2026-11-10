@@ -50,6 +50,9 @@ impl KeyShortcut {
         };
         if c.is_ascii_uppercase() {
             self.modifiers.insert(KeyModifiers::SHIFT);
+        } else if self.modifiers == KeyModifiers::SHIFT && !c.is_alphabetic() {
+            // A shifted symbol or digit (`?` on a US layout, `1` on AZERTY) is the character itself; some terminals still report SHIFT with it
+            self.modifiers = KeyModifiers::NONE;
         } else if self.modifiers.contains(KeyModifiers::SHIFT) {
             self.code = KeyCode::Char(c.to_ascii_uppercase());
         }
@@ -419,6 +422,25 @@ pub use key;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shift_held_symbols_and_digits_match_bare_shortcuts() {
+        use crossterm::event::KeyEvent;
+        for c in ['?', '/', '1', '3', '&', '!'] {
+            let ev = KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
+            assert!(
+                KeyShortcut::key(KeyCode::Char(c)).matches(&ev),
+                "Shift+{c} must match bare `{c}`"
+            );
+        }
+        // Shift+letter shortcuts keep matching, and Ctrl+Shift+symbol does not collapse onto Ctrl+symbol
+        let g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::SHIFT);
+        assert!(key!('G').matches(&g));
+        assert!(key!('g', SHIFT).matches(&KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE)));
+        let ctrl_shift_slash =
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        assert!(!key!('/', CONTROL).matches(&ctrl_shift_slash));
+    }
 
     #[test]
     fn simple_char() {

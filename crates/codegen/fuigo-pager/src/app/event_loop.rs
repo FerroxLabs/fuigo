@@ -1965,6 +1965,9 @@ pub(crate) async fn run(
 
     // Seed app state from disk once at the I/O boundary so dispatch stays sans-IO
     app.current_ui = load_initial_ui_config();
+    crate::views::file_search::set_outside_workspace_listing(
+        app.current_ui.at_picker_outside_workspace.unwrap_or(true),
+    );
     // Here rather than from the row's own update: that runs only once an agent view is on screen
     // A welcome-only session would otherwise be missing from the denominator adoption is measured against
     crate::app::status_line::metrics::global().report_config(&app.current_ui.status_line);

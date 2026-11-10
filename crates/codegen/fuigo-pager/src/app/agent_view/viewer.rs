@@ -425,6 +425,7 @@ impl AgentView {
         use crate::scrollback::block::RenderBlock;
         use crate::scrollback::blocks::BtwBlock;
         use crate::views::btw_overlay::BtwOverlayState;
+        let was_loading = matches!(self.btw_state, Some(BtwOverlayState::Loading { .. }));
         if let Some(BtwOverlayState::Done {
             question, content, ..
         }) = self.btw_state.take()
@@ -433,6 +434,14 @@ impl AgentView {
                 .push_block(RenderBlock::Btw(BtwBlock::new(question, content.text())));
         } else {
             self.btw_state = None;
+        }
+        // Esc on an unanswered fullscreen side question stops the shell's model call; the id is forgotten so a late answer is dropped
+        if let Some(request_id) = self.btw_request_id.take()
+            && was_loading
+            && let Some(session_id) = self.session.session_id.clone()
+        {
+            self.pending_effects
+                .push(crate::app::actions::Effect::CancelBtw { session_id, request_id });
         }
         self.minimal_btw_lifecycle = None;
         self.btw_focused = false;

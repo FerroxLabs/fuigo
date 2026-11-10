@@ -221,7 +221,7 @@ impl AgentView {
                 // Esc: close dropdown, revert any live preview.
                 KeyCode::Esc => {
                     self.prompt.slash_cancel_preview();
-                    self.prompt.slash_close();
+                    self.prompt.slash_dismiss();
                     return InputOutcome::Changed;
                 }
                 // Enter: accept completion, then send (terminal row) or stay open (a row whose insert_text ends with a space chains)
@@ -432,6 +432,28 @@ impl AgentView {
                 );
                 return InputOutcome::Changed;
             }
+        }
+
+        // Prompt vim (`[keys] vim = "all"`): Normal-mode commands, and the Esc that leaves Insert mode.
+        // Runs before the mode intercepts below so a Normal-mode `!` or `#` is a command, not a mode switch.
+        // Normal-mode Esc is consumed here: it never reaches the Esc policy (clear, rewind, turn hints).
+        // The one exception is a queued-prompt edit, whose Esc ("stop editing") is not a turn cancel and keeps working.
+        // With vim off or `nav` the call returns false without touching any state.
+        let esc_ends_queued_edit = key.code == KeyCode::Esc
+            && self.prompt.vim_mode() == crate::views::prompt_widget::VimMode::Normal
+            && !matches!(self.prompt_mode, PromptMode::Normal);
+        if !esc_ends_queued_edit && self.prompt.vim_handle_key(key) {
+            if key.code == KeyCode::Esc {
+                self.esc_pressed_at = None;
+            }
+            self.prompt.refresh_slash(&self.session.models);
+            if let Some(eff) = self.notify_suggestion_text_changed() {
+                self.pending_effects.push(eff);
+            }
+            if let Some(eff) = self.notify_plugin_cta_text_changed() {
+                self.pending_effects.push(eff);
+            }
+            return InputOutcome::Changed;
         }
 
         // 0. Editing-mode intercepts (see `queue_edit.rs`).

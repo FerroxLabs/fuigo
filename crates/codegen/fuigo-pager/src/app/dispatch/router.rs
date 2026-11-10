@@ -94,8 +94,8 @@ use super::settings::setters::{
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
-    dispatch_open_reset_confirm, dispatch_open_settings, dispatch_toggle_compact_mode,
-    dispatch_toggle_mouse_capture, dispatch_toggle_multiline, dispatch_toggle_timestamps,
+    dispatch_open_reset_confirm, dispatch_open_settings, dispatch_set_vim_level,
+    dispatch_toggle_compact_mode, dispatch_toggle_mouse_capture, dispatch_toggle_multiline, dispatch_toggle_timestamps,
     dispatch_toggle_vim_mode,
 };
 use super::status::{
@@ -1141,6 +1141,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::ToggleVimMode => dispatch_toggle_vim_mode(app),
         Action::SetVimMode(v) => set_vim_mode(app, v),
+        Action::SetVimLevel(level) => dispatch_set_vim_level(app, level),
         Action::SetRememberToolApprovals(v) => set_remember_tool_approvals(app, v),
         Action::SetAskUserQuestionTimeoutEnabled(v) => {
             set_ask_user_question_timeout_enabled(app, v)

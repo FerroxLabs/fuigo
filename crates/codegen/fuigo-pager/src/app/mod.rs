@@ -150,6 +150,8 @@ pub fn set_minimal_show_switch_back_to_fullscreen_for_test(on: bool) {
 /// Teardown (and the panic hook, which can't thread parameters) resets the style only when this is true.
 /// Under inherit, `0 q` would clobber a shell-chosen style.
 pub(crate) static CURSOR_STYLE_FORCED: AtomicBool = AtomicBool::new(false);
+/// True when `[ui].cursor_blink = true` forced a blinking cursor at startup; prompt vim then uses blinking block/bar shapes.
+pub(crate) static CURSOR_BLINK_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// The screen the terminal is ACTUALLY on, for teardown paths that cannot thread parameters (panic hook, signal handler, post-loop restore).
 /// It is updated eagerly at every screen flip so mid-switch failures tear down correctly.
 static CURRENT_SCREEN_MODE: std::sync::atomic::AtomicU8 =
@@ -913,12 +915,24 @@ pub async fn run(
         && !args.chat()
         && let Some(id) = title_lookup_id
     {
-        let summaries = fuigo_shell::session::persistence::list_summaries(None).await?;
-        if let Some(s) = summaries.iter().find(|s| s.info.id.0.as_ref() == id)
-            && let Some(title) = s.display_title_opt()
-        {
-            session_title = Some(title);
-        }
+        // Only this session's summary is read: it lives in its original workspace, else in the launch folder where the id
+        // was found. Listing every session just to pick a title made `--resume <id>` slower the more sessions there were.
+        let original_cwd = match &materialized {
+            session_startup::MaterializedStartup::Resume { original_cwd, .. }
+            | session_startup::MaterializedStartup::Fork {
+                parent_cwd: original_cwd,
+                ..
+            } => original_cwd.clone(),
+            _ => None,
+        };
+        let launch_cwd = std::env::current_dir().unwrap_or_default();
+        session_title = effects::session_title_for_resume(
+            fuigo_shell::util::fuigo_home::fuigo_home(),
+            id,
+            original_cwd.as_deref(),
+            &launch_cwd,
+        )
+        .await;
     }
     let session_cwd = match &materialized {
         session_startup::MaterializedStartup::Resume { original_cwd, .. }
@@ -1206,15 +1220,10 @@ pub async fn run(
     )
     .await;
     signal_handler::clear_quit_notify();
-    let forced_exit_code = match &result {
-        Ok(run_result) if run_result.quit_for_update || run_result.relaunch.is_some() => None,
-        Ok(_) => Some(0),
-        Err(_) => Some(1),
-    };
-    if let Some(code) = forced_exit_code {
-        exit_timeout::arm(code);
-        exit_timeout::hold_teardown_for_test();
-    }
+    // Every exit path (quit, error, update-quit, screen-mode relaunch) bounds its teardown.
+    // The update and relaunch paths disarm once teardown is done, since the process continues on purpose
+    exit_timeout::arm(forced_exit_code(&result));
+    exit_timeout::hold_teardown_for_test();
     crate::unified_log::flush_blocking().await;
     // Config writes the user made just before quitting (CTA dismissal, agents
     // modal, `/provider`) run off the input thread; let them land.
@@ -1250,6 +1259,9 @@ pub async fn run(
             }
         }
     }
+    if matches!(&result, Ok(r) if r.quit_for_update || r.relaunch.is_some()) {
+        exit_timeout::disarm();
+    }
     match result {
         Ok(run_result) => {
             if run_result.quit_for_update {
@@ -1274,9 +1286,38 @@ pub async fn run(
                 let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
                 print_exit_resume_hint(&info, width, &mut io::stderr());
             }
+            end_process_after_restore();
             Ok(false)
         }
         Err(run_error) => Err(run_error),
+    }
+}
+
+/// Process exit code for the forced-exit timer: 0 after a clean loop, 1 after an error.
+fn forced_exit_code<T, E>(result: &Result<T, E>) -> i32 {
+    if result.is_ok() { 0 } else { 1 }
+}
+
+/// Windows: a plain quit ends the process right after the terminal is restored and the exit hint is out.
+/// Lingering runtime or console threads can otherwise keep the process (and the shell's console) busy.
+#[cfg(windows)]
+fn end_process_after_restore() {
+    fuigo_sandbox::flush();
+    let _ = io::stderr().flush();
+    std::process::exit(0);
+}
+
+#[cfg(not(windows))]
+fn end_process_after_restore() {}
+
+#[cfg(test)]
+mod exit_code_tests {
+    use super::forced_exit_code;
+
+    #[test]
+    fn forced_exit_code_is_zero_for_ok_and_one_for_err() {
+        assert_eq!(forced_exit_code::<(), ()>(&Ok(())), 0);
+        assert_eq!(forced_exit_code::<(), ()>(&Err(())), 1);
     }
 }
 /// Plain-quit "Resume this session with…" lines (after terminal restore).
@@ -1606,6 +1647,10 @@ fn init_terminal(
                 }
             }
             CURSOR_STYLE_FORCED.store(policy != CursorStylePolicy::Inherit, Ordering::Release);
+            CURSOR_BLINK_REQUESTED.store(
+                policy == CursorStylePolicy::ForceBlinking,
+                Ordering::Release,
+            );
             io::Result::Ok(())
         })?;
         MOUSE_CAPTURE_ENABLED.store(!want_minimal, Ordering::Release);

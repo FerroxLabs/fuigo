@@ -122,6 +122,10 @@ pub struct RawHandler {
     pub url: Option<String>,
     /// Seconds (converted to milliseconds internally).
     pub timeout: Option<u64>,
+    /// `"failClosed": true`: a `PreToolUse` or `UserPromptSubmit` hook that fails (timeout, crash, bad output)
+    /// denies the call or blocks the prompt instead of letting it go ahead. Absent or false keeps the default fail-open.
+    #[serde(default, rename = "failClosed", alias = "fail_closed")]
+    pub fail_closed: bool,
     /// Extra env vars, merged into [`HookSpec::extra_env`].
     #[serde(default, deserialize_with = "deserialize_optional_string_map")]
     pub env: HashMap<String, String>,
@@ -138,6 +142,7 @@ impl std::fmt::Debug for RawHandler {
             shell,
             url,
             timeout,
+            fail_closed,
             env,
         } = self;
         f.debug_struct("RawHandler")
@@ -147,6 +152,7 @@ impl std::fmt::Debug for RawHandler {
             .field("shell", shell)
             .field("url", &url.as_deref().map(fuigo_auth::redact_url))
             .field("timeout", timeout)
+            .field("fail_closed", fail_closed)
             .field("env", &env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
             .finish()
     }
@@ -277,6 +283,10 @@ pub struct HookSpec {
     /// Pre-expansion `url` for display; see `command_raw`.
     pub url_raw: Option<String>,
     pub timeout_ms: u64,
+    /// Opt-in (`"failClosed": true`): a failure of this `PreToolUse` / `UserPromptSubmit` hook blocks instead of
+    /// being ignored. `false` (the default, and what specs serialized before this field existed read as) is fail-open.
+    #[serde(default)]
+    pub fail_closed: bool,
     pub source_dir: PathBuf,
     /// Env injected into the hook process, and consulted by load-time `command`/`url` expansion.
     /// Precedence from low to high: user `env` (reserved keys stripped), plugin-injected, runner-injected at spawn (authentic identity always wins).
@@ -305,6 +315,7 @@ impl std::fmt::Debug for HookSpec {
             url,
             url_raw,
             timeout_ms,
+            fail_closed,
             source_dir,
             extra_env,
             layer,
@@ -323,6 +334,7 @@ impl std::fmt::Debug for HookSpec {
             .field("url", &url.as_deref().map(fuigo_auth::redact_url))
             .field("url_raw", &url_raw.as_deref().map(fuigo_auth::redact_url))
             .field("timeout_ms", timeout_ms)
+            .field("fail_closed", fail_closed)
             .field("source_dir", source_dir)
             .field("extra_env", &extra_env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
             .field("layer", layer)
@@ -711,7 +723,9 @@ fn build_specs(hooks_map: HooksMap, ctx: SpecContext<'_>) -> (Vec<HookSpec>, Vec
                     &ctx,
                 ) {
                     Ok(spec) => specs.push(spec),
-                    Err(e) => errors.push(e),
+                    Err(e) => {
+                        errors.push(e);
+                    }
                 }
             }
         }
@@ -869,6 +883,7 @@ fn build_one_spec(
         url,
         url_raw,
         timeout_ms,
+        fail_closed: handler.fail_closed,
         source_dir: ctx.source_dir.to_path_buf(),
         extra_env,
         layer: ctx.provenance,
@@ -1195,6 +1210,31 @@ mod tests {
         assert!(s.enabled);
         assert_eq!(s.timeout_ms, 2000);
         assert_eq!(s.command, Some(PathBuf::from("bin/check.sh")));
+    }
+
+    #[test]
+    fn fail_closed_is_opt_in_and_defaults_to_false() {
+        let json = r#"{ "hooks": { "PreToolUse": [ { "hooks": [
+            { "type": "command", "command": "a.sh", "failClosed": true },
+            { "type": "command", "command": "b.sh", "failClosed": false },
+            { "type": "command", "command": "c.sh" }
+        ] } ] } }"#;
+        let (specs, errors) = parse_hook_file(json, Path::new("/tmp/hooks/test.json"));
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let flags: Vec<bool> = specs.iter().map(|s| s.fail_closed).collect();
+        assert_eq!(flags, vec![true, false, false]);
+    }
+
+    #[test]
+    fn fail_closed_snake_case_alias_parses() {
+        let json = r#"{ "hooks": { "PreToolUse": [ { "hooks": [
+            { "type": "command", "command": "a.sh", "fail_closed": true },
+            { "type": "command", "command": "b.sh", "fail_closed": false }
+        ] } ] } }"#;
+        let (specs, errors) = parse_hook_file(json, Path::new("/tmp/hooks/test.json"));
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let flags: Vec<bool> = specs.iter().map(|s| s.fail_closed).collect();
+        assert_eq!(flags, vec![true, false]);
     }
 
     #[test]

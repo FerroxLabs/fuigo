@@ -474,9 +474,6 @@ impl AgentView {
                     qv.fullscreen = !qv.fullscreen;
                     return InputOutcome::Changed;
                 }
-                if key!('y', CONTROL).matches(key) {
-                    return self.dismiss_question_view();
-                }
                 if key!('c', CONTROL).matches(key) {
                     if qv.is_feedback_report() {
                         return self.clear_feedback_then_dismiss();
@@ -541,9 +538,6 @@ impl AgentView {
                 }
             }
             QuestionFocus::Navigation => {
-                if key!('y', CONTROL).matches(key) {
-                    return self.dismiss_question_view();
-                }
                 if key!('c', CONTROL).matches(key) {
                     return self.submit_question_answers(true);
                 }

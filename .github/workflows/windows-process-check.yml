@@ -113,7 +113,7 @@ jobs:
           set -euo pipefail
           V=29.3
           sha=57ea59e9f551ad8d71ffaa9b5cfbe0ca1f4e720972a1db7ec2d12ab44bff9383
-          curl -fsSL -o protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v$V/protoc-$V-win64.zip"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 30 --max-time 300 -o protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v$V/protoc-$V-win64.zip"
           echo "$sha  protoc.zip" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/protoc"
           powershell -NoProfile -Command \

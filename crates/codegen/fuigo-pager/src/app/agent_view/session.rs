@@ -224,6 +224,7 @@ impl AgentView {
             drag_table_geometry: None,
             btw_selection_wrap_width: None,
             selection_created_at: None,
+            drag_entry_widths: std::collections::HashMap::new(),
             last_drag_mouse: None,
             drag_autoscroll: None,
             left_mouse_down: false,
@@ -261,6 +262,7 @@ impl AgentView {
             hit_goal_close: Default::default(),
             hit_bg_button: Default::default(),
             last_bg_click: None,
+            last_view_close_click: None,
             hit_queue_close: Default::default(),
             hit_plan_button: Default::default(),
             hit_plan_approval_status: Default::default(),
@@ -310,6 +312,7 @@ impl AgentView {
             persona_detail: None,
             btw_state: None,
             minimal_btw_lifecycle: None,
+            btw_request_id: None,
             btw_focused: false,
             peer: crate::peer_ui_state::PeerUiState::default(),
             hit_btw_close: Default::default(),
@@ -785,6 +788,24 @@ impl AgentView {
             || self.session.state.is_compact_running()
             || (self.wake_turn_active() && !self.wake_turn_cancelling())
     }
+    /// True when quitting right now would discard nothing: the prompt owns the keyboard, no turn, compact or wake is running, the draft (text and pasted images) is empty, no prompt is queued, and no card (permission, question, elicitation, cancel-turn) is waiting.
+    /// `ui.single_ctrl_c_quit` gates its one-press quit on this.
+    pub(crate) fn nothing_lost_on_quit(&self) -> bool {
+        self.active_pane == super::AgentPane::Prompt
+            && self.key_owner() == super::key_owner::KeyOwner::Pane
+            && self.blocking_card().is_none()
+            && self.active_subagent.is_none()
+            && self.jump_state.is_none()
+            && self.rewind_state.is_none()
+            && !self.prompt.file_search_visible()
+            && !self.stoppable_activity_running()
+            && !self.any_cancel_pending()
+            && self.session.state.is_idle()
+            && self.prompt.text().is_empty()
+            && !self.prompt.has_images()
+            && !self.has_held_user_queue()
+    }
+
     /// Whether a local or wake cancel is still in flight.
     pub(crate) fn any_cancel_pending(&self) -> bool {
         self.session.state.is_cancelling() || self.wake_turn_cancelling()

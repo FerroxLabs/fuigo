@@ -5,6 +5,7 @@
 //!
 //! `ModalConfirmation<R>` is a small dialog that blocks all input until the user presses one of the listed keys.
 use crate::docs::{DocEntry, default_howto_entries};
+use crate::render::SafeBuf;
 use crate::theme::Theme;
 use crate::views::modal_window::ModalWindowState;
 use ratatui::buffer::Buffer;
@@ -898,7 +899,7 @@ pub fn render_cancel_turn_panel(
     let title_style = Style::default()
         .fg(theme.accent_user)
         .add_modifier(Modifier::BOLD);
-    buf.set_line(
+    buf.set_line_safe(
         content_x,
         y,
         &Line::from(Span::styled(
@@ -913,7 +914,7 @@ pub fn render_cancel_turn_panel(
     } else {
         format!("{} subagents running", state.running_count)
     };
-    buf.set_line(
+    buf.set_line_safe(
         content_x,
         y,
         &Line::from(Span::styled(count_text, Style::default().fg(theme.gray))),
@@ -963,7 +964,7 @@ pub fn render_cancel_turn_panel(
             Span::styled(format!("({marker}) "), marker_style),
             Span::styled(choice.label(), label_style),
         ]);
-        buf.set_line(content_x, y, &line, content_w as u16);
+        buf.set_line_safe(content_x, y, &line, content_w as u16);
         // Terminal theme (Reset bands): reverse video; no-op on RGB.
         if is_cursor && focused {
             buf.set_style(row_rect, theme.selection_overlay());
@@ -1577,5 +1578,28 @@ mod doc_picker_tip_tests {
             all.contains("docs/user-guide") || all.contains("docs\\user-guide"),
             "missing docs path:\n{all}"
         );
+    }
+}
+
+#[cfg(test)]
+mod cancel_turn_tiny_buffer_tests {
+    use super::*;
+
+    /// Short terminals shrink the panel to 1-3 rows; the title and count rows must never write outside the buffer.
+    #[test]
+    fn cancel_turn_panel_renders_in_tiny_buffers_without_panic() {
+        for (w, h) in [(20u16, 1u16), (20, 2), (20, 3), (20, 4), (9, 2)] {
+            for running_count in [1usize, 3] {
+                let area = Rect::new(0, 0, w, h);
+                let mut buf = Buffer::empty(area);
+                let state = CancelTurnViewState {
+                    active_idx: 0,
+                    running_count,
+                };
+                let mut rects = Vec::new();
+                render_cancel_turn_panel(&mut buf, area, &state, true, &mut rects);
+                assert!(rects.len() <= h as usize, "{w}x{h}: {} rows", rects.len());
+            }
+        }
     }
 }

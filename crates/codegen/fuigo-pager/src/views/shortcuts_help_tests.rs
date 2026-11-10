@@ -2346,3 +2346,77 @@ fn inline_expand_with_no_help_renders_no_description_line() {
         "empty help must render no description line even when expanded"
     );
 }
+
+struct PromptVimGuard(bool);
+
+impl PromptVimGuard {
+    fn set(enabled: bool) -> Self {
+        let previous = crate::appearance::cache::load_vim_prompt();
+        crate::appearance::cache::set_vim_prompt(enabled);
+        Self(previous)
+    }
+}
+
+impl Drop for PromptVimGuard {
+    fn drop(&mut self) {
+        crate::appearance::cache::set_vim_prompt(self.0);
+    }
+}
+
+fn vim_normal_section(entries: &[ShortcutsHelpEntry]) -> Option<usize> {
+    entries.iter().position(|e| {
+        matches!(
+            e,
+            ShortcutsHelpEntry::SectionHeader { label: "Vim Normal mode", .. }
+        )
+    })
+}
+
+#[test]
+fn vim_normal_section_is_absent_unless_prompt_vim_is_on() {
+    let registry = ActionRegistry::defaults();
+    let _g = PromptVimGuard::set(false);
+    let entries = build_entries(&[When::PromptFocused], &registry, false);
+    assert!(vim_normal_section(&entries).is_none());
+    assert!(!default_collapsed().contains(&CATEGORY_ORDER.len()));
+    let nav_only = build_entries(&[When::PromptFocused], &registry, true);
+    assert!(
+        vim_normal_section(&nav_only).is_none(),
+        "`nav` is scrollback vim only"
+    );
+}
+
+#[test]
+fn vim_normal_section_lists_the_prompt_keys_when_enabled() {
+    let registry = ActionRegistry::defaults();
+    let _g = PromptVimGuard::set(true);
+    let entries = build_entries(&[When::PromptFocused], &registry, true);
+    let at = vim_normal_section(&entries).expect("section present");
+    let ShortcutsHelpEntry::SectionHeader { entry_count, category_idx, .. } = &entries[at] else {
+        unreachable!()
+    };
+    assert_eq!(*entry_count, VIM_NORMAL_ROWS.len());
+    assert!(default_collapsed().contains(category_idx));
+    // The section is last and its rows are lit while the prompt is focused
+    assert_eq!(entries.len(), at + 1 + VIM_NORMAL_ROWS.len());
+    for (offset, &(keys, label, _)) in VIM_NORMAL_ROWS.iter().enumerate() {
+        let ShortcutsHelpEntry::Hint { item, dimmed, .. } = &entries[at + 1 + offset] else {
+            panic!("row {offset} is not a hint");
+        };
+        assert_eq!(item.custom_display, Some(keys));
+        assert_eq!(item.label, label);
+        assert!(!dimmed);
+    }
+    for needle in ["h j k l", "w b e", "gg G", "f t F T ; ,", "d c y", "p P", "u Ctrl+R"] {
+        assert!(
+            VIM_NORMAL_ROWS.iter().any(|(k, _, _)| *k == needle),
+            "missing {needle}"
+        );
+    }
+    let dim = build_entries(&[When::ScrollbackFocused], &registry, true);
+    let at = vim_normal_section(&dim).unwrap();
+    assert!(matches!(
+        &dim[at + 1],
+        ShortcutsHelpEntry::Hint { dimmed: true, .. }
+    ));
+}

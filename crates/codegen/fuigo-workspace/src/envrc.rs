@@ -312,7 +312,7 @@ printf '%s' '{sentinel}'
         envrc = envrc_path.display(),
     );
 
-    let mut baseline: HashMap<String, String> = std::env::vars().collect();
+    let mut baseline: HashMap<String, String> = fuigo_tty_utils::env_snapshot_lossy();
 
     // Run the script and capture output
     let mut bash_cmd = Command::new("/bin/bash");

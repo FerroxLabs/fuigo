@@ -178,6 +178,7 @@ fn findings_have_stable_semantic_ids_and_dispositions() {
             allow_passthrough: TmuxProbeResult::Available("on".to_owned()),
             control_mode: TmuxProbeResult::Available(false),
             client_features: TmuxProbeResult::Unavailable,
+            escape_time: TmuxProbeResult::Unavailable,
         },
         available_runtime(),
         false,
@@ -250,6 +251,7 @@ fn all_tmux_finding_metadata_uses_stable_automatic_fix_ids_without_schema_change
             allow_passthrough: TmuxProbeResult::Available("off".to_owned()),
             control_mode: TmuxProbeResult::Available(false),
             client_features: TmuxProbeResult::Unavailable,
+            escape_time: TmuxProbeResult::Unavailable,
         },
         available_runtime(),
         false,
@@ -289,6 +291,7 @@ fn all_tmux_finding_metadata_uses_stable_automatic_fix_ids_without_schema_change
             allow_passthrough: TmuxProbeResult::Available("all".to_owned()),
             control_mode: TmuxProbeResult::Available(false),
             client_features: TmuxProbeResult::Unavailable,
+            escape_time: TmuxProbeResult::Unavailable,
         },
         available_runtime(),
         false,
@@ -320,6 +323,7 @@ fn unavailable_runtime_evidence_is_honest_and_fail_open() {
             allow_passthrough: TmuxProbeResult::Available("on".to_owned()),
             control_mode: TmuxProbeResult::Available(true),
             client_features: TmuxProbeResult::Unavailable,
+            escape_time: TmuxProbeResult::Unavailable,
         },
         DiagnosticRuntimeEvidence {
             fullscreen_active: RuntimeEvidence::Unavailable,
@@ -372,6 +376,7 @@ fn unavailable_and_error_probe_evidence_is_retained_without_findings() {
             allow_passthrough: TmuxProbeResult::Unavailable,
             control_mode: TmuxProbeResult::Unavailable,
             client_features: TmuxProbeResult::Unavailable,
+            escape_time: TmuxProbeResult::Unavailable,
         },
         available_runtime(),
         true,
@@ -410,6 +415,7 @@ fn plain_tmux() -> TmuxProbeFacts {
         allow_passthrough: TmuxProbeResult::Available("on".to_owned()),
         control_mode: TmuxProbeResult::Available(false),
         client_features: TmuxProbeResult::Unavailable,
+        escape_time: TmuxProbeResult::Unavailable,
     }
 }
 

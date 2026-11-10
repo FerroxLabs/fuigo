@@ -4,7 +4,7 @@ use fuigo_workspace::file_system::{
     FileReference, render_embedded_resource, render_file_reference,
 };
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 /// Some templates put `<user_query>` last (context first); Fuigo puts it first.
 /// Keeping them separate lets the caller truncate context without searching for the query boundary in a flat string.
 #[derive(Debug, Clone)]
@@ -133,7 +133,11 @@ pub(crate) async fn parse_prompt_with_skills(
         let Some(mut file_ref) = FileReference::parse(&token) else {
             continue;
         };
-        file_ref.path = working_directory.join(&file_ref.path);
+        file_ref.path = resolve_reference_path(
+            &file_ref.path.to_string_lossy(),
+            &working_directory,
+            fuigo_dirs::home_dir().as_deref(),
+        );
         let rendered_file = render_file_reference(file_ref, is_cursor).await;
         let success = rendered_file.is_some();
         tracing::info_span!("at_mention", mention_type = "file", success).in_scope(|| {});
@@ -204,6 +208,29 @@ Below are some potentially helpful/relevant pieces of information for figuring o
     }
     (context, query)
 }
+/// Where a typed `@path` points.
+/// `~/` and a lone `~` mean the home folder, an absolute path stays itself, anything else is relative to the working directory.
+/// A leading `!` is the hidden-files marker the picker understands (`@!.env`) and is dropped, unless a file really is named with that `!`.
+///
+/// This only maps the typed text to a path.
+/// Reading it still happens only for a human-typed prompt (`file_expansion_allowed`), exactly as for an absolute `@/path` today.
+fn resolve_reference_path(
+    raw: &str,
+    working_directory: &Path,
+    home: Option<&Path>,
+) -> PathBuf {
+    let raw = match raw.strip_prefix('!') {
+        Some(rest) if !rest.is_empty() && !working_directory.join(raw).exists() => rest,
+        _ => raw,
+    };
+    let expanded = match (raw, home) {
+        ("~", Some(home)) => home.to_path_buf(),
+        (_, Some(home)) if raw.starts_with("~/") => home.join(&raw[2..]),
+        _ => PathBuf::from(raw),
+    };
+    working_directory.join(expanded)
+}
+
 fn collect_file_references(message: &str) -> Vec<String> {
     let mut paths = Vec::new();
     let mut i = 0;
@@ -387,6 +414,51 @@ mod tests {
             false,
         )
     }
+    #[test]
+    fn at_tilde_resolves_to_the_home_folder() {
+        let cwd = Path::new("/work/proj");
+        let home = Path::new("/home/me");
+        assert_eq!(
+            resolve_reference_path("~/notes/a.md", cwd, Some(home)),
+            PathBuf::from("/home/me/notes/a.md")
+        );
+        assert_eq!(resolve_reference_path("~", cwd, Some(home)), PathBuf::from("/home/me"));
+        // No home: the token stays workspace-relative, as before
+        assert_eq!(
+            resolve_reference_path("~/a.md", cwd, None),
+            PathBuf::from("/work/proj/~/a.md")
+        );
+        // Everything else is unchanged
+        assert_eq!(resolve_reference_path("src/a.rs", cwd, Some(home)), PathBuf::from("/work/proj/src/a.rs"));
+        assert_eq!(resolve_reference_path("/etc/hosts", cwd, Some(home)), PathBuf::from("/etc/hosts"));
+        assert_eq!(resolve_reference_path("../x", cwd, Some(home)), PathBuf::from("/work/proj/../x"));
+        assert_eq!(resolve_reference_path("~user/x", cwd, Some(home)), PathBuf::from("/work/proj/~user/x"));
+    }
+
+    #[test]
+    fn at_bang_reaches_hidden_files_without_the_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        std::fs::write(cwd.join(".env"), "K=1").unwrap();
+        assert_eq!(resolve_reference_path("!.env", cwd, None), cwd.join(".env"));
+        assert_eq!(resolve_reference_path("!~/x", cwd, Some(Path::new("/h"))), PathBuf::from("/h/x"));
+        // A file genuinely named with the bang wins
+        std::fs::write(cwd.join("!odd"), "x").unwrap();
+        assert_eq!(resolve_reference_path("!odd", cwd, None), cwd.join("!odd"));
+        assert_eq!(resolve_reference_path("!", cwd, None), cwd.join("!"));
+    }
+
+    #[tokio::test]
+    async fn human_prompt_expands_home_and_line_suffix_references() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("n.txt"), "one\ntwo\nthree\n").unwrap();
+        let token = format!("{}/n.txt:2", home.path().display());
+        let file = FileReference::parse(&token).unwrap();
+        assert_eq!((file.start_line, file.end_line), (Some(2), Some(2)));
+        let rendered = render_file_reference(file, false).await.expect("file renders");
+        assert!(rendered.contains("2→two") && !rendered.contains("1→one") && !rendered.contains("3→three"));
+    }
+
     #[test]
     fn test_collect_single_reference() {
         let tokens = collect_file_references("look at @src/main.rs please");

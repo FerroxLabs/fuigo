@@ -9,12 +9,82 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use fuigo_workspace::file_system::{
     FuzzyFileMatcher, FuzzyFileMatcherDaemon, FuzzyMatchResult, FuzzyMatcherDaemonResults,
 };
 
 use super::context::{self, AtContext, normalize_display_path};
+
+/// `[ui] at_picker_outside_workspace`: whether an `@` path starting `/`, `~/` or `../` lists files from that folder.
+/// On by default; the event loop seeds it from the config at startup.
+static OUTSIDE_WORKSPACE_LISTING: AtomicBool = AtomicBool::new(true);
+
+pub fn set_outside_workspace_listing(enabled: bool) {
+    OUTSIDE_WORKSPACE_LISTING.store(enabled, Ordering::Relaxed);
+}
+
+pub fn outside_workspace_listing() -> bool {
+    OUTSIDE_WORKSPACE_LISTING.load(Ordering::Relaxed)
+}
+
+/// Most entries read from one outside folder; keeps a huge directory from stalling a keystroke.
+const OUTSIDE_SCAN_LIMIT: usize = 5000;
+
+/// List the folder an outside-workspace `@` query points into (`/..`, `~/..`, `../..`), filtered by the name typed after the last `/`.
+///
+/// This is a plain, non-recursive directory listing for the picker only.
+/// It reads names, never file contents, and attaching a file still goes through the normal `@` expansion on send.
+/// Entries show the path as typed (`~/notes/a.md`), directories first, name matches that start with the typed text before other matches.
+/// Dotfiles appear only in hidden mode (`@!`) or when the typed name starts with `.`.
+fn list_outside(
+    root: &Path,
+    home: Option<&Path>,
+    query: &str,
+    hidden: bool,
+) -> Vec<FuzzyMatchResult> {
+    let split = query.rfind('/').map_or(0, |i| i + 1);
+    let (dir_part, name_part) = query.split_at(split);
+    let dir = if let Some(rest) = dir_part.strip_prefix("~/") {
+        match home {
+            Some(home) => home.join(rest),
+            None => return Vec::new(),
+        }
+    } else if dir_part.starts_with('/') {
+        PathBuf::from(dir_part)
+    } else {
+        root.join(dir_part)
+    };
+    let Ok(read) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let needle = name_part.to_lowercase();
+    let show_dot = hidden || name_part.starts_with('.');
+    let mut rows: Vec<(bool, bool, String, bool)> = Vec::new();
+    for entry in read.take(OUTSIDE_SCAN_LIMIT).flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') && !show_dot {
+            continue;
+        }
+        let lower = name.to_lowercase();
+        if !lower.contains(&needle) {
+            continue;
+        }
+        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir())
+            || entry.file_type().is_ok_and(|t| t.is_symlink()) && entry.path().is_dir();
+        rows.push((!lower.starts_with(&needle), !is_dir, name, is_dir));
+    }
+    rows.sort();
+    rows.into_iter()
+        .take(MATCHER_TOP_K)
+        .map(|(_, _, name, is_dir)| FuzzyMatchResult {
+            path: nucleo::Utf32String::from(format!("{dir_part}{name}")),
+            is_dir,
+            ..Default::default()
+        })
+        .collect()
+}
 
 /// Top-K results to request from the fuzzy matcher.
 const MATCHER_TOP_K: usize = 1000;
@@ -88,6 +158,9 @@ pub struct FileSearchState {
     /// Directory being drilled into; keeps the @-token alive when its name has whitespace (`my dir`).
     /// Self-validating: applies only while the path matches.
     drill_prefix: Option<String>,
+    /// The current results are a direct folder listing outside the workspace, not the matcher's.
+    /// While set, `poll` leaves them alone and the daemon is not queried.
+    outside: bool,
 }
 
 impl FileSearchState {
@@ -107,6 +180,7 @@ impl FileSearchState {
             results_stale: false,
             last_query: None,
             drill_prefix: None,
+            outside: false,
         }
     }
 
@@ -215,7 +289,46 @@ impl FileSearchState {
     ///
     /// Called after every text change or cursor movement.
     pub fn update_context(&mut self, text: &str, cursor: usize) {
+        self.update_context_with(text, cursor, outside_workspace_listing());
+    }
+
+    /// [`Self::update_context`] with the outside-workspace listing switch passed in.
+    pub(crate) fn update_context_with(&mut self, text: &str, cursor: usize, outside_enabled: bool) {
         let new_ctx = context::detect_with_drill(text, cursor, self.drill_prefix.as_deref());
+
+        // An outside folder (`@~/`, `@/`, `@../`) is listed directly, so the workspace matcher is left alone
+        if outside_enabled
+            && let Some(ctx) = &new_ctx
+            && context::is_outside_query(ctx.matcher_query())
+        {
+            let home = fuigo_dirs::home_dir();
+            self.results = FuzzyMatcherDaemonResults {
+                topk: Arc::from(list_outside(
+                    &self.root,
+                    home.as_deref(),
+                    ctx.matcher_query(),
+                    ctx.is_hidden_mode(),
+                )),
+                num_items: 0,
+                status: Default::default(),
+                generation: self.min_generation,
+            };
+            self.min_generation += 1;
+            self.outside = true;
+            self.results_stale = false;
+            self.last_query = None;
+            self.selected = 0;
+            self.hovered = None;
+            self.scroll_offset = 0;
+            self.context = new_ctx;
+            return;
+        }
+        // Coming back from an outside listing is a fresh entry into the workspace matcher
+        let was_outside = std::mem::take(&mut self.outside);
+        if was_outside {
+            self.context = None;
+            self.results = FuzzyMatcherDaemonResults::default();
+        }
 
         match (&self.context, &new_ctx) {
             (None, Some(ctx)) => {
@@ -269,6 +382,7 @@ impl FileSearchState {
 
     /// Clear the context (e.g., on Esc).
     pub fn clear_context(&mut self) {
+        self.outside = false;
         self.context = None;
         self.drill_prefix = None;
         self.results = FuzzyMatcherDaemonResults::default();
@@ -282,7 +396,7 @@ impl FileSearchState {
     ///
     /// Call this on every tick (~4ms) while the dropdown is potentially visible.
     pub fn poll(&mut self) -> bool {
-        if self.context.is_none() {
+        if self.context.is_none() || self.outside {
             return false;
         }
 
@@ -546,6 +660,78 @@ mod tests {
 
         // Once the matcher answers the new query, its matches are acceptable.
         wait_for(&mut state, "zeta_only");
+    }
+
+    fn outside_fixture() -> (tempfile::TempDir, tempfile::TempDir) {
+        let root = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("notes.md"), "n").unwrap();
+        std::fs::write(outside.path().join(".secret"), "s").unwrap();
+        std::fs::create_dir(outside.path().join("docs")).unwrap();
+        std::fs::write(outside.path().join("docs").join("a.md"), "a").unwrap();
+        (root, outside)
+    }
+
+    fn names(results: &[FuzzyMatchResult]) -> Vec<String> {
+        results.iter().map(|r| r.path.to_string()).collect()
+    }
+
+    #[test]
+    fn outside_listing_shows_the_folder_as_typed_dirs_first_and_hides_dotfiles() {
+        let (root, outside) = outside_fixture();
+        let q = format!("{}/", outside.path().display());
+        let rows = list_outside(root.path(), None, &q, false);
+        assert_eq!(names(&rows), [format!("{q}docs"), format!("{q}notes.md")]);
+        assert!(rows[0].is_dir && !rows[1].is_dir);
+        // `@!` and a typed leading dot both reach hidden files
+        assert!(names(&list_outside(root.path(), None, &q, true)).contains(&format!("{q}.secret")));
+        let dotted = format!("{q}.se");
+        assert_eq!(names(&list_outside(root.path(), None, &dotted, false)), [format!("{q}.secret")]);
+        // The name typed after the last slash filters
+        let filtered = format!("{q}no");
+        assert_eq!(names(&list_outside(root.path(), None, &filtered, false)), [format!("{q}notes.md")]);
+    }
+
+    #[test]
+    fn outside_listing_resolves_home_and_parent_prefixes() {
+        let (root, outside) = outside_fixture();
+        let rows = list_outside(root.path(), Some(outside.path()), "~/docs/", false);
+        assert_eq!(names(&rows), ["~/docs/a.md"]);
+        // No home directory: `~/` lists nothing rather than guessing
+        assert!(list_outside(root.path(), None, "~/", false).is_empty());
+        // `../` is relative to the workspace root
+        let child = root.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::write(root.path().join("sibling.txt"), "x").unwrap();
+        let rows = list_outside(&child, None, "../sib", false);
+        assert_eq!(names(&rows), ["../sibling.txt"]);
+        assert!(list_outside(root.path(), None, "/nonexistent-fuigo-zzz/", false).is_empty());
+    }
+
+    #[test]
+    fn outside_context_lists_directly_and_never_builds_the_matcher() {
+        let (root, outside) = outside_fixture();
+        let mut state = FileSearchState::new(root.path());
+        let text = format!("@{}/", outside.path().display());
+        state.update_context_with(&text, text.len(), true);
+        assert!(state.context().is_some());
+        assert_eq!(state.result_count(), 2);
+        assert!(!state.daemon_is_built());
+        assert!(!state.poll());
+        // Leaving the outside path returns to the workspace matcher
+        state.update_context_with("@al", 3, true);
+        assert!(state.daemon_is_built());
+    }
+
+    /// `at_picker_outside_workspace = false`: the same path is handed to the workspace matcher, exactly as before the setting existed.
+    #[test]
+    fn outside_listing_off_keeps_the_workspace_only_picker() {
+        let (root, outside) = outside_fixture();
+        let mut state = FileSearchState::new(root.path());
+        let text = format!("@{}/", outside.path().display());
+        state.update_context_with(&text, text.len(), false);
+        assert!(state.daemon_is_built());
+        assert_eq!(state.result_count(), 0);
     }
 
     #[test]

@@ -2090,6 +2090,60 @@ pub async fn checkout_session_commit(
     stash_if_dirty: bool,
     session_id: &str,
 ) -> CheckoutSessionOutcome {
+    let mut outcome = checkout_session_commit_inner(git_root, target_sha, stash_if_dirty, session_id).await;
+    if outcome.checked_out {
+        return outcome;
+    }
+    // A checkout that exited nonzero can still have moved HEAD (a post-checkout hook failed afterwards).
+    // HEAD is then at the target, and the changes stay stashed rather than being applied on top of it.
+    if head_is_at(git_root, target_sha).await {
+        outcome.checked_out = true;
+        return outcome;
+    }
+    // The restore failed with HEAD elsewhere: give back the user's uncommitted and untracked files instead of leaving them in a stash.
+    if let Some(stash_ref) = outcome.stash_ref.clone() {
+        match pop_stash_by_ref(git_root, &stash_ref).await {
+            Ok(()) => outcome.stash_ref = None,
+            Err(e) => tracing::warn!(
+                target: RESTORE_CODE_LOG,
+                path = %git_root.display(),
+                stash_ref = %stash_ref,
+                error = %e,
+                "checkout_session_commit: could not restore the stash; it is kept"
+            ),
+        }
+    }
+    outcome
+}
+/// Whether `HEAD` resolves to the commit `target` names.
+async fn head_is_at(git_root: &Path, target: &str) -> bool {
+    let want = format!("{target}^{{commit}}");
+    match (
+        git_cli(git_root, &["rev-parse", "HEAD"]).await,
+        git_cli(git_root, &["rev-parse", "--verify", "--quiet", &want]).await,
+    ) {
+        (Ok(head), Ok(target)) => !head.trim().is_empty() && head.trim() == target.trim(),
+        _ => false,
+    }
+}
+/// Pop the stash entry whose commit is `stash_ref`, wherever it sits in the stash list now.
+///
+/// Another worktree shares the stash list and can push or drop entries meanwhile, so `stash@{0}` may no longer be ours.
+/// On a failed pop (for example a conflict) git keeps the entry, so nothing is lost.
+async fn pop_stash_by_ref(git_root: &Path, stash_ref: &str) -> Result<()> {
+    let list = git_cli(git_root, &["stash", "list", "--format=%H"]).await?;
+    let Some(index) = list.lines().position(|l| l.trim() == stash_ref) else {
+        anyhow::bail!("stash {stash_ref} is no longer in the stash list");
+    };
+    git_cli_mut(git_root, &["stash", "pop", &format!("stash@{{{index}}}")]).await?;
+    Ok(())
+}
+async fn checkout_session_commit_inner(
+    git_root: &Path,
+    target_sha: &str,
+    stash_if_dirty: bool,
+    session_id: &str,
+) -> CheckoutSessionOutcome {
     if let Ok(current) = git_cli(git_root, &["rev-parse", "HEAD"]).await
         && current.trim() == target_sha
     {
@@ -2260,6 +2314,7 @@ pub(crate) async fn checkout_commit_with_fetch(
         };
     }
     let mut stashed = false;
+    let mut stash_oid: Option<String> = None;
     if stash_if_dirty {
         let status = git_cli(git_root, &["status", "--porcelain"]).await;
         if let Ok(output) = &status
@@ -2270,7 +2325,13 @@ pub(crate) async fn checkout_commit_with_fetch(
                 .await
                 .is_ok()
             {
+                // Remember this entry's commit: the pop below must restore this one, not whatever is on top by then.
                 stashed = true;
+                stash_oid = git_cli(git_root, &["rev-parse", "stash@{0}"])
+                    .await
+                    .ok()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty());
             }
         }
     }
@@ -2302,7 +2363,9 @@ pub(crate) async fn checkout_commit_with_fetch(
         )) => {
             return pop_checkout_auto_stash(
                 git_root,
+                head_commit,
                 stashed,
+                stash_oid.as_deref(),
                 false,
                 format!("unsupported checkout target: {head_commit}"),
             )
@@ -2316,7 +2379,15 @@ pub(crate) async fn checkout_commit_with_fetch(
                 "checkout_commit_with_fetch: fetch failed"
             );
             if !crate::restore_fetch::is_safe_fetch_refspec(head_commit) {
-                return pop_checkout_auto_stash(git_root, stashed, false, e.to_string()).await;
+                return pop_checkout_auto_stash(
+                    git_root,
+                    head_commit,
+                    stashed,
+                    stash_oid.as_deref(),
+                    false,
+                    e.to_string(),
+                )
+                .await;
             }
             false
         }
@@ -2328,7 +2399,9 @@ pub(crate) async fn checkout_commit_with_fetch(
             );
             return pop_checkout_auto_stash(
                 git_root,
+                head_commit,
                 stashed,
+                stash_oid.as_deref(),
                 false,
                 "targeted fetch timed out".to_owned(),
             )
@@ -2342,22 +2415,60 @@ pub(crate) async fn checkout_commit_with_fetch(
             fetched,
             error: None,
         },
-        Err(e) => pop_checkout_auto_stash(git_root, stashed, fetched, e.to_string()).await,
+        Err(e) => {
+            pop_checkout_auto_stash(
+                git_root,
+                head_commit,
+                stashed,
+                stash_oid.as_deref(),
+                fetched,
+                e.to_string(),
+            )
+            .await
+        }
     }
 }
 /// Restore a pre-checkout auto-stash on failure so callers that only inspect `error` are not left on a clean tree with a hidden stash entry.
+///
+/// It restores its own entry by commit, not `stash@{0}`: another worktree shares the stash list and may have changed it meanwhile.
+/// When the checkout moved HEAD before failing (a post-checkout hook), the changes stay stashed and the checkout counts as done.
+/// A stash that cannot be restored is kept, never dropped.
 async fn pop_checkout_auto_stash(
     git_root: &Path,
+    target: &str,
     stashed: bool,
+    stash_oid: Option<&str>,
     fetched: bool,
     error: String,
 ) -> CheckoutCommitResponse {
+    if head_is_at(git_root, target).await {
+        return CheckoutCommitResponse {
+            checked_out: true,
+            stashed,
+            fetched,
+            error: None,
+        };
+    }
+    let mut still_stashed = stashed;
     if stashed {
-        let _ = git_cli_mut(git_root, &["stash", "pop"]).await;
+        match stash_oid {
+            Some(oid) => match pop_stash_by_ref(git_root, oid).await {
+                Ok(()) => still_stashed = false,
+                Err(e) => tracing::warn!(
+                    path = %git_root.display(),
+                    error = %e,
+                    "checkout_commit_with_fetch: could not restore the auto-stash; it is kept"
+                ),
+            },
+            None => tracing::warn!(
+                path = %git_root.display(),
+                "checkout_commit_with_fetch: auto-stash ref unknown; it is kept"
+            ),
+        }
     }
     CheckoutCommitResponse {
         checked_out: false,
-        stashed: false,
+        stashed: still_stashed,
         fetched,
         error: Some(error),
     }

@@ -12,6 +12,8 @@ const GROUP_EXIT_POLL: Duration = Duration::from_millis(1);
 enum TmuxCommand<'a> {
     Version,
     OptionValue(&'a str),
+    /// A server-scope option (`show-option -s`), e.g. `escape-time`.
+    ServerOptionValue(&'a str),
     OptionSupport(&'a str),
     ControlMode,
     ClientFeatures,
@@ -234,6 +236,18 @@ fn query_option_with(runner: &dyn TmuxCommandRunner, option: &str) -> TmuxQueryR
     parse_value(runner.run(TmuxCommand::OptionValue(option)))
 }
 
+/// Value of a server-scope tmux option (`show-option -sqv`), such as `escape-time`.
+pub fn query_server_option(option: &str) -> TmuxQueryResult<String> {
+    query_server_option_with(&ServerGate::live(), option)
+}
+
+fn query_server_option_with(
+    runner: &dyn TmuxCommandRunner,
+    option: &str,
+) -> TmuxQueryResult<String> {
+    parse_value(runner.run(TmuxCommand::ServerOptionValue(option)))
+}
+
 pub fn query_option_support(option: &str) -> TmuxQueryResult<()> {
     query_option_support_with(&ServerGate::live(), option)
 }
@@ -288,6 +302,11 @@ fn build_tmux_command(command: TmuxCommand<'_>) -> Command {
         }
         TmuxCommand::OptionValue(option) => {
             cmd.args(["show-option", "-gqv", option])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+        }
+        TmuxCommand::ServerOptionValue(option) => {
+            cmd.args(["show-option", "-sqv", option])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
         }
@@ -366,6 +385,7 @@ mod tests {
             self.calls.borrow_mut().push(match command {
                 TmuxCommand::Version => "version".to_owned(),
                 TmuxCommand::OptionValue(option) => format!("value:{option}"),
+                TmuxCommand::ServerOptionValue(option) => format!("server-value:{option}"),
                 TmuxCommand::OptionSupport(option) => format!("support:{option}"),
                 TmuxCommand::ControlMode => "control-mode".to_owned(),
                 TmuxCommand::ClientFeatures => "client-features".to_owned(),
@@ -381,6 +401,10 @@ mod tests {
             (
                 TmuxCommand::OptionValue("set-clipboard"),
                 vec!["show-option", "-gqv", "set-clipboard"],
+            ),
+            (
+                TmuxCommand::ServerOptionValue("escape-time"),
+                vec!["show-option", "-sqv", "escape-time"],
             ),
             (
                 TmuxCommand::OptionSupport("allow-passthrough"),
@@ -409,6 +433,16 @@ mod tests {
                 .collect();
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn server_option_query_uses_the_server_scope_command() {
+        let runner = FakeRunner::output(true, b"500\n", b"");
+        assert_eq!(
+            query_server_option_with(&runner, "escape-time"),
+            TmuxQueryResult::Available("500".to_owned())
+        );
+        assert_eq!(runner.calls.into_inner(), ["server-value:escape-time"]);
     }
 
     #[test]

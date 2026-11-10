@@ -336,6 +336,10 @@ pub(super) fn set_vim_mode_inner(app: &mut AppView, new: bool) {
         agent.set_vim_mode_recursive(new);
     }
     crate::appearance::cache::set_vim_mode(new);
+    // Prompt vim (`[keys] vim = "all"`) implies scrollback vim, so it cannot outlive it
+    if !new {
+        crate::appearance::cache::set_vim_prompt(false);
+    }
 }
 
 /// Set vim-mode scrollback keybindings (registry-driven path).
@@ -1145,15 +1149,32 @@ pub(in crate::app::dispatch) fn set_simple_mode(app: &mut AppView, new: bool) ->
     // A newly-inserted agent may have a stale default, so we always propagate
     // The inner is per-agent idempotent
     set_simple_mode_inner(app, new);
+    // `simple_mode` is an alias of `[keys] vim`: `false` turns prompt vim on, `true` turns it off, so the setting and the prompt engine cannot disagree
+    let prompt_was_on = crate::appearance::cache::load_vim_prompt();
+    let mut keys_vim = None;
+    if new {
+        if prompt_was_on {
+            crate::appearance::cache::set_vim_prompt(false);
+            keys_vim = Some("nav");
+        }
+    } else {
+        set_vim_mode_inner(app, true);
+        crate::appearance::cache::set_vim_prompt(true);
+        keys_vim = Some("all");
+    }
     refresh_open_settings_modals(app);
     tracing::info!(target: "settings", key = "simple_mode", value = new, "setting changed");
     // Toast label mirrors the renamed registry label ("Disable vim input mode") so the user sees the same name in the modal and the toast
     app.show_toast(&save_success_toast("Disable vim input mode", new));
-    vec![Effect::PersistSetting {
+    let mut effects = vec![Effect::PersistSetting {
         key: "simple_mode",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
+    }];
+    if let Some(value) = keys_vim {
+        effects.push(Effect::PersistKeysVim { value });
+    }
+    effects
 }
 
 // ---------------------------------------------------------------------------

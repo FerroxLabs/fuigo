@@ -173,8 +173,14 @@ impl HunkTrackerActor {
             RestoreDeleted { baseline: String },
             DeleteCreated,
             RevertChange { patched: String },
+            /// The file on disk changed behind the tracker's back (a saved edit it missed) and no longer holds this hunk where it was.
+            /// Leave it untouched and re-sync, rather than overwrite what the user saved.
+            Stale { disk: String },
             NoOp,
         }
+
+        // What the file holds now; the tracker's copy can lag a save it missed.
+        let disk = tokio::fs::read_to_string(path).await.ok();
 
         let action = {
             let state = self.file_states.get(path);
@@ -201,13 +207,28 @@ impl HunkTrackerActor {
             } else if let FileContentState::Full(current) = &state.current_content {
                 // Normal case: patch current content to revert this hunk's changes
                 let old_text = hunk.old_text.as_deref().unwrap_or("");
-                let patched = patch_lines(
-                    current,
-                    hunk.line_info.new_start,
-                    hunk.line_info.new_count,
-                    old_text,
-                );
-                RejectAction::RevertChange { patched }
+                match disk.as_ref().filter(|d| *d != current) {
+                    Some(disk)
+                        if !region_matches(
+                            disk,
+                            hunk.line_info.new_start,
+                            hunk.line_info.new_count,
+                            &hunk.new_text,
+                        ) =>
+                    {
+                        RejectAction::Stale { disk: disk.clone() }
+                    }
+                    saved => {
+                        // Patch what is on disk, so edits the user saved elsewhere in the file survive.
+                        let patched = patch_lines(
+                            saved.unwrap_or(current),
+                            hunk.line_info.new_start,
+                            hunk.line_info.new_count,
+                            old_text,
+                        );
+                        RejectAction::RevertChange { patched }
+                    }
+                }
             } else {
                 RejectAction::NoOp
             }
@@ -239,8 +260,12 @@ impl HunkTrackerActor {
                         source: e,
                     })?;
             }
-            RejectAction::NoOp => return Ok(()),
+            RejectAction::Stale { .. } | RejectAction::NoOp => {}
         }
+        if matches!(action, RejectAction::NoOp) {
+            return Ok(());
+        }
+        let stale = matches!(action, RejectAction::Stale { .. });
 
         // Update state and collect data for recompute
         let (should_recompute, current, _source) = {
@@ -266,16 +291,24 @@ impl HunkTrackerActor {
                     state.hunks.retain(|h| h.id != hunk.id);
                     (true, Some(patched_state), hunk.source)
                 }
+                RejectAction::Stale { disk } => {
+                    // Nothing was written: re-sync to what the user saved and let the recompute decide what is left.
+                    let disk_state = FileContentState::Full(disk);
+                    state.current_content = disk_state.clone();
+                    (true, Some(disk_state), hunk.source)
+                }
                 RejectAction::NoOp => return Ok(()),
             }
         };
 
         // Send event after mutable borrow is released
-        self.send_event(HunkEvent::HunkRemoved {
-            path: path.to_path_buf(),
-            hunk_id: hunk.id.clone(),
-            reason: HunkRemovalReason::Rejected,
-        });
+        if !stale {
+            self.send_event(HunkEvent::HunkRemoved {
+                path: path.to_path_buf(),
+                hunk_id: hunk.id.clone(),
+                reason: HunkRemovalReason::Rejected,
+            });
+        }
 
         // Recompute remaining hunks
         if should_recompute {
@@ -579,7 +612,39 @@ impl HunkTrackerActor {
             FileContentState::Full(s) => s.clone(),
             _ => return Ok(()),
         };
-        let mut current = current_content;
+        // A save the tracker missed leaves the file ahead of its copy: patch what is on disk so the user's edits survive,
+        // and if a hunk is no longer where it was, write nothing and re-sync instead of overwriting them.
+        let disk = tokio::fs::read_to_string(path)
+            .await
+            .ok()
+            .filter(|d| *d != current_content);
+        let mut current = match disk {
+            Some(disk) => {
+                let intact = hunks.iter().all(|h| {
+                    region_matches(
+                        &disk,
+                        h.line_info.new_start,
+                        h.line_info.new_count,
+                        &h.new_text,
+                    )
+                });
+                if !intact {
+                    if let Some(state) = self.file_states.get_mut(path) {
+                        state.current_content = FileContentState::Full(disk.clone());
+                    }
+                    let remaining_source = self
+                        .file_states
+                        .get(path)
+                        .and_then(|state| state.hunks.first())
+                        .map(|h| h.source)
+                        .unwrap_or(HunkSource::External);
+                    self.recompute_hunks(path, Some(FileContentState::Full(disk)), remaining_source);
+                    return Ok(());
+                }
+                disk
+            }
+            None => current_content,
+        };
 
         // Apply patches in reverse order (from end of file to beginning)
         // to avoid line number shifts
@@ -632,4 +697,13 @@ impl HunkTrackerActor {
 
         Ok(())
     }
+}
+
+/// Whether `content` holds `text` where a hunk says its new lines are (`start` is 1-based).
+fn region_matches(content: &str, start: usize, count: usize, text: &str) -> bool {
+    let lines: Vec<&str> = content.lines().collect();
+    let from = start.saturating_sub(1);
+    lines
+        .get(from..from.saturating_add(count))
+        .is_some_and(|region| region.iter().copied().eq(text.lines()))
 }

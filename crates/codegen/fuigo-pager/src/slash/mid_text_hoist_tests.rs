@@ -8,32 +8,18 @@ fn hoist(text: &str) -> Option<String> {
     hoist_mid_text_command(text, &CommandRegistry::new(commands::builtin_commands()))
 }
 
+/// A token that does not begin the message is plain text.
 #[test]
-fn hoists_first_btw_token_and_collapses_gap() {
-    assert_eq!(
-        Some("/btw explain the controller. what is a WBC".to_owned()),
-        hoist("explain the controller. /btw what is a WBC")
-    );
-    assert_eq!(Some("/btw prose. q".to_owned()), hoist("prose. /btw   q"));
-}
-
-#[test]
-fn token_at_end_trims_trailing_space() {
-    assert_eq!(Some("/btw prose".to_owned()), hoist("prose /btw"));
-    assert_eq!(Some("/btw prose".to_owned()), hoist("prose /btw   "));
-}
-
-#[test]
-fn preserves_newline_before_token() {
-    assert_eq!(
-        Some("/btw line1\nq\nline2".to_owned()),
-        hoist("line1\n/btw q\nline2")
-    );
-}
-
-#[test]
-fn second_token_stays_verbatim() {
-    assert_eq!(Some("/btw a b /btw c".to_owned()), hoist("a /btw b /btw c"));
+fn token_later_in_the_text_misses() {
+    for text in [
+        "explain the controller. /btw what is a WBC",
+        "prose /btw",
+        "line1\n/btw q\nline2",
+        "a /btw b /btw c",
+        "/nope hi /btw q",
+    ] {
+        assert_eq!(None, hoist(text), "{text:?}");
+    }
 }
 
 /// The caller keeps real leading invocations out; `[Image #1] /btw q` arrives here as ` /btw q`.
@@ -41,7 +27,7 @@ fn second_token_stays_verbatim() {
 fn leading_token_after_stripped_chip_hoists_in_place() {
     assert_eq!(Some("/btw q".to_owned()), hoist(" /btw q"));
     assert_eq!(Some("/btw q".to_owned()), hoist("/btw q"));
-    assert_eq!(Some("/btw /nope hi q".to_owned()), hoist("/nope hi /btw q"));
+    assert_eq!(Some("/btw a\nb".to_owned()), hoist("/btw   a\nb"));
 }
 
 #[test]

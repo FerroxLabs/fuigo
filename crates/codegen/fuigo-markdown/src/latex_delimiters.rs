@@ -81,6 +81,11 @@ enum State {
         ch: u8,
         len: usize,
     },
+    /// Inside a link or image destination (`](` up to its closing `)`), at paren nesting `depth`.
+    /// A destination is a URL, not prose: `$`, `\(` and `\)` become percent escapes so they can neither open math nor be rewritten as math delimiters.
+    LinkDest {
+        depth: u32,
+    },
 }
 
 /// Streaming, code-aware, escape-aware LaTeX delimiter normalizer.
@@ -172,6 +177,20 @@ impl LatexDelimiterNormalizer {
                             out.push('\n');
                             i += 1;
                             self.at_line_start = true;
+                        }
+                        b']' => {
+                            if i + 1 == n && !final_flush {
+                                break; // may be the `](` of a link; hold it back
+                            }
+                            if bytes.get(i + 1) == Some(&b'(') {
+                                out.push_str("](");
+                                i += 2;
+                                self.state = State::LinkDest { depth: 0 };
+                            } else {
+                                out.push(']');
+                                i += 1;
+                            }
+                            self.at_line_start = false;
                         }
                         b'`' => {
                             let run = count_run(bytes, i, b'`');
@@ -275,7 +294,7 @@ impl LatexDelimiterNormalizer {
                             // Copy a run of ordinary bytes up to the next interesting ASCII byte
                             // Multibyte UTF-8 bytes (0x80 and up) never equal the ASCII delimiters, so they are copied whole and slices stay valid
                             let start = i;
-                            while i < n && !matches!(bytes[i], b'\n' | b'`' | b'\\' | b'$') {
+                            while i < n && !matches!(bytes[i], b'\n' | b'`' | b'\\' | b'$' | b']') {
                                 i += 1;
                             }
                             out.push_str(&buf[start..i]);
@@ -283,6 +302,62 @@ impl LatexDelimiterNormalizer {
                         }
                     }
                 }
+                State::LinkDest { depth } => match bytes[i] {
+                    // The destination ends at whitespace (a title or the rest of the prose follows) without consuming it
+                    b' ' | b'\t'..=b'\r' => self.state = State::Normal,
+                    b'\\' => {
+                        if i + 1 == n && !final_flush {
+                            break; // the escaped byte has not arrived
+                        }
+                        // `\$`, `\(` and `\)` become percent escapes: the link renderer finds the URL in the source text,
+                        // and a backslash escape would make the parsed URL differ from what the source shows
+                        match bytes.get(i + 1) {
+                            Some(b'$') => out.push_str("%24"),
+                            Some(b'(') => out.push_str("%28"),
+                            Some(b')') => out.push_str("%29"),
+                            Some(b) if b.is_ascii_punctuation() => {
+                                out.push('\\');
+                                out.push(char::from(*b));
+                            }
+                            // A backslash before anything else is a plain byte
+                            _ => {
+                                out.push('\\');
+                                i += 1;
+                                continue;
+                            }
+                        }
+                        i += 2;
+                    }
+                    b'(' => {
+                        out.push('(');
+                        i += 1;
+                        self.state = State::LinkDest { depth: depth + 1 };
+                    }
+                    b')' => {
+                        out.push(')');
+                        i += 1;
+                        self.state = match depth {
+                            0 => State::Normal,
+                            d => State::LinkDest { depth: d - 1 },
+                        };
+                    }
+                    b'$' => {
+                        out.push_str("%24");
+                        i += 1;
+                    }
+                    _ => {
+                        let start = i;
+                        while i < n
+                            && !matches!(
+                                bytes[i],
+                                b' ' | b'\t'..=b'\r' | b'\\' | b'(' | b')' | b'$'
+                            )
+                        {
+                            i += 1;
+                        }
+                        out.push_str(&buf[start..i]);
+                    }
+                },
                 State::InlineCode { run } => {
                     // Single-line span: copy verbatim until a matching-length backtick run closes it, the line ends, or EOF
                     // An unterminated span reverts to Normal at the newline so later math still converts
@@ -1157,6 +1232,45 @@ The review is already complete at:\n\n\
         );
         streamed.push_str(&nz.finish());
         assert_eq!(streamed, msg);
+    }
+
+    #[test]
+    fn link_destination_dollars_cannot_open_math() {
+        // The `$` pair spans the link: `$5 [site](https://e.com/$` would otherwise parse as one math span
+        assert_eq!(
+            norm("Costs $5 [site](https://e.com/$x) and $6 total."),
+            "Costs $5 [site](https://e.com/%24x) and $6 total."
+        );
+        assert_eq!(norm("![img](a/$b.png)"), "![img](a/%24b.png)");
+        assert_eq!(norm("[a](https://e.com/\\$x)"), "[a](https://e.com/%24x)");
+    }
+
+    #[test]
+    fn link_destination_backslash_parens_become_percent_escapes() {
+        assert_eq!(
+            norm("[f](https://en.wikipedia.org/wiki/F\\(x\\)) then \\(y\\)"),
+            "[f](https://en.wikipedia.org/wiki/F%28x%29) then $y$"
+        );
+    }
+
+    #[test]
+    fn link_destination_ends_at_whitespace_and_prose_math_still_converts() {
+        assert_eq!(
+            norm("[a](u \"t\") $x$ and [b](v) \\(z\\)"),
+            "[a](u \"t\") $x$ and [b](v) $z$"
+        );
+        // A malformed destination does not swallow the rest of the line
+        assert_eq!(norm("[a](broken \\(z\\)"), "[a](broken $z$");
+        assert_eq!(norm("[a](x\n\\(z\\)"), "[a](x\n$z$");
+    }
+
+    #[test]
+    fn link_destination_normalization_is_idempotent_and_split_invariant() {
+        let doc = "Costs $5 [site](https://e.com/$x/\\(y\\)) and [n](u(a)b$c) $6.";
+        let once = norm(doc);
+        assert_eq!(norm(&once), once);
+        assert_split_invariant(doc);
+        assert_char_by_char(doc);
     }
 }
 

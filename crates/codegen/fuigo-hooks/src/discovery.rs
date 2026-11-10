@@ -269,6 +269,9 @@ pub fn registry_from_specs_deduped(specs: Vec<HookSpec>) -> HookRegistry {
             }
             Some(&(kept_event, kept_idx)) => {
                 let kept = hooks.get_mut(&kept_event).and_then(|v| v.get_mut(kept_idx));
+                // Whichever copy is kept, an opt-in to `failClosed` on either one survives: dropping it would turn a
+                // gate its owner asked to fail closed back into one that fails open.
+                let duplicate_fail_closed = spec.fail_closed;
                 if let Some(kept) = kept
                     && spec.layer.authority_rank() > kept.layer.authority_rank()
                 {
@@ -280,8 +283,12 @@ pub fn registry_from_specs_deduped(specs: Vec<HookSpec>) -> HookRegistry {
                     let mut spec = spec;
                     // Keep specs under their own event key when the duplicate pair used alias spellings (SubagentStop vs SubagentEnd)
                     spec.event = kept_event;
+                    spec.fail_closed |= kept.fail_closed;
                     *kept = spec;
                 } else {
+                    if let Some(kept) = hooks.get_mut(&kept_event).and_then(|v| v.get_mut(kept_idx)) {
+                        kept.fail_closed |= duplicate_fail_closed;
+                    }
                     tracing::debug!(
                         hook_name = %spec.name,
                         event = %spec.event,
@@ -793,6 +800,48 @@ mod tests {
         assert!(hooks[1].name.starts_with("project/"));
     }
 
+    /// Duplicates merge on content, and a `failClosed` opt-in on either copy survives whichever copy is kept.
+    #[test]
+    fn dedup_keeps_fail_closed_from_either_copy() {
+        let spec = |name: &str, layer, fail_closed| crate::config::HookSpec {
+            name: name.to_string(),
+            event: HookEventName::PreToolUse,
+            handler_type: crate::config::HandlerType::Command,
+            configured_matcher: None,
+            matcher: None,
+            enabled: true,
+            command: Some("gate.sh".into()),
+            command_raw: Some("gate.sh".to_string()),
+            args: None,
+            shell: None,
+            url: None,
+            url_raw: None,
+            timeout_ms: 5000,
+            fail_closed,
+            source_dir: std::path::PathBuf::from("/tmp"),
+            extra_env: std::collections::HashMap::new(),
+            layer,
+        };
+        use crate::config::HookProvenance;
+        for (first, second) in [
+            (HookProvenance::File, HookProvenance::File),
+            (HookProvenance::File, HookProvenance::Requirements),
+        ] {
+            // The opt-in on the later copy, then on the earlier one.
+            for (a, b) in [(false, true), (true, false)] {
+                let registry = registry_from_specs_deduped(vec![spec("one", first, a), spec("two", second, b)]);
+                let hooks = registry.hooks_for(HookEventName::PreToolUse);
+                assert_eq!(hooks.len(), 1);
+                assert!(hooks[0].fail_closed, "({first:?}, {a}) + ({second:?}, {b})");
+            }
+        }
+        let registry = registry_from_specs_deduped(vec![
+            spec("one", HookProvenance::File, false),
+            spec("two", HookProvenance::File, false),
+        ]);
+        assert!(!registry.hooks_for(HookEventName::PreToolUse)[0].fail_closed);
+    }
+
     /// A byte-identical duplicate must not shadow a managed hook's provenance.
     /// Whichever order the copies arrive in, the surviving spec is the managed-policy copy, so the no-disable rule and the pinned timeout/env hold.
     /// Ordinary duplicates stay first-wins.
@@ -812,6 +861,7 @@ mod tests {
             url: None,
             url_raw: None,
             timeout_ms,
+            fail_closed: false,
             source_dir: std::path::PathBuf::from("/tmp"),
             extra_env: std::collections::HashMap::new(),
             layer,
@@ -881,6 +931,7 @@ mod tests {
             url: None,
             url_raw: None,
             timeout_ms: 5000,
+            fail_closed: false,
             source_dir: std::path::PathBuf::from("/tmp"),
             extra_env: std::collections::HashMap::new(),
             layer: crate::config::HookProvenance::Requirements,
@@ -1106,6 +1157,7 @@ mod tests {
             url: None,
             url_raw: None,
             timeout_ms: 5_000,
+            fail_closed: false,
             source_dir: PathBuf::from("/tmp"),
             extra_env: Default::default(),
             layer: crate::config::HookProvenance::File,

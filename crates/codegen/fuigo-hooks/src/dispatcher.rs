@@ -18,6 +18,14 @@ fn dispatch_span(event: HookEventName, hook_count: usize) -> tracing::Span {
     )
 }
 
+/// Whether a hook runs for this dispatch.
+enum Eligibility {
+    Run,
+    Skip,
+    /// An opted-in (`failClosed`) gate hook that is known to be unable to start: the call or prompt is blocked.
+    Block(String),
+}
+
 fn eligible_or_record_skip(
     spec: &HookSpec,
     match_value: Option<&str>,
@@ -25,6 +33,26 @@ fn eligible_or_record_skip(
     disabled: &crate::trust::DisabledHooks,
     session_id: &str,
 ) -> bool {
+    match eligibility(spec, match_value, results, disabled, session_id) {
+        Eligibility::Run => true,
+        Eligibility::Skip => false,
+        // Only a gate dispatch can ask for a block, and it calls `eligibility` itself; anything else just skips.
+        Eligibility::Block(_) => {
+            results.push(HookRunResult::Skipped {
+                hook_name: spec.name.clone(),
+            });
+            false
+        }
+    }
+}
+
+fn eligibility(
+    spec: &HookSpec,
+    match_value: Option<&str>,
+    results: &mut Vec<HookRunResult>,
+    disabled: &crate::trust::DisabledHooks,
+    session_id: &str,
+) -> Eligibility {
     match disabled.skip_reason(spec) {
         Some(reason) => {
             match reason {
@@ -43,7 +71,7 @@ fn eligible_or_record_skip(
             results.push(HookRunResult::Skipped {
                 hook_name: spec.name.clone(),
             });
-            return false;
+            return Eligibility::Skip;
         }
         None if spec.is_managed_policy() && (!spec.enabled || disabled.contains(&spec.name)) => {
             tracing::info!(
@@ -55,18 +83,25 @@ fn eligible_or_record_skip(
         None => {}
     }
     if !crate::matcher::matcher_allows(spec.matcher.as_ref(), match_value) {
-        return false;
+        return Eligibility::Skip;
     }
     // A hook that can never start (CONFIG failure) was reported once, when it first failed or at the startup check:
     // from then on the session skips it silently instead of failing again on every prompt and tool call.
-    if crate::health::config_failure_for(session_id, &spec.name).is_some() {
+    // A fail-closed gate is the exception: that the hook cannot start is exactly the failure it asked to block on.
+    if let Some(detail) = crate::health::config_failure_for(session_id, &spec.name) {
+        if spec.fail_closed && matches!(spec.event.traits().gate, GateKind::Tool | GateKind::Prompt) {
+            return Eligibility::Block(format!(
+                "hook '{}' cannot start and failClosed is set: {detail}",
+                spec.name
+            ));
+        }
         tracing::debug!(hook_name = %spec.name, "hook skipped (cannot run in this session; reported once)");
         results.push(HookRunResult::Skipped {
             hook_name: spec.name.clone(),
         });
-        return false;
+        return Eligibility::Skip;
     }
-    true
+    Eligibility::Run
 }
 
 pub struct InputRewrite {
@@ -105,6 +140,7 @@ struct SequentialGateOutcome {
 }
 
 // SECURITY: a hook that errors fails open (contributes nothing); only a healthy deny blocks.
+// The exception is a hook with `fail_closed` set, whose failure blocks.
 async fn dispatch_sequential_gate(
     registry: &HookRegistry,
     event: HookEventName,
@@ -136,8 +172,32 @@ async fn dispatch_sequential_gate(
         let disabled = crate::trust::DisabledHooks::load();
 
         for spec in hooks {
-            if !eligible_or_record_skip(spec, match_value.as_deref(), &mut run_results, &disabled, ctx.session_id) {
-                continue;
+            match eligibility(spec, match_value.as_deref(), &mut run_results, &disabled, ctx.session_id) {
+                Eligibility::Run => {}
+                Eligibility::Skip => continue,
+                Eligibility::Block(reason) => {
+                    tracing::warn!(hook_name = %spec.name, %reason, "fail-closed gate hook cannot start; blocking");
+                    run_results.push(HookRunResult::Blocked {
+                        hook_name: spec.name.clone(),
+                        detail: format!("{block_verb}: {reason}"),
+                        elapsed: std::time::Duration::ZERO,
+                        http_info: None,
+                        system_message: None,
+                    });
+                    record_dispatch_counts(&span, &run_results);
+                    return SequentialGateOutcome {
+                        block: Some(GateBlock {
+                            hook_name: spec.name.clone(),
+                            reason,
+                            ends_turn: false,
+                        }),
+                        pending_ask: None,
+                        deferring_hook: None,
+                        updated_input: None,
+                        additional_context: Vec::new(),
+                        results: run_results,
+                    };
+                }
             }
 
             let hook_span = tracing::info_span!(
@@ -275,6 +335,39 @@ async fn dispatch_sequential_gate(
                     });
                 }
                 HookRunnerResult::Failed(err) => {
+                    // Opt-in (`"failClosed": true`): this hook's failure blocks instead of being ignored.
+                    if spec.fail_closed {
+                        tracing::warn!(
+                            hook_name = %spec.name,
+                            elapsed_ms = elapsed.as_millis() as u64,
+                            hook_failure = %err,
+                            "gate hook failed; blocking (failClosed)"
+                        );
+                        let reason = format!(
+                            "hook '{}' failed and failClosed is set: {err}",
+                            spec.name
+                        );
+                        run_results.push(HookRunResult::Blocked {
+                            hook_name: spec.name.clone(),
+                            detail: format!("{block_verb}: {reason}"),
+                            elapsed,
+                            http_info,
+                            system_message,
+                        });
+                        record_dispatch_counts(&span, &run_results);
+                        return SequentialGateOutcome {
+                            block: Some(GateBlock {
+                                hook_name: spec.name.clone(),
+                                reason,
+                                ends_turn: false,
+                            }),
+                            pending_ask: None,
+                            deferring_hook: None,
+                            updated_input: None,
+                            additional_context: Vec::new(),
+                            results: run_results,
+                        };
+                    }
                     tracing::warn!(
                         hook_name = %spec.name,
                         elapsed_ms = elapsed.as_millis() as u64,
@@ -1265,6 +1358,7 @@ mod tests {
             url: None,
             url_raw: None,
             timeout_ms: 5000,
+            fail_closed: false,
             source_dir: PathBuf::from("/tmp"),
             extra_env: HashMap::new(),
             layer: crate::config::HookProvenance::File,
@@ -1886,6 +1980,465 @@ mod tests {
             "a deny is the hook's decision, not a failure: {:?}",
             result.results[1]
         );
+    }
+
+    // --- failClosed (opt-in): a failing PreToolUse / UserPromptSubmit hook blocks instead of failing open ---
+
+    /// Every way a gate hook can fail, as (label, script, timeout_ms).
+    const GATE_FAILURES: &[(&str, &str, u64)] = &[
+        ("timeout", "sleep 5", 300),
+        ("crash by signal", "kill -9 $$", 5000),
+        ("non-zero exit without a decision", "echo 'oops' >&2; exit 1", 5000),
+        ("invalid output", "echo '{\"decision\":\"maybe\"}'", 5000),
+    ];
+
+    fn failing_pre(script: &str, timeout_ms: u64, fail_closed: bool) -> HookSpec {
+        let mut spec = pre_tool_use_spec("flaky", script);
+        spec.timeout_ms = timeout_ms;
+        spec.fail_closed = fail_closed;
+        spec
+    }
+
+    fn failing_prompt(script: &str, timeout_ms: u64, fail_closed: bool) -> HookSpec {
+        let mut spec = make_prompt_spec("flaky", script);
+        spec.timeout_ms = timeout_ms;
+        spec.fail_closed = fail_closed;
+        spec
+    }
+
+    #[tokio::test]
+    async fn fail_closed_pre_tool_use_denies_on_every_failure_mode() {
+        for &(label, script, timeout_ms) in GATE_FAILURES {
+            let registry = registry_from_specs(vec![failing_pre(script, timeout_ms, true)]);
+            let result =
+                dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            match result.decision {
+                HookDecision::Deny { ref hook_name, ref reason } => {
+                    assert_eq!(hook_name, "flaky", "{label}");
+                    assert!(reason.contains("failed"), "{label}: {reason}");
+                    assert!(reason.contains("failClosed is set"), "{label}: {reason}");
+                }
+                ref other => panic!("{label}: expected Deny, got {other:?}"),
+            }
+            assert!(
+                matches!(&result.results[0], HookRunResult::Blocked { .. }),
+                "{label}: {:?}",
+                result.results
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fail_open_is_unchanged_when_fail_closed_is_false() {
+        for &(label, script, timeout_ms) in GATE_FAILURES {
+            let registry = registry_from_specs(vec![failing_pre(script, timeout_ms, false)]);
+            let result =
+                dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            assert_eq!(result.decision, HookDecision::Allow, "{label}");
+            assert!(
+                matches!(&result.results[0], HookRunResult::Failed { .. }),
+                "{label}: {:?}",
+                result.results
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fail_closed_prompt_gate_blocks_on_every_failure_mode_and_stays_open_by_default() {
+        for &(label, script, timeout_ms) in GATE_FAILURES {
+            let registry = registry_from_specs(vec![failing_prompt(script, timeout_ms, true)]);
+            let result =
+                dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+            match result.decision {
+                PromptDecision::Block { ref hook_name, ref reason } => {
+                    assert_eq!(hook_name, "flaky", "{label}");
+                    assert!(reason.contains("failed"), "{label}: {reason}");
+                    assert!(reason.contains("failClosed is set"), "{label}: {reason}");
+                }
+                ref other => panic!("{label}: expected Block, got {other:?}"),
+            }
+
+            let registry = registry_from_specs(vec![failing_prompt(script, timeout_ms, false)]);
+            let result =
+                dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+            assert_eq!(result.decision, PromptDecision::Allow, "{label} (default)");
+        }
+    }
+
+    #[tokio::test]
+    async fn fail_closed_hook_that_runs_cleanly_is_unaffected() {
+        let registry = registry_from_specs(vec![failing_pre(r#"echo '{"decision":"allow"}'"#, 5000, true)]);
+        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        assert_eq!(result.decision, HookDecision::Allow);
+
+        let registry = registry_from_specs(vec![failing_pre(
+            r#"echo '{"decision":"deny","reason":"nope"}'"#,
+            5000,
+            true,
+        )]);
+        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        assert_eq!(
+            result.decision,
+            HookDecision::Deny { hook_name: "flaky".into(), reason: "nope".into() },
+            "an explicit deny keeps the hook's own reason"
+        );
+
+        let registry = registry_from_specs(vec![failing_prompt("exit 0", 5000, true)]);
+        let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+        assert_eq!(result.decision, PromptDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn fail_closed_only_applies_to_the_hook_that_set_it() {
+        let registry = registry_from_specs(vec![
+            failing_pre("exit 1", 5000, false),
+            failing_pre(r#"echo '{"decision":"allow"}'"#, 5000, true),
+        ]);
+        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        assert_eq!(result.decision, HookDecision::Allow);
+    }
+
+    /// A decision followed by a way of failing, or output that is not a decision at all: with `failClosed` none of
+    /// these may pass as an allow, and without it each stays an allow, as it always was.
+    const GATE_LAUNDERED: &[(&str, &str)] = &[
+        ("malformed JSON then exit 0", "echo '{\"decision\":'"),
+        ("allow then killed by a signal", "echo '{\"decision\":\"allow\"}'; kill -9 $$"),
+        ("allow then exit 3", "echo '{\"decision\":\"allow\"}'; exit 3"),
+        ("continue true then exit 1", "echo '{\"continue\":true}'; exit 1"),
+    ];
+
+    #[tokio::test]
+    async fn fail_closed_pre_tool_use_denies_an_allow_that_is_followed_by_a_failure() {
+        for &(label, script) in GATE_LAUNDERED {
+            let registry = registry_from_specs(vec![failing_pre(script, 5000, true)]);
+            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            match result.decision {
+                HookDecision::Deny { ref reason, .. } => {
+                    assert!(reason.contains("failClosed is set"), "{label}: {reason}")
+                }
+                ref other => panic!("{label}: expected Deny, got {other:?}"),
+            }
+
+            let registry = registry_from_specs(vec![failing_pre(script, 5000, false)]);
+            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            assert_eq!(result.decision, HookDecision::Allow, "{label} (default stays fail-open)");
+        }
+    }
+
+    #[tokio::test]
+    async fn fail_closed_prompt_gate_blocks_an_allow_that_is_followed_by_a_failure() {
+        for &(label, script) in GATE_LAUNDERED {
+            let registry = registry_from_specs(vec![failing_prompt(script, 5000, true)]);
+            let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+            match result.decision {
+                PromptDecision::Block { ref reason, .. } => {
+                    assert!(reason.contains("failClosed is set"), "{label}: {reason}")
+                }
+                ref other => panic!("{label}: expected Block, got {other:?}"),
+            }
+
+            let registry = registry_from_specs(vec![failing_prompt(script, 5000, false)]);
+            let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+            assert_eq!(result.decision, PromptDecision::Allow, "{label} (default stays fail-open)");
+        }
+    }
+
+    /// Trailing bytes after a complete decision make the whole output unparseable; it must not fall through to the
+    /// exit-0 allow when fail-closed (and does without the flag, as before). The deny case is the one a reviewer named.
+    #[tokio::test]
+    async fn fail_closed_denies_a_decision_with_trailing_garbage() {
+        for flag in [true, false] {
+            let registry = registry_from_specs(vec![failing_pre(r#"printf '{"decision":"deny"}oops'"#, 5000, flag)]);
+            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            if flag {
+                assert!(matches!(result.decision, HookDecision::Deny { .. }), "{:?}", result.decision);
+            } else {
+                assert_eq!(result.decision, HookDecision::Allow);
+            }
+            let registry = registry_from_specs(vec![failing_prompt(r#"printf '{"decision":"block"}oops'"#, 5000, flag)]);
+            let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+            if flag {
+                assert!(matches!(result.decision, PromptDecision::Block { .. }), "{:?}", result.decision);
+            } else {
+                assert_eq!(result.decision, PromptDecision::Allow);
+            }
+        }
+    }
+
+    /// Output the size cap cut off (1 MiB of spaces, then the start of a decision) must fail a fail-closed gate: what was
+    /// kept reads as an empty allow, and the decision that followed was lost. Without the flag it is an allow, as before.
+    #[tokio::test]
+    async fn fail_closed_denies_output_cut_off_by_the_size_cap() {
+        let tail = r#"head -c 1048577 /dev/zero | tr '\0' ' '; printf '{"decision":'"#;
+        for flag in [true, false] {
+            let registry = registry_from_specs(vec![failing_pre(tail, 20000, flag)]);
+            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            match (flag, &result.decision) {
+                (true, HookDecision::Deny { reason, .. }) => assert!(reason.contains("size cap"), "{reason}"),
+                (false, HookDecision::Allow) => {}
+                (_, other) => panic!("flag {flag}: unexpected {other:?}"),
+            }
+            let registry = registry_from_specs(vec![failing_prompt(tail, 20000, flag)]);
+            let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+            match (flag, &result.decision) {
+                (true, PromptDecision::Block { reason, .. }) => assert!(reason.contains("size cap"), "{reason}"),
+                (false, PromptDecision::Allow) => {}
+                (_, other) => panic!("flag {flag}: unexpected {other:?}"),
+            }
+        }
+    }
+
+    /// A JSON object that is not a decision document (a misspelled field) fails a fail-closed gate, on both gates; it is
+    /// an allow without the flag. An object carrying only a message makes no decision claim and stays an allow.
+    #[tokio::test]
+    async fn fail_closed_denies_a_json_object_that_is_not_a_decision_document() {
+        for flag in [true, false] {
+            let registry = registry_from_specs(vec![failing_pre(r#"printf '{"decison":"deny"}'"#, 5000, flag)]);
+            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            match (flag, &result.decision) {
+                (true, HookDecision::Deny { reason, .. }) => assert!(reason.contains("does not recognise"), "{reason}"),
+                (false, HookDecision::Allow) => {}
+                (_, other) => panic!("flag {flag}: unexpected {other:?}"),
+            }
+            let registry = registry_from_specs(vec![failing_prompt(r#"printf '{"decison":"block"}'"#, 5000, flag)]);
+            let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+            match (flag, &result.decision) {
+                (true, PromptDecision::Block { reason, .. }) => assert!(reason.contains("does not recognise"), "{reason}"),
+                (false, PromptDecision::Allow) => {}
+                (_, other) => panic!("flag {flag}: unexpected {other:?}"),
+            }
+        }
+        let registry = registry_from_specs(vec![failing_pre(r#"printf '{"systemMessage":"hi"}'"#, 5000, true)]);
+        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        assert_eq!(result.decision, HookDecision::Allow);
+        let registry = registry_from_specs(vec![failing_prompt(r#"printf '{"systemMessage":"hi"}'"#, 5000, true)]);
+        let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+        assert_eq!(result.decision, PromptDecision::Allow);
+    }
+
+    /// One rule under the flag: a JSON object with any key Fuigo does not recognise for the event (top level or inside
+    /// `hookSpecificOutput`) fails closed; a document of recognised keys follows normal handling, and deciding nothing is
+    /// an allow. Without the flag every document below behaves as before (allow).
+    #[tokio::test]
+    async fn fail_closed_unknown_key_rule_on_both_gates() {
+        let denied = [
+            r#"{"hookSpecificOutput":{"permissionDecison":"deny"}}"#,
+            r#"{"decison":"deny"}"#,
+            r#"{"permissionDecision":"deny"}"#,
+        ];
+        let allowed = [
+            "{}",
+            r#"{"systemMessage":"hi"}"#,
+            r#"{"suppressOutput":true}"#,
+            r#"{"stopReason":"x"}"#,
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"ctx"}}"#,
+        ];
+        for flag in [true, false] {
+            for doc in denied {
+                let registry = registry_from_specs(vec![failing_pre(&format!("printf '%s' '{doc}'"), 5000, flag)]);
+                let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+                match (flag, &result.decision) {
+                    (true, HookDecision::Deny { reason, .. }) => assert!(reason.contains("does not recognise"), "{doc}: {reason}"),
+                    (false, HookDecision::Allow) => {}
+                    (_, other) => panic!("tool, flag {flag}, {doc}: unexpected {other:?}"),
+                }
+            }
+            for doc in allowed {
+                let registry = registry_from_specs(vec![failing_pre(&format!("printf '%s' '{doc}'"), 5000, flag)]);
+                let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+                assert_eq!(result.decision, HookDecision::Allow, "tool, flag {flag}, {doc}");
+            }
+        }
+        let prompt_denied = [
+            r#"{"decison":"block","reason":"x"}"#,
+            r#"{"hookSpecificOutput":{"additionalContxt":"x"}}"#,
+            r#"{"hookSpecificOutput":"x"}"#,
+        ];
+        let prompt_allowed = [
+            "{}",
+            r#"{"systemMessage":"hi"}"#,
+            r#"{"stopReason":"x"}"#,
+            r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"ctx"}}"#,
+        ];
+        for flag in [true, false] {
+            for doc in prompt_denied {
+                let registry = registry_from_specs(vec![failing_prompt(&format!("printf '%s' '{doc}'"), 5000, flag)]);
+                let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+                match (flag, &result.decision) {
+                    (true, PromptDecision::Block { reason, .. }) => assert!(reason.contains("does not recognise"), "{doc}: {reason}"),
+                    (false, PromptDecision::Allow) => {}
+                    (_, other) => panic!("prompt, flag {flag}, {doc}: unexpected {other:?}"),
+                }
+            }
+            for doc in prompt_allowed {
+                let registry = registry_from_specs(vec![failing_prompt(&format!("printf '%s' '{doc}'"), 5000, flag)]);
+                let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+                assert_eq!(result.decision, PromptDecision::Allow, "prompt, flag {flag}, {doc}");
+            }
+        }
+    }
+
+    /// A command hook is judged on its raw stdout under the flag, on both gates: an allow whose reason holds a raw 0xFF
+    /// byte (lossy decoding would repair it), and a key repeated at the top level or nested (last-copy-wins would drop the
+    /// flawed first copy), are refused. Without the flag every case stays an allow, as before; valid non-ASCII UTF-8 is an
+    /// allow either way.
+    #[tokio::test]
+    async fn fail_closed_judges_raw_stdout_on_both_gates() {
+        let duplicates = [
+            r#"{"hookSpecificOutput":{"permissionDecison":"deny"},"hookSpecificOutput":{}}"#,
+            r#"{"systemMessage":"a","systemMessage":"b"}"#,
+            r#"{"hookSpecificOutput":{"additionalContext":"a","additionalContext":"b"}}"#,
+        ];
+        let tool_cases: Vec<String> = std::iter::once(r#"printf '{"decision":"allow","reason":"\377"}'"#.to_string())
+            .chain(duplicates.iter().map(|doc| format!("printf '%s' '{doc}'")))
+            .collect();
+        let prompt_cases: Vec<String> = std::iter::once(r#"printf '{"decision":"approve","reason":"\377"}'"#.to_string())
+            .chain(duplicates.iter().map(|doc| format!("printf '%s' '{doc}'")))
+            .collect();
+        let refused = |reason: &str| reason.contains("UTF-8") || reason.contains("duplicate key");
+        for flag in [true, false] {
+            for script in &tool_cases {
+                let registry = registry_from_specs(vec![failing_pre(script, 5000, flag)]);
+                let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+                match (flag, &result.decision) {
+                    (true, HookDecision::Deny { reason, .. }) => assert!(refused(reason), "{script}: {reason}"),
+                    (false, HookDecision::Allow) => {}
+                    (_, other) => panic!("tool, flag {flag}, {script}: unexpected {other:?}"),
+                }
+            }
+            for script in &prompt_cases {
+                let registry = registry_from_specs(vec![failing_prompt(script, 5000, flag)]);
+                let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+                match (flag, &result.decision) {
+                    (true, PromptDecision::Block { reason, .. }) => assert!(refused(reason), "{script}: {reason}"),
+                    (false, PromptDecision::Allow) => {}
+                    (_, other) => panic!("prompt, flag {flag}, {script}: unexpected {other:?}"),
+                }
+            }
+            let ok = r#"printf '%s' '{"systemMessage":"café ✓ 日本語"}'"#;
+            let registry = registry_from_specs(vec![failing_pre(ok, 5000, flag)]);
+            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            assert_eq!(result.decision, HookDecision::Allow, "tool, flag {flag}, valid UTF-8");
+            let registry = registry_from_specs(vec![failing_prompt(ok, 5000, flag)]);
+            let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+            assert_eq!(result.decision, PromptDecision::Allow, "prompt, flag {flag}, valid UTF-8");
+        }
+    }
+
+    /// `{"continue":false}` printed before the hook dies is a run-time failure under the flag (a deny with the failure
+    /// reason); on its own it is still a stop, and without the flag the stop stands, as before.
+    #[tokio::test]
+    async fn fail_closed_gate_stop_followed_by_a_crash_is_a_failure() {
+        for script in [
+            r#"echo '{"continue":false,"stopReason":"halt"}'; kill -9 $$"#,
+            r#"echo '{"continue":false,"stopReason":"halt"}'; exit 1"#,
+        ] {
+            let registry = registry_from_specs(vec![failing_pre(script, 5000, true)]);
+            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            match &result.decision {
+                HookDecision::Deny { reason, .. } => assert!(!reason.contains("halt"), "{script}: {reason}"),
+                other => panic!("flag on, {script}: expected Deny, got {other:?}"),
+            }
+            let registry = registry_from_specs(vec![failing_pre(script, 5000, false)]);
+            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            assert!(matches!(result.decision, HookDecision::Stop { .. }), "flag off keeps the stop: {:?}", result.decision);
+        }
+        let registry = registry_from_specs(vec![failing_pre(r#"echo '{"continue":false,"stopReason":"halt"}'"#, 5000, true)]);
+        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        assert!(matches!(result.decision, HookDecision::Stop { .. }), "a clean stop stays a stop: {:?}", result.decision);
+    }
+
+    /// Exit 0 with an empty body is a clean "no objection", not a failure, even when fail-closed.
+    #[tokio::test]
+    async fn fail_closed_empty_output_on_exit_zero_is_an_allow() {
+        let registry = registry_from_specs(vec![failing_pre("true", 5000, true)]);
+        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        assert_eq!(result.decision, HookDecision::Allow);
+        let registry = registry_from_specs(vec![failing_prompt("true", 5000, true)]);
+        let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+        assert_eq!(result.decision, PromptDecision::Allow);
+    }
+
+    /// A hook that exits 0 with plain text (not JSON) was never a decision; it stays an allow even when fail-closed.
+    #[tokio::test]
+    async fn fail_closed_plain_text_output_on_exit_zero_is_still_an_allow() {
+        let registry = registry_from_specs(vec![failing_pre("echo 'all checks passed'", 5000, true)]);
+        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        assert_eq!(result.decision, HookDecision::Allow);
+    }
+
+    /// A fail-closed hook that cannot start (a CONFIG failure) blocks on the first call, on every later call, and when the
+    /// startup check already recorded the failure; without the flag it is skipped silently, as before.
+    /// Hook names here are unique to this test: the health board is shared by every test using "test-session".
+    #[tokio::test]
+    async fn fail_closed_gate_that_cannot_start_blocks_on_every_call() {
+        let missing = "/nonexistent-u42p4b/gate";
+        let ghost = |name: &str, fail_closed: bool, prompt: bool| {
+            let mut spec = if prompt {
+                make_prompt_spec(name, missing)
+            } else {
+                pre_tool_use_spec(name, missing)
+            };
+            spec.fail_closed = fail_closed;
+            spec
+        };
+
+        // Found at run time (note_result records it), then cached: calls 1 and 2 and 3 all block.
+        let registry = registry_from_specs(vec![ghost("u42-ghost-pre", true, false)]);
+        for call in 1..=3 {
+            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            match result.decision {
+                HookDecision::Deny { ref reason, .. } => {
+                    assert!(reason.contains("failClosed is set"), "call {call}: {reason}");
+                    assert!(reason.contains("command not found"), "call {call}: {reason}");
+                }
+                ref other => panic!("call {call}: expected Deny, got {other:?}"),
+            }
+        }
+
+        // Found by the startup check before the first call.
+        let registry = registry_from_specs(vec![ghost("u42-ghost-startup", true, false)]);
+        let problems = crate::health::validate_registry(&registry, "/tmp", "test-session");
+        assert!(problems.iter().any(|p| p.hook_name == "u42-ghost-startup"), "{problems:?}");
+        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        match result.decision {
+            HookDecision::Deny { ref reason, .. } => assert!(reason.contains("cannot start"), "{reason}"),
+            ref other => panic!("expected Deny after the startup check, got {other:?}"),
+        }
+
+        // The prompt gate, after the startup check.
+        let registry = registry_from_specs(vec![ghost("u42-ghost-prompt", true, true)]);
+        crate::health::validate_registry(&registry, "/tmp", "test-session");
+        let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+        assert!(matches!(result.decision, PromptDecision::Block { .. }), "{:?}", result.decision);
+
+        // No flag: skipped, the call goes ahead.
+        let registry = registry_from_specs(vec![ghost("u42-ghost-open", false, false)]);
+        crate::health::validate_registry(&registry, "/tmp", "test-session");
+        for _ in 0..2 {
+            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            assert_eq!(result.decision, HookDecision::Allow);
+        }
+    }
+
+    /// A fail-closed hook still fails closed when an earlier hook already asked or deferred: the block returns before
+    /// the pending ask or defer is read.
+    #[tokio::test]
+    async fn fail_closed_failure_after_an_earlier_ask_or_defer_still_denies() {
+        for earlier in [
+            r#"echo '{"decision":"ask","reason":"check"}'"#,
+            r#"echo '{"hookSpecificOutput":{"permissionDecision":"defer"}}'"#,
+        ] {
+            let mut first = pre_tool_use_spec("earlier", earlier);
+            first.fail_closed = false;
+            let registry = registry_from_specs(vec![first, failing_pre("exit 1", 5000, true)]);
+            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            assert!(
+                matches!(&result.decision, HookDecision::Deny { hook_name, .. } if hook_name == "flaky"),
+                "{earlier}: {:?}",
+                result.decision
+            );
+        }
     }
 
     fn stop_envelope() -> HookEventEnvelope {

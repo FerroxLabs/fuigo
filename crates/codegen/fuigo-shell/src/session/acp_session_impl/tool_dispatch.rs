@@ -531,12 +531,23 @@ impl SessionActor {
                 &pre.results,
             )
             .await;
-            if let HookDecision::Deny { reason, hook_name } = pre.decision {
-                return Some(format!(
-                    "Refused: a PreToolUse hook ({}) denied this command: {}",
-                    safe(fuigo_hooks::config::hook_display_name(&hook_name)),
-                    safe(&reason)
-                ));
+            match pre.decision {
+                HookDecision::Deny { reason, hook_name } => {
+                    return Some(format!(
+                        "Refused: a PreToolUse hook ({}) denied this command: {}",
+                        safe(fuigo_hooks::config::hook_display_name(&hook_name)),
+                        safe(&reason)
+                    ));
+                }
+                // `continue: false`: as on the normal tool path the command is not run and the turn ends.
+                HookDecision::Stop { reason, hook_name } => {
+                    return Some(format!(
+                        "Refused: a PreToolUse hook ({}) stopped this command: {}",
+                        safe(fuigo_hooks::config::hook_display_name(&hook_name)),
+                        safe(&reason)
+                    ));
+                }
+                HookDecision::Ask { .. } | HookDecision::Defer { .. } | HookDecision::Allow => {}
             }
         }
         // (c) Configured rules and managed policy: deny only (the decide-only entry of the permission manager).

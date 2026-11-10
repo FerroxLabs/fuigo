@@ -3439,3 +3439,33 @@ fn context_window_set_failure_leaves_the_selection_alone() {
     assert_eq!(agent.session.models.context_window_selection, None);
     assert_eq!(agent.scrollback.len(), before + 1);
 }
+
+/// Last system block text of the agent's scrollback.
+fn u42_last_system_text(app: &AppView) -> String {
+    let scrollback = &app.agents[&AgentId(0)].scrollback;
+    let last = scrollback.entry(scrollback.len() - 1).expect("last entry");
+    match &last.block {
+        crate::scrollback::block::RenderBlock::System(b) => b.text.clone(),
+        other => panic!("expected System block, got {other:?}"),
+    }
+}
+
+/// 79.B3: a delete refused because the session is open in another window shows the whole refusal, with exactly one
+/// "Couldn't delete session:" prefix, in scrollback (the toast is cut to the width).
+#[test]
+fn u42_b3_delete_refusal_reaches_scrollback_whole_with_one_prefix() {
+    let refusal = fuigo_shell::session::session_writer_lock::HELD_ELSEWHERE;
+    // The two shapes the effect can produce: the reason alone, and a shell message that already carries the prefix.
+    for error in [refusal.to_string(), format!("Couldn't delete session: {refusal}"), format!("couldn't delete session: {refusal}")] {
+        let mut app = test_app_with_agent();
+        let _ = dispatch_task_result(
+            TaskResult::DeleteSessionFailed {
+                source: "local".into(),
+                session_id: "s1".into(),
+                error,
+            },
+            &mut app,
+        );
+        assert_eq!(u42_last_system_text(&app), format!("Couldn't delete session: {refusal}"));
+    }
+}

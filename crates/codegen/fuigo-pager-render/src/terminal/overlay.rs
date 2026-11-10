@@ -299,7 +299,7 @@ mod tests {
 
     fn is_delete_then_transmit(esc: &Escapes) -> bool {
         let s = esc.as_str();
-        s.contains("a=d,d=i") && s.contains("a=T") && !s.contains("a=p")
+        s.contains("a=d,d=I") && s.contains("a=T") && !s.contains("a=p")
     }
 
     #[test]

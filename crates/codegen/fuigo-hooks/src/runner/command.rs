@@ -93,7 +93,7 @@ pub async fn run_command_hook(
 
     let Some(ref command) = spec.command else {
         return (
-            HookRunnerResult::Failed("command hook has no 'command' field".into()),
+            HookRunnerResult::Failed("command hook has no 'command' field".to_string()),
             start.elapsed(),
             None,
         );
@@ -275,8 +275,8 @@ pub async fn run_command_hook(
         Ok(Ok(output)) => {
             let exit_code = output.status.code().unwrap_or(-1);
 
-            let stdout = truncate_output(&output.stdout);
-            let stderr = truncate_output(&output.stderr);
+            let (stdout, stdout_truncated) = truncate_output(&output.stdout);
+            let (stderr, _) = truncate_output(&output.stderr);
 
             if !stderr.is_empty() {
                 if exit_code != 0 {
@@ -340,6 +340,21 @@ pub async fn run_command_hook(
                     parse_prompt_result(&stdout, &stderr, exit_code, &spec.name, elapsed)
                 }
             };
+            // `failClosed`: exit 2 is the gate's own denial; any other way of not exiting 0 is an execution failure
+            // that an allowing decision printed before it must not hide.
+            let exec_failure = (exit_code != 0 && exit_code != GATE_EXIT_CODE).then(|| {
+                match output.status.code() {
+                    Some(code) => format!("hook '{}' failed with exit code {code}", spec.name),
+                    None => format!("hook '{}' was terminated by a signal", spec.name),
+                }
+            });
+            let result = super::enforce_fail_closed(
+                spec,
+                mode,
+                result,
+                super::gate_output_flaw(mode, &output.stdout, false, stdout_truncated),
+                exec_failure,
+            );
             (result, elapsed, system_message)
         }
     }
@@ -1380,9 +1395,10 @@ fn parse_post_tool_use_result(
     (HookRunnerResult::PostToolUse { outcome, failure }, elapsed)
 }
 
-fn truncate_output(bytes: &[u8]) -> String {
+/// The captured text and whether the size cap cut it off (the flag a `failClosed` hook is judged by).
+fn truncate_output(bytes: &[u8]) -> (String, bool) {
     if bytes.len() <= MAX_OUTPUT_BYTES {
-        String::from_utf8_lossy(bytes).into_owned()
+        (String::from_utf8_lossy(bytes).into_owned(), false)
     } else {
         let mut truncated = String::from_utf8_lossy(&bytes[..MAX_OUTPUT_BYTES]).into_owned();
         truncated.push_str(" [truncated]");
@@ -1391,7 +1407,7 @@ fn truncate_output(bytes: &[u8]) -> String {
             max_bytes = MAX_OUTPUT_BYTES,
             "hook output truncated"
         );
-        truncated
+        (truncated, true)
     }
 }
 
@@ -2314,10 +2330,12 @@ mod tests {
 
     #[test]
     fn truncate_output_respects_limit() {
-        assert_eq!(truncate_output(b"hello world"), "hello world");
+        assert_eq!(truncate_output(b"hello world"), ("hello world".to_string(), false));
+        assert!(!truncate_output(&vec![b'x'; MAX_OUTPUT_BYTES]).1, "exactly the cap is not truncated");
 
-        let large = truncate_output(&vec![b'x'; MAX_OUTPUT_BYTES + 1000]);
+        let (large, truncated) = truncate_output(&vec![b'x'; MAX_OUTPUT_BYTES + 1000]);
         assert!(large.ends_with(" [truncated]"));
+        assert!(truncated);
     }
 
     #[test]
@@ -2328,7 +2346,7 @@ mod tests {
         })
         .to_string();
 
-        let captured = truncate_output(document.as_bytes());
+        let (captured, _) = truncate_output(document.as_bytes());
         assert!(
             !captured.ends_with(" [truncated]"),
             "a ceiling replacement must fit the capture cap without truncation"
@@ -2367,6 +2385,7 @@ mod tests {
                 url: None,
                 url_raw: None,
                 timeout_ms: 5000,
+                fail_closed: false,
                 source_dir: std::path::PathBuf::from(source),
                 extra_env: std::collections::HashMap::new(),
                 layer: crate::config::HookProvenance::File,
@@ -2411,6 +2430,7 @@ mod tests {
             url: None,
             url_raw: None,
             timeout_ms: 5000,
+            fail_closed: false,
             source_dir: std::env::temp_dir(),
             extra_env: std::collections::HashMap::new(),
             layer: crate::config::HookProvenance::File,
@@ -2996,6 +3016,7 @@ mod tests {
             url: None,
             url_raw: None,
             timeout_ms: 5000,
+            fail_closed: false,
             source_dir: std::env::temp_dir(),
             extra_env,
             layer: crate::config::HookProvenance::File,
@@ -3039,6 +3060,7 @@ mod tests {
             url: None,
             url_raw: None,
             timeout_ms: 5000,
+            fail_closed: false,
             source_dir: std::env::temp_dir(),
             extra_env,
             layer: crate::config::HookProvenance::File,

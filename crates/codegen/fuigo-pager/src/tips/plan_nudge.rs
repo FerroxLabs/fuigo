@@ -58,6 +58,16 @@ pub fn plan_nudge_tip() -> EphemeralTip {
     .with_session_seen_cap(PLAN_NUDGE_SEEN_KEY, PLAN_NUDGE_SEEN_CAP)
 }
 
+/// Drafts longer than this skip the plan-nudge keyword scan.
+/// The tip targets a short prompt that starts to mention planning, and the scan runs on every key,
+/// so scanning a long key-delivered paste would cost O(text) per key (quadratic overall).
+pub const PLAN_NUDGE_SCAN_MAX_BYTES: usize = 4096;
+
+/// Whether `text` is short enough for the per-key plan-nudge scan.
+pub fn is_scannable(text: &str) -> bool {
+    text.len() <= PLAN_NUDGE_SCAN_MAX_BYTES
+}
+
 /// Whether `text` mentions a planning intent from the tight [`PLANNING_KEYWORDS`] allowlist.
 /// Case-insensitive and matched on whole-word boundaries so near neighbours ("explain", "explanation", "planet", "redesign") never match.
 /// Non-allocating; it runs on every prompt edit.

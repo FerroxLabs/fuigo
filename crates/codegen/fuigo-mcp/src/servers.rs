@@ -2777,6 +2777,9 @@ where
     W: AsyncWrite,
 {
     read: BufReader<R>,
+    /// Bytes of a line read so far. Kept here, not in `receive`, so a dropped `receive` future (the caller's
+    /// `select!` took another branch) does not lose the start of a long line.
+    partial_line: Vec<u8>,
     /// `Arc<Mutex<Option<…>>>` so `send` can return a `Send + 'static` future (the `Transport` contract) without borrowing `self`.
     /// It also lets `close` drop the writer; mirrors rmcp's own `AsyncRwTransport`.
     write: Arc<Mutex<Option<W>>>,
@@ -2849,6 +2852,7 @@ where
     ) -> Self {
         Self {
             read: BufReader::new(read),
+            partial_line: Vec::new(),
             write: Arc::new(Mutex::new(Some(write))),
             broken: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             server_name,
@@ -2951,8 +2955,7 @@ where
 
     async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
         loop {
-            let mut line = Vec::new();
-            match self.read.read_until(b'\n', &mut line).await {
+            match self.read.read_until(b'\n', &mut self.partial_line).await {
                 Ok(0) => return None, // genuine end-of-stream
                 Ok(_) => {}
                 Err(e) => {
@@ -2964,6 +2967,7 @@ where
                     return None;
                 }
             }
+            let mut line = std::mem::take(&mut self.partial_line);
             if line.last() == Some(&b'\n') {
                 line.pop();
             }

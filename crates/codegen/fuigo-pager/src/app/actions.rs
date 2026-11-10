@@ -101,6 +101,38 @@ pub enum PeerUiAction {
     Decide { refuse: bool },
 }
 
+/// How much of the interface speaks vim: `[keys] vim` and `/vim-mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VimLevel {
+    /// No vim keys.
+    Off,
+    /// Vim keys in the scrollback and pickers only.
+    Nav,
+    /// `Nav`, plus full Vim editing (Normal and Insert modes) in the prompt.
+    All,
+}
+
+impl VimLevel {
+    /// Parse a `/vim-mode` argument or `[keys] vim` value.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "nav" => Some(Self::Nav),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+
+    /// The `[keys] vim` config value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Nav => "nav",
+            Self::All => "all",
+        }
+    }
+}
+
 /// Consumed by [`super::dispatch::dispatch`] to mutate state and return effects.
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -524,6 +556,9 @@ pub enum Action {
     /// Set vim-style scrollback keybindings. SHELL-owned: persisted to `[ui].vim_mode` in config.toml via `Effect::PersistSetting`.
     /// Used by the settings modal; the `ToggleVimMode` variant covers the `/vim-mode` slash-command path.
     SetVimMode(bool),
+    /// `/vim-mode all|nav|off`: set scrollback vim and prompt vim together.
+    /// Persists `[ui].vim_mode` and `[keys].vim` in config.toml.
+    SetVimLevel(VimLevel),
     /// Toggle the per-tool "Always allow …" prompt options. SHELL-owned; persisted to `[ui].remember_tool_approvals`. Applies to new sessions.
     SetRememberToolApprovals(bool),
     /// Toggle the ask_user_question timeout. SHELL-owned; persisted to `[toolset.ask_user_question].timeout_enabled`. Applies to new sessions.
@@ -1775,6 +1810,8 @@ pub enum Effect {
         request: crate::slash::commands::provider::ProviderWriteRequest,
         report_to: ConfigWriteReport,
     },
+    /// Persist `[keys].vim` (`"off"`, `"nav"` or `"all"`) to config.toml.
+    PersistKeysVim { value: &'static str },
     /// Persist a per-command worktree mode preference to `[hints]` in config.toml.
     /// `config_key` is the TOML key under `[hints]` (`"new_session_worktree_mode"` or `"fork_worktree_mode"`).
     PersistWorktreeMode {
@@ -2135,8 +2172,14 @@ pub enum Effect {
         question: String,
         /// Text + image content blocks built from the composer's attachments; `None` keeps the text-only wire.
         blocks: Option<Vec<acp::ContentBlock>>,
-        /// Correlates minimal responses; fullscreen leaves this unset.
-        minimal_request_id: Option<uuid::Uuid>,
+        /// Correlates the answer with the panel that asked, in both screen modes, so a late answer to an earlier `/btw` cannot land in a newer one.
+        /// The shell also keys `fuigo/btw/cancel` by it.
+        request_id: Option<uuid::Uuid>,
+    },
+    /// Cancel an in-flight `/btw` on the shell (`fuigo/btw/cancel`); sent when Esc dismisses a panel that is still loading.
+    CancelBtw {
+        session_id: acp::SessionId,
+        request_id: uuid::Uuid,
     },
     /// Request a session recap via the fuigo/recap ext method.
     /// Fire-and-forget: the recap arrives later as a `SessionRecap` notification.
@@ -3074,9 +3117,11 @@ pub enum TaskResult {
     BtwResponse {
         agent_id: AgentId,
         result: Result<String, String>,
-        /// Correlates minimal responses; fullscreen leaves this unset.
-        minimal_request_id: Option<uuid::Uuid>,
+        /// Echo of the `SendBtw` request id; an answer whose id is not the panel's current one is dropped.
+        request_id: Option<uuid::Uuid>,
     },
+    /// Best-effort `fuigo/btw/cancel` finished (no UI update; the panel is already gone).
+    BtwCancelComplete,
     /// `fuigo/recap` request acknowledged (fire-and-forget).
     /// The recap itself arrives separately as a `SessionRecap` notification; this only carries a transport error, if any, for logging.
     RecapRequested {

@@ -4,6 +4,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::render::SafeBuf;
 use crate::theme::Theme;
 use crate::views::prompt_widget::StashedPrompt;
 
@@ -44,6 +45,9 @@ pub struct RewindResponse {
     pub mode: Option<String>,
     #[serde(default, alias = "promptText")]
     pub prompt_text: Option<String>,
+    /// Estimated context size after a conversation rewind, for the footer.
+    #[serde(default, alias = "contextTokens")]
+    pub context_tokens: Option<u64>,
 }
 
 /// What a rewind restores. Mirrors the engine's `RewindMode` (`fuigo-shell` `acp_types`).
@@ -469,7 +473,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
     match phase {
         RewindPhase::Loading => {
             let y = area.y + 1;
-            buf.set_line(
+            buf.set_line_safe(
                 content_x,
                 y,
                 &Line::from(Span::styled(
@@ -511,14 +515,14 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
         }
         RewindPhase::CancelOffer { active_idx } => {
             let mut y = area.y + 1;
-            buf.set_line(
+            buf.set_line_safe(
                 content_x,
                 y,
                 &Line::from(Span::styled("A turn is currently running.", title_style)),
                 content_w,
             );
             y += 1;
-            buf.set_line(
+            buf.set_line_safe(
                 content_x,
                 y,
                 &Line::from(Span::styled(
@@ -554,7 +558,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
         }
         RewindPhase::Executing { .. } | RewindPhase::Previewing { .. } => {
             let y = area.y + 1;
-            buf.set_line(
+            buf.set_line_safe(
                 content_x,
                 y,
                 &Line::from(Span::styled(
@@ -589,7 +593,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 preview_text.to_string()
             };
             let title = format!("{prefix}{preview_trunc}{suffix}");
-            buf.set_line(
+            buf.set_line_safe(
                 content_x,
                 y,
                 &Line::from(Span::styled(title, title_style)),
@@ -620,7 +624,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 y += 1;
             }
             for note in REWIND_SCOPE_NOTE {
-                buf.set_line(
+                buf.set_line_safe(
                     content_x,
                     y,
                     &Line::from(Span::styled(note, Style::default().fg(theme.gray))),
@@ -636,7 +640,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
             ..
         } => {
             let mut y = area.y + 1;
-            buf.set_line(
+            buf.set_line_safe(
                 content_x,
                 y,
                 &Line::from(Span::styled(
@@ -650,7 +654,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
             for c in conflicts.iter().take(shown) {
                 let text = format!("{} ({})", c.path, c.conflict_type.replace('_', " "));
                 let text: String = text.chars().take(content_w as usize).collect();
-                buf.set_line(
+                buf.set_line_safe(
                     content_x,
                     y,
                     &Line::from(Span::styled(text, Style::default().fg(theme.text_primary))),
@@ -659,7 +663,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 y += 1;
             }
             if more == 1 {
-                buf.set_line(
+                buf.set_line_safe(
                     content_x,
                     y,
                     &Line::from(Span::styled(
@@ -679,7 +683,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
         }
         RewindPhase::Error { message } => {
             let mut y = area.y + 1;
-            buf.set_line(
+            buf.set_line_safe(
                 content_x,
                 y,
                 &Line::from(Span::styled(
@@ -692,7 +696,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
             );
             y += 1;
             let truncated: String = message.chars().take(content_w as usize).collect();
-            buf.set_line(
+            buf.set_line_safe(
                 content_x,
                 y,
                 &Line::from(Span::styled(
@@ -776,7 +780,7 @@ fn render_radio_row(
         Span::styled(format!("({marker}) "), marker_style),
         Span::styled(label.to_string(), label_style),
     ]);
-    buf.set_line(x, y, &line, w);
+    buf.set_line_safe(x, y, &line, w);
     // Terminal theme (Reset bands): reverse video; no-op on RGB.
     if is_cursor && panel_focused {
         buf.set_style(row_rect, theme.selection_overlay());
@@ -1149,5 +1153,59 @@ mod tests {
         assert_eq!(key_label('\x08'), "Bksp");
         assert_eq!(key_label('y'), "y");
         assert_eq!(key_label('a'), "a");
+    }
+}
+
+#[cfg(test)]
+mod tiny_buffer_tests {
+    use super::*;
+
+    fn phases() -> Vec<RewindPhase> {
+        let conflicts: Vec<RewindConflictInfo> = (0..5)
+            .map(|n| RewindConflictInfo {
+                path: format!("src/some/long/path/file{n}.rs"),
+                conflict_type: "modified_outside".into(),
+            })
+            .collect();
+        vec![
+            RewindPhase::Loading,
+            RewindPhase::CancelOffer { active_idx: 0 },
+            RewindPhase::Confirm {
+                target_prompt_index: 0,
+                active_idx: 0,
+                prompt_preview: Some("fix the very long failing thing".into()),
+            },
+            RewindPhase::Executing {
+                target_prompt_index: 0,
+            },
+            RewindPhase::Previewing {
+                target_prompt_index: 0,
+                scope: RewindScope::All,
+            },
+            RewindPhase::Conflicts {
+                target_prompt_index: 0,
+                scope: RewindScope::All,
+                conflicts,
+                active_idx: 0,
+            },
+            RewindPhase::Error {
+                message: "something went wrong while rewinding".into(),
+            },
+        ]
+    }
+
+    /// The overlay is sized for its content, but a short or shrinking terminal clamps the area to the buffer.
+    /// Every row (title, options, notes, conflicts) must be clipped, never written outside it.
+    #[test]
+    fn rewind_overlay_renders_in_tiny_buffers_without_panic() {
+        for phase in phases() {
+            for (w, h) in [(20u16, 1u16), (20, 2), (20, 3), (20, 4)] {
+                for focused in [true, false] {
+                    let area = Rect::new(0, 0, w, h);
+                    let mut buf = Buffer::empty(area);
+                    render_rewind_overlay(&mut buf, area, &phase, focused);
+                }
+            }
+        }
     }
 }

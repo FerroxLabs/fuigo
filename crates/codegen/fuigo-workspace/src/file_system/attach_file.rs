@@ -28,13 +28,17 @@ pub struct FileReference {
     pub end_line: Option<usize>,
 }
 impl FileReference {
-    /// Parse a file reference string in the format `@{file_path}` or `@{file_path}:L?{start_line}-L?{end_line}`.
+    /// Parse a file reference string in the format `@{file_path}`, `@{file_path}:L?{line}` or `@{file_path}:L?{start_line}-L?{end_line}`.
+    /// A single `:N` selects line N only.
     pub fn parse(input: &str) -> Option<Self> {
-        let re = Regex::new(r"^@?([^@].*?)(?::L?(\d+)-L?(\d+))?$").ok()?;
+        let re = Regex::new(r"^@?([^@].*?)(?::L?(\d+)(?:-L?(\d+))?)?$").ok()?;
         let caps = re.captures(input)?;
         let path = PathBuf::from(caps.get(1)?.as_str());
         let start_line: Option<usize> = caps.get(2).and_then(|m| m.as_str().parse().ok());
-        let end_line: Option<usize> = caps.get(3).and_then(|m| m.as_str().parse().ok());
+        let end_line: Option<usize> = match caps.get(3) {
+            Some(end) => end.as_str().parse().ok(),
+            None => start_line,
+        };
         Some(Self {
             path,
             start_line,
@@ -275,6 +279,17 @@ mod tests {
             assert_eq!(captures.get(3).unwrap().as_str(), expected_end);
         }
     }
+    #[test]
+    fn file_reference_accepts_a_single_line_suffix() {
+        let one = FileReference::parse("@src/a.rs:10").unwrap();
+        assert_eq!(one.path, PathBuf::from("src/a.rs"));
+        assert_eq!((one.start_line, one.end_line), (Some(10), Some(10)));
+        let range = FileReference::parse("@src/a.rs:L10-L12").unwrap();
+        assert_eq!((range.start_line, range.end_line), (Some(10), Some(12)));
+        let none = FileReference::parse("@src/a.rs").unwrap();
+        assert_eq!((none.start_line, none.end_line), (None, None));
+    }
+
     #[test]
     fn test_file_path_regex() {
         let path = "/Users/test/019c6024-aef0-7472-89ec-65b62c577c09/prompt_3.txt#L929-L933";

@@ -1540,3 +1540,49 @@ fn cancel_turn_confirm_is_not_awaiting_a_user_answer() {
     open_cancel_turn(&mut agent);
     assert!(!agent.is_awaiting_user_answer());
 }
+
+/// The dock's stop button must stop a background run while an approval card is open.
+#[test]
+fn dock_stop_button_works_under_a_permission_card() {
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+    let mut agent = make_agent();
+    let info = crate::app::agent_view::test_fixtures::running_subagent_info("child-1");
+    agent.subagent_sessions.insert("child-1".to_string(), info);
+    agent
+        .subagent_views
+        .insert("child-1".to_string(), Box::new(make_agent()));
+    agent.dock_shown = true;
+    agent.dock_on = true;
+    agent.pane_areas.dock = Rect::new(2, 4, 78, 2);
+    let y = agent.pane_areas.dock.y + 1;
+    let mouse = |kind, x| {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    let registry = ActionRegistry::defaults();
+    let _ = agent.handle_mouse(&MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: agent.pane_areas.dock.right() - 1,
+        row: y,
+        modifiers: KeyModifiers::NONE,
+    });
+    agent.cache_dock_stop_button();
+    let stop = agent.dock_stop_button.as_ref().expect("stop").rect;
+    open_permission(&mut agent);
+    assert_eq!(agent.focused_card(), Some(BlockingCard::Permission));
+    let outcome = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), stop.x),
+        &registry,
+    );
+    assert!(
+        matches!(outcome, InputOutcome::Action(Action::KillSubagent(ref id)) if id == "sa-child-1"),
+        "stop under a permission card must stop the run, got {outcome:?}"
+    );
+}

@@ -3224,6 +3224,7 @@ async fn hook_registry_snapshot_is_disconnected() {
             url: None,
             url_raw: None,
             timeout_ms: 10_000,
+            fail_closed: false,
             source_dir: std::path::PathBuf::from("/tmp"),
             extra_env: std::collections::HashMap::new(),
             layer: fuigo_hooks::config::HookProvenance::File,

@@ -626,9 +626,10 @@ fn set_page_flip_on_send_emits_persist_setting_with_correct_payload() {
 #[test]
 fn set_simple_mode_emits_persist_setting_with_correct_payload() {
     use crate::settings::SettingValue;
+    let _g = VimCacheGuard::set(false, false);
     let mut app = test_app_with_agent();
     let effects = dispatch(Action::SetSimpleMode(false), &mut app);
-    assert_eq!(effects.len(), 1);
+    assert_eq!(effects.len(), 2);
     match &effects[0] {
         Effect::PersistSetting { key, value, .. } => {
             assert_eq!(*key, "simple_mode");
@@ -1721,6 +1722,7 @@ fn set_simple_mode_propagates_to_active_agent() {
 /// The persist effect still fires (the setting is global, not agent-local).
 #[test]
 fn set_simple_mode_no_op_when_no_active_agent() {
+    let _g = VimCacheGuard::set(false, false);
     let mut app = test_app();
     let effects = dispatch(Action::SetSimpleMode(true), &mut app);
     assert_eq!(effects.len(), 1);
@@ -3787,4 +3789,135 @@ mod tool_density_default {
         );
         assert_eq!(app.current_ui.tool_density.as_deref(), Some("compact"));
     }
+}
+
+/// Pins the prompt-vim and scrollback-vim caches for one test and restores them afterwards.
+struct VimCacheGuard(bool, bool);
+
+impl VimCacheGuard {
+    fn set(nav: bool, prompt: bool) -> Self {
+        let prev = Self(
+            crate::appearance::cache::load_vim_mode(),
+            crate::appearance::cache::load_vim_prompt(),
+        );
+        crate::appearance::cache::set_vim_mode(nav);
+        crate::appearance::cache::set_vim_prompt(prompt);
+        prev
+    }
+}
+
+impl Drop for VimCacheGuard {
+    fn drop(&mut self) {
+        crate::appearance::cache::set_vim_mode(self.0);
+        crate::appearance::cache::set_vim_prompt(self.1);
+    }
+}
+
+/// `/vim-mode all` turns on scrollback vim and prompt vim, and persists both `[ui].vim_mode` and `[keys].vim`.
+#[test]
+fn set_vim_level_all_enables_scrollback_and_prompt_vim() {
+    use crate::app::actions::VimLevel;
+    let _g = VimCacheGuard::set(false, false);
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SetVimLevel(VimLevel::All), &mut app);
+    assert!(crate::appearance::cache::load_vim_mode());
+    assert!(crate::appearance::cache::load_vim_prompt());
+    assert!(app.agents[&AgentId(0)].vim_mode);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [
+                Effect::PersistSetting {
+                    key: "vim_mode",
+                    value: crate::settings::SettingValue::Bool(true),
+                    ..
+                },
+                Effect::PersistKeysVim { value: "all" },
+            ]
+        ),
+        "{effects:?}"
+    );
+}
+
+/// `/vim-mode nav` is scrollback vim only; it takes prompt vim back off.
+#[test]
+fn set_vim_level_nav_keeps_scrollback_and_drops_prompt_vim() {
+    use crate::app::actions::VimLevel;
+    let _g = VimCacheGuard::set(true, true);
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SetVimLevel(VimLevel::Nav), &mut app);
+    assert!(crate::appearance::cache::load_vim_mode());
+    assert!(!crate::appearance::cache::load_vim_prompt());
+    assert!(
+        matches!(effects.last(), Some(Effect::PersistKeysVim { value: "nav" })),
+        "{effects:?}"
+    );
+}
+
+/// `/vim-mode off` turns both off.
+#[test]
+fn set_vim_level_off_disables_both() {
+    use crate::app::actions::VimLevel;
+    let _g = VimCacheGuard::set(true, true);
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SetVimLevel(VimLevel::Off), &mut app);
+    assert!(!crate::appearance::cache::load_vim_mode());
+    assert!(!crate::appearance::cache::load_vim_prompt());
+    assert!(!app.agents[&AgentId(0)].vim_mode);
+    assert!(
+        matches!(effects.last(), Some(Effect::PersistKeysVim { value: "off" })),
+        "{effects:?}"
+    );
+}
+
+/// The bare `/vim-mode` toggle is unchanged with prompt vim off (one effect), and ends prompt vim when it turns vim off.
+#[test]
+fn toggle_vim_mode_off_also_ends_prompt_vim() {
+    let _g = VimCacheGuard::set(true, true);
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::ToggleVimMode, &mut app);
+    assert!(!crate::appearance::cache::load_vim_mode());
+    assert!(!crate::appearance::cache::load_vim_prompt());
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [
+                Effect::PersistSetting { key: "vim_mode", .. },
+                Effect::PersistKeysVim { value: "off" },
+            ]
+        ),
+        "{effects:?}"
+    );
+}
+
+/// The settings-modal path to scrollback vim also ends prompt vim when it turns vim off, since prompt vim implies it.
+#[test]
+fn set_vim_mode_false_clears_prompt_vim() {
+    let _g = VimCacheGuard::set(true, true);
+    let mut app = test_app_with_agent();
+    let _ = dispatch(Action::SetVimMode(false), &mut app);
+    assert!(!crate::appearance::cache::load_vim_prompt());
+}
+
+/// `simple_mode` is an alias of `[keys] vim`: `false` turns prompt vim on, `true` turns it off, and each persists `[keys] vim`.
+#[test]
+fn set_simple_mode_drives_prompt_vim() {
+    let _g = VimCacheGuard::set(false, false);
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SetSimpleMode(false), &mut app);
+    assert!(crate::appearance::cache::load_vim_prompt());
+    assert!(crate::appearance::cache::load_vim_mode());
+    assert!(
+        matches!(effects.last(), Some(Effect::PersistKeysVim { value: "all" })),
+        "{effects:?}"
+    );
+    let effects = dispatch(Action::SetSimpleMode(true), &mut app);
+    assert!(!crate::appearance::cache::load_vim_prompt());
+    assert!(
+        matches!(effects.last(), Some(Effect::PersistKeysVim { value: "nav" })),
+        "{effects:?}"
+    );
+    // Already off: nothing more to persist for `[keys] vim`
+    let effects = dispatch(Action::SetSimpleMode(true), &mut app);
+    assert_eq!(effects.len(), 1, "{effects:?}");
 }

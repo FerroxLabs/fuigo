@@ -78,9 +78,39 @@ const CATEGORY_ORDER: &[(Category, &str)] = &[
     (Category::Dashboard, "Dashboard"),
 ];
 
+/// `category_idx` of the extra "Vim Normal mode" section (one past the registry categories); present only with prompt vim on.
+const VIM_NORMAL_SECTION_IDX: usize = CATEGORY_ORDER.len();
+
 pub fn default_collapsed() -> std::collections::HashSet<usize> {
-    (1..CATEGORY_ORDER.len()).collect()
+    let mut collapsed: std::collections::HashSet<usize> = (1..CATEGORY_ORDER.len()).collect();
+    if crate::appearance::cache::load_vim_prompt() {
+        collapsed.insert(VIM_NORMAL_SECTION_IDX);
+    }
+    collapsed
 }
+
+/// Rows of the "Vim Normal mode" section: (keys as displayed, short label, description).
+/// Mirrors the prompt vim engine in `views/prompt_widget/vim.rs`.
+const VIM_NORMAL_ROWS: &[(&str, &str, &str)] = &[
+    ("Esc", "normal", "Leave Insert mode for Normal mode (Esc in Normal mode does nothing)"),
+    ("i a I A o O", "insert", "Enter Insert mode: before or after the cursor, at line start or end, on a new line"),
+    ("h j k l", "move", "Left, down, up, right (counts work: 3l)"),
+    ("w b e", "word", "Next word, previous word, end of word"),
+    ("0 ^ $", "line", "Start of line, first non-blank, end of line"),
+    ("gg G", "buffer", "First line, last line (with a count, that line)"),
+    ("f t F T ; ,", "find", "Find a character on the line; ; repeats, , repeats backward"),
+    ("d c y", "operator", "Delete, change or yank over a motion: dw, c$, y2e (dd, cc, yy for whole lines)"),
+    ("x X D C s S", "delete", "Delete a character, to line end, or change them"),
+    ("p P", "put", "Paste the last delete or yank after or before the cursor"),
+    ("r J ~", "edit", "Replace a character, join lines, toggle case"),
+    ("u Ctrl+R", "undo", "Undo and redo (counts work: 3u)"),
+    ("Enter", "send", "Submit the prompt, as in Insert mode"),
+];
+
+const VIM_NORMAL_LONG_HELP: &str = "\
+Full Vim editing in the prompt, enabled with `/vim-mode all` or `[keys] vim = \"all\"` in config.toml.\n\
+Esc in Insert mode switches to Normal mode. The info line shows NORMAL or INSERT, and the cursor is a block in Normal mode and a bar in Insert mode.\n\
+Operators take a motion or a count (d2w, 3dd). Esc in Normal mode never cancels a turn.";
 
 // Man-page body for the paste pseudo-row (Enter detail)
 // Keep claims that hold on every host (agent and dashboard); non-image file paths are agent-only
@@ -337,6 +367,26 @@ pub fn build_entries(
             entries.get_mut(header_idx)
         {
             *entry_count = count;
+        }
+    }
+    // Prompt vim (`[keys] vim = "all"`) adds its own section; with vim off or `nav` the cheatsheet is unchanged
+    if crate::appearance::cache::load_vim_prompt() {
+        entries.push(ShortcutsHelpEntry::SectionHeader {
+            label: "Vim Normal mode",
+            category_idx: VIM_NORMAL_SECTION_IDX,
+            entry_count: VIM_NORMAL_ROWS.len(),
+        });
+        let dimmed = !active_contexts.contains(&When::PromptFocused);
+        for &(keys, label, description) in VIM_NORMAL_ROWS {
+            let mut item = HintItem::new(crate::key!(Null), label);
+            item.custom_display = Some(keys);
+            item.description = Some(description.into());
+            entries.push(ShortcutsHelpEntry::Hint {
+                item,
+                dimmed,
+                action_id: None,
+                long_help: Some(VIM_NORMAL_LONG_HELP),
+            });
         }
     }
     entries

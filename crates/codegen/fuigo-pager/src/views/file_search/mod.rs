@@ -14,7 +14,7 @@ pub mod line_viewer;
 mod state;
 
 pub use context::AtContext;
-pub use state::{FileSearchReplacement, FileSearchState};
+pub use state::{FileSearchReplacement, FileSearchState, set_outside_workspace_listing};
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};

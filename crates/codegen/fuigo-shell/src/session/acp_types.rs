@@ -306,6 +306,10 @@ pub struct RewindResponse {
     #[serde(default)]
     pub prompt_text: Option<String>,
     pub error: Option<String>,
+    /// Estimated size of the conversation the rewind left, so the footer's context usage follows it.
+    /// Set on a successful conversation rewind (All or ConversationOnly).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -756,6 +760,7 @@ mod tests {
             conflicts: vec![],
             prompt_text: Some("fix the bug".into()),
             error: None,
+            context_tokens: None,
         };
         let v = serde_json::to_value(&resp).unwrap();
         assert_eq!(v["mode"], json!("conversation_only"));
@@ -774,6 +779,7 @@ mod tests {
             conflicts: vec![],
             prompt_text: None,
             error: None,
+            context_tokens: None,
         };
         let v = serde_json::to_value(&resp).unwrap();
         assert!(v["prompt_text"].is_null());

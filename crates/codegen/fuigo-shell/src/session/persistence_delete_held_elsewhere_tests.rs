@@ -242,9 +242,9 @@ fn a_second_opener_during_a_delete_finds_no_session_and_cannot_take_the_lock() {
     let checks = {
         let (seen, dir, tombstone, sessions) =
             (seen.clone(), dir.clone(), tombstone.clone(), root.path().join("sessions"));
-        move |step: &'static str| {
-            // The observer is process-wide: only this delete's rename (its tombstone exists) is checked.
-            if step != "local_rename" || !tombstone.is_dir() {
+        move |step: &'static str, folder: &Path| {
+            // The observer is process-wide: only this delete's own rename is checked, never a concurrent delete's.
+            if step != "local_rename" || folder != dir || !tombstone.is_dir() {
                 return;
             }
             seen.store(true, Ordering::SeqCst);
@@ -335,9 +335,10 @@ fn f5c_ct_del_o_remote_first_then_rename_release_wipe() {
         let tombstone = dir.parent().unwrap().join(format!("{DELETING_PREFIX}{id}-{}", std::process::id()));
         let watched = dir.clone();
         // The observer is process-wide: only steps of this delete (after its remote ran, its folder renamed away) count.
-        fuigo_session_writer::delete_observer::set(Some(Box::new(move |step| {
+        fuigo_session_writer::delete_observer::set(Some(Box::new(move |step, folder| {
             let mut log = observer_log.lock().unwrap();
-            let ours = log.first() == Some(&"remote_done")
+            let ours = folder == watched
+                && log.first() == Some(&"remote_done")
                 && !watched.exists()
                 && (step == "local_wipe" || tombstone.exists());
             if ours {
@@ -382,4 +383,72 @@ fn seed_id(root: &Path, id: &str) -> (Info, PathBuf) {
     block_on(JsonlStorageAdapter::with_root(root.to_path_buf()).init_session(&info, default_model_id())).expect("init");
     let dir = session_dir_in(root, &info);
     (info, dir)
+}
+
+/// A search-index row for `id`, so a delete's eviction can be seen.
+fn seed_search_row(root: &Path, id: &str) -> PathBuf {
+    let db = root.join("sessions").join("session_search.sqlite");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let index = fuigo_session_search::fts::SessionSearchIndex::open_or_create(&db).expect("index");
+    index
+        .upsert_doc(&fuigo_session_search::fts::SessionDoc {
+            session_id: id.to_owned(),
+            cwd: "/work".to_owned(),
+            updated_at_unix: 1,
+            title: "title".to_owned(),
+            content: "content".to_owned(),
+            content_hash: "h".to_owned(),
+        })
+        .expect("upsert");
+    db
+}
+
+fn search_row_present(db: &Path, id: &str) -> bool {
+    let index = fuigo_session_search::fts::SessionSearchIndex::open_or_create(db).expect("index");
+    index.get_content_hash(id).expect("read").is_some()
+}
+
+/// 79.B2: the folder is renamed away, then the wipe fails. The session is gone from the folder list, so its title-search
+/// row must go too; the delete still reports the wipe failure.
+#[test]
+fn u42_b2_failed_wipe_after_rename_still_evicts_the_search_row() {
+    let _turn = observer_turn();
+    const ID: &str = "u42-b2-wipe";
+    let root = tempfile::tempdir().unwrap();
+    let (_info, dir) = seed_id(root.path(), ID);
+    let db = seed_search_row(root.path(), ID);
+    let tombstone = dir.parent().unwrap().join(format!("{DELETING_PREFIX}{ID}-{}", std::process::id()));
+    let (watched, spoil) = (dir.clone(), tombstone.clone());
+    // Between the rename and the wipe, the tombstone becomes a plain file: `remove_dir_all` of it fails.
+    fuigo_session_writer::delete_observer::set(Some(Box::new(move |step, folder| {
+        if step == "hold_released" && folder == watched && !watched.exists() && spoil.is_dir() {
+            std::fs::remove_dir_all(&spoil).unwrap();
+            std::fs::write(&spoil, b"x").unwrap();
+        }
+    })));
+    let result = block_on(delete_session_history_in(root.path(), ID, None, None, None));
+    fuigo_session_writer::delete_observer::set(None);
+    assert!(matches!(result, Err(DeleteSessionError::Local(_))), "the wipe failure is still reported: {result:?}");
+    assert!(!dir.exists(), "the folder was renamed away");
+    assert!(!search_row_present(&db, ID), "a failed wipe left the title-search row of a session with no folder");
+}
+
+/// 79.B2: a second delete that names the workspace finds no folder (the first one removed it); the row the first one
+/// left behind goes now. A session that still lives under another workspace keeps its row.
+#[test]
+fn u42_b2_second_delete_with_a_workspace_evicts_a_stale_row_but_not_a_live_one() {
+    let root = tempfile::tempdir().unwrap();
+    // Stale: no folder anywhere, row still indexed.
+    let db = seed_search_row(root.path(), "u42-b2-stale");
+    let result = block_on(delete_session_history_in(root.path(), "u42-b2-stale", Some("/work"), None, None))
+        .expect("delete of an already-gone session");
+    assert!(!result.local_removed);
+    assert!(!search_row_present(&db, "u42-b2-stale"), "stale row survived a delete that named a workspace");
+    // Live: the session is under /work, the delete names another workspace; nothing of it may be evicted.
+    let (_info, dir) = seed_id(root.path(), "u42-b2-live");
+    seed_search_row(root.path(), "u42-b2-live");
+    let result = block_on(delete_session_history_in(root.path(), "u42-b2-live", Some("/elsewhere"), None, None))
+        .expect("delete scoped to another workspace");
+    assert!(!result.local_removed && dir.exists());
+    assert!(search_row_present(&db, "u42-b2-live"), "a live session's row was evicted by a delete scoped to another workspace");
 }

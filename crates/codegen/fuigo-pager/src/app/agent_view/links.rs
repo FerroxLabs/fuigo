@@ -1488,6 +1488,15 @@ mod link_click_tests {
             &test_file_link(file_path, 8)
         ));
     }
+    #[test]
+    fn app_opens_url_wrapped_across_rows_even_with_native_plain_url_open() {
+        let url = "https://example.com/a/long/path";
+        let w = unicode_width::UnicodeWidthStr::width(url) as u16;
+        let mut link = test_link(url, 10);
+        link.rects = vec![Rect::new(0, 0, 10, 1), Rect::new(0, 1, w - 10, 1)];
+        assert!(link.looks_like_bare_url_text());
+        assert!(app_should_open_link_on_click_with(true, &link));
+    }
     /// Regression: with the plan preview (line viewer) open and the feedback prompt focused, a left-drag that starts in the prompt stays with it.
     /// Drag/Up keep routing to the prompt even when the pointer wanders up into the plan area, so text selection works in the input.
     /// The line viewer's plan-line gutter drag must NOT swallow it.

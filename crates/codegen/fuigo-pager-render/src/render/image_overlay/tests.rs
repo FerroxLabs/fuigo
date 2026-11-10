@@ -116,7 +116,7 @@ fn paint_pixels_with_path_returns_footer_and_exact_transmission() {
     );
     let esc = escapes.as_str();
     assert!(
-        esc.contains("a=d,d=i"),
+        esc.contains("a=d,d=I"),
         "first paint must delete id 1 before placing: {esc}"
     );
     assert!(

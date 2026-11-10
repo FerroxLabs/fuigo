@@ -1,6 +1,6 @@
 {
     "name": "@fuigo/darwin-x64",
-    "version": "1.0.41",
+    "version": "1.0.42",
     "description": "darwin-x64 binary for fuigo. Do not install directly; install fuigo instead.",
     "license": "Apache-2.0",
     "repository": {

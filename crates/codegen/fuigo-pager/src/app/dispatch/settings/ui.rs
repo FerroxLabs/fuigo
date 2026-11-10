@@ -440,6 +440,7 @@ pub(in crate::app::dispatch) fn dispatch_toggle_vim_mode(app: &mut AppView) -> V
     // Toggle the effective value (the pager cache) so `/vim-mode` works from any view, including the session-less dashboard
     let prev = crate::appearance::cache::load_vim_mode();
     let enabled = !prev;
+    let prompt_was_on = crate::appearance::cache::load_vim_prompt();
     // Propagate to every agent and nested subagent view and mirror the pager cache
     // Background and open subagent views pick up the change without a restart; `set_vim_mode_inner` is shared with the `SetVimMode` settings path
     set_vim_mode_inner(app, enabled);
@@ -450,6 +451,55 @@ pub(in crate::app::dispatch) fn dispatch_toggle_vim_mode(app: &mut AppView) -> V
         "Vim mode: off"
     };
     tracing::info!(vim_mode = enabled, "Vim mode toggled");
+    announce_vim_mode(app, enabled, msg);
+    // Persist like the shared setter so `/vim-mode` survives a restart (writes `[ui].vim_mode` to config.toml)
+    let mut effects = vec![Effect::PersistSetting {
+        key: "vim_mode",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }];
+    // Turning vim off also ended prompt vim; keep `[keys] vim = "all"` from bringing it back on the next start
+    if prompt_was_on {
+        effects.push(Effect::PersistKeysVim { value: "off" });
+    }
+    effects
+}
+
+/// `/vim-mode all|nav|off`: scrollback vim and prompt vim together.
+///
+/// `all` is scrollback vim plus full Vim editing in the prompt, `nav` is scrollback vim only, `off` is neither.
+/// Persists `[ui].vim_mode` (scrollback) and `[keys].vim` (the level), so the choice survives a restart.
+pub(in crate::app::dispatch) fn dispatch_set_vim_level(
+    app: &mut AppView,
+    level: crate::app::actions::VimLevel,
+) -> Vec<Effect> {
+    use crate::app::actions::VimLevel;
+    let prev_nav = crate::appearance::cache::load_vim_mode();
+    let nav = level != VimLevel::Off;
+    set_vim_mode_inner(app, nav);
+    crate::appearance::cache::set_vim_prompt(level == VimLevel::All);
+    refresh_open_settings_modals(app);
+    let msg = match level {
+        VimLevel::Off => "Vim mode: off",
+        VimLevel::Nav => "Vim mode: nav (scrollback keys)",
+        VimLevel::All => "Vim mode: all (scrollback keys and prompt editing)",
+    };
+    tracing::info!(vim_level = level.as_str(), "Vim mode set");
+    announce_vim_mode(app, nav, msg);
+    vec![
+        Effect::PersistSetting {
+            key: "vim_mode",
+            value: crate::settings::SettingValue::Bool(nav),
+            rollback_value: crate::settings::SettingValue::Bool(prev_nav),
+        },
+        Effect::PersistKeysVim {
+            value: level.as_str(),
+        },
+    ]
+}
+
+/// Tell the user the vim mode changed, in the active surface's own idiom.
+fn announce_vim_mode(app: &mut AppView, enabled: bool, msg: &str) {
     match app.active_view {
         ActiveView::Agent(id) => {
             if let Some(agent) = app.agents.get_mut(&id) {
@@ -473,12 +523,6 @@ pub(in crate::app::dispatch) fn dispatch_toggle_vim_mode(app: &mut AppView) -> V
             app.show_toast(msg);
         }
     }
-    // Persist like the shared setter so `/vim-mode` survives a restart (writes `[ui].vim_mode` to config.toml)
-    vec![Effect::PersistSetting {
-        key: "vim_mode",
-        value: crate::settings::SettingValue::Bool(enabled),
-        rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
 }
 
 /// Toggle timestamps (Ctrl+? keybinding path).

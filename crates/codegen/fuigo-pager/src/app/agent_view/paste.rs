@@ -1761,6 +1761,64 @@ pub(super) mod paste_key_tests {
         assert!(agent.toast.is_some(), "the click reports the copy");
         assert!(!agent.mermaid_needs_tick(), "a copy row dispatches no render");
     }
+    /// A code block's `[Copy]` click must land while a dirty queued-prompt edit holds focus in the prompt, and must not close the edit.
+    #[test]
+    fn copy_click_works_while_a_queued_prompt_edit_is_dirty() {
+        let _theme = crate::theme::cache::pin_theme();
+        use crate::scrollback::blocks::mermaid_content::{CopyButton, CopyRow, copy_row_button_cols};
+        use crate::scrollback::render::DiagramAffordancePlacement;
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let theme = Theme::current();
+        let copy = CopyRow {
+            label: "rust".to_string(),
+            buttons: vec![CopyButton {
+                label: "[Copy]".to_string(),
+                text: "fn main() {}".to_string(),
+            }],
+        };
+        let cols = copy_row_button_cols(&copy);
+        let mut agent = make_agent();
+        let rect = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(rect);
+        agent.paint_diagram_affordances(
+            &mut buf,
+            vec![DiagramAffordancePlacement {
+                screen_rect: rect,
+                source: String::new(),
+                copy: Some(copy),
+            }],
+            &theme,
+        );
+        agent.pane_areas.scrollback = Rect::new(0, 0, 80, 10);
+        agent.active_pane = crate::views::agent::ActivePane::Prompt;
+        agent.prompt_mode = crate::app::queue_edit::PromptMode::EditingQueued {
+            id: 1,
+            original: "queued".into(),
+            server_id: None,
+            kind: crate::app::agent::QueueEntryKind::Prompt,
+        };
+        agent.prompt.set_text("queued, edited");
+        let at = |kind| MouseEvent {
+            kind,
+            column: cols[0],
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        agent.handle_mouse(&at(MouseEventKind::Down(MouseButton::Left)));
+        agent.toast = None;
+        agent.handle_mouse(&at(MouseEventKind::Up(MouseButton::Left)));
+        assert!(agent.toast.is_some(), "the copy click must report the copy");
+        assert!(
+            matches!(
+                agent.prompt_mode,
+                crate::app::queue_edit::PromptMode::EditingQueued { .. }
+            ),
+            "the queued edit stays open"
+        );
+        assert_eq!(agent.prompt.text(), "queued, edited");
+    }
     /// The real painter (`paint_diagram_affordances`) lays the row from the single layout source of truth.
     /// A leading dim `◇ mermaid` label comes first, then the three always-clickable buttons shifted right past the label.
     /// Each button registers a hit-rect carrying the source.

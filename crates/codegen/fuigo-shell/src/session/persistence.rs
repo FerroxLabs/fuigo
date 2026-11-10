@@ -1122,6 +1122,15 @@ pub struct PendingCwdSwitchReminder {
     pub destination_project_instructions: Option<String>,
 }
 
+/// Reads `reasoning_effort` leniently: a known effort parses, anything else (an unknown name, a wrong type) is `None`.
+fn lenient_reasoning_effort<'de, D>(deserializer: D) -> Result<Option<ReasoningEffort>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = <Option<serde_json::Value> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(raw.as_ref().and_then(serde_json::Value::as_str).and_then(|s| s.parse().ok()))
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Summary {
     pub info: Info,
@@ -1230,7 +1239,9 @@ pub struct Summary {
     /// `None` for sessions created before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_profile: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// An effort this build does not know (written by a newer one) reads as unset, so the session resumes at the default
+    /// effort instead of dropping out of the listings.
+    #[serde(default, deserialize_with = "lenient_reasoning_effort", skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
     /// The context window (tokens) the user selected with `/context-window`; absent when the model default is in use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3796,27 +3807,50 @@ async fn delete_session_history_in_by(
         None => false,
     };
 
-    let removed = match (local_info, session_writer) {
+    // The folder's path, taken before the writer is consumed: after a failed wipe it says whether the session is still there
+    let local_dir = local_info.as_ref().map(|info| session_dir_in(root, info));
+    let mut wipe_error = None;
+    let removed = match (local_info.clone(), session_writer) {
         (Some(info), Some(session_writer)) => {
-            delete_local_session(session_writer).await.map_err(DeleteSessionError::Local)?;
-            Some(info)
+            match delete_local_session(session_writer).await {
+                Ok(()) => Some(info),
+                Err(error) => {
+                    wipe_error = Some(error);
+                    None
+                }
+            }
         }
         _ => None,
     };
     let local_removed = removed.is_some();
 
+    // The folder is renamed away or gone whatever the wipe returned: the row must not outlive it, so a failed wipe that
+    // left no folder evicts too (the error is still reported after)
+    let folder_gone = wipe_error.is_some() && local_dir.as_ref().is_some_and(|dir| !dir.exists());
+    // A second delete named a workspace and found no local session there: the first one may have left its row behind. Evict
+    // unless the session is still on disk under another workspace
+    let already_gone = local_info.is_none()
+        && cwd.is_some()
+        && !storage
+            .list_sessions(None)
+            .await
+            .map(|all| all.iter().any(|s| s.info.id == sid))
+            .unwrap_or(true);
     // Also evict when no workspace was named: that row outlives the directory and nothing else prunes it
-    if local_removed || cwd.is_none() {
+    if local_removed || folder_gone || already_gone || cwd.is_none() {
         crate::session::storage::search::evict_session(root, session_id).await;
     }
     // The eviction above is a point in time
     // Queue the indexer too so an upsert already under way, which would otherwise write the row back, is followed by a re-read that finds nothing
-    if let Some(info) = removed {
+    if let Some(info) = removed.as_ref().or(local_info.as_ref().filter(|_| folder_gone)) {
         crate::session::storage::search::notify_session_updated(
             search_index,
             &info.id.to_string(),
             &info.cwd,
         );
+    }
+    if let Some(error) = wipe_error {
+        return Err(DeleteSessionError::Local(error));
     }
 
     Ok(SessionDeletion {

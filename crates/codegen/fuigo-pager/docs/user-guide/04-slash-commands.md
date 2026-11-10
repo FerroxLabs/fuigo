@@ -155,7 +155,16 @@ Toggle compact display — less padding and tighter spacing for denser output.
 
 ### `/vim-mode`
 
-Toggle vim-style scrollback keys (`j`/`k`, `h`/`l`, `g`/`G`, `y`/`Y`, and so on). With it off (the default), a bare letter or `Shift+letter` in the scrollback just focuses the prompt and types the character. The setting persists to `[ui] vim_mode`.
+Choose how much of the interface uses vim keys.
+
+| Command | Effect |
+| --- | --- |
+| `/vim-mode` | Toggle vim-style scrollback keys (`j`/`k`, `h`/`l`, `g`/`G`, `y`/`Y`, and so on). |
+| `/vim-mode nav` | Vim keys in the scrollback only. |
+| `/vim-mode all` | Scrollback vim keys plus full Vim editing in the prompt: Insert and Normal modes, motions, operators, counts and undo. See [Vim editing in the prompt](03-keyboard-shortcuts.md#vim-editing-in-the-prompt). |
+| `/vim-mode off` | No vim keys. |
+
+With it off (the default), a bare letter or `Shift+letter` in the scrollback just focuses the prompt and types the character. The choice persists to `[ui] vim_mode` and `[keys] vim`.
 
 ### `/edit-prompt`
 
@@ -358,6 +367,8 @@ Report an issue or send feedback. Opens a report pane: `Enter` sends, `Esc` disc
 
 Send an aside to the agent without interrupting the current task. In minimal mode (`--minimal`), the answer shows up in a dismissible panel above the prompt: `Esc` dismisses it, a finished answer is saved into native scrollback, and a late reply to an already-dismissed panel is dropped. The side question and its answer aren't part of the main turn.
 
+`/btw` starts a side question only when it begins the message. Typed later in the text, it is plain text and goes to the main conversation as typed.
+
 ```
 /btw also check the error handling
 ```
@@ -368,7 +379,7 @@ Open the MCP servers management modal.
 
 ### `/doctor`
 
-Check the current session for terminal, clipboard, color, input, notification, and sandbox issues. Doctor shows what it found and how to resolve each issue. Run `/doctor fix` to list available automatic fixes; other findings include manual steps. `/terminal-setup`, `/terminal-check`, and `/terminal-info` remain aliases.
+Check the current session for terminal, clipboard, color, input, notification, and sandbox issues. Doctor shows what it found and how to resolve each issue. Run `/doctor fix` to list available automatic fixes; other findings include manual steps. Inside tmux, Doctor also warns when tmux waits more than 50 ms after Esc before passing it on, which makes the Esc key feel slow. The fix is one line in your tmux config: `set -sg escape-time 10`. `/terminal-setup`, `/terminal-check`, and `/terminal-info` remain aliases.
 
 ### `/release-notes`
 

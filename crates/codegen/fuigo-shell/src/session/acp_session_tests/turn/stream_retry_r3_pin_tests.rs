@@ -195,6 +195,7 @@ fn p188_failed_retry_state_and_its_agent_error_hook_run_on_the_caller() {
                     url: None,
                     url_raw: None,
                     timeout_ms: 30_000,
+                    fail_closed: false,
                     source_dir: dir.path().to_path_buf(),
                     extra_env: std::collections::HashMap::new(),
                     layer: fuigo_hooks::config::HookProvenance::Requirements,

@@ -256,7 +256,65 @@ pub fn quantize_color(color: Color, level: ColorLevel) -> Color {
 
 /// Quantize a color using the globally-detected level.
 pub fn quantize(color: Color) -> Color {
-    quantize_color(color, get())
+    let level = get();
+    let quantized = quantize_color(color, level);
+    if level == ColorLevel::Basic && eight_color_terminal() {
+        fold_bright_for_eight_colors(quantized, ColorRole::Foreground)
+    } else {
+        quantized
+    }
+}
+
+// ── 8-colour terminals ──────────────────────────────────────────────────
+
+/// Which side of a cell a colour paints, because the 8-colour fallback differs for each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorRole {
+    Foreground,
+    Background,
+}
+
+/// `TERM` values whose terminfo entry has 8 colours only: bare `screen` and `tmux`, and their `screen.*` / `tmux.*` variants without a colour-depth suffix.
+/// An 8-colour terminal has no bright SGR 90-97 / 100-107 colours, and tmux turns them into bold or drops them.
+pub(crate) fn term_is_eight_color(term: &str) -> bool {
+    let term = term.to_ascii_lowercase();
+    let is_multiplexer = term == "screen"
+        || term == "tmux"
+        || term.starts_with("screen.")
+        || term.starts_with("tmux.");
+    is_multiplexer
+        && !term.contains("256color")
+        && !term.contains("direct")
+        && !term.contains("16color")
+}
+
+/// Whether this process runs in an 8-colour terminal. Cached; only consulted at the [`ColorLevel::Basic`] level.
+pub(crate) fn eight_color_terminal() -> bool {
+    static EIGHT: OnceLock<bool> = OnceLock::new();
+    *EIGHT.get_or_init(|| {
+        std::env::var("TERM").is_ok_and(|term| term_is_eight_color(&term))
+            && std::env::var_os("COLORTERM").is_none()
+    })
+}
+
+/// Fold the bright half of the ANSI 16 palette onto the 8 colours an 8-colour terminal can show.
+/// Bright black as text would be black on the usual black background, so it becomes grey; as a background it becomes black.
+/// Every other bright colour becomes its normal twin.
+pub fn fold_bright_for_eight_colors(color: Color, role: ColorRole) -> Color {
+    match color {
+        Color::DarkGray => match role {
+            ColorRole::Foreground => Color::Gray,
+            ColorRole::Background => Color::Black,
+        },
+        Color::LightRed => Color::Red,
+        Color::LightGreen => Color::Green,
+        Color::LightYellow => Color::Yellow,
+        Color::LightBlue => Color::Blue,
+        Color::LightMagenta => Color::Magenta,
+        Color::LightCyan => Color::Cyan,
+        Color::White if role == ColorRole::Background => Color::Gray,
+        other => other,
+    }
 }
 
 // ── Terminal-based truecolor inference ──────────────────────────────────
@@ -517,5 +575,54 @@ mod tests {
         assert_eq!(indexed_to_ansi16(4), Color::Blue);
         assert_eq!(indexed_to_ansi16(9), Color::LightRed);
         assert_eq!(indexed_to_ansi16(14), Color::LightCyan);
+    }
+
+    #[test]
+    fn eight_color_terms_are_bare_screen_and_tmux_only() {
+        for term in ["screen", "tmux", "SCREEN", "screen.xterm", "tmux.linux"] {
+            assert!(term_is_eight_color(term), "{term}");
+        }
+        for term in [
+            "screen-256color",
+            "tmux-256color",
+            "tmux-direct",
+            "xterm-256color",
+            "xterm",
+            "screen-16color",
+            "dumb",
+            "",
+        ] {
+            assert!(!term_is_eight_color(term), "{term}");
+        }
+    }
+
+    #[test]
+    fn bright_colours_fold_to_visible_eight_colour_twins() {
+        use ColorRole::{Background, Foreground};
+        // Bright black text would be black on black; it must stay readable.
+        assert_eq!(
+            fold_bright_for_eight_colors(Color::DarkGray, Foreground),
+            Color::Gray
+        );
+        assert_eq!(
+            fold_bright_for_eight_colors(Color::DarkGray, Background),
+            Color::Black
+        );
+        assert_eq!(
+            fold_bright_for_eight_colors(Color::LightBlue, Foreground),
+            Color::Blue
+        );
+        assert_eq!(
+            fold_bright_for_eight_colors(Color::White, Background),
+            Color::Gray
+        );
+        assert_eq!(
+            fold_bright_for_eight_colors(Color::White, Foreground),
+            Color::White
+        );
+        assert_eq!(
+            fold_bright_for_eight_colors(Color::Red, Foreground),
+            Color::Red
+        );
     }
 }

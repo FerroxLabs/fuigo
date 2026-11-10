@@ -69,6 +69,7 @@ fn managed_registry() -> fuigo_hooks::discovery::HookRegistry {
         url: None,
         url_raw: None,
         timeout_ms: 5000,
+        fail_closed: false,
         source_dir: std::env::temp_dir(),
         extra_env: std::collections::HashMap::new(),
         layer: fuigo_hooks::config::HookProvenance::Requirements,

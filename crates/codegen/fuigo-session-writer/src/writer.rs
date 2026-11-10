@@ -800,19 +800,19 @@ impl SessionWriter {
             trace::op(self.0.generation, &[&dir, tombstone], || std::fs::rename(&dir, tombstone)).is_ok()
         });
         if renamed {
-            delete_observer::note("local_rename");
+            delete_observer::note("local_rename", &dir);
         }
         // Release the hold: Windows then has no handle of ours in the folder being removed.
         drop(std::mem::replace(&mut *state, HoldState::ReleasedForWipe));
         drop(state);
-        delete_observer::note("hold_released");
+        delete_observer::note("hold_released", &dir);
         let target = if renamed { tombstone.unwrap_or_else(|| dir.clone()) } else { dir.clone() };
         let result = match trace::op(self.0.generation, &[&target], || std::fs::remove_dir_all(&target)) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
         };
-        delete_observer::note("local_wipe");
+        delete_observer::note("local_wipe", &dir);
         result
     }
 
@@ -997,24 +997,26 @@ mod durable {
 /// installs an observer (`cfg(test)` here, or the `test-support` feature for `fuigo-shell`'s tests).
 pub mod delete_observer {
     #[cfg(any(test, feature = "test-support"))]
-    type Observer = Box<dyn Fn(&'static str) + Send + Sync>;
+    type Observer = Box<dyn Fn(&'static str, &std::path::Path) + Send + Sync>;
 
     #[cfg(any(test, feature = "test-support"))]
     static OBSERVER: std::sync::Mutex<Option<Observer>> = std::sync::Mutex::new(None);
 
-    /// Install (or clear) the observer that receives each delete step.
+    /// Install (or clear) the observer that receives each delete step, with the session folder (its own path, before the
+    /// rename) the step belongs to. The observer is process-wide, so it sees every delete in the process, including the
+    /// ones running concurrently on other test threads: an observer must act only on steps whose folder is its own.
     #[cfg(any(test, feature = "test-support"))]
     pub fn set(observer: Option<Observer>) {
         *OBSERVER.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = observer;
     }
 
-    pub(crate) fn note(step: &'static str) {
+    pub(crate) fn note(step: &'static str, dir: &std::path::Path) {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(observer) = OBSERVER.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
-            observer(step);
+            observer(step, dir);
         }
         #[cfg(not(any(test, feature = "test-support")))]
-        let _ = step;
+        let _ = (step, dir);
     }
 }
 

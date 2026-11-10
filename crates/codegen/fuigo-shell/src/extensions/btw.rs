@@ -45,6 +45,60 @@ pub(crate) fn side_question_omit_notice(omitted: usize) -> String {
     format!("{omitted} attached image(s) were not included (over the 50MB side-question limit).")
 }
 
+/// Side questions in flight that the client gave a `requestId`, so `fuigo/btw/cancel` can stop one.
+static IN_FLIGHT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Notify>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Registers a request id for its lifetime; dropping it (answered, cancelled or abandoned) unregisters it.
+struct InFlight {
+    id: String,
+    cancel: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl InFlight {
+    fn register(id: String) -> Self {
+        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+        IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.clone(), cancel.clone());
+        Self { id, cancel }
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+    }
+}
+
+/// Cancel the side question registered under `id`; false when none is in flight (already answered, or never started).
+fn cancel_in_flight(id: &str) -> bool {
+    let cancel = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned();
+    match cancel {
+        Some(cancel) => {
+            // `notify_one` stores a permit, so a cancel that lands before the waiter polls is not lost
+            cancel.notify_one();
+            true
+        }
+        None => false,
+    }
+}
+
+/// Handle `fuigo/btw/cancel`: stop the side question the client started with this `requestId`.
+/// Best-effort and idempotent; the dropped request's own reply is a request-cancelled error nobody is waiting on.
+pub(super) async fn handle_btw_cancel(args: &acp::ExtRequest) -> ExtResult {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CancelRequest {
+        request_id: String,
+    }
+    let req: CancelRequest = parse_params(args)?;
+    let cancelled = cancel_in_flight(&req.request_id);
+    super::to_ext_response(Ok(serde_json::json!({ "cancelled": cancelled })))
+}
+
 /// Handle `fuigo/btw`, a side question that doesn't interrupt the current turn.
 pub(super) async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     #[derive(serde::Deserialize)]
@@ -55,6 +109,9 @@ pub(super) async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
         /// Optional text + image blocks. Absent = legacy text-only wire.
         #[serde(default)]
         content: Vec<acp::ContentBlock>,
+        /// Client-chosen id that `fuigo/btw/cancel` names. Absent = not cancellable.
+        #[serde(default)]
+        request_id: Option<String>,
     }
 
     let req: BtwRequest = parse_params(args)?;
@@ -79,9 +136,20 @@ pub(super) async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
         images,
         respond_to: tx,
     });
-    let result = rx
-        .await
-        .map_err(|_| crate::acp_error::session_unavailable("session failed to respond"))?;
+    let in_flight = req.request_id.map(InFlight::register);
+    let result = match &in_flight {
+        Some(in_flight) => tokio::select! {
+            result = rx => result,
+            // Returning drops `rx`, which tells the session to abandon the model call
+            _ = in_flight.cancel.notified() => {
+                return Err(side_question_error_to_acp(SideQuestionError::Sampling(
+                    fuigo_sampler::events::request_cancelled_error(),
+                )));
+            }
+        },
+        None => rx.await,
+    }
+    .map_err(|_| crate::acp_error::session_unavailable("session failed to respond"))?;
     match result {
         Ok(answer) => super::to_ext_response(Ok(serde_json::json!({
             "answer": answer,
@@ -127,6 +195,22 @@ mod tests {
         assert_eq!(estimated_decoded_len("=="), 0);
         assert_eq!(estimated_decoded_len("===="), 0);
         assert_eq!(estimated_decoded_len("aGVsbG8="), 5);
+    }
+
+    #[test]
+    fn cancel_in_flight_wakes_the_registered_request_once() {
+        let flight = InFlight::register("test-cancel-wakes".into());
+        assert!(!cancel_in_flight("test-cancel-unknown"), "an unknown id cancels nothing");
+        assert!(cancel_in_flight("test-cancel-wakes"));
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        rt.block_on(async {
+            // The permit stored by the cancel completes the wait even though it was sent first
+            tokio::time::timeout(std::time::Duration::from_secs(5), flight.cancel.notified())
+                .await
+                .expect("cancel must wake the waiter");
+        });
+        drop(flight);
+        assert!(!cancel_in_flight("test-cancel-wakes"), "dropping unregisters the id");
     }
 
     /// A /btw whose side call was cancelled answers JSON-RPC request-cancelled with `error_kind: cancelled`, never an auth error.

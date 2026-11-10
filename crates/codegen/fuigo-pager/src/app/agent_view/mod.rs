@@ -189,6 +189,8 @@ mod session;
 mod shell_completion;
 #[cfg(test)]
 mod task_status_tests;
+#[cfg(test)]
+mod vim_prompt_tests;
 mod viewer;
 mod workflows_overlay;
 use super::actions;
@@ -592,7 +594,8 @@ pub(super) fn app_should_open_link_on_click_with(
     ) {
         return true;
     }
-    !link.looks_like_bare_url_text()
+    // A URL wrapped over several rows is not handed to the terminal: it would open only the row that was clicked
+    link.rects.len() > 1 || !link.looks_like_bare_url_text()
 }
 /// Whether double/triple-click performs terminal-like word/paragraph text
 /// selection (and copy) instead of toggling a fold.
@@ -1205,6 +1208,9 @@ pub struct AgentView {
     /// Timestamp when the current persistent selection was created.
     /// Used for auto-dismissal after a configurable timeout.
     pub selection_created_at: Option<Instant>,
+    /// Last visible content width of each entry while a text drag is active, by entry index.
+    /// Cross-block copy reads blocks that scrolled out of view at the width they were last shown at.
+    pub drag_entry_widths: std::collections::HashMap<usize, u16>,
     /// Last mouse position during an active drag (for autoscroll re-hit-testing).
     pub last_drag_mouse: Option<(u16, u16)>,
     /// Active drag autoscroll state (scrolls on each tick while set).
@@ -1287,6 +1293,9 @@ pub struct AgentView {
     pub hit_goal_close: HitArea,
     pub hit_bg_button: HitArea,
     pub(crate) last_bg_click: Option<Instant>,
+    /// When and where the last view-close button was pressed: the second press of a double-click on that spot is swallowed
+    /// (it would land on whatever the closed view uncovered, such as a stop button).
+    pub(crate) last_view_close_click: Option<(Instant, u16, u16)>,
     pub hit_queue_close: HitArea,
     pub hit_plan_button: HitArea,
     pub hit_plan_approval_status: HitArea,
@@ -1424,6 +1433,8 @@ pub struct AgentView {
     pub btw_state: Option<crate::views::btw_overlay::BtwOverlayState>,
     /// Minimal-only ownership/correlation for `btw_state`; absent in fullscreen.
     pub(crate) minimal_btw_lifecycle: Option<crate::minimal_api::MinimalBtwLifecycle>,
+    /// Fullscreen-only id of the `/btw` request whose answer `btw_state` is waiting for; `None` once answered or dismissed.
+    pub(crate) btw_request_id: Option<uuid::Uuid>,
     /// Whether the /btw panel holds keyboard focus. The panel is non-blocking,
     /// so Up/Down/PgUp/PgDn scroll it when focused and otherwise reach the
     /// prompt. Set on a `Done` answer; cleared when the user types in or clicks

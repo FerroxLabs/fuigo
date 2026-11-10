@@ -15,6 +15,11 @@ behavior, clipboard routes, and microphone availability when audio capture is
 included. The in-app command can also check live session details such as
 notification focus tracking and sandbox profile conflicts.
 
+Inside tmux, the in-app Doctor also reads tmux's `escape-time` and warns when it
+is above 50 ms. tmux then holds every Esc press that long to see whether an
+escape sequence follows, so Esc feels slow. Add `set -sg escape-time 10` to your
+tmux config, then reload it with `tmux source-file` or restart the tmux server.
+
 A report can contain issues or recommendations and still exit successfully.
 `fuigo doctor --json` reports the same color capability when piped. Microphone
 checks do not start recording, so Doctor cannot detect macOS permission failures

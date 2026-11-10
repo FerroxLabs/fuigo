@@ -2209,7 +2209,12 @@ pub(super) async fn run_session(
                         SessionCommand::SideQuestion { question, images, respond_to } => {
                             let s = session.clone();
                             tokio::task::spawn_local(async move {
-                                let result = s.handle_side_question(&question, images).await;
+                                let mut respond_to = respond_to;
+                                // The requester went away (`fuigo/btw/cancel`, or a dropped connection): stop the model call
+                                let result = tokio::select! {
+                                    result = s.handle_side_question(&question, images) => result,
+                                    () = respond_to.closed() => return,
+                                };
                                 let _ = respond_to.send(result);
                             });
                         }

@@ -1585,6 +1585,29 @@
     }
 
     #[test]
+    fn sync_acp_commands_keeps_esc_dismissed_menu_closed() {
+        let mut pw = PromptWidget::new();
+        let models = crate::acp::model_state::ModelState::default();
+        pw.textarea.insert_str("/fl");
+        pw.refresh_slash(&models);
+        assert!(pw.slash_snapshot().open);
+        pw.slash_dismiss();
+        let acp_cmds = vec![agent_client_protocol::AvailableCommand::new(
+            "flush".to_string(),
+            "Flush memory".to_string(),
+        )];
+        pw.sync_acp_commands(&acp_cmds, None, &models);
+        assert!(
+            !pw.slash_snapshot().open,
+            "a command-list refresh must not reopen an Esc-closed menu"
+        );
+        // Typing again reopens it through the normal path
+        pw.textarea.insert_str("u");
+        pw.refresh_slash(&models);
+        assert!(pw.slash_snapshot().open);
+    }
+
+    #[test]
     fn sync_acp_commands_passes_tools_to_registry() {
         // End-to-end: tracker advertises a toolset, sync forwards it, and tool-gated commands like /loop disappear when their tool isn't registered
         let mut pw = PromptWidget::new();
@@ -3038,6 +3061,27 @@
         );
     }
 
+    /// A long draft (a key-delivered paste) skips the per-key keyword scan, so the tip never fires and the cost stays flat.
+    #[test]
+    fn long_draft_skips_plan_nudge_scan() {
+        let mut pw = PromptWidget::new();
+        pw.contextual_hint_plan_mode = true;
+        // Key-delivered, so the cursor sits at the end like a real paste of keys
+        let filler = "x ".repeat(crate::tips::plan_nudge::PLAN_NUDGE_SCAN_MAX_BYTES / 2 + 1);
+        for ch in filler.chars() {
+            pw.handle_key(&KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        let _ = pw.take_plan_nudge_fire();
+        assert!(pw.textarea.text().len() > crate::tips::plan_nudge::PLAN_NUDGE_SCAN_MAX_BYTES);
+        for ch in "plan".chars() {
+            pw.handle_key(&KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        assert!(
+            !pw.take_plan_nudge_fire(),
+            "a long draft must not run the plan-nudge scan"
+        );
+    }
+
     /// Slash- and bash-prefixed drafts route to a command, not a planning prompt, so the plan nudge stays silent even with a keyword present.
     #[test]
     fn slash_and_bash_drafts_suppress_plan_nudge() {
@@ -3729,6 +3773,60 @@
                 .unwrap_or(false),
             "re-detected context must still be in hidden mode (bang preserved)"
         );
+    }
+
+    fn char_key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn file_chip_count(pw: &PromptWidget) -> usize {
+        pw.textarea
+            .elements()
+            .iter()
+            .filter(|e| e.kind == KIND_FILE_REF)
+            .count()
+    }
+
+    /// Typing at the end of a file chip edits it in place: the chip becomes plain `@path` text and the picker reopens on it.
+    #[test]
+    fn typing_at_the_end_of_a_file_chip_edits_it_in_place() {
+        let mut pw = PromptWidget::new();
+        seed_at_completion(&mut pw, "READ", "README.md", false);
+        pw.handle_key(&key!(Tab).to_key_event());
+        assert_eq!(file_chip_count(&pw), 1);
+        // Step back from after the trailing space to the chip's end
+        pw.textarea.set_cursor("@README.md".len());
+
+        pw.handle_key(&char_key('x'));
+
+        assert_eq!(pw.textarea.text(), "@README.mdx ");
+        assert_eq!(pw.textarea.cursor(), "@README.mdx".len());
+        assert_eq!(file_chip_count(&pw), 0, "the chip is plain text now");
+        assert!(pw.file_search.context().is_some(), "the picker reopens on the edited path");
+    }
+
+    /// Default behaviour unchanged: a chip stays atomic when you type after it, or press `:`, whitespace or Backspace at it.
+    #[test]
+    fn typing_after_a_file_chip_leaves_it_atomic() {
+        let mut pw = PromptWidget::new();
+        seed_at_completion(&mut pw, "READ", "README.md", false);
+        pw.handle_key(&key!(Tab).to_key_event());
+        // Cursor sits after the trailing space: typing continues the sentence
+        pw.handle_key(&char_key('x'));
+        assert_eq!(pw.textarea.text(), "@README.md x");
+        assert_eq!(file_chip_count(&pw), 1);
+        // A space typed at the chip end does not dissolve it either
+        pw.textarea.set_cursor("@README.md".len());
+        pw.handle_key(&char_key(' '));
+        assert_eq!(file_chip_count(&pw), 1);
+        // Backspace at the chip end still removes the whole chip
+        let mut pw = PromptWidget::new();
+        seed_at_completion(&mut pw, "READ", "README.md", false);
+        pw.handle_key(&key!(Tab).to_key_event());
+        pw.textarea.set_cursor("@README.md".len());
+        pw.handle_key(&key!(Backspace).to_key_event());
+        assert_eq!(file_chip_count(&pw), 0);
+        assert!(!pw.textarea.text().contains("README"));
     }
 
     #[test]

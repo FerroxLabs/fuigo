@@ -497,6 +497,8 @@ pub struct QueuePane {
     hovered_row_id: Option<u64>,
     /// Content area from the last `render`, used to hit-test which row the mouse is over (for `hovered_row_id`).
     last_inner: Option<Rect>,
+    /// Entry id of the row whose text is open in the prompt bar for editing; that row is painted dim.
+    editing_row_id: Option<u64>,
 }
 
 impl Default for QueuePane {
@@ -532,7 +534,13 @@ impl QueuePane {
             edit_button: RowActionButton::default(),
             hovered_row_id: None,
             last_inner: None,
+            editing_row_id: None,
         }
+    }
+
+    /// Mark the row being edited in the prompt bar (`None` clears it); the next `render` dims it.
+    pub fn set_editing_row(&mut self, id: Option<u64>) {
+        self.editing_row_id = id;
     }
 
     // -- Data management -----------------------------------------------------
@@ -975,6 +983,23 @@ impl QueuePane {
                     .unwrap_or(theme.bg_dark);
                 let row = Rect::new(inner.x, screen_y, inner.width, 1);
                 buf.set_style(row, Style::default().bg(hover_bg));
+            }
+        }
+
+        // The row open in the prompt bar for editing reads as set aside: its live text is in the editor, not here
+        if let Some(idx) = self
+            .editing_row_id
+            .and_then(|id| self.entries.iter().position(|e| e.id == id))
+        {
+            let item_y = self.list_state.layout().virtual_y(idx);
+            if let Some(rel) = item_y.checked_sub(self.list_state.scroll_offset())
+                && rel < inner.height as usize
+            {
+                let row = Rect::new(inner.x, inner.y + rel as u16, inner.width, 1);
+                buf.set_style(
+                    row,
+                    Style::default().add_modifier(ratatui::style::Modifier::DIM),
+                );
             }
         }
 
@@ -1755,6 +1780,39 @@ mod tests {
         let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with("! "));
         // Total should fit within width (prefix "! " is 2 chars, content truncated to 13)
+    }
+
+    // -- Editing-row dimming -------------------------------------------------
+
+    /// The queued row that is open in the prompt bar for editing is painted dim; its neighbours are not.
+    #[test]
+    fn the_row_being_edited_is_dimmed() {
+        use ratatui::style::Modifier;
+        let _theme = crate::theme::cache::pin_theme();
+        let mut pane = QueuePane::new();
+        let mut local = std::collections::VecDeque::new();
+        local.push_back(local_prompt(1, "first queued"));
+        local.push_back(local_prompt(2, "second queued"));
+        pane.sync_from_merged(&local, &[], None, None, &Default::default());
+        let ids = pane.entry_ids();
+        let layout_cfg = crate::appearance::LayoutConfig::default();
+        let area = Rect::new(0, 0, 60, 4);
+        let dim_rows = |pane: &mut QueuePane| -> Vec<bool> {
+            let mut buf = Buffer::empty(area);
+            pane.render(area, &mut buf, false, &layout_cfg, None, false);
+            let inner = pane.last_inner.expect("rendered");
+            (0..2)
+                .map(|row| {
+                    buf[(inner.x, inner.y + row)].modifier.contains(Modifier::DIM)
+                })
+                .collect()
+        };
+
+        assert_eq!(dim_rows(&mut pane), [false, false], "nothing is dim while no row is being edited");
+        pane.set_editing_row(Some(ids[1]));
+        assert_eq!(dim_rows(&mut pane), [false, true], "only the edited row dims");
+        pane.set_editing_row(None);
+        assert_eq!(dim_rows(&mut pane), [false, false], "leaving edit mode restores the row");
     }
 
     // -- Action-button rendering (hover + layout) ----------------------------

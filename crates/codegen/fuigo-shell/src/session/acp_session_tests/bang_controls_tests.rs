@@ -265,6 +265,16 @@ local_test!(denying_pre_tool_use_hook_refuses, async {
     assert!(!items.contains("hook says no"), "the hook message must not reach the model: {items}");
 });
 
+const STOP_HOOK: &str = r#"echo '{"continue":false,"stopReason":"halt now"}'"#;
+
+local_test!(stopping_pre_tool_use_hook_refuses_a_bang_line, async {
+    let h = harness(None, vec![pre_tool_use_spec("test/stop", None, STOP_HOOK)]).await;
+    h.bang("echo hi").await;
+    assert!(h.ran().is_empty(), "continue:false must keep the command from running");
+    let screen = h.refusal("echo hi").await;
+    assert!(screen.contains("Refused: a PreToolUse hook (") && screen.contains("halt now"), "{screen}");
+});
+
 local_test!(asking_or_rewriting_pre_tool_use_hook_neither_prompts_nor_changes_the_command, async {
     let h = harness(None, vec![pre_tool_use_spec("test/ask", None, ASK_HOOK)]).await;
     h.bang("echo hi").await;

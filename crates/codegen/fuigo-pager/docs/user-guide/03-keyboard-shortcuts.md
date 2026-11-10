@@ -99,6 +99,39 @@ Switch between the prompt input and scrollback pane.
 
 **Esc is not a focus key.** It follows the clear / rewind semantics below, and it never cancels a running turn (`Ctrl+C` does). Nothing about Esc depends on `[ui].vim_mode` (scrollback nav) or `[ui].simple_mode` (prompt editor). Overlays, modals, slash/file dropdowns, voice, search, and selection still steal Esc first.
 
+The one exception is full Vim editing in the prompt (`[keys] vim = "all"`, below), which is off by default. With it on, one Esc in Insert mode switches the prompt to Normal mode, and Esc in Normal mode does nothing. It never cancels a turn.
+
+## Vim editing in the prompt
+
+Set `[keys] vim = "all"` in `~/.fuigo/config.toml`, or run `/vim-mode all`, to edit the prompt with Vim keys. The default is off, and with vim off or `nav` the prompt behaves exactly as before. `all` also turns on the scrollback vim keys described above.
+
+The prompt starts in **Insert mode**, where typing inserts text as usual. The prompt's info line shows `INSERT` or `NORMAL` (in fullscreen and in minimal mode), and the cursor is a bar in Insert mode and a block in Normal mode. The cheatsheet (`?`) gains a **Vim Normal mode** section while this is on.
+
+Press `Esc` once to enter Normal mode. `Enter` still sends the prompt, `Tab` still moves focus to the scrollback, `Up`/`Down` still browse history, and `Ctrl+` chords (such as `Ctrl+C`) keep their usual meaning. Any other key that is not a Vim command does nothing.
+
+| Keys | Action |
+| --- | --- |
+| `i` `a` `I` `A` | Insert before or after the cursor, at the first non-blank, or at the end of the line |
+| `o` `O` | Open a new line below or above and insert |
+| `h` `j` `k` `l` | Move left, down, up, right (lines are the lines you typed, not wrapped rows) |
+| `w` `b` `e` | Next word, previous word, end of word |
+| `0` `^` `$` | Start of line, first non-blank, end of line |
+| `gg` `G` | First line, last line (`3G` is line 3) |
+| `f` `t` `F` `T` + char | Find or move up to a character on the line; `;` repeats and `,` repeats backward |
+| `d` `c` `y` + motion | Delete, change or yank over a motion (`dw`, `c$`, `y2e`, `df,`) |
+| `dd` `cc` `yy` | Delete, change or yank whole lines |
+| `x` `X` `D` `C` `s` `S` `Y` | Delete a character, delete backward, delete or change to end of line, substitute, change line, yank line |
+| `p` `P` | Paste the last delete or yank after or before the cursor |
+| `r` + char | Replace the character under the cursor |
+| `J` | Join the next line onto this one |
+| `~` | Toggle the case of the character under the cursor |
+| `u` `Ctrl+R` | Undo and redo |
+| `Esc` | Cancel a half-typed command; in Insert mode, switch to Normal mode |
+
+In Normal mode `Ctrl+R` is redo, so it does not open the sessions list; the sessions list opens from Insert mode, so press `i` first.
+
+Counts work before a command and before a motion: `3w`, `2dd`, `d3w`, `2d2w`, `5x`, `3u`. A whole Insert session (from `i` to `Esc`) is one undo step. There is a single unnamed register, and it is not shared with the system clipboard. Text objects, visual mode, marks, macros and `.` are not supported.
+
 ## Blocking cards
 
 Four surfaces block the agent on your answer and take over the keyboard while
@@ -257,7 +290,7 @@ Actions that affect the agent session, available from the agent screen.
 |---|---|---|---|
 | Drag image from file manager into the prompt | Finder ✓ | Files / Dolphin ✓ | Explorer ✓ |
 | Copy a file in the file manager, then paste | `Cmd+V` | `Ctrl+V` | `Ctrl+V` |
-| Screenshot or "Copy Image" in clipboard, then paste | `Cmd+V` | `Ctrl+V` | **`Alt+V`** |
+| Screenshot or "Copy Image" in clipboard, then paste | `Ctrl+V` | `Ctrl+V` | **`Alt+V`** |
 
 Non-image files insert their absolute path as text instead of a chip.
 

@@ -450,8 +450,10 @@ pub fn place_kitty_image_cropped(
 }
 
 /// Build a Kitty escape sequence to delete a specific image by ID.
+///
+/// Upper-case `d=I` frees the image data in the terminal as well as its placements; lower-case `d=i` would leave the data allocated.
 pub fn clear_kitty_image(image_id: u32) -> String {
-    format!("\x1b_Ga=d,d=i,i={image_id},q=2\x1b\\")
+    format!("\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\")
 }
 
 // -------------------------------------------------------------------------
@@ -476,7 +478,7 @@ pub fn render_iterm2_image(image_data: &[u8], cols: u16, rows: u16) -> String {
 // Shared overlay helpers
 // -------------------------------------------------------------------------
 
-/// Kitty always deletes id 1 (`d=i`) then transmits and displays (`a=T`).
+/// Kitty always deletes id 1 and frees its data (`d=I`) then transmits and displays (`a=T`).
 /// Warp ignores placement-id replace, so a later `a=p` would stack a duplicate image.
 /// Callers that see an unchanged committed placement must not call this.
 /// They return an empty string (keeping the existing placement) instead of re-placing every frame.

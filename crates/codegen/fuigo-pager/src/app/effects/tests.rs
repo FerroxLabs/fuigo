@@ -198,7 +198,7 @@ fn interject_params_omit_content_when_no_blocks() {
 #[test]
 fn btw_params_carry_content_only_when_blocks_are_present() {
     let sid = acp::SessionId::new("s1");
-    let params = build_btw_params(&sid, "why", None);
+    let params = build_btw_params(&sid, "why", None, None);
     let obj = params.as_object().unwrap();
     assert!(!obj.contains_key("content"), "content key must be absent");
     assert_eq!(obj["sessionId"], "s1");
@@ -209,10 +209,18 @@ fn btw_params_carry_content_only_when_blocks_are_present() {
         acp::ContentBlock::Text(acp::TextContent::new("why")),
         acp::ContentBlock::Image(acp::ImageContent::new("aGVsbG8=", "image/png")),
     ];
-    let params = build_btw_params(&sid, "why", Some(&blocks));
+    let params = build_btw_params(&sid, "why", Some(&blocks), None);
     let content = params["content"].as_array().expect("content array");
     assert_eq!(content.len(), 2);
     assert_eq!(content[1]["type"], "image");
+}
+/// The request id travels as `requestId`, the key `fuigo/btw/cancel` names.
+#[test]
+fn btw_params_carry_the_request_id() {
+    let sid = acp::SessionId::new("s1");
+    let id = uuid::Uuid::from_u128(9);
+    let params = build_btw_params(&sid, "why", None, Some(id));
+    assert_eq!(params["requestId"], id.to_string());
 }
 #[test]
 fn picker_keeps_conversation_with_empty_cwd_and_missing_updated_at() {
@@ -3090,4 +3098,50 @@ fn decode_memory_save_response_surfaces_an_error_response() {
     let err = decode_memory_save_response(Err(acp::Error::invalid_params().data("memory is off for this session")))
         .expect_err("an ACP error must fail");
     assert!(err.contains("memory is off"), "{err}");
+}
+
+/// 79.B3 / 73.B9: a refusal or load reason longer than 200 characters reaches the person whole (the capped form cuts it).
+#[test]
+fn u42_b3_whole_sanitizer_keeps_a_long_refusal_the_capped_one_cuts() {
+    let refusal = format!("{} {}", fuigo_shell::session::session_writer_lock::HELD_ELSEWHERE, "x".repeat(150));
+    assert!(refusal.chars().count() > 200);
+    assert_eq!(sanitize_user_error_whole(&refusal), refusal);
+    assert!(sanitize_user_error(&refusal).ends_with("..."), "the capped form still cuts toast text");
+    // Rename's refusal text is whole too.
+    let err = fuigo_shell::acp_error::session_unavailable_headline(refusal.clone());
+    assert_eq!(session_rename_error_text(&err), refusal);
+}
+
+/// 74.P7: `--resume <id>` reads that one session's summary, in its original workspace or else the launch folder; a
+/// decoy session with a corrupt summary elsewhere is never opened.
+#[tokio::test]
+async fn u42_p7_resume_title_reads_only_the_one_session() {
+    let root = tempfile::tempdir().unwrap();
+    let write = |cwd: &str, id: &str, body: String| {
+        let dir = root
+            .path()
+            .join("sessions")
+            .join(fuigo_shell::util::fuigo_home::encode_cwd_dirname(cwd))
+            .join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("summary.json"), body).unwrap();
+    };
+    let summary = |cwd: &str, id: &str, title: &str| {
+        serde_json::json!({
+            "info": { "id": id, "cwd": cwd }, "session_summary": "s",
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            "num_messages": 1, "current_model_id": "m", "generated_title": title
+        })
+        .to_string()
+    };
+    write("/orig", "mine", summary("/orig", "mine", "Original workspace title"));
+    write("/launch", "here", summary("/launch", "here", "Launch folder title"));
+    write("/decoy", "other", "{ not json".to_string());
+    let launch = std::path::Path::new("/launch");
+    let got = session_title_for_resume(root.path().to_path_buf(), "mine", Some(std::path::Path::new("/orig")), launch).await;
+    assert_eq!(got.as_deref(), Some("Original workspace title"));
+    let got = session_title_for_resume(root.path().to_path_buf(), "here", None, launch).await;
+    assert_eq!(got.as_deref(), Some("Launch folder title"));
+    let got = session_title_for_resume(root.path().to_path_buf(), "gone", None, launch).await;
+    assert_eq!(got, None, "a missing summary is no title, not an error and not a scan");
 }

@@ -1424,9 +1424,28 @@ fn detect_is_wsl() -> bool {
     if !cfg!(target_os = "linux") {
         return false;
     }
-    let env: HashMap<String, String> = std::env::vars().collect();
+    let env = env_snapshot_lossy();
     let osrelease = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok();
     is_wsl_from_inputs(&env, osrelease.as_deref())
+}
+
+/// The process environment as a string map. Non-UTF-8 names and values are converted lossily instead of panicking like `std::env::vars()`.
+pub fn env_snapshot_lossy() -> HashMap<String, String> {
+    collect_env_lossy(std::env::vars_os())
+}
+
+/// Lossy `OsString` pairs to a string map (see [`env_snapshot_lossy`]).
+pub fn collect_env_lossy(
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> HashMap<String, String> {
+    vars.into_iter()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
 }
 
 /// Pure helper so tests can drive the env and `/proc` contents directly.
@@ -1438,6 +1457,28 @@ fn is_wsl_from_inputs(env: &HashMap<String, String>, osrelease: Option<&str>) ->
         let lower = s.to_ascii_lowercase();
         lower.contains("microsoft") || lower.contains("wsl")
     })
+}
+
+#[cfg(all(test, unix))]
+mod lossy_env_tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn non_utf8_env_is_converted_lossily_not_dropped_or_panicking() {
+        let bad = OsString::from_vec(b"BAD_\xff_NAME".to_vec());
+        let val = OsString::from_vec(b"v\xfe".to_vec());
+        let map = collect_env_lossy([
+            (bad, OsString::from("x")),
+            (OsString::from("GOOD"), val),
+            (OsString::from("WSL_DISTRO_NAME"), OsString::from("Ubuntu")),
+        ]);
+        assert_eq!(map.len(), 3);
+        assert_eq!(map["GOOD"], "v\u{fffd}");
+        assert!(map.keys().any(|k| k.starts_with("BAD_") && k.contains('\u{fffd}')));
+        assert!(is_wsl_from_inputs(&map, None));
+    }
 }
 
 #[cfg(test)]
