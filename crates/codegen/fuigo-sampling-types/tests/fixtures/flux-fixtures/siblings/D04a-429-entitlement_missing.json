@@ -1,0 +1,32 @@
+{
+ "status": 429,
+ "headers": {
+  "content-length": "266",
+  "content-type": "application/json"
+ },
+ "body": {
+  "error": {
+   "type": "rate_limit_exceeded",
+   "state": "entitlement_missing",
+   "message": "This account has no active Flux entitlement, so no allowance could be resolved for it. Contact support@fluxrouter.ai to have the account provisioned.",
+   "support": "support@fluxrouter.ai"
+  }
+ },
+ "endpoint": "/v1/responses",
+ "per_endpoint": {
+  "/v1/messages": {
+   "status": 429,
+   "headers": {
+    "content-length": "214",
+    "content-type": "application/json"
+   },
+   "body": {
+    "type": "error",
+    "error": {
+     "type": "rate_limit_error",
+     "message": "This account has no active Flux entitlement, so no allowance could be resolved for it. Contact support@fluxrouter.ai to have the account provisioned."
+    }
+   }
+  }
+ }
+}

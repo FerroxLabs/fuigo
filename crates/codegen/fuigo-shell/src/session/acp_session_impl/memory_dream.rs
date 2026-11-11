@@ -547,7 +547,7 @@ impl SessionActor {
 
     /// Make the dream model call using the session's sampling client.
     async fn run_dream_model_call(&self, user_message: &str) -> Result<String, acp::Error> {
-        let sampling_client = self.prepare_chat_completion(false).await?;
+        let sampling_client = self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side).await?;
         let model = self
             .chat_state_handle
             .get_sampling_config()
@@ -615,7 +615,7 @@ impl SessionActor {
             .await;
 
         let result = async {
-            let sampling_client = self.prepare_chat_completion(false).await?;
+            let sampling_client = self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side).await?;
             let MemoryFlushSnapshot {
                 counts,
                 chat_history,
@@ -947,7 +947,7 @@ impl SessionActor {
             ));
         }
 
-        let sampling_client = self.prepare_chat_completion(false).await.map_err(|e| {
+        let sampling_client = self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side).await.map_err(|e| {
             format!(
                 "failed to prepare client: {}",
                 crate::sampling::error::acp_error_text(&e)

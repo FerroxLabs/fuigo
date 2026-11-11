@@ -1168,6 +1168,9 @@ pub const CONTEXT_LENGTH_ERROR_TYPE: &str = "context_length";
 pub enum RetryState {
     /// A retry is in progress
     Retrying {
+        /// Upstream facts, independent of the truncated display message.
+        #[serde(default)]
+        upstream: fuigo_sampling_types::error::UpstreamError,
         /// Current retry attempt number (1-indexed)
         attempt: u32,
         /// Maximum number of retries allowed
@@ -1207,6 +1210,9 @@ pub enum RetryState {
     },
     /// All retries have been exhausted
     Exhausted {
+        /// Upstream facts, independent of the truncated display message.
+        #[serde(default)]
+        upstream: fuigo_sampling_types::error::UpstreamError,
         /// Total number of attempts made
         attempts: u32,
         /// Human-readable reason for the failure
@@ -1228,6 +1234,9 @@ pub enum RetryState {
     },
     /// A non-retryable error occurred (e.g., auth error, invalid params)
     Failed {
+        /// Upstream facts, independent of the truncated display message.
+        #[serde(default)]
+        upstream: fuigo_sampling_types::error::UpstreamError,
         /// Category of the error (e.g., "auth", "invalid_params", "server")
         error_type: String,
         /// Human-readable error message
@@ -1249,6 +1258,9 @@ impl RetryState {
     pub fn scrub_sent_credentials(&mut self) {
         use fuigo_telemetry::sent_credentials::scrub_in_place;
         self.stamp_verdicts();
+        match self {
+            Self::Retrying {upstream,..} | Self::Exhausted {upstream,..} | Self::Failed {upstream,..} => upstream.project(),
+        }
         match self {
             Self::Retrying { reason, .. } | Self::Exhausted { reason, .. } => {
                 scrub_in_place(reason);
@@ -1281,6 +1293,7 @@ impl RetryState {
                 error_type,
                 message,
                 verdicts,
+                ..
             } if verdicts.is_none() => {
                 *verdicts = Some(ErrorVerdicts::for_retry(Some(error_type), message));
             }
@@ -1862,6 +1875,7 @@ mod tests {
                 max_retries: 3,
                 reason: with("retrying"),
                 error_type: None,
+                upstream: Default::default(),
                 verdicts: None,
                 discard_emitted: false,
                 message_id: None,
@@ -1872,11 +1886,13 @@ mod tests {
                 reason: with("exhausted"),
                 is_rate_limited: false,
                 error_type: None,
+                upstream: Default::default(),
                 verdicts: None,
             }),
             SessionUpdate::RetryState(RetryState::Failed {
                 error_type: "api".into(),
                 message: with("failed"),
+                upstream: Default::default(),
                 verdicts: None,
             }),
             SessionUpdate::AutoCompactFailed {
@@ -1946,6 +1962,7 @@ mod tests {
                     max_retries: 2,
                     reason: "empty response from model (reasoning_only)".into(),
                     error_type: Some("empty_response".into()),
+                    upstream: Default::default(),
                     verdicts: None,
                     discard_emitted: false,
                     message_id: None,
@@ -1959,6 +1976,7 @@ mod tests {
                     reason: "429 Too Many Requests".into(),
                     is_rate_limited: true,
                     error_type: None,
+                    upstream: Default::default(),
                     verdicts: None,
                 },
                 "The model request failed after 3 attempts: 429 Too Many Requests\n\n",
@@ -1967,6 +1985,7 @@ mod tests {
                 RetryState::Failed {
                     error_type: "empty_response".into(),
                     message: "empty response from model (reasoning_only)".into(),
+                    upstream: Default::default(),
                     verdicts: None,
                 },
                 "The model request failed: empty response from model (reasoning_only)\n\n",
@@ -2003,6 +2022,7 @@ mod tests {
         let state = RetryState::Failed {
             error_type: DISK_FULL_ERROR_TYPE.to_string(),
             message: DISK_FULL_USER_MESSAGE.to_string(),
+            upstream: Default::default(),
             verdicts: None,
         };
         assert_eq!(
@@ -2018,6 +2038,7 @@ mod tests {
                 &RetryState::Failed {
                     error_type: "api".to_string(),
                     message: "upstream exploded".to_string(),
+                    upstream: Default::default(),
                     verdicts: None,
                 },
                 false
@@ -2037,6 +2058,7 @@ mod tests {
             reason: "empty response from model (reasoning_only)".into(),
             is_rate_limited: false,
             error_type: Some("empty_response".into()),
+            upstream: Default::default(),
             verdicts: None,
         };
         assert_eq!(
@@ -2048,6 +2070,7 @@ mod tests {
             reason: "empty response from model (reasoning_only)".into(),
             is_rate_limited: false,
             error_type: Some("empty_response".into()),
+            upstream: Default::default(),
             verdicts: None,
         };
         assert_eq!(
@@ -2066,6 +2089,7 @@ mod tests {
             max_retries: 3,
             reason: "Server error; retrying request".into(),
             error_type: Some("api".into()),
+            upstream: Default::default(),
             verdicts: None,
             discard_emitted: false,
             message_id: None,

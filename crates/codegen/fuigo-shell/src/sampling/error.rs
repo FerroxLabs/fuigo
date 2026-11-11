@@ -186,10 +186,19 @@ pub const OVERLOADED_USER_MESSAGE: &str = "Model is temporarily overloaded. Try 
 /// Map a `SamplingError` to an ACP `Error` for client-facing responses.
 /// This stays in fuigo-shell because it depends on `agent_client_protocol::Error`.
 pub(crate) fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
+    let upstream = fuigo_sampler::SamplingErrorInfo::from(&err).upstream();
+    let mut result = map_sampling_err_to_acp_inner(err);
+    if let Some(data) = result.data.as_mut() {
+        data["upstream"] = serde_json::json!(upstream);
+    }
+    result
+}
+
+fn map_sampling_err_to_acp_inner(err: SamplingError) -> acp::Error {
     use reqwest::StatusCode;
     let info = fuigo_sampler::SamplingErrorInfo::from(&err);
     // Capacity/overload gets the same short copy everywhere, as the message and as the typed `data.message`
-    if err.is_overloaded() {
+    if err.is_overloaded() && !err.is_terminal_refusal() {
         return acp::Error::new(
             acp::ErrorCode::InternalError.into(),
             OVERLOADED_USER_MESSAGE,
@@ -384,6 +393,26 @@ pub(crate) fn terminal_error_data(
 ) -> serde_json::Value {
     let mut data = error_data_with_status(message, http_status);
     data[ERROR_KIND_DATA_KEY] = serde_json::json!(kind.as_str());
+    data["upstream"] = serde_json::json!(fuigo_sampling_types::error::UpstreamError { http_status, ..Default::default() });
+    data
+}
+
+/// Preserve the typed facts when a terminal error is re-announced by a recovery path.
+pub(crate) fn upstream_from_acp(err: &acp::Error) -> fuigo_sampling_types::error::UpstreamError {
+    err.data.as_ref()
+        .and_then(|data| data.get("upstream"))
+        .and_then(|upstream| serde_json::from_value(upstream.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Same legacy data fields, plus all upstream facts captured before message truncation.
+pub(crate) fn sampling_error_data(
+    message: String,
+    http_status: Option<u16>,
+    info: &fuigo_sampler::SamplingErrorInfo,
+) -> serde_json::Value {
+    let mut data = terminal_error_data(message, http_status, info.kind);
+    data["upstream"] = serde_json::json!(info.upstream());
     data
 }
 
@@ -781,6 +810,7 @@ mod tests {
             ),
             (
                 SamplingError::StreamError {
+                    upstream: Default::default(),
                     error_type: "server_error".into(),
                     message: "boom".into(),
                     code: None,
@@ -819,6 +849,9 @@ mod tests {
                     retry_after_secs: None,
                     should_retry: None,
                     error_code: None,
+                    upstream_state: None,
+                    upstream_type: None,
+                    upstream_details: Default::default(),
                 },
                 "api",
                 "Content violates usage guidelines.",
@@ -831,6 +864,9 @@ mod tests {
                     retry_after_secs: None,
                     should_retry: None,
                     error_code: None,
+                    upstream_state: None,
+                    upstream_type: None,
+                    upstream_details: Default::default(),
                 },
                 "rate_limited",
                 "Rate limit exceeded",
@@ -1141,6 +1177,7 @@ mod tests {
     #[test]
     fn overload_maps_to_display_message_with_typed_data() {
         let err = SamplingError::StreamError {
+            upstream: Default::default(),
             error_type: "overloaded_error".into(),
             message: "Overloaded".into(),
             code: None,
@@ -1161,6 +1198,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         let acp_529 = map_sampling_err_to_acp(err_529);
         assert_eq!(acp_529.message, OVERLOADED_USER_MESSAGE);
@@ -1183,6 +1223,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         let acp_err = map_sampling_err_to_acp(err);
         assert_eq!(acp_err.code, acp::ErrorCode::from(RATE_LIMITED_ERROR_CODE));
@@ -1192,6 +1235,7 @@ mod tests {
             Some(serde_json::json!({
                 "message": "Rate limit exceeded",
                 "error_kind": "rate_limited",
+                "upstream": { "http_status": 429 },
             }))
         );
     }
@@ -1205,6 +1249,9 @@ mod tests {
             retry_after_secs: Some(60),
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert_eq!(err.retry_after(), Some(60));
         let acp_err = map_sampling_err_to_acp(err);
@@ -1221,6 +1268,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         let server_err = SamplingError::Api {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -1229,6 +1279,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         let rate_acp = map_sampling_err_to_acp(rate_err);
         let server_acp = map_sampling_err_to_acp(server_err);
@@ -1247,6 +1300,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         let acp_err = map_sampling_err_to_acp(err);
         assert_eq!(acp_err.code, acp::Error::internal_error().code);
@@ -1262,6 +1318,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         let acp_err = map_sampling_err_to_acp(err);
         assert_eq!(acp_err.code, acp::Error::auth_required().code);
@@ -1283,6 +1342,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         let acp_err = map_sampling_err_to_acp(err);
         assert_ne!(
@@ -1295,6 +1357,7 @@ mod tests {
             Some(serde_json::json!({
                 "message": "Content violates usage guidelines. Failed check: SAFETY_CHECK_TYPE_DATA_LEAKAGE",
                 "error_kind": "api",
+                "upstream": { "http_status": 403 },
             }))
         );
     }
@@ -1340,6 +1403,9 @@ mod tests {
                 retry_after_secs: None,
                 should_retry: None,
                 error_code: None,
+                upstream_state: None,
+                upstream_type: None,
+                upstream_details: Default::default(),
             };
             let acp_err = map_sampling_err_to_acp(err);
             let data = acp_err.data.unwrap();
@@ -1366,6 +1432,9 @@ mod tests {
                 retry_after_secs: None,
                 should_retry: None,
                 error_code: None,
+                upstream_state: None,
+                upstream_type: None,
+                upstream_details: Default::default(),
             };
             let acp_err = map_sampling_err_to_acp(err);
             let data = acp_err.data.unwrap();
@@ -1388,6 +1457,9 @@ mod tests {
                 retry_after_secs: None,
                 should_retry: None,
                 error_code: None,
+                upstream_state: None,
+                upstream_type: None,
+                upstream_details: Default::default(),
             };
             let acp_err = map_sampling_err_to_acp(err);
             let data = acp_err.data.unwrap();
@@ -1660,3 +1732,157 @@ mod tests {
 #[cfg(test)]
 #[path = "error_data_guard_tests.rs"]
 mod error_data_guard_tests;
+
+#[cfg(test)]
+mod upstream_contract_tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn rate_limit_terminal_preserves_upstream_without_legacy_status() {
+        let err = SamplingError::Api {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "rate_limit_exceeded: monthly allowance exhausted".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+            upstream_state: Some("free_cap_reached".into()),
+            upstream_type: Some("rate_limit_exceeded".into()),
+            upstream_details: Default::default(),
+        };
+        let err = map_sampling_err_to_acp(err);
+        assert_eq!(i32::from(err.code), -32003);
+        let data = err.data.unwrap();
+        assert!(data.get("http_status").is_none());
+        assert_eq!(
+            data["upstream"],
+            serde_json::json!({"http_status":429,"type":"rate_limit_exceeded","state":"free_cap_reached"})
+        );
+    }
+
+    #[test]
+    fn every_api_terminal_class_carries_upstream() {
+        for status in [400, 401, 403, 404, 413, 429, 500, 503, 529] {
+            let err = SamplingError::Api {
+                status: StatusCode::from_u16(status).unwrap(),
+                message: "short detail".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+                error_code: None,
+                upstream_state: Some("hold".into()),
+                upstream_type: Some("provider_error".into()),
+                upstream_details: Default::default(),
+            };
+            let data = map_sampling_err_to_acp(err).data.unwrap();
+            assert_eq!(data["upstream"], serde_json::json!({
+                "http_status": status, "type": "provider_error", "state": "hold"
+            }));
+        }
+        let data = map_sampling_err_to_acp(SamplingError::MaxTokensTruncation).data.unwrap();
+        assert_eq!(data["upstream"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn failed_and_retrying_notices_preserve_upstream() {
+        let upstream = serde_json::json!({"http_status":503,"type":"server_error","state":"hold"});
+        for mut wire in [
+            serde_json::json!({"type":"failed","error_type":"api","message":"short detail"}),
+            serde_json::json!({"type":"retrying","attempt":1,"max_retries":3,"reason":"short detail"}),
+        ] {
+            wire["upstream"] = upstream.clone();
+            let state: crate::extensions::notification::RetryState = serde_json::from_value(wire).unwrap();
+            assert_eq!(serde_json::to_value(state).unwrap()["upstream"], serde_json::json!({"http_status":503,"type":"server_error","state":"hold"}));
+        }
+    }
+
+    #[test]
+    fn exhausted_notice_preserves_upstream() {
+        let upstream = serde_json::json!({"http_status":429,"type":"rate_limit_exceeded","state":"free_cap_reached"});
+        let state: crate::extensions::notification::RetryState = serde_json::from_value(serde_json::json!({
+            "type":"exhausted", "attempts":3,"reason":"truncated message", "is_rate_limited":true,
+            "error_type":"rate_limited", "upstream": upstream
+        })).unwrap();
+        assert_eq!(serde_json::to_value(state).unwrap()["upstream"], upstream);
+    }
+}
+
+#[cfg(test)]
+mod busyloop_review_tests {
+ use super::*;
+ use serde_json::json;
+ use crate::extensions::notification::RetryState;
+ fn check_p1(field: &str, value: &str, expected: &str) {
+  let mut upstream=json!({"http_status":429}); upstream[field]=json!(value);
+  let err=agent_client_protocol::Error::internal_error().data(json!({"message":"refusal","upstream":upstream}));
+  let wire=crate::agent::credential_scrub::scrub_acp_error(err).data.unwrap();
+  assert_eq!(wire["upstream"][field],expected);
+  for kind in ["failed","exhausted","retrying"] {
+   let mut state:RetryState=serde_json::from_value(json!({"type":kind,"message":"refusal","reason":"refusal","error_type":"api","attempt":1,"max_retries":3,"attempts":3,"upstream":upstream})).unwrap();
+   state.scrub_sent_credentials();
+   let persisted=serde_json::to_string(&state).unwrap();
+   let reloaded:serde_json::Value=serde_json::from_str(&persisted).unwrap();
+   assert_eq!(reloaded["upstream"][field],expected);
+   assert_eq!(reloaded["upstream"]["http_status"],429);
+  }
+ }
+ #[test]
+ fn p1_unknown_state_is_other_on_wire_retry_and_persistence() {
+  check_p1("state","xk3-9f2a7c1e0b4d6a8f3e5c7b9d1f0a2c4e6b8d","other");
+ }
+ #[test]
+ fn p1_unknown_type_is_other_on_wire_retry_and_persistence() {
+  check_p1("type","xk3-9f2a7c1e0b4d6a8f3e5c7b9d1f0a2c4e6b8d","other");
+ }
+ #[test]
+ fn p1_known_flux_state_and_provider_type_are_preserved() {
+  check_p1("state","free_cap_reached","free_cap_reached");
+  check_p1("type","authentication_error","authentication_error");
+ }
+ #[tokio::test]
+ async fn p3_http_401_preserves_upstream_on_all_six_handlers() {
+  use fuigo_sampler::{ApiBackend,SamplerConfig,SamplingClient};
+  use fuigo_test_support::{MockInferenceServer,ScriptedResponse};
+  for backend in [ApiBackend::ChatCompletions,ApiBackend::Responses,ApiBackend::Messages] {
+   for streaming in [false,true] {
+    let server=MockInferenceServer::start().await.unwrap();
+    let path=match backend {ApiBackend::ChatCompletions=>"/v1/chat/completions",ApiBackend::Responses=>"/v1/responses",ApiBackend::Messages=>"/v1/messages"};
+    server.enqueue_response(path,ScriptedResponse::json(401,json!({"error":{"type":"authentication_error","state":"token_expired","message":"refusal"}})));
+    let client=SamplingClient::new(SamplerConfig {base_url:server.url(),api_key:Some("p3-dummy-key".into()),api_backend:backend.clone(),..Default::default()}).unwrap();
+    let r=fuigo_sampling_types::ConversationRequest::new();
+    let e=match (backend.clone(),streaming) {
+     (ApiBackend::ChatCompletions,true)=>client.conversation_stream(r).await.err().unwrap(),
+     (ApiBackend::Responses,true)=>client.conversation_stream_responses(r).await.err().unwrap(),
+     (ApiBackend::Messages,true)=>client.conversation_stream_messages(r).await.err().unwrap(),
+     (ApiBackend::ChatCompletions,false)=>client.conversation(r).await.unwrap_err(),
+     (ApiBackend::Responses,false)=>client.conversation_responses(r).await.unwrap_err(),
+     (ApiBackend::Messages,false)=>client.conversation_messages(r).await.unwrap_err(),
+    };
+    let data=map_sampling_err_to_acp(e).data.unwrap();
+    assert_eq!(data["upstream"]["http_status"],401);assert_eq!(data["upstream"]["state"],"token_expired");
+   }
+  }
+ }
+ #[test]
+ fn p4_both_workflow_child_branches_use_sampling_facts() {
+  let source=include_str!("../session/acp_session_impl/sampler_turn.rs");
+  for anchor in ["budgeted workflow child model request failed", "workflow child model request failed; usage"] {
+   let tail=source.split_once(anchor).unwrap().1;
+   let branch=tail.split_once("return Err").unwrap().1.split_once(';').unwrap().0;
+   assert!(branch.contains("prompt_terminal_error(&error, message, None)"),"{anchor}: {branch}");
+  }
+  let helper=source.split_once("fn prompt_terminal_error(").unwrap().1.split_once("/// P189").unwrap().0;
+  assert!(helper.contains("sampling_error_data(message, http_status, error)"));
+ }
+ #[test]
+ fn p5_sse_upstream_survives_clone_retry_and_terminal() {
+  let e=try_parse_stream_error(r#"{"error":{"type":"rate_limit_exceeded","state":"free_cap_reached","code":"free_cap_reached","message":"refusal"}}"#).unwrap();
+  let cloned=fuigo_sampler::SamplingErrorInfo::from(&e);
+  let upstream=cloned.upstream();
+  assert_eq!(upstream.state.as_deref(),Some("free_cap_reached"));
+  let retry:RetryState=serde_json::from_value(json!({"type":"exhausted","attempts":3,"reason":"refusal","upstream":upstream})).unwrap();
+  assert_eq!(serde_json::to_value(retry).unwrap()["upstream"]["state"],"free_cap_reached");
+  assert_eq!(map_sampling_err_to_acp(e).data.unwrap()["upstream"]["state"],"free_cap_reached");
+ }
+}

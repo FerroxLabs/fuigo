@@ -349,6 +349,7 @@ impl SessionActor {
                     .await;
             }
             SamplingEvent::Retrying {
+                upstream,
                 request_id,
                 attempt,
                 max_retries,
@@ -406,6 +407,7 @@ impl SessionActor {
                         max_retries,
                         reason,
                         error_type: Some(kind.as_str().to_string()),
+                        upstream,
                         verdicts: None,
                         discard_emitted: false,
                         message_id: None,

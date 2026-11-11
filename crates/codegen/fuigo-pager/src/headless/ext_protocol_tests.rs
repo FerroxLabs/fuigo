@@ -737,6 +737,7 @@ fn p188_retry_state_with_discard_decodes_to_response_discarded() {
             max_retries: 15,
             reason: "stream ended early".into(),
             error_type: Some("api".into()),
+            upstream: Default::default(),
             verdicts: None,
             discard_emitted,
             message_id: discard_emitted.then(|| "msg_1".to_string()),

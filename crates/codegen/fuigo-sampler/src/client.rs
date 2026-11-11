@@ -20,7 +20,7 @@ use reqwest::header::{
 use serde::Serialize;
 
 use fuigo_sampling_types::error::{
-    parse_error_code, try_parse_stream_error, user_facing_api_error_message,
+    parse_error_code, user_facing_api_error_message,
 };
 use fuigo_sampling_types::serde_helpers::parse_sse_event;
 use fuigo_sampling_types::{
@@ -726,6 +726,7 @@ pub struct SamplingClient {
     http: reqwest::Client,
     default_headers: HeaderMap,
     base_url: String,
+    flux_base_url: Option<String>,
     defaults: ClientDefaults,
     /// Optional 401-attribution hook.
     /// The shell wires this to emit a structured event at every UNAUTHORIZED arm so 401s can be bucketed by stale-snapshot vs. live-token-rejected.
@@ -926,6 +927,14 @@ pub fn user_agent_string_for(origin: &OriginClientInfo) -> String {
     }
 }
 
+pub(crate) fn upstream_headers(headers:&HeaderMap)->fuigo_sampling_types::error::UpstreamError {
+    fuigo_sampling_types::error::UpstreamError {
+        hold_reason:headers.get("x-flux-hold-reason").and_then(|v|v.to_str().ok()).filter(|s|fuigo_sampling_types::error::is_upstream_slug(s)).map(str::to_owned),
+        retry_after_s:headers.get("retry-after").and_then(|v|v.to_str().ok()).and_then(fuigo_sampling_types::refusal::header_wait),
+        ..Default::default()
+    }
+}
+
 /// A request builder coupled to the credential state it was built with, so a 401 arm cannot classify from anything but the build-time capture.
 /// The wire default (`SentCredential::Unknown`, which charges the retry budget) stays the fail-closed one.
 /// Only an explicit `sent_bearer: None` (a send the builder provably stamped no credential onto) reaches the uncharged lane via [`auth_rejected`].
@@ -936,8 +945,10 @@ struct SentRequest {
 }
 
 /// The one way a 401 becomes a `SamplingError::Auth` with a wire-derived credential classification: from the fragment its [`SentRequest`] captured.
-fn auth_rejected(message: String, sent_bearer: Option<&BearerFingerprint>) -> SamplingError {
+fn auth_rejected(message: String, sent_bearer: Option<&BearerFingerprint>, upstream_details: fuigo_sampling_types::error::UpstreamError) -> SamplingError {
     SamplingError::Auth {
+        status: upstream_details.http_status.unwrap_or(0),
+        upstream: upstream_details,
         message,
         credential: SentCredential::from_sent_fragment(sent_bearer.map(BearerFingerprint::as_str)),
     }
@@ -1203,6 +1214,7 @@ impl SamplingClient {
             http,
             default_headers: headers,
             base_url: config.base_url,
+            flux_base_url: config.flux_base_url,
             defaults,
             attribution_callback: config.attribution_callback,
             bearer_resolver: config.bearer_resolver,
@@ -1216,8 +1228,21 @@ impl SamplingClient {
         })
     }
 
+    fn observe_refusal(&self,mut error:SamplingError)->SamplingError {
+        error.assert_boundary_classified();
+        if self.dispatch_gate.as_ref().is_some_and(|g|g.on_refusal(&error))
+            && !error.is_terminal_refusal()
+            && let SamplingError::Api {should_retry,..}=&mut error {
+            *should_retry=Some(false);
+        }
+        error
+    }
+
     async fn dispatch_request(&self, mut request: reqwest::Request, streaming: bool) -> Result<reqwest::Response> {
         use crate::request_accounting::{Attempt, Outcome};
+        let route = RequestRoute(fuigo_sampling_types::refusal::is_flux_routed(
+            request.url(), self.flux_base_url.as_deref(),
+        ));
         // Low-level callers still receive a receipt, but without guessing purpose
         // or claiming that receiving response headers settled streaming usage.
         let fallback = (!crate::request_accounting::is_scoped()).then(||
@@ -1229,6 +1254,7 @@ impl SamplingClient {
         // subscription resolver re-awaits the gate itself.
         if let Some(gate) = &self.dispatch_gate {
             gate.wait_open().await;
+            gate.check_open()?;
         }
         // Grok r4 #7: the durable call debit comes AFTER the gate. A request cancelled while it waits at the gate
         // was never admitted, so no call slot is consumed and no attempt is left pending.
@@ -1237,6 +1263,7 @@ impl SamplingClient {
         if let Some(gate) = &self.dispatch_gate {
             // Cancelled while waiting here: `admitted` drops armed and refunds the slot (nothing was sent).
             gate.wait_open().await;
+            gate.check_open()?;
         }
         if let Some(budget) = crate::execution_budget::process_budget().map_err(SamplingError::InvalidConfiguration)? {
             let (purpose, scope) = crate::request_accounting::current_policy();
@@ -1257,13 +1284,17 @@ impl SamplingClient {
         crate::request_accounting::dispatched();
         fuigo_extra_ca::dispatch::execute(&self.http, request).await.map_err(|error| dispatch_error(error, streaming))
         };
-        if let Some(receipt) = fallback {
+        let mut result = if let Some(receipt) = fallback {
             let result = receipt.scope(dispatch).await;
             receipt.finish(if result.is_ok() { Outcome::Unknown } else { Outcome::Failed }, None, None);
             result
         } else {
             dispatch.await
+        };
+        if let Ok(response) = &mut result {
+            response.extensions_mut().insert(route);
         }
+        result
     }
 
     /// Sets the gate awaited right before every request leaves the process (see `dispatch_request`).
@@ -1460,10 +1491,17 @@ impl SamplingClient {
         sent_bearer: Option<&BearerFingerprint>,
     ) -> Result<ChatCompletionResponse> {
         let status = response.status();
+        let mut upstream_headers = upstream_headers(response.headers());
+        upstream_headers.flux_routed = response.extensions().get::<RequestRoute>().expect("request route attached at dispatch").0;
         let model_metadata = extract_model_metadata(response.headers());
         let retry_after_secs = extract_retry_after(status, response.headers());
         let should_retry = extract_should_retry(response.headers());
-        let bytes = response.bytes().await?;
+        // A failed refusal-body read must not discard a known Flux refusal status.
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(_) if !status.is_success() && upstream_headers.flux_routed => Default::default(),
+            Err(error) => return Err(SamplingError::Http(error)),
+        };
 
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -1472,20 +1510,24 @@ impl SamplingClient {
                     sent_bearer,
                 );
                 let server_message = user_facing_api_error_message(status, bytes.as_ref());
-                return Err(auth_rejected(
+                return Err(self.observe_refusal(auth_rejected(
                     format!("Unauthorized (401): {server_message}"),
                     sent_bearer,
-                ));
+                    upstream_headers.with_body(status.as_u16(), bytes.as_ref()),
+                )));
             }
             let message = user_facing_api_error_message(status, bytes.as_ref());
-            return Err(SamplingError::Api {
+            return Err(self.observe_refusal(SamplingError::Api {
                 status,
                 message,
                 model_metadata,
                 retry_after_secs,
                 should_retry,
                 error_code: parse_error_code(bytes.as_ref()),
-            });
+                upstream_state: fuigo_sampling_types::error::parse_error_state(bytes.as_ref()),
+                upstream_type: fuigo_sampling_types::error::parse_error_type(bytes.as_ref()),
+                upstream_details: upstream_headers.with_body(status.as_u16(),bytes.as_ref()),
+            }));
         }
 
         let completion = serde_json::from_slice::<ChatCompletionResponse>(&bytes)
@@ -1604,6 +1646,8 @@ impl SamplingClient {
         let response = self.dispatch_request(built_request, true).await?;
 
         let status = response.status();
+        let mut upstream_headers = upstream_headers(response.headers());
+        upstream_headers.flux_routed = response.extensions().get::<RequestRoute>().expect("request route attached at dispatch").0;
         let span = tracing::Span::current();
         span.record("status_code", status.as_u16() as i64);
         span.record("success", status.is_success());
@@ -1620,13 +1664,19 @@ impl SamplingClient {
                 let endpoint = self.endpoint("chat/completions");
                 let body = response.bytes().await.unwrap_or_default();
                 let server_message = user_facing_api_error_message(status, body.as_ref());
-                return Err(auth_rejected(
+                return Err(self.observe_refusal(auth_rejected(
                     format!("Unauthorized (401) from {endpoint}: {server_message}"),
                     sent_bearer.as_ref(),
-                ));
+                    upstream_headers.with_body(status.as_u16(), body.as_ref()),
+                )));
             }
 
-            let bytes = response.bytes().await?;
+            // A failed refusal-body read must not discard a known Flux refusal status.
+            let bytes = match response.bytes().await {
+                Ok(bytes) => bytes,
+                Err(_) if !status.is_success() && upstream_headers.flux_routed => Default::default(),
+                Err(error) => return Err(SamplingError::Http(error)),
+            };
             let message = user_facing_api_error_message(status, bytes.as_ref());
             span.record("error", message.as_str());
             tracing::error!(
@@ -1636,14 +1686,17 @@ impl SamplingClient {
                 model_id = %model_id,
                 "chat/completions API error"
             );
-            return Err(SamplingError::Api {
+            return Err(self.observe_refusal(SamplingError::Api {
                 status,
                 message,
                 model_metadata,
                 retry_after_secs,
                 should_retry,
                 error_code: parse_error_code(bytes.as_ref()),
-            });
+                upstream_state: fuigo_sampling_types::error::parse_error_state(bytes.as_ref()),
+                upstream_type: fuigo_sampling_types::error::parse_error_type(bytes.as_ref()),
+                upstream_details: upstream_headers.with_body(status.as_u16(),bytes.as_ref()),
+            }));
         }
 
         // Strip UTF-8 BOM if present: eventsource-stream 0.2.3 incorrectly slices BOM at byte 1 instead of 3.
@@ -1662,13 +1715,14 @@ impl SamplingClient {
         });
 
         let event_stream = byte_stream.eventsource();
+        let refusal_gate = self.dispatch_gate.clone();
 
         // Map SSE events into ChatCompletionChunk.
         // Uses `scan` so that `[DONE]` and transport errors both terminate the stream (`None`)
         // The first transport error is emitted to the consumer, then subsequent polls return `None`
         // This prevents an infinite busy-loop when the HTTP/2 connection drops and h2 keeps producing errors
         let chunks = event_stream
-            .scan(false, |had_transport_error, event_res| {
+            .scan(false, move |had_transport_error, event_res| {
                 if *had_transport_error {
                     return std::future::ready(None);
                 }
@@ -1686,7 +1740,7 @@ impl SamplingClient {
                             data = %data,
                         );
 
-                        if let Some(stream_error) = try_parse_stream_error(data) {
+                        if let Some(stream_error) = parse_boundary_stream_error(data, upstream_headers.flux_routed, refusal_gate.as_deref()) {
                             Some(Err(stream_error))
                         } else {
                             Some(
@@ -1827,10 +1881,17 @@ impl SamplingClient {
         let response = self.dispatch_request(http_request.build().map_err(SamplingError::Http)?, false).await?;
 
         let status = response.status();
+        let mut upstream_headers = upstream_headers(response.headers());
+        upstream_headers.flux_routed = response.extensions().get::<RequestRoute>().expect("request route attached at dispatch").0;
         let model_metadata = extract_model_metadata(response.headers());
         let retry_after_secs = extract_retry_after(status, response.headers());
         let should_retry = extract_should_retry(response.headers());
-        let bytes = response.bytes().await?;
+        // A failed refusal-body read must not discard a known Flux refusal status.
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(_) if !status.is_success() && upstream_headers.flux_routed => Default::default(),
+            Err(error) => return Err(SamplingError::Http(error)),
+        };
 
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -1840,10 +1901,11 @@ impl SamplingClient {
                 );
                 let endpoint = self.endpoint("responses");
                 let server_message = user_facing_api_error_message(status, bytes.as_ref());
-                return Err(auth_rejected(
+                return Err(self.observe_refusal(auth_rejected(
                     format!("Unauthorized (401) from {endpoint}: {server_message}"),
                     sent_bearer.as_ref(),
-                ));
+                    upstream_headers.with_body(status.as_u16(), bytes.as_ref()),
+                )));
             }
 
             let message = user_facing_api_error_message(status, bytes.as_ref());
@@ -1854,14 +1916,17 @@ impl SamplingClient {
                 model_id = %model_id,
                 "responses API error"
             );
-            return Err(SamplingError::Api {
+            return Err(self.observe_refusal(SamplingError::Api {
                 status,
                 message,
                 model_metadata,
                 retry_after_secs,
                 should_retry,
                 error_code: parse_error_code(bytes.as_ref()),
-            });
+                upstream_state: fuigo_sampling_types::error::parse_error_state(bytes.as_ref()),
+                upstream_type: fuigo_sampling_types::error::parse_error_type(bytes.as_ref()),
+                upstream_details: upstream_headers.with_body(status.as_u16(),bytes.as_ref()),
+            }));
         }
 
         let response_obj = serde_json::from_slice::<rs::Response>(&bytes)
@@ -1975,6 +2040,8 @@ impl SamplingClient {
         let response = self.dispatch_request(built_request, true).await?;
 
         let status = response.status();
+        let mut upstream_headers = upstream_headers(response.headers());
+        upstream_headers.flux_routed = response.extensions().get::<RequestRoute>().expect("request route attached at dispatch").0;
         let span = tracing::Span::current();
         span.record("status_code", status.as_u16() as i64);
         span.record("success", status.is_success());
@@ -1988,15 +2055,21 @@ impl SamplingClient {
                 let endpoint = self.endpoint("responses");
                 let body = response.bytes().await.unwrap_or_default();
                 let server_message = user_facing_api_error_message(status, body.as_ref());
-                return Err(auth_rejected(
+                return Err(self.observe_refusal(auth_rejected(
                     format!("Unauthorized (401) from {endpoint}: {server_message}"),
                     sent_bearer.as_ref(),
-                ));
+                    upstream_headers.with_body(status.as_u16(), body.as_ref()),
+                )));
             }
             let model_metadata = extract_model_metadata(response.headers());
             let retry_after_secs = extract_retry_after(status, response.headers());
             let should_retry = extract_should_retry(response.headers());
-            let bytes = response.bytes().await?;
+            // A failed refusal-body read must not discard a known Flux refusal status.
+            let bytes = match response.bytes().await {
+                Ok(bytes) => bytes,
+                Err(_) if !status.is_success() && upstream_headers.flux_routed => Default::default(),
+                Err(error) => return Err(SamplingError::Http(error)),
+            };
             let message = user_facing_api_error_message(status, bytes.as_ref());
             span.record("error", message.as_str());
             tracing::error!(
@@ -2006,14 +2079,17 @@ impl SamplingClient {
                 model_id = %model_id,
                 "responses API error"
             );
-            return Err(SamplingError::Api {
+            return Err(self.observe_refusal(SamplingError::Api {
                 status,
                 message,
                 model_metadata,
                 retry_after_secs,
                 should_retry,
                 error_code: parse_error_code(bytes.as_ref()),
-            });
+                upstream_state: fuigo_sampling_types::error::parse_error_state(bytes.as_ref()),
+                upstream_type: fuigo_sampling_types::error::parse_error_type(bytes.as_ref()),
+                upstream_details: upstream_headers.with_body(status.as_u16(),bytes.as_ref()),
+            }));
         }
 
         let model_metadata = extract_model_metadata(response.headers());
@@ -2034,6 +2110,7 @@ impl SamplingClient {
         });
 
         let event_stream = byte_stream.eventsource();
+        let refusal_gate = self.dispatch_gate.clone();
 
         let doom_loop_for_stream = doom_loop.clone();
         let mut codex_output = (self.subscription == Some(crate::subscription::SubscriptionKind::Chatgpt))
@@ -2069,7 +2146,7 @@ impl SamplingClient {
                         };
                         if swallow {
                             Some(None)
-                        } else if let Some(stream_error) = try_parse_stream_error(data) {
+                        } else if let Some(stream_error) = parse_boundary_stream_error(data, upstream_headers.flux_routed, refusal_gate.as_deref()) {
                             Some(Some(Err(stream_error)))
                         } else {
                             match deserialize_response_event(data) {
@@ -2166,10 +2243,17 @@ impl SamplingClient {
         let response = self.dispatch_request(http_request.build().map_err(SamplingError::Http)?, false).await?;
 
         let status = response.status();
+        let mut upstream_headers = upstream_headers(response.headers());
+        upstream_headers.flux_routed = response.extensions().get::<RequestRoute>().expect("request route attached at dispatch").0;
         let model_metadata = extract_model_metadata(response.headers());
         let retry_after_secs = extract_retry_after(status, response.headers());
         let should_retry = extract_should_retry(response.headers());
-        let bytes = response.bytes().await?;
+        // A failed refusal-body read must not discard a known Flux refusal status.
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(_) if !status.is_success() && upstream_headers.flux_routed => Default::default(),
+            Err(error) => return Err(SamplingError::Http(error)),
+        };
 
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -2179,10 +2263,11 @@ impl SamplingClient {
                 );
                 let endpoint = self.endpoint("messages");
                 let server_message = user_facing_api_error_message(status, bytes.as_ref());
-                return Err(auth_rejected(
+                return Err(self.observe_refusal(auth_rejected(
                     format!("Unauthorized (401) from {endpoint}: {server_message}"),
                     sent_bearer.as_ref(),
-                ));
+                    upstream_headers.with_body(status.as_u16(), bytes.as_ref()),
+                )));
             }
 
             let message = user_facing_api_error_message(status, bytes.as_ref());
@@ -2193,14 +2278,17 @@ impl SamplingClient {
                 model_id = %model_id,
                 "messages API error"
             );
-            return Err(SamplingError::Api {
+            return Err(self.observe_refusal(SamplingError::Api {
                 status,
                 message,
                 model_metadata,
                 retry_after_secs,
                 should_retry,
                 error_code: parse_error_code(bytes.as_ref()),
-            });
+                upstream_state: fuigo_sampling_types::error::parse_error_state(bytes.as_ref()),
+                upstream_type: fuigo_sampling_types::error::parse_error_type(bytes.as_ref()),
+                upstream_details: upstream_headers.with_body(status.as_u16(),bytes.as_ref()),
+            }));
         }
 
         let response_obj =
@@ -2281,6 +2369,8 @@ impl SamplingClient {
         let response = self.dispatch_request(built_request, true).await?;
 
         let status = response.status();
+        let mut upstream_headers = upstream_headers(response.headers());
+        upstream_headers.flux_routed = response.extensions().get::<RequestRoute>().expect("request route attached at dispatch").0;
         let span = tracing::Span::current();
         span.record("status_code", status.as_u16() as i64);
         span.record("success", status.is_success());
@@ -2294,15 +2384,21 @@ impl SamplingClient {
                 let endpoint = self.endpoint("messages");
                 let body = response.bytes().await.unwrap_or_default();
                 let server_message = user_facing_api_error_message(status, body.as_ref());
-                return Err(auth_rejected(
+                return Err(self.observe_refusal(auth_rejected(
                     format!("Unauthorized (401) from {endpoint}: {server_message}"),
                     sent_bearer.as_ref(),
-                ));
+                    upstream_headers.with_body(status.as_u16(), body.as_ref()),
+                )));
             }
             let model_metadata = extract_model_metadata(response.headers());
             let retry_after_secs = extract_retry_after(status, response.headers());
             let should_retry = extract_should_retry(response.headers());
-            let bytes = response.bytes().await?;
+            // A failed refusal-body read must not discard a known Flux refusal status.
+            let bytes = match response.bytes().await {
+                Ok(bytes) => bytes,
+                Err(_) if !status.is_success() && upstream_headers.flux_routed => Default::default(),
+                Err(error) => return Err(SamplingError::Http(error)),
+            };
             let message = user_facing_api_error_message(status, bytes.as_ref());
             span.record("error", message.as_str());
             tracing::error!(
@@ -2312,14 +2408,17 @@ impl SamplingClient {
                 model_id = %model_id,
                 "messages API error"
             );
-            return Err(SamplingError::Api {
+            return Err(self.observe_refusal(SamplingError::Api {
                 status,
                 message,
                 model_metadata,
                 retry_after_secs,
                 should_retry,
                 error_code: parse_error_code(bytes.as_ref()),
-            });
+                upstream_state: fuigo_sampling_types::error::parse_error_state(bytes.as_ref()),
+                upstream_type: fuigo_sampling_types::error::parse_error_type(bytes.as_ref()),
+                upstream_details: upstream_headers.with_body(status.as_u16(),bytes.as_ref()),
+            }));
         }
 
         let model_metadata = extract_model_metadata(response.headers());
@@ -2340,6 +2439,7 @@ impl SamplingClient {
         });
 
         let event_stream = byte_stream.eventsource();
+        let refusal_gate = self.dispatch_gate.clone();
 
         // Map SSE events into MessageStreamEvent.
         // Uses `scan` so transport errors terminate the stream after the first error (same pattern as `chat_completion_stream`)
@@ -2347,7 +2447,7 @@ impl SamplingClient {
         // without terminating the stream (`filter_map` below), exactly as the Responses backend does
         // An outer `None` still ends the stream
         let events = event_stream
-            .scan(false, |had_transport_error, event_res| {
+            .scan(false, move |had_transport_error, event_res| {
                 if *had_transport_error {
                     return std::future::ready(None);
                 }
@@ -2365,7 +2465,7 @@ impl SamplingClient {
                             data = %data,
                         );
 
-                        if let Some(stream_error) = try_parse_stream_error(data) {
+                        if let Some(stream_error) = parse_boundary_stream_error(data, upstream_headers.flux_routed, refusal_gate.as_deref()) {
                             Some(Some(Err(stream_error)))
                         } else {
                             // Anthropic adds SSE event types without a version bump. An unmodelled
@@ -2710,6 +2810,9 @@ pub(crate) fn apply_length_policy(
 
 /// Rebuild `Api` from stream-collected info, preserving status, `Retry-After`, and `x-should-retry` (kind is lost on this path).
 fn stream_collect_error(info: SamplingErrorInfo) -> SamplingError {
+    if info.kind==crate::events::SamplingErrorKind::Auth {
+        return SamplingError::Auth {status:info.upstream().http_status.unwrap_or(0),upstream:info.upstream(),message:info.message,credential:info.credential};
+    }
     SamplingError::Api {
         status: info
             .status_code
@@ -2720,6 +2823,9 @@ fn stream_collect_error(info: SamplingErrorInfo) -> SamplingError {
         retry_after_secs: info.retry_after_secs,
         should_retry: info.should_retry,
         error_code: info.error_code,
+        upstream_state: info.upstream_state,
+        upstream_type: info.upstream_type,
+        upstream_details: info.upstream_details,
     }
 }
 
@@ -2789,6 +2895,9 @@ mod tests {
             retry_after_secs: Some(3),
             should_retry: Some(false),
             error_code: Some(ApiErrorCode::InvalidImage),
+            upstream_state: Some("hold".into()),
+            upstream_type: Some("rate_limit_exceeded".into()),
+            upstream_details: Default::default(),
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
@@ -2803,10 +2912,15 @@ mod tests {
             retry_after_secs,
             should_retry,
             error_code,
+            upstream_state,
+            upstream_type,
+            upstream_details: _,
         } = stream_collect_error(info)
         else {
             panic!("expected Api");
         };
+        assert_eq!(upstream_state.as_deref(), Some("hold"));
+        assert_eq!(upstream_type.as_deref(), Some("rate_limit_exceeded"));
         assert_eq!(
             (
                 status.as_u16(),
@@ -3085,6 +3199,7 @@ mod tests {
     fn minimal_config() -> SamplerConfig {
         SamplerConfig {
             api_key: Some("test-key".to_string()),
+            flux_base_url: None,
             base_url: "https://example.test".to_string(),
             model: "test-model".to_string(),
             max_completion_tokens: None,
@@ -4877,3 +4992,17 @@ mod p70b_body_preview_tests {
         clear_for_tests();
     }
 }
+
+/// The raw SSE boundary shared by all three streaming backends.
+fn parse_boundary_stream_error(data: &str, flux_routed: bool, gate: Option<&dyn fuigo_sampling_types::DispatchGate>) -> Option<SamplingError> {
+    let mut error = fuigo_sampling_types::error::try_parse_stream_error_for_request(data, flux_routed)?;
+    error.assert_boundary_classified();
+    if gate.is_some_and(|g| g.on_refusal(&error)) && !error.is_terminal_refusal()
+        && let SamplingError::Api { should_retry, .. } = &mut error
+    { *should_retry = Some(false); }
+    Some(error)
+}
+
+// Request provenance is captured before transport dispatch, independently of response URLs.
+#[derive(Clone, Copy)]
+struct RequestRoute(bool);

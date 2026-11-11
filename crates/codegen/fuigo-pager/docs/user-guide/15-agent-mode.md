@@ -205,9 +205,27 @@ Every error reply the agent itself produces carries `data` as an object. The exc
 | ------------- | ------------------------------- | ---------------------------------------------------------------------------------------- |
 | `message`     | always, in an agent-built reply | What went wrong, in words. Show this to the user.                                        |
 | `error_kind`  | always, in an agent-built reply | Stable machine tag for the failure (see below).                                          |
-| `http_status` | when the provider returned one  | Upstream HTTP status, for example `503`.                                                 |
+| `http_status` | on existing status-bearing error classes | Legacy upstream status; deliberately absent on `-32003` (429). |
+| `upstream` | on terminal sampling failures | Typed upstream facts, independent of the display message (frozen format below). |
 | `promptUsage` | when usage was recorded         | Tokens and spend the failed prompt still consumed.                                       |
 | `code`        | on some failures                | A finer machine code a client can match on, for example `local_workspace_chat_only` or `FS_DISK_QUOTA_EXCEEDED`. |
+
+The frozen `upstream` object has `http_status` (an integer HTTP status when known), `type` and `state` (optional values from a fixed vocabulary of Flux codes, supported provider error types, and exact LiteLLM exception names). Absent fields are omitted; a failure with no upstream facts carries `{}`. For example a Flux free-tier cap yields `{"http_status":429,"type":"rate_limit_exceeded","state":"free_cap_reached","codes":["free_cap_reached","rate_limit_exceeded"]}`. The same object is carried as `upstream` on `_fuigo` RetryState `retrying`, `exhausted`, and `failed` notices. Consumers should classify these fields independently of the capped human message. LiteLLM-wrapped and double-encoded error envelopes retain these facts even when the code word falls beyond the message cap. This is additive: JSON-RPC codes, `data.message`, and the legacy top-level `data.http_status` retain their meanings.
+
+Additional frozen `upstream` fields:
+
+- `code`: first slug in `error.error`, `error.provider_specific_fields.error` (string, or its `state` then `type`), then a non-numeric `error.code`.
+- `codes`: all slug codes in body extraction order (`state`, `error`, non-numeric `code`, `type`, provider error string, nested `state`, `type`, `error`), without duplicates. This retains a terminal code even when `code` names a transient condition.
+- `hold_reason`: the slug in `X-Flux-Hold-Reason`.
+- `limit`: the first slug in `error.limit`, `error.provider_specific_fields.limit`, then its nested `error.limit`.
+- `retry_after_s`: integer seconds in 0..=7200, from an integer `Retry-After` header, then `error.retry_after`, provider-specific `retry_after`, then its nested error's `retry_after`. JSON booleans, strings, fractions, negative and out-of-range values are omitted. This wire value is independent of the engine's capped internal retry timing.
+- `resets_at`: `error.resets_at` or provider-specific `resets_at`, when it is a UTC string shaped `YYYY-MM-DDTHH:MM:SSZ`.
+
+The refusal classifier applies terminal status (401/402/403), terminal codes, and terminal text before transient hints. STOP and PAUSE both end the prompt without further model dispatches. A bare 401 classified as `keyRefused` may refresh a session token once and resubmit once; every refusal of that resubmit ends the prompt. Static keys, 403s, and budget/key-access refusals do not enter this exception. A new user prompt starts a fresh attempt. Auth errors retain their actual status in `upstream`; the legacy top-level status and JSON-RPC code conventions are preserved.
+
+Unknown-429 PAUSE and terminal-text handling apply only when the request host is `fluxrouter.ai`, a subdomain, or the configured Flux base URL host; other hosts retain their existing 429 retry/backoff behavior (including Retry-After), with terminal handling limited to 401/402/403 and explicit final codes.
+
+Unknown upstream state, type, and code values are reported as `"other"` on the wire and in saved sessions.
 
 Some failures add more structured fields next to these, for example the execution receipt (`partial`, `reason`, `pending_tool_calls`, ...) when a budgeted execution ends early.
 

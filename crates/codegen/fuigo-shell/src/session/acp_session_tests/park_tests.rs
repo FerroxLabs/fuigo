@@ -145,7 +145,7 @@ async fn a_parked_roots_subagent_waits_at_its_model_call() {
             let _link = quiesce::SessionGuard::new(&child_id, Some(&root_id));
             park(&root_id);
             assert!(!quiesce::is_self_quiesced(&child_id));
-            let call = actor.prepare_chat_completion(false);
+            let call = actor.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side);
             tokio::pin!(call);
             assert!(
                 tokio::time::timeout(std::time::Duration::from_millis(300), &mut call)
@@ -171,7 +171,7 @@ async fn a_side_call_prepared_before_the_park_waits_at_dispatch() {
             let actor = test_actor().await;
             let session_id = actor.session_info.id.0.to_string();
             let client = actor
-                .prepare_chat_completion(false)
+                .prepare_chat_completion(false, crate::session::acp_session::CallRole::Side)
                 .await
                 .expect("client before the park");
             park(&session_id);

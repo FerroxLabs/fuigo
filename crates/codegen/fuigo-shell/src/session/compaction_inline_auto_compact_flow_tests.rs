@@ -372,6 +372,8 @@ async fn create_test_actor(
     );
     chat_state_handle.record_token_usage(total_tokens);
     SessionActor {
+        held_wakes: Default::default(),
+        refusal_prompt: std::sync::Arc::new(std::sync::Mutex::new(fuigo_sampling_types::refusal::PromptSM::new(false))),
         repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
         ),
         transient_retry_enabled: true,
@@ -2250,6 +2252,9 @@ fn api_error_with_context_window(context_window: u64) -> fuigo_sampler::Sampling
         retry_after_secs: None,
         should_retry: None,
         error_code: None,
+        upstream_state: None,
+        upstream_type: None,
+        upstream_details: Default::default(),
         model_metadata: Some(crate::sampling::ResponseModelMetadata {
             context_window: Some(context_window),
             max_completion_tokens: None,
@@ -2571,7 +2576,7 @@ async fn actor_with_prepared_client() -> (
         )
         .await
         .expect("switch");
-    let client = actor.prepare_chat_completion(false).await.expect("client");
+    let client = actor.prepare_chat_completion(false, crate::session::acp_session::CallRole::Main).await.expect("client");
     (actor, server, client)
 }
 /// Astra r2 #5 (a): a compaction request prepared before the park but sent after it must wait for the unpark.
@@ -2586,7 +2591,7 @@ async fn compaction_request_prepared_before_a_park_is_not_sent_while_parked() {
         .run_until(async {
             let (actor, server, client) = actor_with_prepared_client().await;
             let session_id = actor.session_info.id.0.to_string();
-            let sampling_config = actor.reconstruct_full_config().await;
+            let sampling_config = actor.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
             let parked = park_session(&session_id);
             let cancel = tokio_util::sync::CancellationToken::new();
             let run = tokio::task::spawn_local({
@@ -2639,7 +2644,7 @@ async fn subagent_compaction_retry_is_not_sent_while_the_parent_is_parked() {
             let child = actor.session_info.id.0.to_string();
             let parent = format!("{child}-parent");
             let _link = crate::session::quiesce::SessionGuard::new(&child, Some(&parent));
-            let sampling_config = actor.reconstruct_full_config().await;
+            let sampling_config = actor.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
             let sampler =
                 crate::session::helpers::full_replace_compaction::ShellCompactionSampler::new(
                     false,
@@ -2722,6 +2727,9 @@ fn context_length_error_without_metadata() -> fuigo_sampler::SamplingErrorInfo {
         retry_after_secs: None,
         should_retry: None,
         error_code: None,
+        upstream_state: None,
+        upstream_type: None,
+        upstream_details: Default::default(),
         model_metadata: None,
         empty_response_context: None,
         doom_loop_triggers: None,

@@ -1,0 +1,80 @@
+{
+ "status": 402,
+ "headers": {
+  "date": "<HTTP-date>",
+  "server": "uvicorn",
+  "x-flux-alias": "deepseek-v4-flash",
+  "content-type": "application/json",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "connection": "close",
+  "content-length": "<n>"
+ },
+ "body": {
+  "error": {
+   "message": "key_budget_reached",
+   "type": "None",
+   "param": "None",
+   "code": "402",
+   "provider_specific_fields": {
+    "error": "key_budget_reached",
+    "limit": "bot_monthly_spend",
+    "key_id": "KEYHASH_REDACTED",
+    "key_name": "my-key",
+    "key_monthly_budget_usd": null,
+    "key_monthly_token_limit": null,
+    "spent_usd_this_month": 25.0123,
+    "tokens_this_month": 91234,
+    "spend_basis": "customer_billed_sale",
+    "resets_at": "2026-12-01T00:00:00Z",
+    "message": "This bot has reached its $25.00 monthly budget across all of its keys. It resets on 1 December 2026 at 00:00 UTC. Raise the bot's monthly budget to let it keep going.",
+    "manage_url": "https://fluxrouter.ai/home/keys",
+    "bot_id": "BOTID_REDACTED",
+    "bot_monthly_budget_usd": 25.0
+   }
+  }
+ },
+ "endpoint": "/v1/chat/completions",
+ "per_endpoint": {
+  "/v1/responses": {
+   "status": 402,
+   "headers": {
+    "content-length": "588",
+    "content-type": "application/json"
+   },
+   "body": {
+    "error": {
+     "error": "key_budget_reached",
+     "limit": "bot_monthly_spend",
+     "key_id": "KEYHASH_REDACTED",
+     "key_name": "my-key",
+     "key_monthly_budget_usd": null,
+     "key_monthly_token_limit": null,
+     "spent_usd_this_month": 25.0123,
+     "tokens_this_month": 91234,
+     "spend_basis": "customer_billed_sale",
+     "resets_at": "2026-12-01T00:00:00Z",
+     "message": "This bot has reached its $25.00 monthly budget across all of its keys. It resets on 1 December 2026 at 00:00 UTC. Raise the bot's monthly budget to let it keep going.",
+     "manage_url": "https://fluxrouter.ai/home/keys",
+     "bot_id": "BOTID_REDACTED",
+     "bot_monthly_budget_usd": 25.0
+    }
+   }
+  },
+  "/v1/messages": {
+   "status": 402,
+   "headers": {
+    "content-length": "236",
+    "content-type": "application/json"
+   },
+   "body": {
+    "type": "error",
+    "error": {
+     "type": "invalid_request_error",
+     "message": "This bot has reached its $25.00 monthly budget across all of its keys. It resets on 1 December 2026 at 00:00 UTC. Raise the bot's monthly budget to let it keep going."
+    }
+   }
+  }
+ }
+}

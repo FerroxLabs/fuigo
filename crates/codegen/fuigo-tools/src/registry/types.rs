@@ -331,6 +331,9 @@ pub struct SessionContext {
     /// wire this to the same attribution sink used for inference-side
     /// 401s so tool and chat auth failures share one telemetry path.
     pub attribution_callback: Option<crate::SharedAttributionCallback>,
+    /// The session's veto over model requests made by tools (web search).
+    /// `None` outside a session.
+    pub dispatch_gate: Option<crate::implementations::web_search::client::SharedModelDispatchGate>,
     /// Tag name for `<system-reminder>` wrappers in tool result text.
     /// Defaults to [`crate::reminders::DEFAULT_REMINDER_TAG`] (hyphen).
     /// Hosts that expect a different tag name may override this.
@@ -1154,7 +1157,9 @@ impl ToolRegistryBuilder {
             &ctx.web_search_config,
             ctx.api_key_provider.clone(),
         ) {
-            let client = client.with_attribution_callback(ctx.attribution_callback.clone());
+            let client = client
+                .with_attribution_callback(ctx.attribution_callback.clone())
+                .with_dispatch_gate(ctx.dispatch_gate.clone());
             resources.insert(client);
         }
         if let Some(lsp) = ctx.lsp {
@@ -2651,6 +2656,7 @@ mod tests {
             api_key_provider: None,
             auth_provider: None,
             attribution_callback: None,
+            dispatch_gate: None,
             system_reminder_tag: crate::reminders::DEFAULT_REMINDER_TAG,
         }
     }

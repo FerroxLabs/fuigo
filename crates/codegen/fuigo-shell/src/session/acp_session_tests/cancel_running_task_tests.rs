@@ -37,6 +37,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 cwd: cwd.as_str().to_string(),
             };
             let sampling_client = crate::sampling::Client::new(fuigo_sampler::SamplerConfig {
+        flux_base_url: None,
                 api_key: Some("test-key".to_string()),
                 base_url: fuigo_test_support::refused_loopback_url(),
                 model: "test".to_string(),
@@ -125,6 +126,8 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 tokio_util::sync::CancellationToken::new(),
             );
             let actor = Arc::new(SessionActor {
+                held_wakes: Default::default(),
+                refusal_prompt: std::sync::Arc::new(std::sync::Mutex::new(fuigo_sampling_types::refusal::PromptSM::new(false))),
                 repo_status_prefetch:
                     crate::session::repo_status_prefix::RepoStatusPrefetchState::default(),
                 transient_retry_enabled: true,
@@ -497,6 +500,7 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                 cwd: session_dir.path().to_string_lossy().to_string(),
             };
             let sampling_client = crate::sampling::Client::new(fuigo_sampler::SamplerConfig {
+        flux_base_url: None,
                     api_key: Some("test-key".to_string()),
                     base_url: fuigo_test_support::refused_loopback_url(),
                     model: "test-model".to_string(),
@@ -645,6 +649,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
             let tool_context =
                 ToolContext::new(cwd.clone(), None, None, fs, terminal, hunk_tracker_handle);
             let sampling_client = crate::sampling::Client::new(fuigo_sampler::SamplerConfig {
+        flux_base_url: None,
                 api_key: Some("test-key".to_string()),
                 base_url: fuigo_test_support::refused_loopback_url(),
                 model: "test-model".to_string(),
@@ -755,6 +760,8 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
             };
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
             let actor = Arc::new(SessionActor {
+                held_wakes: Default::default(),
+                refusal_prompt: std::sync::Arc::new(std::sync::Mutex::new(fuigo_sampling_types::refusal::PromptSM::new(false))),
                 repo_status_prefetch:
                     crate::session::repo_status_prefix::RepoStatusPrefetchState::default(),
                 transient_retry_enabled: true,
@@ -1087,6 +1094,8 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 )
                 .await;
             let actor = SessionActor {
+                held_wakes: Default::default(),
+                refusal_prompt: std::sync::Arc::new(std::sync::Mutex::new(fuigo_sampling_types::refusal::PromptSM::new(false))),
                 repo_status_prefetch:
                     crate::session::repo_status_prefix::RepoStatusPrefetchState::default(),
                 transient_retry_enabled: true,
@@ -2574,6 +2583,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 let _ = axum::serve(listener, app).await;
             });
             let cfg = fuigo_sampler::SamplerConfig {
+        flux_base_url: None,
                 api_key: Some("test-key".to_string()),
                 base_url: format!("http://{addr}/v1"),
                 model: "test-model".to_string(),
@@ -2660,6 +2670,8 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 )
                 .await;
             let actor = SessionActor {
+                held_wakes: Default::default(),
+                refusal_prompt: std::sync::Arc::new(std::sync::Mutex::new(fuigo_sampling_types::refusal::PromptSM::new(false))),
                 repo_status_prefetch:
                     crate::session::repo_status_prefix::RepoStatusPrefetchState::default(),
                 transient_retry_enabled: true,

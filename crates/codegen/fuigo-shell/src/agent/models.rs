@@ -1394,7 +1394,7 @@ impl ModelsManager {
         let credentials =
             resolve_credentials(current_model, session_auth.as_ref().map(|a| a.key.as_str()));
 
-        sampling_config_for_model(
+        let mut sampler = sampling_config_for_model(
             current_model,
             credentials,
             config.endpoints.alpha_test_key.clone(),
@@ -1403,7 +1403,9 @@ impl ModelsManager {
                 config.endpoints.deployment_key.as_deref(),
             ),
             None,
-        )
+        );
+        sampler.flux_base_url = Some(config.endpoints.fuigo_api_base_url.clone());
+        sampler
     }
 
     fn cache_origin(&self) -> String {

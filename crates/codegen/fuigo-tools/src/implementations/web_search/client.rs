@@ -4,6 +4,17 @@ use crate::types::SharedApiKeyProvider;
 use crate::types::api_key_provider::{CredentialPurpose, CredentialRequest};
 use async_openai::types::responses as rs;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+/// The owning session's veto over model requests, consulted immediately before
+/// the web search request leaves the process. `fuigo-tools` cannot depend on
+/// the sampling crate, so the host adapts its dispatch gate to this trait.
+pub trait ModelDispatchGate: Send + Sync {
+    /// `Err(reason)` when no further model request may be dispatched.
+    fn check_open(&self) -> Result<(), String>;
+}
+
+/// Shared handle to a session's dispatch veto.
+pub type SharedModelDispatchGate = std::sync::Arc<dyn ModelDispatchGate>;
+
 /// A minimal, purpose-built HTTP client for calling the Responses API
 /// with web search capability.
 #[derive(Clone)]
@@ -26,6 +37,8 @@ pub struct WebSearchClient {
     /// from the Responses API emits an `auth_401_attribution` event
     /// with `consumer == "WebSearch"`.
     attribution_callback: Option<SharedAttributionCallback>,
+    /// The session's veto; `None` for callers outside a session.
+    dispatch_gate: Option<SharedModelDispatchGate>,
 }
 impl WebSearchClient {
     /// Create a new web search client from `WebSearchConfig::Enabled`.
@@ -90,6 +103,7 @@ impl WebSearchClient {
             api_key_provider,
             configured_api_key,
             attribution_callback: None,
+            dispatch_gate: None,
         })
     }
     /// Resolve the effective domain filters for a request.
@@ -189,6 +203,23 @@ impl WebSearchClient {
         self.attribution_callback = callback;
         self
     }
+    /// Wire the owning session's dispatch veto into this client.
+    pub fn with_dispatch_gate(mut self, gate: Option<SharedModelDispatchGate>) -> Self {
+        self.dispatch_gate = gate;
+        self
+    }
+    /// Called immediately before the request is sent, after the credential await.
+    fn check_open_before_send(&self) -> Result<(), fuigo_tool_runtime::ToolError> {
+        match &self.dispatch_gate {
+            Some(gate) => gate.check_open().map_err(|reason| {
+                fuigo_tool_runtime::ToolError::execution(
+                    fuigo_tool_protocol::ToolId::new("web_search").expect("valid"),
+                    format!("Web search request was not sent: {reason}"),
+                )
+            }),
+            None => Ok(()),
+        }
+    }
     async fn current_bearer(&self, recipient: &str) -> Option<String> {
         crate::types::api_key_provider::resolve_bearer(
             self.api_key_provider.as_ref(),
@@ -225,6 +256,7 @@ impl WebSearchClient {
                 "No credential is available for the configured web search endpoint",
             )
         })?;
+        self.check_open_before_send()?;
         let req = self
             .http
             .post(&url)
@@ -299,6 +331,7 @@ impl WebSearchClient {
                 "No credential is available for the configured web search endpoint",
             )
         })?;
+        self.check_open_before_send()?;
         let req = self
             .http
             .post(&url)
@@ -994,6 +1027,128 @@ mod tests {
             .await
             .expect("search must succeed with provider key");
         assert_eq!(content, "fresh result");
+    }
+    /// Gate that reports a fixed state and counts consultations.
+    struct FlagGate(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl ModelDispatchGate for FlagGate {
+        fn check_open(&self) -> Result<(), String> {
+            if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                Err("session dispatch is closed".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+    /// Provider that closes the gate while the credential lookup is awaited.
+    struct ClosesGateDuringLookup(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl crate::types::ApiKeyProvider for ClosesGateDuringLookup {
+        fn current_api_key(&self) -> Option<String> {
+            Some("lookup-key".into())
+        }
+        fn credential_for(
+            &self,
+            _request: CredentialRequest<'_>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = crate::types::api_key_provider::CredentialResolution,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            let flag = self.0.clone();
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                crate::types::api_key_provider::CredentialResolution::Resolved("lookup-key".into())
+            })
+        }
+    }
+    async fn gate_mock() -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "resp_test",
+                "object": "response",
+                "created_at": 1234567890,
+                "status": "completed",
+                "model": "test-model",
+                "output": [{
+                    "type": "message",
+                    "id": "msg_1",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "gated result", "annotations": []}]
+                }]
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+    fn gate_client(
+        base_url: &str,
+        provider: Option<SharedApiKeyProvider>,
+        gate: Option<SharedModelDispatchGate>,
+    ) -> WebSearchClient {
+        let config = WebSearchConfig::Enabled {
+            api_key: "static-key".to_string(),
+            base_url: base_url.to_string(),
+            model: "test-model".to_string(),
+            extra_headers: IndexMap::new(),
+            alpha_test_key: None,
+            allowed_domains: None,
+            excluded_domains: None,
+        };
+        WebSearchClient::new(&config, provider)
+            .expect("client should build")
+            .with_dispatch_gate(gate)
+    }
+    /// A closed gate means no POST leaves, on both entry points.
+    #[tokio::test]
+    async fn f1_closed_gate_sends_nothing() {
+        let server = gate_mock().await;
+        let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let gate: SharedModelDispatchGate = std::sync::Arc::new(FlagGate(closed));
+        let client = gate_client(&server.uri(), None, Some(gate));
+        let err = client.search("q", None).await.expect_err("closed gate must refuse");
+        assert!(err.to_string().contains("not sent"), "{err}");
+        client
+            .search_with_titles("q", None)
+            .await
+            .expect_err("closed gate must refuse");
+        assert_eq!(server.received_requests().await.unwrap().len(), 0);
+    }
+    /// The gate is read after the credential await, not before it.
+    #[tokio::test]
+    async fn f1_gate_closing_during_credential_lookup_sends_nothing() {
+        let server = gate_mock().await;
+        let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate: SharedModelDispatchGate = std::sync::Arc::new(FlagGate(closed.clone()));
+        let provider: SharedApiKeyProvider = std::sync::Arc::new(ClosesGateDuringLookup(closed));
+        let client = gate_client(&server.uri(), Some(provider), Some(gate.clone()));
+        client.search("q", None).await.expect_err("gate closed mid-lookup");
+        client
+            .search_with_titles("q", None)
+            .await
+            .expect_err("gate closed mid-lookup");
+        assert_eq!(server.received_requests().await.unwrap().len(), 0);
+    }
+    /// An open gate, and no gate at all, behave exactly as before.
+    #[tokio::test]
+    async fn f1_open_gate_and_no_gate_send_one_request() {
+        for with_gate in [true, false] {
+            let server = gate_mock().await;
+            let open = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let gate: Option<SharedModelDispatchGate> =
+                with_gate.then(|| std::sync::Arc::new(FlagGate(open)) as _);
+            let client = gate_client(&server.uri(), None, gate);
+            let (content, _) = client.search("q", None).await.expect("open gate sends");
+            assert_eq!(content, "gated result");
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
     }
     #[test]
     fn test_extract_citations_no_annotations() {

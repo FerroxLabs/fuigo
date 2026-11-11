@@ -6,6 +6,7 @@ edition.workspace = true
 description = "Pure data types for the Ferrox Labs sampling / chat-completion API layer"
 
 [dependencies]
+regex = { workspace = true }
 async-openai = { workspace = true }
 chrono = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
@@ -22,6 +23,7 @@ fuigo-tools = { path = "../fuigo-tools" }
 fuigo-workspace-types = { workspace = true }
 
 [dev-dependencies]
+sha2 = { workspace = true }
 assert_matches = { workspace = true }
 # P70b: the test that pins the user-facing cap against the sink scrub.
 fuigo-secrets = { workspace = true }

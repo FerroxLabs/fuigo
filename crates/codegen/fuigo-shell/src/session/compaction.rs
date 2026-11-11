@@ -145,8 +145,8 @@ impl SessionActor {
     /// Prefire is `spawn_local` on the same LocalSet as the turn loop.
     /// A long-lived borrow would race with turn/compact/cancel and panic on double-borrow.
     async fn two_pass_sample(&self, history: Vec<ConversationItem>) -> Option<CompactOutput> {
-        let sampling_config = self.reconstruct_full_config().await;
-        let client = match self.prepare_chat_completion(false).await {
+        let sampling_config = self.reconstruct_full_config(crate::session::acp_session::CallRole::Side).await;
+        let client = match self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side).await {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(error = %crate::sampling::error::acp_error_text(&e), "two_pass: failed to prepare sampling client");
@@ -846,6 +846,8 @@ impl SessionActor {
     pub(crate) async fn surface_compact_auth_failure(&self, err: acp::Error) -> acp::Error {
         use crate::extensions::notification::SessionUpdate as FuigoSessionUpdate;
         use crate::extensions::notification::UNAUTHORIZED_NEEDLE;
+        let mut upstream = crate::sampling::error::upstream_from_acp(&err);
+        upstream.http_status = upstream.http_status.or(Some(401));
         let detailed = crate::sampling::error::acp_error_message(&err);
         let message = if detailed.to_ascii_lowercase().contains("unauthorized") {
             detailed
@@ -871,15 +873,18 @@ impl SessionActor {
             crate::extensions::notification::RetryState::Failed {
                 error_type: "auth".to_string(),
                 message: message.clone(),
+                upstream: upstream.clone(),
                 verdicts: None,
             },
         ))
         .await;
-        acp::Error::auth_required().data(crate::sampling::error::terminal_error_data(
+        let mut data = crate::sampling::error::terminal_error_data(
             message,
             Some(401),
             fuigo_sampler::SamplingErrorKind::Auth,
-        ))
+        );
+        data["upstream"] = serde_json::json!(upstream);
+        acp::Error::auth_required().data(crate::acp_error::typed_error_data(Some(data), "auth"))
     }
     /// Clear [`SUPPRESS_AUTH`] on login/token refresh (credit suppress waits for a 200).
     pub(crate) fn clear_auth_compact_suppression(&self) {
@@ -1175,8 +1180,8 @@ impl SessionActor {
                 "{COMPACTION_FAILED_GUARD_PREFIX}no system message in simplified conversation"
             )));
         }
-        let sampling_config = self.reconstruct_full_config().await;
-        let sampling_client = self.prepare_chat_completion(false).await?;
+        let sampling_config = self.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
+        let sampling_client = self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Main).await?;
         // The summarization request replays the conversation, so it also replays the tool list the main turn last sent: same cached prefix
         let compaction_tools: Vec<fuigo_sampling_types::ToolSpec> = self.side_call_tool_specs().await;
         let compaction_tool_tokens = fuigo_chat_state::estimate_tool_specs_tokens(&compaction_tools);
@@ -2332,6 +2337,9 @@ impl SessionActor {
         );
         if let Err(e) = self.run_compact_only(trigger_info, false).await {
             tracing::error!(error = %crate::sampling::error::acp_error_text(&e), "Model-switch compaction failed");
+            if self.is_terminal_prompt_refusal(&e) {
+                return Err(e);
+            }
             if Self::is_auth_compact_error(&e) {
                 return Err(self.surface_compact_auth_failure(e).await);
             }
@@ -2439,6 +2447,11 @@ impl SessionActor {
                 let span = tracing::Span::current();
                 span.record("success", false);
                 span.record("error", crate::sampling::error::acp_error_text(&e).as_str());
+                // A Flux STOP/PAUSE on this call ended the prompt: hand back that refusal itself.
+                let e = self.end_prompt_on_compaction_refusal(e).await;
+                if self.is_terminal_prompt_refusal(&e) {
+                    return Err(e);
+                }
                 // Every compaction error carries object `data` with the typed `kind` discriminator
                 // (`compact_error_data`), so the discriminator above is the whole test. The old
                 // text match on a bare-string `data` had nothing left to read.

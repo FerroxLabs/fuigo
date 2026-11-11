@@ -511,6 +511,20 @@ impl SessionActor {
         self: &Arc<Self>,
         request: TurnInputRequest,
     ) -> PromptTurnResult {
+        let terminal = self.refusal_prompt.lock().unwrap().state == fuigo_sampling_types::refusal::PromptState::Terminal;
+        let starts_prompt = matches!(request.input_origin.as_prompt_origin(), super::super::PromptOrigin::User)
+            || (self.startup_hints.parent_session_id.is_some()
+                && matches!(request.input_origin.as_prompt_origin(), super::super::PromptOrigin::ParentAgentMessage { .. }));
+        if terminal && !starts_prompt {
+            self.hold_terminal_wake(&request).await?;
+            if let Some(ack) = request.persist_ack { let _ = ack.send(()); }
+            return ok_end_turn(0, None);
+        }
+        if starts_prompt {
+            self.clear_terminal_prompt()?;
+        }
+        *self.refusal_prompt.lock().unwrap() = fuigo_sampling_types::refusal::PromptSM::new(false);
+        super::sampler_turn::bind_refusal_prompt(&self.session_info.id.to_string(),&self.refusal_prompt);
         let _active = fuigo_telemetry::activity::TURNS_ACTIVE.enter();
         let TurnInputRequest {
             prompt_id,
@@ -1234,6 +1248,9 @@ impl SessionActor {
                 fuigo_telemetry::session_ctx::log_event_dual(self.telemetry_enabled, ev);
             }
             self.await_inherited_mcp_registration().await;
+            if starts_prompt {
+                self.deliver_held_wakes().await?;
+            }
             self.maybe_inject_mcp_reminder().await;
             self.maybe_inject_date_rollover_reminder().await;
             self.inject_plan_mode_reminders().await;
@@ -1285,37 +1302,6 @@ impl SessionActor {
                 self.chat_state_handle.begin_turn_capture();
             }
             let mut user_chat = match input_origin.as_prompt_origin() {
-                super::super::PromptOrigin::TaskCompleted { .. } => {
-                    ConversationItem::task_completed(user_message)
-                }
-                super::super::PromptOrigin::SubagentCompleted { .. } => {
-                    ConversationItem::subagent_completed(user_message)
-                }
-                super::super::PromptOrigin::ParentAgentMessage { .. } => {
-                    ConversationItem::agent_message(user_message)
-                }
-                super::super::PromptOrigin::PeerMessage { .. } => {
-                    ConversationItem::peer_message(user_message)
-                }
-                super::super::PromptOrigin::WorkflowCompleted { .. }
-                | super::super::PromptOrigin::PeerNotice { .. } => {
-                    ConversationItem::notification_drain(user_message)
-                }
-                super::super::PromptOrigin::NotificationDrain => {
-                    ConversationItem::notification_drain(user_message)
-                }
-                super::super::PromptOrigin::GoalSummary => {
-                    ConversationItem::goal_summary(user_message)
-                }
-                super::super::PromptOrigin::GoalClassifierNudge => {
-                    ConversationItem::goal_classifier_nudge(user_message)
-                }
-                // An unverified scheduled prompt is recorded as a scheduled item: it came from a schedule, not a person.
-                super::super::PromptOrigin::SchedulerFired
-                | super::super::PromptOrigin::UnverifiedScheduled => {
-                    ConversationItem::scheduler_fired(user_message)
-                }
-                super::super::PromptOrigin::PlanResume => ConversationItem::user(user_message),
                 super::super::PromptOrigin::User | super::super::PromptOrigin::SubagentTask => {
                     let mut item = ConversationItem::user(
                         self.maybe_apply_interrupt_envelope(user_message, verbatim),
@@ -1329,6 +1315,7 @@ impl SessionActor {
                     }
                     item
                 }
+                origin => super::held_wakes::item_for_origin(origin, user_message),
             };
             if self.head_holder_owed.replace(false) {
                 user_chat.mark_project_files_withheld();
@@ -2336,6 +2323,7 @@ impl SessionActor {
                         max_retries: recovery.max_retries,
                         reason: format!("Auto-recovery: {error_desc}"),
                         error_type: None,
+                        upstream: result.as_ref().err().map(crate::sampling::error::upstream_from_acp).unwrap_or_default(),
                         verdicts: None,
                         discard_emitted: false,
                         message_id: None,
@@ -2972,6 +2960,9 @@ impl SessionActor {
                 && let Err(e) = self.run_compact_only(trigger_info, false).await
             {
                 tracing::error!(error = %crate::sampling::error::acp_error_text(&e), "Pre-sampling auto-compaction failed");
+                if self.is_terminal_prompt_refusal(&e) {
+                    return Err(e);
+                }
                 if Self::is_auth_compact_error(&e) {
                     return Err(self.surface_compact_auth_failure(e).await);
                 }
@@ -3349,7 +3340,7 @@ impl SessionActor {
                     self.tool_context.fail_task_output_usage_closed();
                     return Err(error);
                 }
-                Ok(SamplerTurnOutcome::RetryTransient { kind, status_code }) => {
+                Ok(SamplerTurnOutcome::RetryTransient { kind, status_code, upstream }) => {
                     // A server error closes the charged incident but proves nothing about a missing credential:
                     // keep the park so the next credential-less 401 re-parks without a fresh recovery dispatch
                     if matches!(kind, fuigo_sampler::SamplingErrorKind::Api) {
@@ -3390,6 +3381,7 @@ impl SessionActor {
                             max_retries: display_max,
                             reason: format!("{cause}; retrying request"),
                             error_type: Some(kind.as_str().to_string()),
+                            upstream,
                             verdicts: None,
                             discard_emitted: false,
                             message_id: None,
@@ -3439,6 +3431,7 @@ impl SessionActor {
                                              credential); retrying request"
                                         .to_string(),
                                     error_type: None,
+                                    upstream: fuigo_sampling_types::error::UpstreamError { http_status: Some(401), ..Default::default() },
                                     verdicts: None,
                                     discard_emitted: false,
                                     message_id: None,
@@ -3474,6 +3467,7 @@ impl SessionActor {
                                     reason: "Re-authenticated after 401; retrying request"
                                         .to_string(),
                                     error_type: None,
+                                    upstream: fuigo_sampling_types::error::UpstreamError { http_status: Some(401), ..Default::default() },
                                     verdicts: None,
                                     discard_emitted: false,
                                     message_id: None,
@@ -3729,6 +3723,7 @@ impl SessionActor {
                         max_retries: MAX_MEDIA_GEN_OVER_CAP_RESAMPLES,
                         reason: "Too many parallel media-gen calls; retrying".to_string(),
                         error_type: None,
+                        upstream: Default::default(),
                         verdicts: None,
                         discard_emitted: false,
                         message_id: None,
@@ -4178,6 +4173,9 @@ impl SessionActor {
             {
                 if let Err(e) = self.run_compact_only(trigger_info, false).await {
                     tracing::error!(error = %crate::sampling::error::acp_error_text(&e), "Preflight overflow compaction failed");
+                    if self.is_terminal_prompt_refusal(&e) {
+                        return Err(e);
+                    }
                     if Self::is_auth_compact_error(&e) {
                         return Err(self.surface_compact_auth_failure(e).await);
                     }

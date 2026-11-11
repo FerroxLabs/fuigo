@@ -140,6 +140,7 @@ pub enum SamplingEvent {
 
     /// Request is being retried.
     Retrying {
+        upstream: fuigo_sampling_types::error::UpstreamError,
         request_id: RequestId,
         attempt: u32,
         max_retries: u32,
@@ -228,6 +229,12 @@ pub struct SamplingErrorInfo {
     /// Serializes as the plain wire string; `None` when absent or from an older peer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<ApiErrorCode>,
+    #[serde(default, deserialize_with = "fuigo_sampling_types::upstream_vocab::deserialize_optional", serialize_with = "fuigo_sampling_types::upstream_vocab::serialize_optional", skip_serializing_if = "Option::is_none")]
+    pub upstream_state: Option<String>,
+    #[serde(default, deserialize_with = "fuigo_sampling_types::upstream_vocab::deserialize_optional", serialize_with = "fuigo_sampling_types::upstream_vocab::serialize_optional", skip_serializing_if = "Option::is_none")]
+    pub upstream_type: Option<String>,
+    #[serde(default,skip_serializing_if="fuigo_sampling_types::error::UpstreamError::is_empty",serialize_with="fuigo_sampling_types::upstream_vocab::serialize_internal",deserialize_with="fuigo_sampling_types::upstream_vocab::deserialize_internal")]
+    pub upstream_details: fuigo_sampling_types::error::UpstreamError,
     pub model_metadata: Option<ResponseModelMetadata>,
     /// Present only when `kind == EmptyResponse`.
     /// Carries the structured context from the L2 stream so downstream consumers can distinguish reasoning-only completions from transport failures.
@@ -245,6 +252,15 @@ pub struct SamplingErrorInfo {
     /// Defaults to `Unknown` (charge-the-budget behavior) for payloads from older peers.
     #[serde(default, skip_serializing_if = "SentCredential::is_unknown")]
     pub credential: SentCredential,
+}
+
+impl SamplingErrorInfo {
+    pub fn upstream(&self) -> fuigo_sampling_types::error::UpstreamError {
+        let mut u=self.upstream_details.clone();
+        u.http_status=self.status_code.or(u.http_status);
+        u.state=u.state.or_else(||self.upstream_state.clone().filter(|s|fuigo_sampling_types::error::is_upstream_slug(s)));
+        u.error_type=u.error_type.or_else(||self.upstream_type.clone().filter(|s|fuigo_sampling_types::error::is_upstream_slug(s)));u
+    }
 }
 
 /// Coarse-grained classification of a sampling failure.
@@ -389,11 +405,21 @@ impl From<&SamplingError> for SamplingErrorInfo {
         };
 
         Self {
+            upstream_details: err.upstream(),
             kind,
             status_code,
             message,
             should_retry: err.should_retry_header(),
             error_code,
+            upstream_state: match err {
+                SamplingError::Api { upstream_state, .. } => upstream_state.clone().filter(|s| fuigo_sampling_types::error::is_upstream_slug(s)),
+                _ => None,
+            },
+            upstream_type: match err {
+                SamplingError::Api { upstream_type, .. } => upstream_type.clone(),
+                SamplingError::StreamError { error_type, .. } => Some(error_type.clone()),
+                _ => None,
+            }.filter(|s| fuigo_sampling_types::error::is_upstream_slug(s)),
             is_retryable,
             retry_after_secs,
             model_metadata,
@@ -420,12 +446,16 @@ mod tests {
             retry_after_secs: None,
             should_retry: Some(false),
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         let info = SamplingErrorInfo::from(&err);
         assert_eq!(info.should_retry, Some(false));
 
         // Non-Api variants have no header
         let stream_err = SamplingError::StreamError {
+ upstream: Default::default(),
             error_type: "overloaded_error".into(),
             message: "Overloaded".into(),
             code: None,
@@ -442,6 +472,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: Some(ApiErrorCode::InvalidImage),
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert_eq!(
             SamplingErrorInfo::from(&api).error_code,
@@ -449,6 +482,7 @@ mod tests {
         );
 
         let stream = SamplingError::StreamError {
+ upstream: Default::default(),
             error_type: "invalid_request_error".into(),
             message: "bad image".into(),
             code: Some(ApiErrorCode::InvalidImage),
@@ -515,6 +549,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         let info = SamplingErrorInfo::from(&err);
         assert_eq!(info.kind, SamplingErrorKind::Api);
@@ -531,6 +568,9 @@ mod tests {
             retry_after_secs: Some(15),
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         let info = SamplingErrorInfo::from(&err);
         assert_eq!(info.kind, SamplingErrorKind::RateLimited);
@@ -551,6 +591,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         let info = SamplingErrorInfo::from(&err);
         assert_eq!(info.kind, SamplingErrorKind::Api);
@@ -571,6 +614,7 @@ mod tests {
     #[test]
     fn stream_error_classified_as_api_and_retryable() {
         let err = SamplingError::StreamError {
+ upstream: Default::default(),
             error_type: "server_error".into(),
             message: "transient".into(),
             code: None,
@@ -641,5 +685,53 @@ mod tests {
             "nope".parse::<SamplingErrorKind>(),
             Err(UnknownSamplingErrorKind)
         );
+    }
+}
+
+#[cfg(test)]
+mod upstream_contract_tests {
+    use super::*;
+
+    #[test]
+    fn upstream_facts_survive_clone_and_serialized_info() {
+        let err = SamplingError::Api {
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            message: "capped detail".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+            upstream_state: Some("free_cap_reached".into()),
+            upstream_type: Some("rate_limit_exceeded".into()),
+            upstream_details: Default::default(),
+        };
+        let info = SamplingErrorInfo::from(&crate::retry::clone_error(&err));
+        let wire = serde_json::to_value(info).unwrap();
+        let restored: SamplingErrorInfo = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(restored.upstream()).unwrap(),
+            serde_json::json!({
+                "http_status":429,"type":"rate_limit_exceeded","state":"free_cap_reached"
+            })
+        );
+        for invalid in [
+            serde_json::json!("not a slug"),
+            serde_json::json!(17),
+            serde_json::json!(["hold"]),
+        ] {
+            let invalid_wire_string_expected=invalid.is_string().then_some("other");
+            let mut invalid_wire = wire.clone();
+            invalid_wire["upstream_type"] = invalid.clone();
+            invalid_wire["upstream_state"] = invalid;
+            let restored: SamplingErrorInfo = serde_json::from_value(invalid_wire).unwrap();
+            assert_eq!(restored.upstream_type.as_deref(),invalid_wire_string_expected);
+            assert_eq!(restored.upstream_state.as_deref(),invalid_wire_string_expected);
+        }
+        let mut legacy = wire;
+        legacy.as_object_mut().unwrap().remove("upstream_state");
+        legacy.as_object_mut().unwrap().remove("upstream_type");
+        let restored: SamplingErrorInfo = serde_json::from_value(legacy).unwrap();
+        assert!(restored.upstream_state.is_none());
+        assert!(restored.upstream_type.is_none());
     }
 }

@@ -515,6 +515,10 @@ pub(crate) fn stream_responses_tracked<'a>(
                         .map(|e| format!("{}: {}", e.code, e.message))
                         .unwrap_or_else(|| "Response failed with unknown error".to_string());
                     let err = SamplingError::Api {
+                        upstream_state: None,
+                        upstream_type: None,
+                        upstream_details: fuigo_sampling_types::error::UpstreamError::default().with_body(500,
+                            &serde_json::to_vec(&serde_json::json!({"error": response.error})).expect("error envelope")),
                         status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
                         message: error_message,
                         model_metadata: None,
@@ -539,6 +543,10 @@ pub(crate) fn stream_responses_tracked<'a>(
                         error_event.message
                     );
                     let err = SamplingError::Api {
+                        upstream_state: None,
+                        upstream_type: None,
+                        upstream_details: fuigo_sampling_types::error::UpstreamError::default().with_body(500,
+                            &serde_json::to_vec(&serde_json::json!({"error": {"message": error_event.message, "code": error_event.code}})).expect("error envelope")),
                         status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
                         message: error_message,
                         model_metadata: None,
@@ -699,6 +707,9 @@ pub(crate) fn stream_responses_tracked<'a>(
                     should_retry: None,
                     // Synthesized client-side; no wire envelope to read.
                     error_code: None,
+                    upstream_state: None,
+                    upstream_type: None,
+                    upstream_details: Default::default(),
                 };
                 yield SamplingEvent::Failed {
                     request_id: request_id.clone(),

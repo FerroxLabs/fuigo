@@ -356,6 +356,7 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
             &FuigoSessionUpdate::RetryState(RetryState::Failed {
                 error_type: "auth".into(),
                 message: "Unauthorized (401): compaction failed".into(),
+                upstream: Default::default(),
                 verdicts: None,
             }),
             &mut agent.session,

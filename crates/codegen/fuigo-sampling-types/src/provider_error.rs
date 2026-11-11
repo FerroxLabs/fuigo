@@ -139,17 +139,21 @@ pub fn parse_provider_error(bytes: &[u8]) -> Option<ProviderError> {
 
 /// [`parse_provider_error`] over a string slice.
 pub fn parse_provider_error_str(text: &str) -> Option<ProviderError> {
+    parse_provider_error_depth(text,0)
+}
+fn parse_provider_error_depth(text:&str,depth:usize)->Option<ProviderError>{
+    if depth==8 {return None;}
     let text = text.trim();
     if text.is_empty() || text.starts_with('<') {
         return None;
     }
-    let value: Value = serde_json::from_str(text).ok()?;
+    let value=crate::selective_error::from_provider_str(text)?;
     let parsed = walk(&value)?;
-    Some(unwrap_double_encoding(parsed))
+    Some(unwrap_double_encoding(parsed,depth))
 }
 
-fn unwrap_double_encoding(outer: ProviderError) -> ProviderError {
-    let Some(inner) = parse_provider_error_str(&outer.message) else {
+fn unwrap_double_encoding(outer: ProviderError,depth:usize) -> ProviderError {
+    let Some(inner) = parse_provider_error_depth(&outer.message,depth+1) else {
         return outer;
     };
     if inner.message == outer.message {
@@ -164,7 +168,7 @@ fn unwrap_double_encoding(outer: ProviderError) -> ProviderError {
     }
 }
 
-fn walk(value: &Value) -> Option<ProviderError> {
+pub(crate) fn walk(value: &Value) -> Option<ProviderError> {
     match value {
         Value::String(s) => ProviderError::from_message(s.clone()),
         Value::Array(items) => items.iter().find_map(walk),

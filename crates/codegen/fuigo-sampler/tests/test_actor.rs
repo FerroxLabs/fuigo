@@ -69,6 +69,7 @@ impl MockServer {
 
 fn test_config(base_url: String, model: &str) -> SamplerConfig {
     SamplerConfig {
+        flux_base_url: None,
         api_key: Some("test-key".into()),
         base_url,
         model: model.into(),

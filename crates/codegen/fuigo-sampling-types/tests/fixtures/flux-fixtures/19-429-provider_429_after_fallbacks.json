@@ -1,0 +1,102 @@
+{
+ "status": 429,
+ "headers": {
+  "date": "<HTTP-date>",
+  "server": "uvicorn",
+  "x-flux-alias": "deepseek-v4-flash",
+  "content-type": "application/json",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "connection": "close",
+  "content-length": "<n>"
+ },
+ "body": {
+  "error": {
+   "message": "Flux Router error: litellm.RateLimitError: RateLimitError: OpenAIException - Rate limit reached for requests. Please try again in 20s.",
+   "type": null,
+   "param": null,
+   "code": "429"
+  }
+ },
+ "endpoint": "/v1/chat/completions",
+ "per_endpoint": {
+  "/v1/messages": {
+   "status": 429,
+   "headers": {
+    "content-length": "199",
+    "content-type": "application/json"
+   },
+   "body": {
+    "type": "error",
+    "error": {
+     "type": "rate_limit_error",
+     "message": "Flux Router error: litellm.RateLimitError: RateLimitError: OpenAIException - Rate limit reached for requests. Please try again in 20s."
+    }
+   }
+  },
+  "/v1/responses": {
+   "status": 502,
+   "headers": {
+    "content-length": "224",
+    "content-type": "application/json"
+   },
+   "body": {
+    "error": {
+     "message": "upstream provider error: RateLimitError: litellm.RateLimitError: RateLimitError: OpenAIException - Rate limit reached for requests. Please try again in 20s.",
+     "type": "api_error",
+     "param": null,
+     "code": null
+    }
+   }
+  },
+  "free_key_variant": {
+   "/v1/chat/completions": {
+    "status": 402,
+    "gate_headers": {},
+    "body": {
+     "error": {
+      "message": "free_tier_exhausted",
+      "type": "None",
+      "param": "None",
+      "code": "402",
+      "provider_specific_fields": {
+       "error": "free_tier_exhausted",
+       "message": "Free tier monthly allowance exhausted. Upgrade to Builder ($29/mo) for $20 of included usage + BYOK.",
+       "upgrade_url": "https://fluxrouter.ai/home/billing"
+      }
+     }
+    }
+   },
+   "/v1/messages": {
+    "status": 402,
+    "headers": {
+     "content-length": "170",
+     "content-type": "application/json"
+    },
+    "body": {
+     "type": "error",
+     "error": {
+      "type": "invalid_request_error",
+      "message": "Free tier monthly allowance exhausted. Upgrade to Builder ($29/mo) for $20 of included usage + BYOK."
+     }
+    }
+   },
+   "/v1/responses": {
+    "status": 502,
+    "headers": {
+     "content-length": "212",
+     "content-type": "application/json"
+    },
+    "body": {
+     "error": {
+      "message": "upstream provider error: RateLimitError: litellm.RateLimitError: RateLimitError: OpenAIException - Rate limit exceeded. Please try again in 20s.",
+      "type": "api_error",
+      "param": null,
+      "code": null
+     }
+    }
+   }
+  }
+ }
+}

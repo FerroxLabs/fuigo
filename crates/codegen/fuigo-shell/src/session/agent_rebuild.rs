@@ -335,6 +335,8 @@ impl AgentRebuildSpec {
         if let Some(attribution_callback) = attribution_callback.clone() {
             builder = builder.with_attribution_callback(attribution_callback);
         }
+        // The web search tool dispatches its own model request; it honors the session's STOP/PAUSE veto.
+        builder = builder.with_dispatch_gate(crate::session::acp_session::side_model_gate(session_id_str));
         if let Some(bash_params_json) = tool_params_json.bash.clone() {
             builder = builder.with_bash_params(bash_params_json);
         }

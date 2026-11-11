@@ -1,0 +1,112 @@
+{
+ "status": 402,
+ "headers": {
+  "date": "<HTTP-date>",
+  "server": "uvicorn",
+  "x-flux-alias": "deepseek-v4-flash",
+  "content-type": "application/json",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "connection": "close",
+  "content-length": "<n>"
+ },
+ "body": {
+  "error": {
+   "message": "key_budget_reached",
+   "type": "None",
+   "param": "None",
+   "code": "402",
+   "provider_specific_fields": {
+    "error": "key_budget_reached",
+    "limit": "monthly_spend",
+    "key_id": "KEYHASH_REDACTED",
+    "key_name": "my-key",
+    "key_monthly_budget_usd": 5.0,
+    "key_monthly_token_limit": null,
+    "spent_usd_this_month": 5.0123,
+    "tokens_this_month": 812345,
+    "spend_basis": "customer_billed_sale",
+    "resets_at": "2026-12-01T00:00:00Z",
+    "message": "The key my-key has reached its $5.00 monthly budget. It resets on 1 December 2026 at 00:00 UTC. Raise the budget on this key or use a different key.",
+    "manage_url": "https://fluxrouter.ai/home/keys"
+   }
+  }
+ },
+ "endpoint": "/v1/chat/completions",
+ "per_endpoint": {
+  "/v1/messages": {
+   "status": 402,
+   "headers": {
+    "content-length": "218",
+    "content-type": "application/json"
+   },
+   "body": {
+    "type": "error",
+    "error": {
+     "type": "invalid_request_error",
+     "message": "The key my-key has reached its $5.00 monthly budget. It resets on 1 December 2026 at 00:00 UTC. Raise the budget on this key or use a different key."
+    }
+   }
+  },
+  "/v1/responses": {
+   "status": 402,
+   "headers": {
+    "content-length": "509",
+    "content-type": "application/json"
+   },
+   "body": {
+    "error": {
+     "error": "key_budget_reached",
+     "limit": "monthly_spend",
+     "key_id": "KEYHASH_REDACTED",
+     "key_name": "my-key",
+     "key_monthly_budget_usd": 5.0,
+     "key_monthly_token_limit": null,
+     "spent_usd_this_month": 5.0123,
+     "tokens_this_month": 812345,
+     "spend_basis": "customer_billed_sale",
+     "resets_at": "2026-12-01T00:00:00Z",
+     "message": "The key my-key has reached its $5.00 monthly budget. It resets on 1 December 2026 at 00:00 UTC. Raise the budget on this key or use a different key.",
+     "manage_url": "https://fluxrouter.ai/home/keys"
+    }
+   }
+  },
+  "tokens_variant_chat": {
+   "status": 402,
+   "headers": {
+    "date": "<HTTP-date>",
+    "server": "uvicorn",
+    "x-flux-alias": "deepseek-v4-flash",
+    "content-type": "application/json",
+    "x-frame-options": "DENY",
+    "content-security-policy": "frame-ancestors 'none'",
+    "x-content-type-options": "nosniff",
+    "connection": "close",
+    "content-length": "<n>"
+   },
+   "body": {
+    "error": {
+     "message": "key_budget_reached",
+     "type": "None",
+     "param": "None",
+     "code": "402",
+     "provider_specific_fields": {
+      "error": "key_budget_reached",
+      "limit": "monthly_tokens",
+      "key_id": "KEYHASH_REDACTED",
+      "key_name": "my-key",
+      "key_monthly_budget_usd": null,
+      "key_monthly_token_limit": 1000000,
+      "spent_usd_this_month": 1.2,
+      "tokens_this_month": 1000412,
+      "spend_basis": "customer_billed_sale",
+      "resets_at": "2026-12-01T00:00:00Z",
+      "message": "The key my-key has used its 1,000,000 token monthly limit. It resets on 1 December 2026 at 00:00 UTC. Raise the limit on this key or use a different key.",
+      "manage_url": "https://fluxrouter.ai/home/keys"
+     }
+    }
+   }
+  }
+ }
+}

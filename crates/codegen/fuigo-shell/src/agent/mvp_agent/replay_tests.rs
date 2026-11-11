@@ -248,6 +248,7 @@ async fn a_replayed_discard_is_marked_as_replay() {
             max_retries: 15,
             reason: "stream ended early".into(),
             error_type: Some("api".into()),
+            upstream: Default::default(),
             verdicts: None,
             discard_emitted: true,
             message_id: None,

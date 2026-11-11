@@ -205,6 +205,7 @@ impl ShellToolsetConfig {
     /// Optionally layers sampling credentials onto the web search config.
     pub fn new(base: Option<Self>, sampling_config: Option<SamplerConfig>) -> Self {
         let default_base = SamplerConfig {
+        flux_base_url: None,
             api_key: None,
             // Fuigo's inference default, not the upstream vendor's endpoint: this
             // placeholder is never dialled (no key, and every production

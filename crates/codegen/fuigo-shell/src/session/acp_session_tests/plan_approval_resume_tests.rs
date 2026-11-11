@@ -91,7 +91,7 @@ async fn request_plan_approval_issues_reverse_request_and_clears_flag() {
             assert_eq!(method.as_deref(), Some("fuigo/exit_plan_mode"));
             assert_eq!(
                 session_id.as_deref(),
-                Some("test-actor"),
+                Some(actor.session_info.id.0.as_ref()),
                 "reverse-request must carry a non-empty sessionId (design §5.4)"
             );
         })

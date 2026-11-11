@@ -77,6 +77,8 @@ async fn create_test_actor(
     );
     chat_state_handle.record_token_usage(total_tokens);
     SessionActor {
+        held_wakes: Default::default(),
+        refusal_prompt: std::sync::Arc::new(std::sync::Mutex::new(fuigo_sampling_types::refusal::PromptSM::new(false))),
         repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
         ),
         transient_retry_enabled: true,
@@ -520,6 +522,8 @@ async fn create_test_actor_with_memory(
         .as_ref()
         .map_or_else(Default::default, |mc| mc.initial_injection.clone());
     SessionActor {
+        held_wakes: Default::default(),
+        refusal_prompt: std::sync::Arc::new(std::sync::Mutex::new(fuigo_sampling_types::refusal::PromptSM::new(false))),
         repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
         ),
         transient_retry_enabled: true,
@@ -955,6 +959,9 @@ fn api_error_with_context_window(context_window: u64) -> fuigo_sampler::Sampling
         retry_after_secs: None,
         should_retry: None,
         error_code: None,
+        upstream_state: None,
+        upstream_type: None,
+        upstream_details: Default::default(),
         model_metadata: Some(crate::sampling::ResponseModelMetadata {
             context_window: Some(context_window),
             max_completion_tokens: None,
@@ -1012,6 +1019,9 @@ async fn test_compact_on_error_noop_without_model_metadata() {
                 retry_after_secs: None,
                 should_retry: None,
                 error_code: None,
+                upstream_state: None,
+                upstream_type: None,
+                upstream_details: Default::default(),
                 model_metadata: None,
                 empty_response_context: None,
                 doom_loop_triggers: None,
@@ -1037,7 +1047,7 @@ async fn compactions_remaining_header_flips_after_compaction() {
                 .set(Some(CompactionsRemaining::Dynamic(true)));
             assert_eq!(
                 actor
-                    .reconstruct_full_config()
+                    .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
                     .await
                     .extra_headers
                     .get("x-compactions-remaining")
@@ -1049,7 +1059,7 @@ async fn compactions_remaining_header_flips_after_compaction() {
             actor.chat_state_handle.record_compaction_at(0);
             assert_eq!(
                 actor
-                    .reconstruct_full_config()
+                    .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
                     .await
                     .extra_headers
                     .get("x-compactions-remaining")
@@ -1076,7 +1086,7 @@ async fn compactions_remaining_fixed_does_not_flip_after_compaction() {
                 .set(Some(CompactionsRemaining::Fixed(1)));
             assert_eq!(
                 actor
-                    .reconstruct_full_config()
+                    .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
                     .await
                     .extra_headers
                     .get("x-compactions-remaining")
@@ -1088,7 +1098,7 @@ async fn compactions_remaining_fixed_does_not_flip_after_compaction() {
             actor.chat_state_handle.record_compaction_at(0);
             assert_eq!(
                 actor
-                    .reconstruct_full_config()
+                    .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
                     .await
                     .extra_headers
                     .get("x-compactions-remaining")
@@ -1116,7 +1126,7 @@ async fn compaction_at_tokens_header_flips_after_compaction() {
                 .set(Some(CompactionAtTokens::Enabled(true)));
             assert_eq!(
                 actor
-                    .reconstruct_full_config()
+                    .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
                     .await
                     .extra_headers
                     .get("x-compaction-at")
@@ -1128,7 +1138,7 @@ async fn compaction_at_tokens_header_flips_after_compaction() {
             actor.chat_state_handle.record_compaction_at(0);
             assert!(
                 actor
-                    .reconstruct_full_config()
+                    .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
                     .await
                     .extra_headers
                     .get("x-compaction-at")
@@ -1150,7 +1160,7 @@ async fn compaction_at_tokens_fixed_and_disabled() {
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             assert!(
                 actor
-                    .reconstruct_full_config()
+                    .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
                     .await
                     .extra_headers
                     .get("x-compaction-at")
@@ -1162,7 +1172,7 @@ async fn compaction_at_tokens_fixed_and_disabled() {
                 .set(Some(CompactionAtTokens::Fixed(367_000)));
             assert_eq!(
                 actor
-                    .reconstruct_full_config()
+                    .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
                     .await
                     .extra_headers
                     .get("x-compaction-at")

@@ -1,0 +1,127 @@
+id	kind	endpoint	status	headers	body	reason	action	wait
+01.chat	leaf	chat	fixture	-	-	fluxStop	STOP	-
+02.chat	leaf	chat	fixture	-	-	fluxStop	STOP	-
+03.chat	leaf	chat	fixture	-	-	fluxStop	STOP	-
+04.chat	leaf	chat	fixture	-	-	fluxStop	STOP	-
+05.chat	leaf	chat	fixture	-	-	fluxStop	STOP	-
+08.chat	leaf	chat	fixture	-	-	fluxStop	STOP	-
+01.msg	leaf	msg	fixture	-	-	freeCap	STOP	-
+01.resp	leaf	resp	fixture	-	-	freeCap	STOP	-
+02.msg	leaf	msg	fixture	-	-	requestCap	STOP	-
+02.resp	leaf	resp	fixture	-	-	requestCap	STOP	-
+03.msg	leaf	msg	fixture	-	-	planCap	STOP	-
+03.resp	leaf	resp	fixture	-	-	planCap	STOP	-
+04.msg	leaf	msg	fixture	-	-	keyRevoked	STOP	-
+04.resp	leaf	resp	fixture	-	-	keyRevoked	STOP	-
+05.msg	leaf	msg	fixture	-	-	unknownLimit	PAUSE	-
+05.resp	leaf	resp	fixture	-	-	busy	BACKOFF	60
+06.chat	leaf	chat	fixture	-	-	busy	BACKOFF	30
+06.msg	leaf	msg	fixture	-	-	busy	BACKOFF	ladder
+06.resp	leaf	resp	fixture	-	-	busy	BACKOFF	30
+07.chat	leaf	chat	fixture	-	-	busy	BACKOFF	60
+07.msg	leaf	msg	fixture	-	-	busy	BACKOFF	60
+07.resp	leaf	resp	fixture	-	-	busy	BACKOFF	60
+08.msg	leaf	msg	fixture	-	-	busy	BACKOFF	60
+08.resp	leaf	resp	fixture	-	-	busy	BACKOFF	60
+09.chat	leaf	chat	fixture	-	-	busy	BACKOFF	1
+09.msg	leaf	msg	fixture	-	-	busy	BACKOFF	1
+09.resp	leaf	resp	fixture	-	-	busy	BACKOFF	1
+10.chat	leaf	chat	fixture	-	-	hourly	STOP	reset+1800
+10.msg	leaf	msg	fixture	-	-	unknownLimit	PAUSE	-
+10.resp	leaf	resp	fixture	-	-	hourly	STOP	reset+1800
+11.chat	leaf	chat	fixture	-	-	hold	RETRY_ONCE	2
+11.msg	leaf	msg	fixture	-	-	hold	RETRY_ONCE	2
+11.resp	leaf	resp	fixture	-	-	hold	RETRY_ONCE	2
+12.chat	leaf	chat	fixture	-	-	keyBudget	STOP	-
+12.resp	leaf	resp	fixture	-	-	keyBudget	STOP	-
+12.msg	leaf	msg	fixture	-	-	keyBudget	STOP	-
+12.tokens_variant_chat	leaf	chat	fixture	-	-	keyTokens	STOP	-
+13.chat	leaf	chat	fixture	-	-	freeCredit	STOP	-
+13.msg	leaf	msg	fixture	-	-	freeCredit	STOP	-
+13.resp	leaf	resp	fixture	-	-	freeCredit	STOP	-
+14.chat	leaf	chat	fixture	-	-	fluxStop	STOP	-
+14.msg	leaf	msg	fixture	-	-	keyRefused	STOP	-
+14.resp	leaf	resp	fixture	-	-	keyRefused	STOP	-
+15.chat	leaf	chat	fixture	-	-	accountCeiling	STOP	-
+15.msg	leaf	msg	fixture	-	-	accountCeiling	STOP	-
+15.resp	leaf	resp	fixture	-	-	accountCeiling	STOP	-
+16.chat	leaf	chat	fixture	-	-	credit	STOP	-
+16.msg	leaf	msg	fixture	-	-	credit	STOP	-
+16.resp	leaf	resp	fixture	-	-	credit	STOP	-
+16.monthly_cap_variant_chat	leaf	chat	fixture	-	-	spendCap	STOP	-
+17.chat	leaf	chat	fixture	-	-	planAllowance	STOP	-
+17.msg	leaf	msg	fixture	-	-	planAllowance	STOP	-
+17.resp	leaf	resp	fixture	-	-	planAllowance	STOP	-
+18.chat	leaf	chat	fixture	-	-	keyLifetime	STOP	-
+18.msg	leaf	msg	fixture	-	-	keyLifetime	STOP	-
+18.resp	leaf	resp	fixture	-	-	keyLifetime	STOP	-
+19.chat	leaf	chat	fixture	-	-	busy	BACKOFF	20
+19.msg	leaf	msg	fixture	-	-	busy	BACKOFF	20
+19.resp	leaf	resp	fixture	-	-	busy	BACKOFF	20
+19.free_key/chat	leaf	chat	fixture	-	-	fluxStop	STOP	-
+19.free_key/msg	leaf	msg	fixture	-	-	fluxStop	STOP	-
+19.free_key/resp	leaf	resp	fixture	-	-	busy	BACKOFF	20
+20.chat	leaf	chat	fixture	-	-	busy	BACKOFF	60
+20.msg	leaf	msg	fixture	-	-	busy	BACKOFF	60
+20.resp	leaf	resp	fixture	-	-	busy	BACKOFF	60
+D04a.resp	sibling	resp	fixture	-	-	keyAccess	STOP	-
+D04a.msg	sibling	msg	fixture	-	-	keyAccess	STOP	-
+D04b.resp	sibling	resp	fixture	-	-	keyAccess	STOP	-
+D04b.msg	sibling	msg	fixture	-	-	keyAccess	STOP	-
+D04c.resp	sibling	resp	fixture	-	-	keyNotFound	STOP	-
+D04c.msg	sibling	msg	fixture	-	-	keyNotFound	STOP	-
+D04d.resp	sibling	resp	fixture	-	-	accessUnknown	STOP	-
+D04d.msg	sibling	msg	fixture	-	-	accessUnknown	STOP	-
+D07.chat	sibling	chat	fixture	-	-	busy	BACKOFF	60
+D07.resp	sibling	resp	fixture	-	-	busy	BACKOFF	60
+D07.msg	sibling	msg	fixture	-	-	busy	BACKOFF	60
+D09.chat	sibling	chat	fixture	-	-	busy	BACKOFF	1
+D09.resp	sibling	resp	fixture	-	-	busy	BACKOFF	1
+D09.msg	sibling	msg	fixture	-	-	busy	BACKOFF	1
+D12.chat	sibling	chat	fixture	-	-	botBudget	STOP	-
+D12.resp	sibling	resp	fixture	-	-	botBudget	STOP	-
+D12.msg	sibling	msg	fixture	-	-	botBudget	STOP	-
+D16a.chat	sibling	chat	fixture	-	-	spendCap	STOP	-
+D16a.resp	sibling	resp	fixture	-	-	spendCap	STOP	-
+D16a.msg	sibling	msg	fixture	-	-	spendCap	STOP	-
+D16b.resp	sibling	resp	fixture	-	-	spendCap	STOP	-
+D16b.msg	sibling	msg	fixture	-	-	spendCap	STOP	-
+D16d.chat	sibling	chat	fixture	-	-	unresolved	STOP	-
+D16d.resp	sibling	resp	fixture	-	-	unresolved	STOP	-
+D16d.msg	sibling	msg	fixture	-	-	unresolved	STOP	-
+D17.chat	sibling	chat	fixture	-	-	spendCap	STOP	-
+D17.resp	sibling	resp	fixture	-	-	spendCap	STOP	-
+D17.msg	sibling	msg	fixture	-	-	spendCap	STOP	-
+D16c.chat	homegate	chat	402	{"x-flux-hold-reason":"credit_hold"}	{"error":{"message":"Your credit is on hold. Please contact support. Top up at https://fluxrouter.ai/home/billing","type":"None","param":"None","code":"402"}}	creditHold	STOP	-
+D16c.resp	homegate	resp	402	{}	{"error":{"message":"Your credit is on hold. Please contact support.","type":"api_error","param":null,"code":"402"}}	creditHold	STOP	-
+D16c.msg	homegate	msg	402	{}	{"type":"error","error":{"type":"invalid_request_error","message":"Your credit is on hold. Please contact support."}}	creditHold	STOP	-
+D16e.chat	homegate	chat	402	{"x-flux-hold-reason":"credit_exhausted"}	{"error":{"message":"Your Murage Cloud credit is exhausted. Top up to keep going. Top up at https://fluxrouter.ai/home/billing","type":"None","param":"None","code":"402"}}	credit	STOP	-
+D16e.resp	homegate	resp	402	{}	{"error":{"message":"Your Murage Cloud credit is exhausted. Top up to keep going.","type":"api_error","param":null,"code":"402"}}	credit	STOP	-
+D16e.msg	homegate	msg	402	{}	{"type":"error","error":{"type":"invalid_request_error","message":"Your Murage Cloud credit is exhausted. Top up to keep going."}}	credit	STOP	-
+X1	synthetic	chat	402	{"retry-after":"2","x-flux-hold-reason":"concurrency"}	{"error":{"message":"Available credit is low because other requests have temporarily reserved it. Retry in 2s.","type":"None","param":"None","code":"402"}}	fluxStop	STOP	-
+X2	synthetic	resp	401	{}	{"error":{"type":"authentication_error","state":"credit_unresolved"}}	unresolved	STOP	-
+X3	synthetic	chat	402	{}	{"error":{"message":"This key is limited to 1 concurrent requests (batch traffic class). Retry after 1 second.","type":"None","param":"None","code":"402","provider_specific_fields":{"error":{"type":"rate_limit_exceeded","state":"batch_concurrency","retry_after":1}}}}	fluxStop	STOP	-
+X4	synthetic	resp	403	{}	{"error":{"type":"permission_error","state":"authorization_state_unknown"}}	accessUnknown	STOP	-
+X5	synthetic	resp	429	{}	{"error":{"type":"rate_limit_exceeded","state":"credit_unresolved"}}	unresolved	STOP	-
+X6	synthetic	msg	401	{}	{"type":"error","error":{"type":"authentication_error","message":"The key my-key has reached its $5.00 monthly budget."}}	keyBudget	STOP	-
+X7	synthetic	msg	429	{}	{"type":"error","error":{"type":"rate_limit_error","message":"Your credit balance could not be verified. Please retry shortly."}}	unresolved	STOP	-
+X8	synthetic	resp	402	{}	{"error":{"error":"key_budget_reached","message":"This bot has reached its $5.00 monthly budget across all of its keys."}}	botBudget	STOP	-
+X9	synthetic	resp	402	{}	{"error":{"error":"key_budget_reached"}}	keyBudget	STOP	-
+X10	synthetic	chat	402	{}	{"error":{"message":"key_budget_reached","type":"None","param":"None","code":"402","provider_specific_fields":{"error":"key_budget_reached","limit":"monthly_tokens"}}}	keyTokens	STOP	-
+X11	synthetic	resp	429	{}	{"error":{"type":"rate_limit_exceeded","retry_after":true}}	unknownLimit	PAUSE	-
+X12a	synthetic	msg	429	{}	null	unknownLimit	PAUSE	-
+X12b	synthetic	msg	402	{}	null	fluxStop	STOP	-
+X12c	synthetic	msg	401	{}	null	keyRefused	STOP	-
+X12d	synthetic	msg	403	{}	null	keyRefused	STOP	-
+X12e	synthetic	msg	503	{}	null	busy	RETRY_ONCE	2
+X13	synthetic	resp	429	{}	{"error":{"type":"rate_limit_exceeded","retry_after":7201}}	unknownLimit	PAUSE	-
+X14	synthetic	resp	429	{}	{"error":{"type":"rate_limit_exceeded","retry_after":"60"}}	unknownLimit	PAUSE	-
+X15	synthetic	resp	403	{}	{"error":{"type":"permission_error","message":"Forbidden"}}	keyRefused	STOP	-
+X16	synthetic	chat	402	{"x-flux-hold-reason":"free_tier_exhausted"}	{"error":{"message":"free_tier_exhausted","type":"None","param":"None","code":"402","provider_specific_fields":{"error":"free_tier_exhausted"}}}	freeCredit	STOP	-
+X17	synthetic	resp	429	{"retry-after":"5"}	{"error":{"type":"rate_limit_exceeded","state":"key_revoked"}}	keyRevoked	STOP	-
+X18	synthetic	resp	429	{}	{"error":{"type":"rate_limit_exceeded","state":"concurrency"}}	hold	RETRY_ONCE	2
+X19	synthetic	resp	400	{}	{"error":{"type":"invalid_request_error","message":"bad"}}	other	PASS	-
+X20	synthetic	chat	402	{}	{"error":{"message":"free_tier_exhausted","type":"None","param":"None","code":"402","provider_specific_fields":{"error":"free_tier_exhausted"}}}	fluxStop	STOP	-
+X21	synthetic	resp	402	{}	{"error":{"error":"key_budget_reached","limit":"monthly_tokens"}}	keyTokens	STOP	-
+X22	synthetic	resp	429	{}	{"error":{"error":"concurrency","code":"key_revoked"}}	keyRevoked	STOP	-
+X23	synthetic	resp	429	{}	{"error":{"error":"tier_rpm_limit","provider_specific_fields":{"error":{"state":"daily_cap"}}}}	spendCap	STOP	-

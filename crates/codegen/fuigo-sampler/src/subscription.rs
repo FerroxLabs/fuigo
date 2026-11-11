@@ -199,6 +199,7 @@ pub(crate) async fn dispatch(
             "subscription endpoint or protocol mismatch",
         ));
     }
+    let flux_routed = fuigo_sampling_types::refusal::is_flux_routed(request.url(), None);
     let bytes =
         request
             .body()
@@ -240,24 +241,34 @@ pub(crate) async fn dispatch(
                 .unwrap();
         if let Some(gate) = gate {
             gate.wait_open().await;
+            gate.check_open()?;
         }
         admitted.disarm();
         crate::request_accounting::dispatched();
         let response = fuigo_extra_ca::dispatch::execute(&client, request)
             .await
             .unwrap();
-        return classify(response).await;
+        return classify(response, flux_routed).await;
     }
     // The resolver awaits above may have outlasted a park: re-check right before the send.
     if let Some(gate) = gate {
         gate.wait_open().await;
+            gate.check_open()?;
     }
     admitted.disarm();
     crate::request_accounting::dispatched();
     let response = client.execute(request).await.map_err(|_| {
         SamplingError::InvalidConfiguration("subscription transport failed; no API-key fallback")
     })?;
-    classify(response).await
+    match classify(response, flux_routed).await {
+        Err(mut error) => {
+            error.assert_boundary_classified();
+            if gate.is_some_and(|g|g.on_refusal(&error)) && !error.is_terminal_refusal()
+                && let SamplingError::Api {should_retry,..}=&mut error { *should_retry=Some(false); }
+            Err(error)
+        },
+        ok=>ok,
+    }
 }
 /// Bytes of a non-2xx subscription error body read before the rest is discarded.
 /// Same cap the token-exchange reader uses (`fuigo-shell` `auth::subscription::flow`).
@@ -288,12 +299,14 @@ const NO_API_KEY_FALLBACK_ADVICE: &str =
 /// status line is the provider refusing before any completion was produced, which is a
 /// different thing from P14's ambiguous exchange (a read that failed *after* a 2xx, where the
 /// reply may have been generated and lost). Nothing in this function can reach a 2xx body.
-async fn classify(mut response: Response) -> Result<Response> {
+async fn classify(mut response: Response, flux_routed: bool) -> Result<Response> {
     let status = response.status();
     if status.is_success() {
         return Ok(response);
     }
     // Read the headers before the body: `chunk()` borrows the response mutably.
+    let mut upstream_headers=crate::client::upstream_headers(response.headers());
+    upstream_headers.flux_routed=flux_routed;
     let retry_after_secs = crate::client::extract_retry_after(status, response.headers());
     let should_retry = crate::client::extract_should_retry(response.headers());
     let model_metadata = crate::client::extract_model_metadata(response.headers());
@@ -308,6 +321,9 @@ async fn classify(mut response: Response) -> Result<Response> {
         retry_after_secs,
         should_retry,
         error_code: fuigo_sampling_types::parse_error_code(&body),
+        upstream_state: fuigo_sampling_types::error::parse_error_state(&body),
+        upstream_type: fuigo_sampling_types::error::parse_error_type(&body),
+        upstream_details: upstream_headers.with_body(status.as_u16(),&body),
     })
 }
 

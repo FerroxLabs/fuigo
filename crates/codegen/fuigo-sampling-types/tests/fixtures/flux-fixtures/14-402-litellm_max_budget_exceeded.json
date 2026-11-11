@@ -1,0 +1,51 @@
+{
+ "status": 402,
+ "headers": {
+  "date": "<HTTP-date>",
+  "server": "uvicorn",
+  "content-length": "272",
+  "content-type": "application/json",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "connection": "close"
+ },
+ "body": {
+  "error": {
+   "message": "{'error': 'free_tier_exhausted', 'message': 'Free tier monthly allowance exhausted. Upgrade to Builder ($29/mo) for $20 of included usage + BYOK.', 'upgrade_url': 'https://fluxrouter.ai/home/billing'}",
+   "type": "auth_error",
+   "param": "None",
+   "code": "402"
+  }
+ },
+ "endpoint": "/v1/chat/completions",
+ "per_endpoint": {
+  "/v1/messages": {
+   "status": 401,
+   "headers": {
+    "content-type": "application/json"
+   },
+   "body": {
+    "type": "error",
+    "error": {
+     "type": "authentication_error",
+     "message": "invalid x-api-key or Authorization bearer token"
+    }
+   }
+  },
+  "/v1/responses": {
+   "status": 401,
+   "headers": {
+    "content-type": "application/json"
+   },
+   "body": {
+    "error": {
+     "message": "invalid x-api-key or Authorization bearer token",
+     "type": "authentication_error",
+     "param": null,
+     "code": null
+    }
+   }
+  }
+ }
+}

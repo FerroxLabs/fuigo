@@ -181,6 +181,7 @@ pub(crate) async fn test_agent_from_config_owned(
         api_key_provider: None,
         auth_provider: None,
         attribution_callback: None,
+        dispatch_gate: None,
         system_reminder_tag: fuigo_tools::reminders::DEFAULT_REMINDER_TAG,
     };
     let tool_bridge = crate::tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)
@@ -288,8 +289,11 @@ pub(crate) async fn create_test_actor_with_terminal(
     let cwd = fuigo_paths::AbsPathBuf::new(crate::test_support::abs_tmp()).unwrap();
     let fs = Arc::new(fuigo_workspace::file_system::MockFs::new(cwd.to_path_buf()));
     let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
+    // Production dispatch and permission registries are keyed by session ID.
+    // Parallel actors must never share another prompt's terminal state.
+    let session_id = format!("test-actor-{}", uuid::Uuid::new_v4());
     let hunk_tracker_handle = fuigo_hunk_tracker::HunkTrackerActor::spawn(
-        "test-actor".to_string(),
+        session_id.clone(),
         cwd.to_path_buf(),
         hunk_tx,
         fuigo_hunk_tracker::TrackingMode::AgentOnly,
@@ -320,6 +324,8 @@ pub(crate) async fn create_test_actor_with_terminal(
     );
     chat_state_handle.record_token_usage(total_tokens);
     let actor = SessionActor {
+        held_wakes: Default::default(),
+        refusal_prompt: Arc::new(std::sync::Mutex::new(fuigo_sampling_types::refusal::PromptSM::new(false))),
         repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
         ),
         transient_retry_enabled: true,
@@ -331,7 +337,7 @@ pub(crate) async fn create_test_actor_with_terminal(
         transient_episode_start: std::cell::Cell::new(None),
         status_wake: Default::default(),
         session_info: SessionInfo {
-            id: acp::SessionId::new("test-actor"),
+            id: acp::SessionId::new(session_id),
             cwd: cwd.as_str().to_string(),
         },
         auth_method_id: test_auth_method_id("test-auth"),

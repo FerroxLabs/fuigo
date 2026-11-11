@@ -44,6 +44,9 @@ pub struct SamplerConfig {
     pub subscription_resolver: Option<crate::subscription::SharedSubscriptionResolver>,
     pub api_key: Option<String>,
     pub base_url: String,
+    /// Configured Flux endpoint; matched by host against the request actually sent.
+    #[serde(default)]
+    pub flux_base_url: Option<String>,
     /// Resolved local directory for this model's mTLS client identity.
     #[serde(default)]
     pub mtls_cert_dir: Option<PathBuf>,
@@ -147,6 +150,7 @@ impl std::fmt::Debug for SamplerConfig {
             subscription_resolver,
             api_key,
             base_url,
+            flux_base_url,
             mtls_cert_dir,
             model,
             max_completion_tokens,
@@ -187,6 +191,7 @@ impl std::fmt::Debug for SamplerConfig {
             .field("subscription_resolver", &subscription_resolver.as_ref().map(|_| "<dyn>"))
             .field("api_key", &api_key.as_ref().map(|_| "<redacted>"))
             .field("base_url", &fuigo_auth::redact_url(base_url))
+            .field("flux_base_url", &flux_base_url.as_deref().map(fuigo_auth::redact_url))
             .field("mtls_cert_dir", mtls_cert_dir)
             .field("model", model)
             .field("max_completion_tokens", max_completion_tokens)
@@ -233,6 +238,7 @@ impl Default for SamplerConfig {
             subscription_resolver: None,
             api_key: None,
             base_url: String::new(),
+            flux_base_url: None,
             mtls_cert_dir: None,
             model: String::new(),
             max_completion_tokens: None,

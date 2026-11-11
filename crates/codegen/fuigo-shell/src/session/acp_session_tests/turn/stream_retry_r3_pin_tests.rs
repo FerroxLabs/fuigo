@@ -102,6 +102,7 @@ fn retrying() -> RetryState {
         max_retries: 3,
         reason: "stream closed before response.completed".into(),
         error_type: None,
+        upstream: Default::default(),
         verdicts: None,
         discard_emitted: false,
         message_id: None,
@@ -208,6 +209,7 @@ fn p188_failed_retry_state_and_its_agent_error_hook_run_on_the_caller() {
                 .send_fuigo_notification(SessionUpdate::RetryState(RetryState::Failed {
                     error_type: "auth".into(),
                     message: "p188 terminal failure".into(),
+                    upstream: Default::default(),
                     verdicts: None,
                 }))
                 .await;

@@ -1,0 +1,64 @@
+{
+ "status": 429,
+ "headers": {
+  "date": "<HTTP-date>",
+  "server": "uvicorn",
+  "x-flux-alias": "deepseek-v4-flash",
+  "content-type": "application/json",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "connection": "close",
+  "content-length": "<n>"
+ },
+ "body": {
+  "error": {
+   "message": "hourly_burn_limit",
+   "type": "None",
+   "param": "None",
+   "code": "429",
+   "provider_specific_fields": {
+    "error": "hourly_burn_limit",
+    "subscription_tier": "builder",
+    "spent_usd_last_hour": 20.0412,
+    "inflight_usd": 0.12,
+    "threshold_usd": 20.0,
+    "retry_after": 1800
+   }
+  }
+ },
+ "endpoint": "/v1/chat/completions",
+ "per_endpoint": {
+  "/v1/messages": {
+   "status": 429,
+   "headers": {
+    "content-length": "92",
+    "content-type": "application/json"
+   },
+   "body": {
+    "type": "error",
+    "error": {
+     "type": "rate_limit_error",
+     "message": "upstream error (status 429)"
+    }
+   }
+  },
+  "/v1/responses": {
+   "status": 429,
+   "headers": {
+    "content-length": "159",
+    "content-type": "application/json"
+   },
+   "body": {
+    "error": {
+     "error": "hourly_burn_limit",
+     "subscription_tier": "builder",
+     "spent_usd_last_hour": 20.0412,
+     "inflight_usd": 0.12,
+     "threshold_usd": 20.0,
+     "retry_after": 1800
+    }
+   }
+  }
+ }
+}

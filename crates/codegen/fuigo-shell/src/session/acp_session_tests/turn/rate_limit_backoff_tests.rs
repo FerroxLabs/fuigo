@@ -304,7 +304,7 @@ async fn explicit_sampler_threshold_disables_subagent_wait_budget() {
             config.rate_limit_retry_threshold = Some(4);
             actor.chat_state_handle.update_sampling_config(config);
 
-            let reconstructed = actor.reconstruct_full_config().await;
+            let reconstructed = actor.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
             assert_eq!(
                 reconstructed.max_retries,
                 Some(3),
@@ -656,4 +656,52 @@ async fn subagents_over_cap_all_complete_under_paced_time() {
             );
         })
         .await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn upstream_contract_real_turn_preserves_flux_and_litellm() {
+    tokio::task::LocalSet::new().run_until(async {
+        let inner = serde_json::json!({"error":{"type":"rate_limit_exceeded","state":"free_cap_reached","message":"monthly allowance exhausted"}});
+        let wrapped = serde_json::json!({"error":{"message":format!("litellm.RateLimitError: {}{}", "prefix ".repeat(50), inner),"code":"429"}});
+        let expected = serde_json::json!({"http_status":429,"type":"rate_limit_exceeded","state":"free_cap_reached","codes":["free_cap_reached","rate_limit_exceeded"],"retry_after_s":1});
+        for (body, direct_codes) in [(inner, true), (wrapped, false)] {
+            let mut expected = expected.clone();
+            // A2.2 codes come from structured envelope slots; the legacy bounded
+            // message walker additionally recovers state/type from wrapped text.
+            if !direct_codes { expected.as_object_mut().unwrap().remove("codes"); }
+            for (session, policy) in [
+                    (SessionKind::Main, sampler_surfaces_429()),
+                    (SessionKind::Subagent, sampler_surfaces_429()),
+                    (SessionKind::Main, sampler_retries_429()),
+                ] {
+                let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")]).await.unwrap();
+                for _ in 0..=crate::session::acp_session::RateLimitWaitConfig::DEFAULT_MAX_ATTEMPTS {
+                    let mut reply = ScriptedResponse::text(429, body.to_string());
+                    reply.headers.push(("retry-after".into(), "1".into()));
+                    server.enqueue_response("/v1/responses", reply);
+                }
+                let (actor, retries) = actor_under_test_with_event_pump(&server, session, policy, true, drain_gateway).await;
+                // Keep the explicit Flux route through every per-turn sampler rebuild.
+                let mut routes = crate::agent::config::Config::default();
+                routes.endpoints.fuigo_api_base_url = server.url();
+                actor.models_manager.apply_config(routes);
+                let request = conversation_request(&actor).await;
+                let mut budget = actor.rate_limit_wait_budget(None);
+                let result = actor.run_turn_via_sampler(request, &mut budget, transient_state(0, true), false, crate::session::acp_session::TurnParkState::Fresh).await;
+                let err = match result { Err(err) => err, Ok(_) => panic!("429 must fail") };
+                assert_eq!(i32::from(err.code), -32003);
+                let data = err.data.unwrap();
+                assert_eq!(data["upstream"], expected);
+                assert!(data.get("http_status").is_none());
+                pump_local_tasks().await;
+                let notices = retries.lock().unwrap();
+                assert!(!notices.is_empty());
+                assert!(notices.iter().any(|n| matches!(n, crate::extensions::notification::RetryState::Failed { .. } | crate::extensions::notification::RetryState::Exhausted { .. })));
+                assert!(!notices.iter().any(|n| matches!(n, crate::extensions::notification::RetryState::Retrying { .. })));
+                for notice in notices.iter() {
+                    assert_eq!(serde_json::to_value(notice).unwrap()["upstream"], expected);
+                }
+            }
+        }
+    }).await;
 }

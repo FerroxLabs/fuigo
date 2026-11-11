@@ -129,7 +129,7 @@ fn request() -> fuigo_sampling_types::ConversationRequest {
 /// One turn's sampler, exactly as the turn builds it, sent once.
 async fn send_turn(actor: &Arc<SessionActor>) {
     let client = actor
-        .prepare_chat_completion(true)
+        .prepare_chat_completion(true, crate::session::acp_session::CallRole::Side)
         .await
         .expect("turn sampler builds");
     let _ = client.conversation(request()).await;

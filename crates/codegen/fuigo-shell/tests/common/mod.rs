@@ -412,6 +412,7 @@ pub fn test_sampler_config(
     SamplerConfig {
         api_key: Some("test-api-key".to_string()),
         base_url: base_url.to_string(),
+        flux_base_url: None,
         model: "test-model".to_string(),
         max_completion_tokens: Some(1000),
         temperature: Some(0.7),

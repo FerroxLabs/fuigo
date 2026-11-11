@@ -83,7 +83,7 @@ pub(super) fn transient_backoff_delay(attempts_used: u32) -> std::time::Duration
 /// Vetoes mirror `is_retry_vetoed`. Status-less `Api` fails closed; other kinds keep their dedicated recovery or terminal path.
 pub(super) fn transient_retry_eligible(error: &fuigo_sampler::SamplingErrorInfo) -> bool {
     use fuigo_sampler::SamplingErrorKind;
-    if error.should_retry == Some(false)
+    if error.upstream().classification().is_terminal() || error.should_retry == Some(false)
         || fuigo_sampling_types::is_context_length_error(&error.message)
         // Deterministic rejection however the proxy wrapped it (400 or 500); the sampler's own classifier already stripped images and gave up
         || matches!(
@@ -314,6 +314,9 @@ fn revoked_sampling_info() -> fuigo_sampler::SamplingErrorInfo {
         retry_after_secs: None,
         should_retry: None,
         error_code: None,
+        upstream_state: None,
+        upstream_type: None,
+        upstream_details: Default::default(),
         model_metadata: None,
         empty_response_context: None,
         doom_loop_triggers: None,
@@ -704,7 +707,7 @@ impl SessionActor {
 
     /// Reconstruct a full `SamplerConfig` (with credentials) by combining the actor's `SamplingConfig` and `Credentials`.
     /// Folds in the URL-derived headers (cli-chat-proxy auth, the staging auth header) so the sampler crate stays URL-agnostic.
-    pub(super) async fn reconstruct_full_config(&self) -> SamplingConfig {
+    pub(super) async fn reconstruct_full_config(&self, role: CallRole) -> SamplingConfig {
         #[allow(clippy::items_after_statements)]
         #[derive(Debug)]
         struct TraceContextInjector;
@@ -822,6 +825,7 @@ impl SessionActor {
             subscription_resolver: None,
             api_key,
             base_url: cfg.base_url,
+            flux_base_url: Some(self.models_manager.endpoints().fuigo_api_base_url.clone()),
             model: cfg.model,
             max_completion_tokens: cfg.max_completion_tokens,
             temperature: cfg.temperature,
@@ -870,9 +874,10 @@ impl SessionActor {
             // The sampler sends the opt-in header itself when this is set.
             doom_loop_recovery: self.doom_loop_recovery,
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
-            dispatch_gate: Some(std::sync::Arc::new(ParkGate {
-                session_id: self.session_info.id.0.to_string(),
-            })),
+            dispatch_gate: Some(std::sync::Arc::new(ParkGate::new(
+                self.session_info.id.0.to_string(), role,
+                self.rebuild_spec.session_writer.clone().map(|writer| (self.held_wakes.clone(), writer)),
+            ))),
             mtls_cert_dir: cfg.mtls_cert_dir,
             rate_limit_retry_threshold: cfg.rate_limit_retry_threshold,
             reasoning_summary: cfg.reasoning_summary,
@@ -975,7 +980,7 @@ impl SessionActor {
                     // the cached classifier route is re-judged against it per request.
                     let cached = match (&aux_classifier_sampler, &classifier_route) {
                         (Some(aux), Some((slug, choice))) => {
-                            let current = session.reconstruct_full_config().await;
+                            let current = session.reconstruct_full_config(CallRole::Side).await;
                             match crate::agent::config::cached_helper_route(
                                 *choice,
                                 session.models_manager.model_in_catalog(slug),
@@ -1004,7 +1009,7 @@ impl SessionActor {
                         }
                         None => {
                             session.refresh_token_if_expired().await;
-                            let config = session.reconstruct_full_config().await;
+                            let config = session.reconstruct_full_config(CallRole::Side).await;
                             if let Some((slug, choice)) = explicit_classifier_unusable
                                 && crate::agent::config::explicit_helper_fallback_refused(
                                     None, &config, *choice,
@@ -1183,7 +1188,7 @@ impl SessionActor {
         slug: &str,
         choice: crate::agent::config::HelperModelChoice,
     ) -> Option<(fuigo_sampler::SamplingClient, String, u64)> {
-        let active_session_config = self.reconstruct_full_config().await;
+        let active_session_config = self.reconstruct_full_config(CallRole::Side).await;
         let mut cfg = crate::agent::config::explicit_helper_route(
             self.resolve_aux_sampler_config(slug, choice).await,
             self.models_manager.model_in_catalog(slug),
@@ -1215,13 +1220,14 @@ impl SessionActor {
     pub(super) async fn prepare_chat_completion(
         &self,
         force_http1: bool,
+        role: CallRole,
     ) -> Result<fuigo_sampler::SamplingClient, acp::Error> {
         // P189: every side call (turn summary, title refresh, recap, compaction, memory, goal, laziness) waits while its session tree is parked
         crate::session::quiesce::wait_model_allowed(self.session_info.id.0.as_ref()).await;
         // Check if the JWT token is expired/near-expiration and refresh from config if needed
         self.refresh_token_if_expired().await;
 
-        let mut full_config = self.reconstruct_full_config().await;
+        let mut full_config = self.reconstruct_full_config(role).await;
         full_config.force_http1 = force_http1;
         let sampling_client =
             fuigo_sampler::SamplingClient::new(full_config).map_err(|e| self.to_acp_error(e))?;
@@ -1237,8 +1243,12 @@ impl SessionActor {
 
     /// Refresh auth and push a fresh `SamplerConfig` before each turn.
     pub(crate) async fn prepare_sampler_for_turn(&self) {
-        self.refresh_token_if_expired().await;
-        let mut sampler_config = self.reconstruct_full_config().await;
+        if self.refusal_prompt.lock().unwrap().state==fuigo_sampling_types::refusal::PromptState::Terminal {return;}
+        if self.refusal_prompt.lock().unwrap().refreshes==0 {
+            self.refresh_token_if_expired().await;
+        }
+        let mut sampler_config = self.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
+        self.refusal_prompt.lock().unwrap().refreshable=self.auth_gate(&sampler_config.model,&sampler_config.base_url).active();
         if self.tool_context.task_output_token_budget.is_some()
             || self.tool_context.sampler_retry_only_before_output
         {
@@ -1318,6 +1328,7 @@ impl SessionActor {
             crate::extensions::notification::RetryState::Failed {
                 error_type: kind.as_str().to_owned(),
                 message: message.clone(),
+                upstream: Default::default(),
                 verdicts: None,
             },
         ))
@@ -1342,6 +1353,7 @@ impl SessionActor {
             crate::extensions::notification::RetryState::Failed {
                 error_type: error_type.to_owned(),
                 message: message.clone(),
+                upstream: fuigo_sampling_types::error::UpstreamError { http_status: STATUS, ..Default::default() },
                 verdicts: None,
             },
         ))
@@ -1488,6 +1500,25 @@ impl SessionActor {
             return Err(err);
         }
 
+        // A2.1: STOP and PAUSE terminate before compaction, 4c, and 4d. The sole
+        // exception is one bare-401 session-token refresh in this user prompt.
+        let classification=error.upstream().classification();
+        let (failed_model_id, failed_base_url) = self.chat_state_handle
+            .get_sampling_config().await.map(|c| (c.model, c.base_url)).unwrap_or_default();
+        let session_withheld = self.session_withheld_401(&error, &failed_model_id, &failed_base_url);
+        let refreshable = classification.refresh_eligible(error.upstream().http_status.unwrap_or(0), true)
+            && self.auth_gate(&failed_model_id, &failed_base_url).active();
+        let terminal={
+            let mut prompt=self.refusal_prompt.lock().unwrap();
+            prompt.refreshable=refreshable;
+            prompt.respond("main",error.upstream().http_status.unwrap_or(0),Some(&classification));
+            // The resubmit has spent the sole exception, even if its answer is transient.
+            if prompt.refreshes>0 { prompt.state=fuigo_sampling_types::refusal::PromptState::Terminal; }
+            prompt.state==fuigo_sampling_types::refusal::PromptState::Terminal
+        };
+
+        if terminal { self.persist_terminal_prompt(); }
+
         // On an in-flight salvage continuation, a max-tokens failure or a probable context overflow is not terminal
         // For an overflow, compact-and-resubmit would delete the continue reminder and split the report
         // The turn loop completes the turn truncated with the committed segments
@@ -1503,7 +1534,7 @@ impl SessionActor {
         let encrypted_content_mismatch = matches!(error.kind, SamplingErrorKind::Api)
             && error.status_code == Some(400)
             && error.message.contains("encrypted_content");
-        let quiet_mid_salvage = mid_salvage_continuation
+        let quiet_mid_salvage = !terminal && mid_salvage_continuation
             && (error.kind == SamplingErrorKind::MaxTokensTruncation
                 || fuigo_sampling_types::is_context_length_error(&error.message)
                 || (!matches!(
@@ -1544,9 +1575,7 @@ impl SessionActor {
             );
             self.log_terminal_failure("output_budget_usage_unknown", error.status_code, &message);
             // Arms that used to send a bare string gain the typed object but no `http_status`: a status (401) changes what clients do
-            return Err(acp::Error::internal_error().data(
-                crate::sampling::error::terminal_error_data(message, None, error.kind),
-            ));
+            return Err(prompt_terminal_error(&error, message, None));
         }
         if self.tool_context.sampler_retry_only_before_output {
             self.mark_turn_usage_unaccounted();
@@ -1559,15 +1588,13 @@ impl SessionActor {
                 error.status_code,
                 &message,
             );
-            return Err(acp::Error::internal_error().data(
-                crate::sampling::error::terminal_error_data(message, None, error.kind),
-            ));
+            return Err(prompt_terminal_error(&error, message, None));
         }
 
         // Never compact mid-salvage: the rewrite would drop the continue reminder and split the joined report
         // Genuine overflows already completed truncated in the quiet arm above
         // The remaining mid-salvage kinds (rate limit) take their terminal arms below
-        let overflow_window = if mid_salvage_continuation {
+        let overflow_window = if terminal || mid_salvage_continuation {
             None
         } else {
             self.overflow_compaction_window(&error).await
@@ -1595,6 +1622,10 @@ impl SessionActor {
                     percentage,
                 };
                 if let Err(e) = self.run_compact_only(trigger_info, false).await {
+                    // A Flux STOP/PAUSE on the compaction call already ended the prompt: that classified error stands.
+                    if self.is_terminal_prompt_refusal(&e) {
+                        return Err(e);
+                    }
                     if Self::is_auth_compact_error(&e) {
                         return Err(self.surface_compact_auth_failure(e).await);
                     }
@@ -1611,7 +1642,7 @@ impl SessionActor {
 
         // 2. Encrypted-content mismatch: friendly error, no retry.
         //    Detect via the BadRequest and "encrypted_content" message pattern that `SamplingError::is_encrypted_content_error` used in the legacy path
-        if encrypted_content_mismatch {
+        if !terminal && encrypted_content_mismatch {
             self.signals_handle()
                 .record_error_typed("encrypted_content_mismatch");
             let friendly = "This session's conversation history is incompatible \
@@ -1622,12 +1653,13 @@ impl SessionActor {
                 crate::extensions::notification::RetryState::Failed {
                     error_type: "encrypted_content_mismatch".to_string(),
                     message: friendly.clone(),
+                    upstream: error.upstream(),
                     verdicts: None,
                 },
             ))
             .await;
             return Err(acp::Error::invalid_params().data(
-                crate::sampling::error::terminal_error_data(friendly, None, error.kind),
+                crate::sampling::error::sampling_error_data(friendly, None, &error),
             ));
         }
 
@@ -1639,6 +1671,7 @@ impl SessionActor {
                     reason: detailed_message.clone(),
                     is_rate_limited: true,
                     error_type: Some(SamplingErrorKind::RateLimited.as_str().to_string()),
+                    upstream: error.upstream(),
                     verdicts: None,
                 },
             ))
@@ -1647,10 +1680,10 @@ impl SessionActor {
                 crate::sampling::error::RATE_LIMITED_ERROR_CODE,
                 "Rate limited".to_string(),
             )
-            .data(crate::sampling::error::terminal_error_data(
+            .data(crate::sampling::error::sampling_error_data(
                 detailed_message,
                 None,
-                error.kind,
+                &error,
             ));
             return Err(acp_err);
         }
@@ -1659,19 +1692,6 @@ impl SessionActor {
         //    A static api-key isn't refreshable, so retrying re-sends the same rejected bearer and 401-loops the turn
         //    See `crate::agent::auth_method::session_token_auth_gate`.
         // One sampling-config snapshot drives every arm-4 decision, so the provider resolution and the gate can't disagree mid-model-switch
-        let (failed_model_id, failed_base_url) = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .map(|c| (c.model, c.base_url))
-            .unwrap_or_default();
-
-        // P42: a 401 on a request that went out WITHOUT the session token because its destination may not
-        // receive it. No refresh or login can fix that; only configuration can. Decided here, from the same
-        // snapshot as arm 4, and reported terminally in arm 6 instead of as a self-healing blip.
-        let session_withheld =
-            self.session_withheld_401(&error, &failed_model_id, &failed_base_url);
-
         // Provider-backed models recover via arm 4c below
         // The provider is resolved before the eligibility check so its warnings stay quiet for a 401 that 4c handles
         let auth_provider =
@@ -1681,7 +1701,7 @@ impl SessionActor {
                 None
             };
 
-        let auth_recovery_eligible = matches!(error.kind, SamplingErrorKind::Auth) && {
+        let auth_recovery_eligible = !terminal && matches!(error.kind, SamplingErrorKind::Auth) && {
             let gate = self.auth_gate(&failed_model_id, &failed_base_url);
             let eligible = gate.active();
             // Log the Unknown-BYOK decision (eligible or not) so a session still 401ing shows whether refresh fired
@@ -1749,6 +1769,7 @@ impl SessionActor {
             if park.is_parked() && self.uncharged_401_park_eligible(am, error.credential) {
                 return Ok(self.park_uncharged_401(error.credential, true));
             }
+            if error.upstream().flux_routed { self.refusal_prompt.lock().unwrap().refresh_token(); }
             if am
                 .try_recover_unauthorized(crate::auth::recovery::RecoverySource::Turn)
                 .await
@@ -1782,10 +1803,11 @@ impl SessionActor {
             if self.uncharged_401_park_eligible(am, error.credential) {
                 return Ok(self.park_uncharged_401(error.credential, false));
             }
+            if error.upstream().flux_routed { self.refusal_prompt.lock().unwrap().state=fuigo_sampling_types::refusal::PromptState::Terminal; self.persist_terminal_prompt(); }
         }
 
         // 4c. Auth failure or bare 401 on a provider-backed model (gateway 401s can classify under other error kinds).
-        if let Some(ref provider) = auth_provider
+        if !terminal && let Some(ref provider) = auth_provider
             && self.try_provider_401_recovery(provider).await
         {
             self.prepare_sampler_for_turn().await;
@@ -1797,13 +1819,14 @@ impl SessionActor {
 
         // 4d. Bounded resubmit, after the auth arms, before the terminal paths.
         //     Budgeted workflow children stay terminal (guards above)
-        if transient_retry_eligible(&error) && transient.enabled {
+        if !terminal && transient_retry_eligible(&error) && transient.enabled {
             if transient.budget_remaining() {
                 // Count intercepted attempts; section 5 sees only the final one.
                 if matches!(error.kind, SamplingErrorKind::IdleTimeout) {
                     self.signals_handle().record_idle_timeout();
                 }
                 return Ok(SamplerFailureRecovery::RetryTransient {
+                    upstream: error.upstream(),
                     kind: error.kind,
                     status_code: error.status_code,
                 });
@@ -1888,13 +1911,12 @@ impl SessionActor {
                 crate::extensions::notification::RetryState::Failed {
                     error_type: "legacy_auth".to_string(),
                     message: msg.clone(),
+                    upstream: error.upstream(),
                     verdicts: None,
                 },
             ))
             .await;
-            return Err(acp::Error::internal_error().data(
-                crate::sampling::error::terminal_error_data(msg, None, error.kind),
-            ));
+            return Err(prompt_terminal_error(&error, msg, None));
         }
 
         // 5d. Enriched error for 404 model-not-found and 401 auth errors.
@@ -2001,12 +2023,14 @@ impl SessionActor {
                     reason: detailed_message.clone(),
                     is_rate_limited: false,
                     error_type: Some(error_type.to_string()),
+                    upstream: error.upstream(),
                     verdicts: None,
                 }
             }
             _ => crate::extensions::notification::RetryState::Failed {
                 error_type: error_type.to_string(),
                 message: detailed_message.clone(),
+                upstream: error.upstream(),
                 verdicts: None,
             },
         };
@@ -2019,18 +2043,13 @@ impl SessionActor {
             return Err(acp::Error::internal_error().data(crate::acp_error::typed_error_data(
                 Some(serde_json::json!({
                     "message": detailed_message,
+                    "upstream": error.upstream(),
                     crate::acp_error::ERROR_KIND_DATA_KEY: SESSION_WITHHELD_ERROR_TYPE,
                 })),
                 SESSION_WITHHELD_ERROR_TYPE,
             )));
         }
-        Err(
-            acp::Error::internal_error().data(crate::sampling::error::terminal_error_data(
-                detailed_message,
-                error.status_code,
-                error.kind,
-            )),
-        )
+        Err(prompt_terminal_error(&error, detailed_message, error.status_code))
     }
 
     async fn wait_for_stream_drain(
@@ -2105,7 +2124,7 @@ impl SessionActor {
                             .await;
                     };
                     earlier_attempts = attempts;
-                    self.notify_rate_limit_wait(attempt, budget, backoff).await;
+                    self.notify_rate_limit_wait(attempt, budget, backoff, info.upstream()).await;
                     // Esc cancels a turn by aborting its task, so this await point is itself the cancellation point; no select needed
                     sleep(super::auth_retry::paced(backoff)).await;
                     // A token can expire across minutes of accumulated waits
@@ -2307,8 +2326,8 @@ impl SessionActor {
             SamplerFailureRecovery::RefreshAuthAndResubmit { credential, store } => {
                 Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store })
             }
-            SamplerFailureRecovery::RetryTransient { kind, status_code } => {
-                Ok(SamplerTurnOutcome::RetryTransient { kind, status_code })
+            SamplerFailureRecovery::RetryTransient { kind, status_code, upstream } => {
+                Ok(SamplerTurnOutcome::RetryTransient { kind, status_code, upstream })
             }
         }
     }
@@ -2319,6 +2338,7 @@ impl SessionActor {
         attempt: u32,
         budget: &RateLimitWaitBudget,
         backoff: Duration,
+        upstream: fuigo_sampling_types::error::UpstreamError,
     ) {
         // Debug, not warn: a burst of subagents would otherwise flood the log.
         tracing::debug!(
@@ -2348,6 +2368,7 @@ impl SessionActor {
                     human_duration(announced)
                 ),
                 error_type: None,
+                upstream,
                 verdicts: None,
                 discard_emitted: false,
                 message_id: None,
@@ -2390,6 +2411,12 @@ impl SessionActor {
     /// Falling through after a failed session refresh left hard-expired opaque tokens (External/OIDC) on the wire and guaranteed a 401.
     /// Soft failures with a still-usable access token still return here (grace / optimistic send); 401 recovery remains the safety net.
     pub(crate) async fn refresh_token_if_expired(&self) {
+        // Every preflight caller, including helper/compaction clients, observes the
+        // same prompt boundary; a terminal refusal cannot start another refresh.
+        {
+            let prompt=self.refusal_prompt.lock().unwrap();
+            if prompt.state==fuigo_sampling_types::refusal::PromptState::Terminal || prompt.refreshes>0 {return;}
+        }
         if let Some(ref am) = self.auth_manager {
             let creds = self.chat_state_handle.get_credentials().await;
             // Gate on the stable classifier, not `creds.auth_type`; this also heals a transient `ApiKey` flip by writing the refreshed token into `creds.api_key` below
@@ -2700,20 +2727,115 @@ struct ClassifierHelper {
     effort: Option<fuigo_sampling_types::ReasoningEffort>,
 }
 
+/// FA6 changes only the code of a Flux 401. Every prompt terminal arm keeps
+/// the parent's top-level message and composes its own unchanged data.message.
+fn prompt_terminal_error(
+    error: &fuigo_sampler::SamplingErrorInfo,
+    message: String,
+    http_status: Option<u16>,
+) -> acp::Error {
+    let upstream = error.upstream();
+    let code = if upstream.flux_routed && upstream.http_status == Some(401) {
+        -32000
+    } else {
+        -32603
+    };
+    // Parent Error::internal_error() has exactly this JSON-RPC message.
+    acp::Error::new(code, "Internal error").data(
+        crate::sampling::error::sampling_error_data(message, http_status, error),
+    )
+}
+
 /// P189 (M3): holds every model HTTP request of a session tree at the single dispatch point while the tree is parked.
 /// Set on every `SamplerConfig` built for a session or its subagents, so the sampler's own retries and any side call
 /// that got past execution admission wait here, just before the request leaves the process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CallRole { Main, Side }
+
 pub(crate) struct ParkGate {
-    pub(crate) session_id: String,
+    session_id: String,
+    role: CallRole,
+    durable: Option<(Arc<std::sync::Mutex<super::held_wakes::HeldWakes>>, fuigo_session_writer::SessionWriter)>,
+}
+impl ParkGate {
+    pub(crate) fn new(
+        session_id: String,
+        role: CallRole,
+        durable: Option<(Arc<std::sync::Mutex<super::held_wakes::HeldWakes>>, fuigo_session_writer::SessionWriter)>,
+    ) -> Self {
+        ParkGate { session_id, role, durable }
+    }
 }
 
+
 impl fuigo_sampling_types::DispatchGate for ParkGate {
+    fn on_refusal(&self,error:&fuigo_sampling_types::SamplingError)->bool {
+        if self.role == CallRole::Side {return false;}
+        let prompt=REFUSAL_PROMPTS.lock().unwrap().get(&self.session_id).and_then(std::sync::Weak::upgrade);
+        if let Some(prompt)=prompt {
+            let mut prompt=prompt.lock().unwrap();
+            let result=error.upstream().classification();
+            let eligible=prompt.refreshes==0 && result.refresh_eligible(error.upstream().http_status.unwrap_or(0),prompt.refreshable);
+            if !eligible && (result.is_terminal() || prompt.refreshes>0) {
+                prompt.state=fuigo_sampling_types::refusal::PromptState::Terminal;
+                TERMINAL_REFUSALS.lock().unwrap().insert(self.session_id.clone(), fuigo_sampler::SamplingErrorInfo::from(error));
+                if let Some((queue, writer)) = &self.durable {
+                    let mut queue = queue.lock().unwrap();
+                    queue.terminal = true;
+                    if let Err(error) = queue.save(writer) {
+                        tracing::error!(%error, "Could not persist terminal prompt");
+                    }
+                }
+                return true;
+            }
+        }
+        false
+    }
+    fn check_open(&self)->fuigo_sampling_types::Result<()> {
+        check_refusal_dispatch(&self.session_id)
+    }
     fn wait_open(&self) -> fuigo_sampling_types::DispatchGateFuture<'_> {
         Box::pin(crate::session::quiesce::wait_model_allowed(&self.session_id))
     }
 }
 
+/// The session's dispatch veto, as the web search tool sees it. A refusal of the web search call itself stays
+/// nonfatal to the prompt (Side role); only the session's or an ancestor's terminal state closes it.
+struct SideModelGate(ParkGate);
+impl fuigo_tools::implementations::web_search::client::ModelDispatchGate for SideModelGate {
+    fn check_open(&self) -> Result<(), String> {
+        fuigo_sampling_types::DispatchGate::check_open(&self.0).map_err(|e| e.to_string())
+    }
+}
+pub(crate) fn side_model_gate(session_id: &str) -> fuigo_tools::implementations::web_search::client::SharedModelDispatchGate {
+    std::sync::Arc::new(SideModelGate(ParkGate::new(session_id.to_string(), CallRole::Side, None)))
+}
+
 impl SessionActor {
+    /// Whether `error` is the refusal that ended this prompt, as returned by [`Self::end_prompt_on_compaction_refusal`]:
+    /// the prompt is terminal and the error is not a compaction failure (those carry `error_kind` "compaction"). The wire form of `upstream` does not carry the Flux routing bit, so it cannot be read back.
+    pub(crate) fn is_terminal_prompt_refusal(&self, error: &acp::Error) -> bool {
+        crate::sampling::error::error_kind_str_from_error(error) != Some("compaction")
+            && self.refusal_prompt.lock().unwrap().state == fuigo_sampling_types::refusal::PromptState::Terminal
+    }
+    /// A compaction call that ends the prompt with a terminal Flux refusal returns that refusal, through the path a
+    /// main-call refusal takes, instead of a compaction failure the caller would log before the main request is
+    /// blocked with a generic error. Anything else comes back unchanged.
+    pub(crate) async fn end_prompt_on_compaction_refusal(self: &Arc<Self>, failure: acp::Error) -> acp::Error {
+        let Some(info) = TERMINAL_REFUSALS.lock().unwrap().remove(&self.session_id_string()) else { return failure };
+        if !info.upstream().flux_routed
+            || self.refusal_prompt.lock().unwrap().state != fuigo_sampling_types::refusal::PromptState::Terminal
+        {
+            return failure;
+        }
+        let transient = TransientRetryState { step_attempts: 0, prompt_attempts: 0, episode_start: None, enabled: false };
+        // Boxed: handle_sampling_failure can itself run a compaction.
+        match Box::pin(self.handle_sampling_failure(info, 0, transient, false, TurnParkState::Fresh)).await {
+            Err(error) => error,
+            Ok(_) => failure,
+        }
+    }
+
     /// The window after a server overflow at `server_window`: a selection that fits stays, a larger one is cleared.
     pub(in crate::session) fn context_window_after_overflow(
         &self,
@@ -2784,6 +2906,9 @@ mod stream_drain_tests {
             retry_after_secs: Some(1),
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
@@ -2800,4 +2925,28 @@ mod stream_drain_tests {
         assert_eq!(result.kind, fuigo_sampler::SamplingErrorKind::Cancelled);
         assert_eq!(result.status_code, None);
     }
+}
+
+// Weak entries cannot keep actors alive. Bind once per prompt; session/load does not
+// reopen the prompt. The same gate protects main, retry, compact, and title dispatches.
+type RefusalPrompt = std::sync::Mutex<fuigo_sampling_types::refusal::PromptSM>;
+static REFUSAL_PROMPTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String,std::sync::Weak<RefusalPrompt>>>> = std::sync::LazyLock::new(Default::default);
+/// The refusal that ended each session's prompt, kept so a failed inline compaction can end the prompt with the
+/// same classified error a main call would have returned. Cleared when the next prompt binds.
+static TERMINAL_REFUSALS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String,fuigo_sampler::SamplingErrorInfo>>> = std::sync::LazyLock::new(Default::default);
+pub(super) fn bind_refusal_prompt(id:&str,prompt:&std::sync::Arc<RefusalPrompt>) {
+    TERMINAL_REFUSALS.lock().unwrap().remove(id);
+    let mut entries=REFUSAL_PROMPTS.lock().unwrap();entries.retain(|_,v|v.strong_count()>0);
+    entries.insert(id.into(),std::sync::Arc::downgrade(prompt));
+}
+fn check_refusal_dispatch(id:&str)->fuigo_sampling_types::Result<()> {
+    // Rebuilt child samplers keep the dispatch veto of every parent prompt.
+    // Their own refusal is still recorded only against their own session.
+    for id in crate::session::quiesce::ancestors_including_self(id) {
+        let prompt=REFUSAL_PROMPTS.lock().unwrap().get(&id).and_then(std::sync::Weak::upgrade);
+        if let Some(prompt)=prompt && prompt.lock().unwrap().state==fuigo_sampling_types::refusal::PromptState::Terminal {
+            return Err(fuigo_sampling_types::SamplingError::InvalidConfiguration("prompt ended with a terminal upstream refusal"));
+        }
+    }
+    Ok(())
 }

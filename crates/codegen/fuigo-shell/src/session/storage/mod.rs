@@ -3756,6 +3756,7 @@ mod tests {
                         max_retries: 15,
                         reason: "stream ended early".into(),
                         error_type: Some("api".into()),
+                        upstream: Default::default(),
                         verdicts: None,
                         discard_emitted,
                         message_id: None,

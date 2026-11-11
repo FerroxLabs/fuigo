@@ -209,6 +209,7 @@ fn reasoning_only_storm_is_capped_and_mirrored_on_session_update() {
                     max_retries: 3,
                     reason: reason.to_string(),
                     error_type: Some("empty_response".to_string()),
+                    upstream: Default::default(),
                     verdicts: None,
                     // P188: each resent attempt had streamed its reasoning, which the resend voids
                     discard_emitted: true,
@@ -225,6 +226,7 @@ fn reasoning_only_storm_is_capped_and_mirrored_on_session_update() {
                 reason: reason.to_string(),
                 is_rate_limited: false,
                 error_type: Some("empty_response".to_string()),
+                upstream: Default::default(),
                 verdicts: None,
             };
             exhausted.stamp_verdicts();
@@ -294,6 +296,10 @@ fn shell_transient_retries_are_mirrored_once_each() {
                     max_retries: 3,
                     reason: "Server error; retrying request".to_string(),
                     error_type: Some("api".to_string()),
+                    upstream: fuigo_sampling_types::error::UpstreamError {
+                        http_status: Some(503),
+                        ..Default::default()
+                    },
                     verdicts: None,
                     discard_emitted: false,
                     message_id: None,
@@ -553,6 +559,7 @@ async fn a_retry_mirror_never_overtakes_answer_text_already_generated() {
                 max_retries: 3,
                 reason: "Server error; retrying request".to_string(),
                 error_type: Some("api".to_string()),
+                upstream: Default::default(),
                 verdicts: None,
                 discard_emitted: false,
                 message_id: None,
@@ -648,6 +655,7 @@ async fn a_mirror_queued_from_outside_the_actor_is_ordered_and_separated() {
             let disk_full = RetryState::Failed {
                 error_type: DISK_FULL_ERROR_TYPE.to_string(),
                 message: DISK_FULL_USER_MESSAGE.to_string(),
+                upstream: Default::default(),
                 verdicts: None,
             };
             actor
@@ -1174,6 +1182,7 @@ async fn a_mirror_queued_during_session_teardown_still_reaches_the_client() {
             let disk_full = RetryState::Failed {
                 error_type: DISK_FULL_ERROR_TYPE.to_string(),
                 message: DISK_FULL_USER_MESSAGE.to_string(),
+                upstream: Default::default(),
                 verdicts: None,
             };
             // What the persistence actor does when a session-end write runs out of space.

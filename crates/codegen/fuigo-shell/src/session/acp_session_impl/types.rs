@@ -53,6 +53,7 @@ pub(crate) enum SamplerFailureRecovery {
     /// Transient failure: back off and resubmit instead of killing the turn.
     /// Retries are bounded.
     RetryTransient {
+        upstream: fuigo_sampling_types::error::UpstreamError,
         kind: fuigo_sampler::SamplingErrorKind,
         status_code: Option<u16>,
     },
@@ -75,6 +76,7 @@ pub(crate) enum SamplerTurnOutcome {
     },
     /// Mirrors [`SamplerFailureRecovery::RetryTransient`].
     RetryTransient {
+        upstream: fuigo_sampling_types::error::UpstreamError,
         kind: fuigo_sampler::SamplingErrorKind,
         status_code: Option<u16>,
     },

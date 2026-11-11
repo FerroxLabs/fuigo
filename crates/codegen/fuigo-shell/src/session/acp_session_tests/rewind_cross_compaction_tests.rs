@@ -338,7 +338,7 @@ async fn run_clears_marker_scenario() {
         .compactions_remaining
         .set(Some(CompactionsRemaining::Dynamic(true)));
     let header = actor
-        .reconstruct_full_config()
+        .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
         .await
         .extra_headers
         .get("x-compactions-remaining")

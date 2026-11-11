@@ -724,6 +724,7 @@ async fn read_parent_sampling_config(
                 "subagent_inherit_live",
             );
             let mut inherited = fuigo_sampler::SamplerConfig {
+                flux_base_url: ctx.sampling_config.flux_base_url.clone(),
                 api_key: inherited_api_key,
                 base_url: cfg.base_url,
                 model: cfg.model.clone(),
@@ -768,9 +769,7 @@ async fn read_parent_sampling_config(
                 subscription: None,
                 subscription_resolver: None,
                 header_injector: ctx.sampling_config.header_injector.clone(),
-                dispatch_gate: Some(std::sync::Arc::new(crate::session::acp_session::ParkGate {
-                    session_id: ctx.parent_session_id.clone(),
-                })),
+                dispatch_gate: Some(std::sync::Arc::new(crate::session::acp_session::ParkGate::new(ctx.parent_session_id.clone(), crate::session::acp_session::CallRole::Side, None))),
                 mtls_cert_dir: cfg.mtls_cert_dir,
                 rate_limit_retry_threshold: cfg.rate_limit_retry_threshold,
                 reasoning_summary: cfg.reasoning_summary,
@@ -899,6 +898,7 @@ fn resolve_model_override_to_config(
         ctx.sampling_config.deployment_id.clone(),
         ctx.sampling_config.user_id.clone(),
     );
+    config.flux_base_url = ctx.sampling_config.flux_base_url.clone();
     config.bearer_resolver = if !ctx.would_strip_fallback_key(config.api_key.as_deref())
         && resolved_auth_type == fuigo_chat_state::AuthType::SessionToken
     {

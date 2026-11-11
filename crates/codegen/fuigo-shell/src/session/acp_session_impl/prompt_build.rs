@@ -994,7 +994,7 @@ impl SessionActor {
         let current_query = crate::session::image_describe::strip_template_context_tags(
             &fuigo_chat_state::compaction_utils::extract_user_query(&original_user_message),
         );
-        let active_session_config = self.reconstruct_full_config().await;
+        let active_session_config = self.reconstruct_full_config(crate::session::acp_session::CallRole::Side).await;
         // The helper slug and how it was chosen come from ONE config snapshot (P90 F6), so a
         // config reload can never pair one helper with another helper's provenance. The
         // session's spawn-time slug is the fallback for a config that carries none.

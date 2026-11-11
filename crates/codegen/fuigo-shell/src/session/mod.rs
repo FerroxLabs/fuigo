@@ -99,7 +99,7 @@ pub use fuigo_agent_lifecycle::{
     AnalyticsClass, CompactionClass, InputAuthority, InputPolicy, QueuePolicy, ShutdownPolicy,
     TurnBoundary,
 };
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PromptOrigin {
     User,
     /// Auto-wake prompt injected when a background terminal task completed.

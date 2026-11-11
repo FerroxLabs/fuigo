@@ -194,6 +194,7 @@
             max_retries: 3,
             reason: "rate limited".into(),
             error_type: None,
+            upstream: Default::default(),
             verdicts: None,
             discard_emitted: false,
             message_id: None,
@@ -228,6 +229,7 @@
                 max_retries: 15,
                 reason: "stream ended early".into(),
                 error_type: Some("api".into()),
+                upstream: Default::default(),
                 verdicts: None,
                 discard_emitted,
                 message_id: None,
@@ -254,6 +256,7 @@
                 reason: "rate limited".into(),
                 is_rate_limited: true,
                 error_type: None,
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -273,6 +276,7 @@
             reason: "".into(),
             is_rate_limited: true,
             error_type: None,
+            upstream: Default::default(),
             verdicts: None,
         };
 
@@ -297,6 +301,7 @@
             reason: reason.clone(),
             is_rate_limited: true,
             error_type: None,
+            upstream: Default::default(),
             verdicts: None,
         };
 
@@ -331,6 +336,7 @@
                 .into(),
             is_rate_limited: true,
             error_type: None,
+            upstream: Default::default(),
             verdicts: None,
         };
 
@@ -369,6 +375,7 @@
                 reason: "server error".into(),
                 is_rate_limited: false,
                 error_type: None,
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -401,6 +408,7 @@
                     .into(),
                 is_rate_limited: true,
                 error_type: None,
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -444,6 +452,7 @@
                 reason: reason.into(),
                 is_rate_limited: false,
                 error_type: Some(SamplingErrorKind::EmptyResponse.as_str().to_string()),
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -475,6 +484,7 @@
                 reason: "empty response from model (reasoning_only)".into(),
                 is_rate_limited: false,
                 error_type: None,
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -500,6 +510,7 @@
             &RetryState::Failed {
                 error_type: DISK_FULL_ERROR_TYPE.into(),
                 message: DISK_FULL_USER_MESSAGE.into(),
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -532,6 +543,7 @@
                 reason: "status 403: run out of credits".into(),
                 is_rate_limited: false,
                 error_type: None,
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -562,6 +574,7 @@
             &RetryState::Failed {
                 error_type: "api".into(),
                 message: "status 403: run out of credits".into(),
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -594,6 +607,7 @@
                 message:
                     "API error (status 402 Payment Required): Fuigo usage balance exhausted"
                         .into(),
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -620,6 +634,7 @@
             &RetryState::Failed {
                 error_type: "api".into(),
                 message: "internal server error".into(),
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -668,6 +683,7 @@
         let mut scrollback = ScrollbackState::new();
         apply_retry_state(
             &RetryState::Failed {
+                upstream: Default::default(),
                 error_type: "auth".into(),
                 message: "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/messages: \
                           no auth context"
@@ -702,6 +718,7 @@
             &RetryState::Failed {
                 error_type: "auth".into(),
                 message: "Unauthorized (401) from https://proxy/v1/messages".into(),
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -723,6 +740,7 @@
                 error_type: "api".into(),
                 message: "Unauthorized (401) from https://proxy/v1/responses: invalid credentials"
                     .into(),
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -744,6 +762,7 @@
                 message: "Unauthorized (401) ... deprecated authentication method (WebLogin) ... \
                           run `fuigo logout` then `fuigo login`"
                     .into(),
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -763,6 +782,7 @@
             &RetryState::Failed {
                 error_type: "api".into(),
                 message: r#"API error (status 500 Internal Server Error): {"error":"upstream exploded"}"#.into(),
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -793,6 +813,7 @@
                 error_type: "api".into(),
                 message: "API error (status 403 Forbidden): Access to the chat endpoint is denied"
                     .into(),
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -822,6 +843,7 @@
         let mut scrollback = ScrollbackState::new();
         apply_retry_state(
             &RetryState::Failed {
+                upstream: Default::default(),
                 error_type: CONTEXT_LENGTH_ERROR_TYPE.into(),
                 message: "API error (status 500): the prompt is too long for this model's \
                           context window"
@@ -847,6 +869,7 @@
         let mut scrollback = ScrollbackState::new();
         apply_retry_state(
             &RetryState::Failed {
+                upstream: Default::default(),
                 error_type: "api".into(),
                 message: "API error (status 500): the prompt is too long for this model's \
                           context window"
@@ -880,6 +903,7 @@
             &RetryState::Failed {
                 error_type: CONTEXT_LENGTH_ERROR_TYPE.into(),
                 message: "the prompt is too long for this model's context window".into(),
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -1402,6 +1426,7 @@
             &RetryState::Failed {
                 error_type: "encrypted_content_mismatch".into(),
                 message: "incompatible history".into(),
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,
@@ -1422,6 +1447,7 @@
             &RetryState::Failed {
                 error_type: "api_400".into(),
                 message: "bad request".into(),
+                upstream: Default::default(),
                 verdicts: None,
             },
             &mut session,

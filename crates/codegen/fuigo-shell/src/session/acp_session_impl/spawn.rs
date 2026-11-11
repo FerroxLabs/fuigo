@@ -1977,6 +1977,9 @@ pub(crate) async fn spawn_session_actor(
     };
     // `turn_owner_lock` was taken by `spawn_session_on_thread` before this actor exists, so no `turn_started` is
     // ever written unlocked.
+    let held_wakes = super::held_wakes::HeldWakes::load(&crate::session::persistence::session_dir(&session_info), &session_writer)
+        .map_err(|e| fuigo_agent::AgentBuildError::InvalidConfig(format!("Could not load held wakes: {e}")))?;
+    let refusal_prompt = held_wakes.refusal_prompt();
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         status_wake: Default::default(),
         session_info: session_info.clone(),
@@ -1997,6 +2000,8 @@ pub(crate) async fn spawn_session_actor(
         model_auth_memo: std::cell::RefCell::new(None),
         attribution_callback,
         auth_manager,
+        held_wakes: Arc::new(std::sync::Mutex::new(held_wakes)),
+        refusal_prompt: Arc::new(std::sync::Mutex::new(refusal_prompt)),
         is_chat_kind,
         state,
         notifications: NotificationSender {
@@ -2269,6 +2274,7 @@ pub(crate) async fn spawn_session_actor(
     if owns_permission_manager {
         session.wire_permission_prompt_notification();
     }
+    super::sampler_turn::bind_refusal_prompt(&session.session_info.id.to_string(), &session.refusal_prompt);
     if goal_was_restored {
         let current_tokens = session.chat_state_handle.get_total_tokens().await as i64;
         let (tokens_used, finished_marginal) = session.goal_tokens(current_tokens);

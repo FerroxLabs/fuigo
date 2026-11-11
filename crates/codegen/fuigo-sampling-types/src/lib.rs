@@ -36,3 +36,7 @@ pub use self::tool_overrides::{
 pub use self::types::*;
 
 pub use async_openai::types::responses as rs;
+
+pub mod refusal;
+pub mod upstream_vocab;
+mod selective_error;

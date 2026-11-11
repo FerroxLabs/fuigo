@@ -24,6 +24,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         parent_max_turns: None,
         client_hooks: Default::default(),
         sampling_config: fuigo_sampler::SamplerConfig {
+        flux_base_url: None,
             api_key: None,
             base_url: String::new(),
             model: String::new(),

@@ -474,7 +474,7 @@ impl SessionActor {
         // The per-session `sampler_handle` would forward streaming events on the shared sampler channel
         // Every `ChannelToken { Text }` becomes an ACP `AgentMessageChunk`, so the pager UI would render mid-classifier reasoning and text deltas
         // `conversation_collect` never publishes on that channel, so the client sees nothing
-        let sampling_client = match self.prepare_chat_completion(false).await {
+        let sampling_client = match self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side).await {
             Ok(c) => c,
             Err(err) => {
                 let detail = crate::sampling::error::acp_error_text(&err);

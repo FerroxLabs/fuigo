@@ -1,0 +1,78 @@
+{
+ "status": 402,
+ "headers": {
+  "date": "<HTTP-date>",
+  "server": "uvicorn",
+  "x-flux-alias": "deepseek-v4-flash",
+  "content-type": "application/json",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "connection": "close",
+  "content-length": "<n>",
+  "x-flux-hold-reason": "credit_exhausted"
+ },
+ "body": {
+  "error": {
+   "message": "Your credit balance is exhausted. Top up to keep going. Top up at https://fluxrouter.ai/home/billing",
+   "type": "None",
+   "param": "None",
+   "code": "402"
+  }
+ },
+ "endpoint": "/v1/chat/completions",
+ "per_endpoint": {
+  "/v1/messages": {
+   "status": 402,
+   "headers": {
+    "content-length": "170",
+    "content-type": "application/json"
+   },
+   "body": {
+    "type": "error",
+    "error": {
+     "type": "invalid_request_error",
+     "message": "Your credit balance is exhausted. Top up to keep going. Top up at https://fluxrouter.ai/home/billing"
+    }
+   }
+  },
+  "/v1/responses": {
+   "status": 402,
+   "headers": {
+    "content-length": "169",
+    "content-type": "application/json"
+   },
+   "body": {
+    "error": {
+     "message": "Your credit balance is exhausted. Top up to keep going. Top up at https://fluxrouter.ai/home/billing",
+     "type": "api_error",
+     "param": null,
+     "code": "402"
+    }
+   }
+  },
+  "monthly_cap_variant_chat": {
+   "status": 402,
+   "headers": {
+    "date": "<HTTP-date>",
+    "server": "uvicorn",
+    "x-flux-alias": "deepseek-v4-flash",
+    "content-type": "application/json",
+    "x-frame-options": "DENY",
+    "content-security-policy": "frame-ancestors 'none'",
+    "x-content-type-options": "nosniff",
+    "connection": "close",
+    "content-length": "<n>",
+    "x-flux-hold-reason": "monthly_cap"
+   },
+   "body": {
+    "error": {
+     "message": "Your monthly spend cap is reached. Raise it or wait for the next cycle. Top up at https://fluxrouter.ai/home/billing",
+     "type": "None",
+     "param": "None",
+     "code": "402"
+    }
+   }
+  }
+ }
+}

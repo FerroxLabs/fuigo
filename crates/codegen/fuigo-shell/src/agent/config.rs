@@ -6515,7 +6515,7 @@ fn resolve_aux_model_sampling_config_inner(
     let catalog_entry = find_model_by_id(models, model_id).cloned();
     if let Some(entry) = &catalog_entry {
         let credentials = resolve_credentials_enforced(entry, session_key, disable_api_key_auth);
-        let sampler = sampling_config_for_model(
+        let mut sampler = sampling_config_for_model(
             entry,
             credentials,
             alpha_test_key.clone(),
@@ -6523,6 +6523,7 @@ fn resolve_aux_model_sampling_config_inner(
             None,
             None,
         );
+        sampler.flux_base_url = Some(endpoints.fuigo_api_base_url.clone());
         if sampler.api_key.is_some() || sampler.subscription.is_some() {
             return Some(sampler);
         }
@@ -6612,7 +6613,7 @@ fn resolve_aux_model_sampling_config_inner(
             mtls_cert_dir: None,
         };
         let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
-        let sampler = sampling_config_for_model(
+        let mut sampler = sampling_config_for_model(
             &entry,
             credentials,
             alpha_test_key,
@@ -6620,6 +6621,7 @@ fn resolve_aux_model_sampling_config_inner(
             None,
             None,
         );
+        sampler.flux_base_url = Some(endpoints.fuigo_api_base_url.clone());
         return Some(sampler);
     }
     tracing::warn!(
@@ -6861,6 +6863,7 @@ pub(crate) fn sampling_config_for_model(
         api_key: credentials.api_key,
         model: model_name,
         base_url: credentials.base_url,
+        flux_base_url: None,
         max_completion_tokens,
         temperature,
         top_p,
@@ -7022,14 +7025,16 @@ fn resolve_hidden_default_web_search_sampling_config(
         mtls_cert_dir: None,
     };
     let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
-    sampling_config_for_model(
+    let mut sampler = sampling_config_for_model(
         &entry,
         credentials,
         alpha_test_key,
         client_version,
         None,
         None,
-    )
+    );
+    sampler.flux_base_url = Some(endpoints.fuigo_api_base_url.clone());
+    sampler
 }
 pub(crate) fn resolve_web_search_sampling_config(
     model_id: &str,
@@ -7083,7 +7088,10 @@ pub(crate) fn resolve_web_search_sampling_config(
             "configured web_search model not found; disabling web search"
         );
     }
-    resolved.map(crate::tools::config::web_search_sampling_config)
+    resolved.map(|mut sampler| {
+        sampler.flux_base_url = Some(endpoints.fuigo_api_base_url.clone());
+        crate::tools::config::web_search_sampling_config(sampler)
+    })
 }
 pub(crate) fn to_acp_model_info(
     models: &IndexMap<String, ModelEntry>,

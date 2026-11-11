@@ -88,7 +88,7 @@ impl SummaryGenerator {
 
                 // The helper client is built per agent, not per session: bind it to this session's park here.
                 let sampling_client = self.config.sampling_client.clone().with_dispatch_gate(std::sync::Arc::new(
-                    crate::session::acp_session::ParkGate { session_id: self.config.session_id.clone() },
+                    crate::session::acp_session::ParkGate::new(self.config.session_id.clone(), crate::session::acp_session::CallRole::Side, None),
                 ));
                 let model = self.config.model.clone();
                 let session_id = self.config.session_id.clone();

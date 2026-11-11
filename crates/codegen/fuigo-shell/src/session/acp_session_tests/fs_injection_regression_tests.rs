@@ -66,6 +66,7 @@ async fn tool_bridge_routes_writes_through_injected_fs() {
         api_key_provider: None,
         auth_provider: None,
         attribution_callback: None,
+        dispatch_gate: None,
         system_reminder_tag: fuigo_tools::reminders::DEFAULT_REMINDER_TAG,
     };
     let bridge = crate::tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)

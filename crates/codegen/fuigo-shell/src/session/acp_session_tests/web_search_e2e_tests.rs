@@ -120,6 +120,7 @@ async fn web_search_uses_model_override_from_config_end_to_end() {
         api_key_provider: None,
         auth_provider: None,
         attribution_callback: None,
+        dispatch_gate: None,
         system_reminder_tag: fuigo_tools::reminders::DEFAULT_REMINDER_TAG,
     };
     let bridge = crate::tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)
@@ -191,6 +192,7 @@ async fn web_search_errors_when_configured_model_cannot_be_resolved() {
         api_key_provider: None,
         auth_provider: None,
         attribution_callback: None,
+        dispatch_gate: None,
         system_reminder_tag: fuigo_tools::reminders::DEFAULT_REMINDER_TAG,
     };
     let bridge = crate::tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)

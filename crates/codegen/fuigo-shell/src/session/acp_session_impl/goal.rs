@@ -106,7 +106,7 @@ impl SessionActor {
         let session_id = self.session_info.id.to_string();
         let mut last_error = String::new();
         for _ in 0..2 {
-            let client = match self.prepare_chat_completion(false).await {
+            let client = match self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side).await {
                 Ok(client) => client,
                 Err(error) => {
                     last_error = format!(
