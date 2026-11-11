@@ -139,6 +139,8 @@ async fn test_e2e_idle_resume_never_sends_the_session_to_a_loopback_models() {
             });
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let actor = SessionActor {
+                held_wakes: Default::default(),
+                refusal_prompt: std::sync::Arc::new(std::sync::Mutex::new(fuigo_sampling_types::refusal::PromptSM::new(false))),
                 repo_status_prefetch:
                     crate::session::repo_status_prefix::RepoStatusPrefetchState::default(),
                 transient_retry_enabled: true,

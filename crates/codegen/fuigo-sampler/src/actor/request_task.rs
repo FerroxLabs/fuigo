@@ -585,7 +585,8 @@ async fn apply_retry_decision(
     let max_retries = retry_mod::effective_max_retries(err, configured_max_retries);
     let empty_response = matches!(err, SamplingError::EmptyResponse { .. });
     let stalled = matches!(err, SamplingError::IdleTimeout { .. });
-    let decision = if (empty_response || stalled) && retry_counts.total + 1 >= configured_max_retries {
+    let prompt_ended = config.dispatch_gate.as_ref().is_some_and(|gate| gate.on_refusal(err));
+    let decision = if prompt_ended || (empty_response || stalled) && retry_counts.total + 1 >= configured_max_retries {
         RetryDecision::Fatal(clone_error(err))
     } else if stalled {
         classify_error(err, retry_counts.stalled, configured_max_retries, rate_limit_threshold)
@@ -1137,6 +1138,8 @@ fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
         SamplingErrorKind::Auth => SamplingError::Auth {
             message: info.message.clone(),
             credential: info.credential,
+            status: info.upstream().http_status.unwrap_or(0),
+            upstream: info.upstream(),
         },
         // Must stay Serialization: EventStreamError is retryable, and a response-parse failure is deterministic on retry
         // `info.message` is the variant's rendered Display, so rebuild via the constructor that owns the prefix-stripping
@@ -1156,6 +1159,9 @@ fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
                 retry_after_secs: info.retry_after_secs,
                 should_retry: info.should_retry,
                 error_code: info.error_code.clone(),
+                upstream_state: info.upstream_state.clone(),
+                upstream_type: info.upstream_type.clone(),
+                upstream_details: info.upstream_details.clone(),
             }
         }
         SamplingErrorKind::EmptyResponse => {
@@ -1243,6 +1249,7 @@ fn emit_retrying(
 ) {
     let info = SamplingErrorInfo::from(err);
     let _ = event_tx.send(SamplingEvent::Retrying {
+        upstream: info.upstream(),
         request_id: request_id.clone(),
         attempt,
         max_retries,
@@ -1280,6 +1287,9 @@ fn handle_cancellation(
         retry_after_secs: None,
         should_retry: None,
         error_code: None,
+        upstream_state: None,
+        upstream_type: None,
+        upstream_details: Default::default(),
         model_metadata: None,
         empty_response_context: None,
         doom_loop_triggers: None,
@@ -1813,6 +1823,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
@@ -1836,6 +1849,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: Some(false),
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
@@ -1869,6 +1885,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: Some(ApiErrorCode::InvalidImage),
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(original.is_image_processing_error());
 
@@ -1888,6 +1907,7 @@ mod tests {
     #[test]
     fn synthesize_stream_sourced_info_still_classifies_for_strip() {
         let original = SamplingError::StreamError {
+ upstream: Default::default(),
             error_type: "invalid_request_error".into(),
             message: "bad image".into(),
             code: Some(ApiErrorCode::InvalidImage),
@@ -1914,6 +1934,9 @@ mod tests {
             retry_after_secs: Some(7),
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
@@ -2091,6 +2114,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         }
     }
 
@@ -2329,4 +2355,38 @@ mod tests {
         let cancelled = init_or_cancel(std::future::pending::<SamplingResult<u32>>(), &token).await;
         assert!(matches!(cancelled, Err(AttemptOutcome::Cancelled)));
     }
+}
+
+#[cfg(test)]
+mod boundary_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn r1_actor_reconstruction_retains_raw_envelope_decision() {
+        let error = fuigo_sampling_types::error::try_parse_stream_error_for_request(
+            r#"{"error":{"message":"busy","provider_specific_fields":{"message":"API key has been revoked"}}}"#, true,
+        ).unwrap();
+        let info = SamplingErrorInfo::from(&error);
+        let replay: SamplingErrorInfo = serde_json::from_value(serde_json::to_value(info).unwrap()).unwrap();
+        let reconstructed = synthesize_from_info(&replay);
+        reconstructed.assert_boundary_classified();
+        assert_eq!(reconstructed.upstream().classification(), error.upstream().classification());
+        assert!(reconstructed.is_terminal_refusal());
+        assert!(!reconstructed.is_retryable());
+    }
+    #[test]
+    fn r2_auth_mirror_preserves_status_without_legacy_projection() {
+        let original = SamplingError::Auth {
+            message: "unauthorized".into(), credential: SentCredential::Sent, status: 401,
+            upstream: fuigo_sampling_types::error::UpstreamError { flux_routed: true, ..Default::default() }.with_body(401, b"{}"),
+        };
+        let info = SamplingErrorInfo::from(&original);
+        // 413f407d6 events.rs:331: HTTP status never occupied Auth's legacy slot.
+        assert_eq!(info.status_code, None);
+        let replay: SamplingErrorInfo = serde_json::from_value(serde_json::to_value(info).unwrap()).unwrap();
+        let reconstructed = synthesize_from_info(&replay);
+        assert!(matches!(reconstructed, SamplingError::Auth { status: 401, .. }));
+        assert_eq!(reconstructed.upstream(), original.upstream());
+    }
+
 }

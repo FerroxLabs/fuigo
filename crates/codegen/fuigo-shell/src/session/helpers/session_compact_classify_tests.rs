@@ -16,6 +16,9 @@ fn api_error(status: StatusCode, message: &str) -> SamplingError {
         retry_after_secs: None,
         should_retry: None,
         error_code: None,
+        upstream_state: None,
+        upstream_type: None,
+        upstream_details: Default::default(),
     }
 }
 
@@ -94,6 +97,7 @@ fn sampling_stream_error_with_size_message_is_overflow() {
     // exceeds the maximum allowed length (M tokens)".
     assert!(is_overflow(&classify_sampling_error(
         SamplingError::StreamError {
+            upstream: Default::default(),
             error_type: "BAD_REQUEST".into(),
             message: "Input length (300000 tokens) exceeds the maximum allowed length \
                       (200000 tokens)"
@@ -109,6 +113,7 @@ fn sampling_stream_error_with_structured_size_code_is_overflow() {
     for code in ["413", "payload_too_large", "request_too_large"] {
         assert!(
             is_overflow(&classify_sampling_error(SamplingError::StreamError {
+                upstream: Default::default(),
                 error_type: "BAD_REQUEST".into(),
                 message: "request rejected".into(),
                 code: Some(fuigo_sampling_types::ApiErrorCode::parse(code)),
@@ -119,6 +124,7 @@ fn sampling_stream_error_with_structured_size_code_is_overflow() {
     // An opaque stream error with a non-size code stays transient.
     assert!(!is_det(&classify_sampling_error(
         SamplingError::StreamError {
+            upstream: Default::default(),
             error_type: "server_error".into(),
             message: "internal error".into(),
             code: Some(fuigo_sampling_types::ApiErrorCode::parse(
@@ -144,6 +150,7 @@ fn sampling_non_api_variants_classify_correctly() {
     )));
     assert!(!is_det(&classify_sampling_error(
         SamplingError::StreamError {
+            upstream: Default::default(),
             error_type: "overloaded_error".into(),
             message: "try again".into(),
             code: None,
@@ -275,10 +282,14 @@ fn classifier_preserves_acp_error_data() {
         retry_after_secs: None,
         should_retry: None,
         error_code: None,
+        upstream_state: Some("hold".into()),
+        upstream_type: Some("provider_error".into()),
+        upstream_details: Default::default(),
     }) else {
         panic!("expected Deterministic for 400");
     };
     assert_eq!(err.data.as_ref().unwrap()["error_kind"], "compaction");
+    assert_eq!(err.data.as_ref().unwrap()["upstream"], serde_json::json!({"http_status":400,"type":"provider_error","state":"hold"}));
     let data = err
         .data
         .as_ref()
@@ -294,10 +305,14 @@ fn classifier_preserves_acp_error_data() {
         retry_after_secs: None,
         should_retry: None,
         error_code: None,
+        upstream_state: Some("hold".into()),
+        upstream_type: Some("provider_error".into()),
+        upstream_details: Default::default(),
     }) else {
         panic!("expected Transient for 500");
     };
     assert_eq!(err.data.as_ref().unwrap()["error_kind"], "compaction");
+    assert_eq!(err.data.as_ref().unwrap()["upstream"], serde_json::json!({"http_status":500,"type":"provider_error","state":"hold"}));
     let data = err
         .data
         .as_ref()
@@ -513,4 +528,26 @@ fn an_anthropic_stream_overflow_still_ladders() {
         is_overflow(&classify_sampling_error(err)),
         "a real prompt-size rejection must still reach the input ladder"
     );
+}
+
+#[test]
+fn r1_compaction_obeys_stored_boundary_stop_before_retry_or_ladder() {
+    for flux in [false, true] {
+        for (status, message) in [(503, "busy"), (413, "payload too large")] {
+            let mut error = api_error(StatusCode::from_u16(status).unwrap(), message);
+            if let SamplingError::Api { upstream_details, .. } = &mut error {
+                *upstream_details = fuigo_sampling_types::error::UpstreamError {
+                    flux_routed: flux, ..Default::default()
+                }.with_body(status, br#"{"error":{"message":"busy","provider_specific_fields":{"message":"API key has been revoked"}}}"#);
+            }
+            let failure = classify_sampling_error(error);
+            if flux {
+                assert!(is_det(&failure), "Flux STOP must not retry or enter the size ladder");
+            } else if status == 413 {
+                assert!(is_overflow(&failure), "non-Flux keeps the parent's ladder");
+            } else {
+                assert!(matches!(failure, CompactFailure::Transient(_)), "non-Flux keeps the parent's retry");
+            }
+        }
+    }
 }

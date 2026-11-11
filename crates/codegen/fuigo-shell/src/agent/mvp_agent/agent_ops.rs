@@ -1580,6 +1580,7 @@ impl MvpAgent {
             );
         }
         let cfg = self.cfg.borrow();
+        let flux_base_url = cfg.endpoints.fuigo_api_base_url.clone();
         let alpha_test_key = cfg.endpoints.alpha_test_key.clone();
         let client_version = cfg.client_version.clone();
         let deployment_id = crate::managed_config::resolve_deployment_id(
@@ -1599,6 +1600,7 @@ impl MvpAgent {
             deployment_id,
             user_id,
         );
+        config.flux_base_url = Some(flux_base_url);
         config.origin_client = origin_client;
         config
     }

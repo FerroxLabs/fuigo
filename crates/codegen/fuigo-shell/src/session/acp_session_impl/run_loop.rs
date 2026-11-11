@@ -2096,7 +2096,7 @@ pub(super) async fn run_session(
                         SessionCommand::GetLiveSamplerConfig { respond_to } => {
                             let s = session.clone();
                             tokio::task::spawn_local(async move {
-                                let _ = respond_to.send(s.reconstruct_full_config().await);
+                                let _ = respond_to.send(s.reconstruct_full_config(crate::session::acp_session::CallRole::Side).await);
                             });
                         }
                         SessionCommand::ReloadSkills => {

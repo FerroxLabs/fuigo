@@ -1,6 +1,7 @@
 //! TODO: Move from fuigo-shell/src/sampling/error.rs
 
 use std::fmt;
+use std::sync::LazyLock;
 
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -151,6 +152,8 @@ pub enum SamplingError {
     #[error("{message}")]
     Auth {
         message: String,
+        status: u16,
+        upstream: UpstreamError,
         /// Whether the rejected request carried a credential.
         credential: SentCredential,
     },
@@ -179,12 +182,16 @@ pub enum SamplingError {
         /// Dedicated code slots (nested envelopes, Responses-stream error events) pass through verbatim.
         /// The flat envelope's `code` slot is overloaded, so only semantic values surface from it.
         error_code: Option<ApiErrorCode>,
+        upstream_state: Option<String>,
+        upstream_type: Option<String>,
+        upstream_details: UpstreamError,
     },
     #[error("reqwest error stream: {0}")]
     EventStreamError(String),
     /// Server-side stream error (sent as JSON within the SSE stream)
     #[error("stream error ({error_type}): {message}")]
     StreamError {
+        upstream: UpstreamError,
         error_type: String,
         message: String,
         /// The stream error envelope's `code` slot, when present.
@@ -328,7 +335,30 @@ impl SamplingError {
         Self::Auth {
             message: message.into(),
             credential: SentCredential::Unknown,
+            status: 0,
+            upstream: Default::default(),
         }
+    }
+
+    pub fn upstream(&self) -> UpstreamError {
+        match self {
+            Self::Api {status, upstream_state, upstream_type, upstream_details, ..} => {
+                let mut u=upstream_details.clone(); u.http_status=Some(status.as_u16());
+                u.state=u.state.or_else(||upstream_state.clone());u.error_type=u.error_type.or_else(||upstream_type.clone());u
+            },
+            Self::Auth {status,upstream,..}=>{let mut u=upstream.clone();u.http_status=(*status!=0).then_some(*status).or(u.http_status);u},
+            Self::StreamError {upstream,..} => upstream.clone(),
+            _=>UpstreamError::default(),
+        }
+    }
+    /// Network boundaries must attach a decision before an error leaves the sampler.
+    pub fn assert_boundary_classified(&self) {
+        debug_assert!(self.upstream().classification.is_some(),
+            "sampling error reached a consumer without boundary classification");
+    }
+
+    pub fn is_terminal_refusal(&self) -> bool {
+        self.upstream().classification().is_terminal()
     }
 
     /// Display plus the hidden source() chain.
@@ -466,6 +496,7 @@ impl SamplingError {
     }
 
     pub fn is_retryable(&self) -> bool {
+        if self.is_terminal_refusal() { return false; }
         match self {
             SamplingError::Auth { .. } => false,
             SamplingError::InvalidConfiguration(_) => false,
@@ -539,6 +570,7 @@ impl SamplingError {
                 error_type,
                 message,
                 code,
+                ..
             } => {
                 let size_coded = code.as_ref().is_some_and(ApiErrorCode::is_size_overflow);
                 // Same carve-out as the `Api` arm above, keyed on the parsed wire
@@ -623,7 +655,7 @@ impl SamplingError {
     /// - `x-should-retry: false`: the server says the request content caused the failure, not something transient.
     /// - Context-length overflow: deterministic; re-sending the same payload always fails.
     pub fn is_retry_vetoed(&self) -> bool {
-        self.should_retry_header() == Some(false) || self.is_context_length_error()
+        self.is_terminal_refusal() || self.should_retry_header() == Some(false) || self.is_context_length_error()
     }
 }
 
@@ -648,6 +680,8 @@ struct ErrorResponse {
 
 #[derive(Debug, Deserialize)]
 struct ErrorBody {
+    #[serde(default, deserialize_with = "lenient_code")]
+    state: Option<String>,
     message: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
@@ -670,17 +704,29 @@ struct FlatErrorResponse {
 /// Some provider dialects put non-strings in the nested `code` slot (e.g. `"code": 429`).
 /// A strict `Option<String>` would fail the whole envelope parse and demote a retryable stream error to a fatal `Serialization` error.
 /// Swallow non-string codes instead of rejecting the envelope.
-fn lenient_code<'de, D: serde::Deserializer<'de>>(
+pub(crate) fn lenient_code<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> std::result::Result<Option<String>, D::Error> {
-    Ok(match serde_json::Value::deserialize(d)? {
-        serde_json::Value::String(s) => Some(s),
-        _ => None,
-    })
+    struct StringOnly;
+    impl<'de> serde::de::Visitor<'de> for StringOnly {
+        type Value=Option<String>;
+        fn expecting(&self,f:&mut fmt::Formatter)->fmt::Result {f.write_str("an optional string")}
+        fn visit_str<E:serde::de::Error>(self,s:&str)->std::result::Result<Self::Value,E>{Ok(Some(s.to_owned()))}
+        fn visit_string<E:serde::de::Error>(self,s:String)->std::result::Result<Self::Value,E>{Ok(Some(s))}
+        fn visit_unit<E:serde::de::Error>(self)->std::result::Result<Self::Value,E>{Ok(None)}
+        fn visit_bool<E:serde::de::Error>(self,_:bool)->std::result::Result<Self::Value,E>{Ok(None)}
+        fn visit_u64<E:serde::de::Error>(self,_:u64)->std::result::Result<Self::Value,E>{Ok(None)}
+        fn visit_i64<E:serde::de::Error>(self,_:i64)->std::result::Result<Self::Value,E>{Ok(None)}
+        fn visit_f64<E:serde::de::Error>(self,_:f64)->std::result::Result<Self::Value,E>{Ok(None)}
+        fn visit_seq<A:serde::de::SeqAccess<'de>>(self,mut a:A)->std::result::Result<Self::Value,A::Error>{while a.next_element::<serde::de::IgnoredAny>()?.is_some() {} Ok(None)}
+        fn visit_map<A:serde::de::MapAccess<'de>>(self,mut a:A)->std::result::Result<Self::Value,A::Error>{while a.next_entry::<serde::de::IgnoredAny,serde::de::IgnoredAny>()?.is_some() {} Ok(None)}
+    }
+    d.deserialize_any(StringOnly)
 }
 
 /// Fields extracted from an error payload by [`try_parse_error`].
 struct ParsedError {
+    state: Option<String>,
     error_type: String,
     message: String,
     /// The envelope's `code` slot: nested envelopes pass through verbatim.
@@ -692,6 +738,7 @@ struct ParsedError {
 fn try_parse_error(data: &str) -> Option<ParsedError> {
     if let Ok(resp) = serde_json::from_str::<ErrorResponse>(data) {
         return Some(ParsedError {
+            state: resp.error.state.filter(|s| is_upstream_slug(s)),
             error_type: resp.error.kind.unwrap_or_else(|| "unknown".to_string()),
             message: resp
                 .error
@@ -707,6 +754,7 @@ fn try_parse_error(data: &str) -> Option<ParsedError> {
             .map(ApiErrorCode::parse)
             .filter(|c| !matches!(c, ApiErrorCode::Other(_)));
         return Some(ParsedError {
+            state: None,
             code,
             error_type: flat.code.unwrap_or_else(|| "server_error".to_string()),
             message: flat.error,
@@ -722,6 +770,198 @@ pub fn parse_error_code(bytes: &[u8]) -> Option<ApiErrorCode> {
         .ok()
         .and_then(try_parse_error)?
         .code
+}
+
+/// The frozen upstream wire vocabulary accepts code words, never free text.
+pub fn is_upstream_slug(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_:-".contains(&b))
+}
+
+/// Lenient at serialized boundaries too: old peers and malformed values cannot inject prose.
+pub fn deserialize_upstream_slug<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    Ok(lenient_code(d)?.filter(|s| is_upstream_slug(s)))
+}
+
+/// Frozen ACP `data.upstream` and RetryState `upstream` object.
+/// Absent facts are omitted; present unknown strings are projected as `other`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamError {
+    /// Local request routing provenance, never accepted from the upstream body.
+    #[serde(skip)]
+    pub flux_routed: bool,
+    /// Boundary decision; internal persistence retains it, ACP upstream omits it.
+    #[serde(skip)]
+    pub classification: Option<crate::refusal::Classification>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    #[serde(
+        rename = "type",
+        default,
+        deserialize_with = "crate::upstream_vocab::deserialize_optional",
+        serialize_with = "crate::upstream_vocab::serialize_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub error_type: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::upstream_vocab::deserialize_optional",
+        serialize_with = "crate::upstream_vocab::serialize_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub state: Option<String>,
+    #[serde(default,deserialize_with="crate::upstream_vocab::deserialize_optional",serialize_with="crate::upstream_vocab::serialize_optional",skip_serializing_if="Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default,deserialize_with="deserialize_upstream_codes",serialize_with="crate::upstream_vocab::serialize_codes",skip_serializing_if="Vec::is_empty")]
+    pub codes: Vec<String>,
+    #[serde(default,deserialize_with="crate::upstream_vocab::deserialize_optional",serialize_with="crate::upstream_vocab::serialize_optional",skip_serializing_if="Option::is_none")]
+    pub hold_reason: Option<String>,
+    #[serde(default,deserialize_with="crate::upstream_vocab::deserialize_optional",serialize_with="crate::upstream_vocab::serialize_optional",skip_serializing_if="Option::is_none")]
+    pub limit: Option<String>,
+    #[serde(default,deserialize_with="deserialize_upstream_wait",skip_serializing_if="Option::is_none")]
+    pub retry_after_s: Option<u64>,
+    #[serde(default,deserialize_with="deserialize_reset",skip_serializing_if="Option::is_none")]
+    pub resets_at: Option<String>,
+}
+
+fn deserialize_upstream_codes<'de,D:serde::Deserializer<'de>>(d:D)->std::result::Result<Vec<String>,D::Error>{
+    let value=serde_json::Value::deserialize(d)?;let mut codes=Vec::new();
+    if let Some(values)=value.as_array() {for v in values {if let Some(c)=v.as_str().map(|s|crate::upstream_vocab::vocab(s).to_owned()) && !codes.contains(&c) {codes.push(c);}}}
+    Ok(codes)
+}
+impl UpstreamError {
+    pub fn project(&mut self) {
+        for value in [&mut self.state,&mut self.error_type,&mut self.code,&mut self.hold_reason,&mut self.limit] {
+            if let Some(s)=value { *s=crate::upstream_vocab::vocab(s).to_owned(); }
+        }
+        for s in &mut self.codes {*s=crate::upstream_vocab::vocab(s).to_owned();}
+    }
+
+    pub fn is_empty(&self)->bool { self==&Self::default() }
+    pub fn classification(&self) -> crate::refusal::Classification {
+        // Legacy records have no boundary decision. Do not guess from their display text.
+        self.classification.clone().unwrap_or_else(|| {
+            if self.flux_routed {
+                crate::refusal::decide_for_request(&crate::refusal::from_upstream(self, "", chrono::Utc::now()), true)
+            } else {
+                crate::refusal::Classification::pass()
+            }
+        })
+    }
+    pub fn classify(&self, _display: &str) -> crate::refusal::Classification {
+        self.classification()
+    }
+    /// Preserve the A1 bounded envelope walker for encoded/wrapped provider bodies.
+    pub fn with_body(mut self,status:u16,bytes:&[u8])->Self {
+        let mut headers=serde_json::Map::new();
+        if let Some(h)=&self.hold_reason {headers.insert("x-flux-hold-reason".into(),h.clone().into());}
+        if let Some(w)=self.retry_after_s {headers.insert("retry-after".into(),w.to_string().into());}
+        let body=crate::selective_error::from_slice(bytes).unwrap_or(serde_json::Value::Null);
+        let headers = serde_json::Value::Object(headers);
+        let u=crate::refusal::fuigo_upstream(status,&headers,&body);
+        let flux_routed=self.flux_routed;
+        self=u;
+        self.flux_routed=flux_routed;
+        self.state=self.state.or_else(||parse_error_state(bytes));
+        self.error_type=self.error_type.or_else(||parse_error_type(bytes));
+        // Present strings outside the slug grammar are still projected, never
+        // silently changed into absence. Keep the public slug readers strict.
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            let projected = |field: &str| upstream_value(text, 0, &|e| {
+                let value = e.get(field)?.as_str()?;
+                // The binding Flux chat capture uses the Python sentinel "None"
+                // for an absent type (FA1); it is not an upstream fact.
+                if value == "None" { return None; }
+                Some(crate::upstream_vocab::vocab(value).to_owned())
+            });
+            self.state = self.state.or_else(|| projected("state"));
+            self.error_type = self.error_type.or_else(|| projected("type"));
+        }
+
+        if self.flux_routed && status == 401 && self.error_type.is_none() {
+            self.error_type = Some("authentication_error".into());
+        }
+        self.code=self.code.or_else(||parse_upstream_code(bytes));
+        self.retry_after_s=self.retry_after_s.or_else(||parse_upstream_retry_after(bytes));
+        self.classification = Some(if self.flux_routed {
+            let mut signals = crate::refusal::extract("resp", status, &headers, &body, chrono::Utc::now());
+            // The bounded envelope walker also recognizes encoded provider envelopes.
+            // Keep those code slots while using the raw combined message, never Display.
+            for code in [&self.state, &self.code, &self.error_type].into_iter().flatten() {
+                if !signals.codes.contains(code) { signals.codes.push(code.clone()); }
+            }
+            crate::refusal::decide_for_request(&signals, true)
+        } else { crate::refusal::Classification::pass() });
+        self
+    }
+}
+fn deserialize_upstream_wait<'de,D:serde::Deserializer<'de>>(d:D)->std::result::Result<Option<u64>,D::Error>{
+    Ok(serde_json::Value::deserialize(d)?.as_u64().filter(|n|*n<=7200))
+}
+static RESET_DATE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$").unwrap());
+fn deserialize_reset<'de,D:serde::Deserializer<'de>>(d:D)->std::result::Result<Option<String>,D::Error>{
+    Ok(serde_json::Value::deserialize(d)?.as_str().filter(|s|RESET_DATE.is_match(s)).map(str::to_owned))
+}
+
+// Only inspect error envelopes / their message wrappers, with a bounded unwrap depth.
+// Streaming deserialization permits LiteLLM's non-JSON suffix after the embedded envelope.
+fn upstream_value<T>(text: &str, depth: usize, pick: &impl Fn(&serde_json::Map<String,serde_json::Value>)->Option<T>) -> Option<T> {
+    if depth == 8 {
+        return None;
+    }
+    let value = serde_json::from_str::<crate::selective_error::Envelope>(text)
+        .ok()
+        .or_else(|| {
+            let start = text.find('{')?;
+            serde_json::Deserializer::from_str(&text[start..])
+                .into_iter::<crate::selective_error::Envelope>()
+                .next()?
+                .ok()
+        })
+        .or_else(|| {
+            // A JSON string containing the first envelope may follow a prefix that
+            // itself contains quotes (for example a quoted model name).
+            let start = text[..text.find('{')?].rfind('"')?;
+            serde_json::Deserializer::from_str(&text[start..])
+                .into_iter::<crate::selective_error::Envelope>()
+                .next()?
+                .ok()
+        })?.0;
+    if let Some(inner) = value.as_str() {
+        return upstream_value(inner, depth + 1,pick);
+    }
+    let error = value.get("error")?.as_object()?;
+    pick(error).or_else(|| upstream_value(error.get("message")?.as_str()?,depth+1,pick))
+}
+
+fn upstream_field(text:&str,field:&str,depth:usize)->Option<String>{
+    upstream_value(text,depth,&|e|crate::refusal::slug(e.get(field)?))
+}
+pub fn parse_upstream_code(bytes:&[u8])->Option<String>{
+    upstream_value(std::str::from_utf8(bytes).ok()?,0,&|e|{
+        crate::refusal::fuigo_upstream(0,&serde_json::Value::Null,&serde_json::json!({"error":e})).code
+    })
+}
+pub fn parse_upstream_retry_after(bytes:&[u8])->Option<u64>{
+    upstream_value(std::str::from_utf8(bytes).ok()?,0,&|e|{
+        crate::refusal::fuigo_upstream(0,&serde_json::Value::Null,&serde_json::json!({"error":e})).retry_after_s
+    })
+}
+/// Slug-only `error.state`, including double-encoded and LiteLLM-wrapped envelopes.
+pub fn parse_error_state(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    try_parse_error(text)
+        .and_then(|p| p.state)
+        .or_else(|| upstream_field(text, "state", 0))
+}
+
+/// Slug-only `error.type`, independently of the capped human message.
+pub fn parse_error_type(bytes: &[u8]) -> Option<String> {
+    upstream_field(std::str::from_utf8(bytes).ok()?, "type", 0)
 }
 
 /// Max chars of a structured (JSON) error message shown to users.
@@ -816,13 +1056,43 @@ pub fn user_facing_api_error_message(status: StatusCode, bytes: &[u8]) -> String
 }
 
 pub fn try_parse_stream_error(data: &str) -> Option<SamplingError> {
+    try_parse_stream_error_for_request(data, false)
+}
+
+pub fn try_parse_stream_error_for_request(data: &str, flux_routed: bool) -> Option<SamplingError> {
+    // Responses errors can be top-level events or nested under response.error.
+    // Intercept before the typed backend drops provider_specific_fields.
+    let envelope = crate::selective_error::from_slice(data.as_bytes())?;
+    let event_type = envelope["type"].as_str().unwrap_or_default();
+    if flux_routed && (event_type == "response.failed" || event_type == "response.error"
+        || (event_type == "error" && envelope.get("error").is_none()))
+    {
+        let error = if event_type == "response.failed" { &envelope["response"]["error"] } else { &envelope };
+        let code = error["code"].as_str();
+        let message = match error["message"].as_str() {
+            Some(message) => format!("{}: {message}", code.unwrap_or("error")),
+            None => "Response failed with unknown error".into(),
+        };
+        let body = serde_json::json!({"error": error});
+        return Some(SamplingError::Api {
+            status: StatusCode::INTERNAL_SERVER_ERROR, message,
+            model_metadata: None, retry_after_secs: None, should_retry: None,
+            error_code: code.map(ApiErrorCode::parse), upstream_state: None, upstream_type: None,
+            upstream_details: UpstreamError { flux_routed, ..Default::default() }
+                .with_body(500, &serde_json::to_vec(&body).expect("error envelope serialization")),
+        });
+    }
     let ParsedError {
         error_type,
         message,
         code,
+        ..
     } = try_parse_error(data)?;
     tracing::warn!(error_type, message, "Server-side stream error");
+    let mut upstream=UpstreamError { flux_routed, ..Default::default() }.with_body(0,data.as_bytes());
+    upstream.http_status=None;
     Some(SamplingError::StreamError {
+        upstream,
         error_type,
         message,
         code,
@@ -869,6 +1139,7 @@ mod tests {
     fn overloaded_detects_stream_and_api_shapes() {
         assert!(
             SamplingError::StreamError {
+ upstream: Default::default(),
                 error_type: "overloaded_error".into(),
                 message: "Overloaded".into(),
                 code: None,
@@ -883,6 +1154,9 @@ mod tests {
                 retry_after_secs: None,
                 should_retry: None,
                 error_code: None,
+                upstream_state: None,
+                upstream_type: None,
+                upstream_details: Default::default(),
             }
             .is_overloaded()
         );
@@ -894,6 +1168,9 @@ mod tests {
                 retry_after_secs: None,
                 should_retry: None,
                 error_code: None,
+                upstream_state: None,
+                upstream_type: None,
+                upstream_details: Default::default(),
             }
             .is_overloaded()
         );
@@ -905,6 +1182,9 @@ mod tests {
                 retry_after_secs: None,
                 should_retry: None,
                 error_code: None,
+                upstream_state: None,
+                upstream_type: None,
+                upstream_details: Default::default(),
             }
             .is_retryable()
         );
@@ -917,6 +1197,9 @@ mod tests {
                 retry_after_secs: None,
                 should_retry: None,
                 error_code: None,
+                upstream_state: None,
+                upstream_type: None,
+                upstream_details: Default::default(),
             }
             .is_overloaded()
         );
@@ -929,12 +1212,16 @@ mod tests {
                 retry_after_secs: None,
                 should_retry: None,
                 error_code: None,
+                upstream_state: None,
+                upstream_type: None,
+                upstream_details: Default::default(),
             }
             .is_overloaded()
         );
         // Stream errors classify on the parsed error_type only; a request-shaped stream error mentioning "overloaded" is not capacity
         assert!(
             !SamplingError::StreamError {
+ upstream: Default::default(),
                 error_type: "invalid_request_error".into(),
                 message: "tool result mentions overloaded".into(),
                 code: None,
@@ -943,6 +1230,7 @@ mod tests {
         );
         assert!(
             SamplingError::StreamError {
+ upstream: Default::default(),
                 error_type: "service_unavailable_error".into(),
                 message: "upstream capacity".into(),
                 code: None,
@@ -968,6 +1256,9 @@ mod tests {
                     retry_after_secs: None,
                     should_retry: None,
                     error_code: None,
+                    upstream_state: None,
+                    upstream_type: None,
+                    upstream_details: Default::default(),
                 }
                 .is_overloaded(),
                 "expected overloaded for message: {msg}"
@@ -983,6 +1274,9 @@ mod tests {
                     retry_after_secs: None,
                     should_retry: None,
                     error_code: None,
+                    upstream_state: None,
+                    upstream_type: None,
+                    upstream_details: Default::default(),
                 }
                 .is_overloaded(),
                 "expected not overloaded for message: {msg}"
@@ -999,6 +1293,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: Some(false),
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(vetoed_by_header.is_retry_vetoed());
 
@@ -1009,6 +1306,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(vetoed_by_context.is_retry_vetoed());
 
@@ -1019,6 +1319,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(!not_vetoed.is_retry_vetoed());
     }
@@ -1027,6 +1330,9 @@ mod tests {
     fn tpm_429_with_retry_after_escapes_the_size_text_veto() {
         let tpm =
             |retry_after_secs: Option<u64>, error_code: Option<ApiErrorCode>| SamplingError::Api {
+                upstream_state: None,
+                upstream_type: None,
+                upstream_details: Default::default(),
                 status: StatusCode::TOO_MANY_REQUESTS,
                 message: "Request too large for model: Limit 30000, Requested 50000 \
                           tokens per min"
@@ -1060,10 +1366,14 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(api.is_context_length_error());
         assert!(
             SamplingError::StreamError {
+ upstream: Default::default(),
                 error_type: "overloaded_error".into(),
                 message: "prompt is too long".into(),
                 code: None,
@@ -1129,6 +1439,7 @@ mod tests {
     fn structured_size_code_with_opaque_message_is_context_length_error() {
         // The code slot alone must classify when the text matches nothing.
         let stream = SamplingError::StreamError {
+ upstream: Default::default(),
             error_type: "BAD_REQUEST".into(),
             message: "request rejected".into(),
             code: Some(ApiErrorCode::parse("request_too_large")),
@@ -1142,11 +1453,15 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: Some(ApiErrorCode::parse("413")),
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(api.is_context_length_error());
 
         // An opaque error with a non-size code stays non-size.
         let opaque = SamplingError::StreamError {
+ upstream: Default::default(),
             error_type: "server_error".into(),
             message: "internal error".into(),
             code: Some(ApiErrorCode::parse("overloaded_error")),
@@ -1217,6 +1532,7 @@ mod tests {
                 error_type,
                 message,
                 code,
+                ..
             } => {
                 assert_eq!(error_type, "The service is currently unavailable");
                 assert_eq!(
@@ -1429,6 +1745,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(
             !err.is_auth_error(),
@@ -1445,6 +1764,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(
             err.is_auth_error(),
@@ -1487,6 +1809,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(err.is_rate_limited());
         assert!(err.is_retryable(), "429 should be retryable");
@@ -1503,6 +1828,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(!server_error.is_rate_limited());
 
@@ -1523,6 +1851,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(!payload_too_large.is_likely_body_rejected());
         assert!(payload_too_large.is_payload_too_large());
@@ -1536,6 +1867,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: Some(ApiErrorCode::InvalidImage),
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(!invalid_image.is_likely_body_rejected());
         assert!(invalid_image.is_image_processing_error());
@@ -1555,6 +1889,9 @@ mod tests {
             retry_after_secs: Some(42),
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert_eq!(err.retry_after(), Some(42));
     }
@@ -1568,6 +1905,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert_eq!(err.retry_after(), None);
     }
@@ -1590,6 +1930,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(err.is_encrypted_content_error());
         assert!(
@@ -1607,6 +1950,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(
             !err.is_encrypted_content_error(),
@@ -1623,6 +1969,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(
             !err.is_encrypted_content_error(),
@@ -1639,6 +1988,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(err.is_image_processing_error());
         assert!(!err.is_encrypted_content_error());
@@ -1653,6 +2005,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(err.is_image_processing_error());
     }
@@ -1666,6 +2021,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(!err.is_image_processing_error());
     }
@@ -1679,6 +2037,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(!err.is_image_processing_error());
     }
@@ -1692,6 +2053,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(
             !err.is_image_processing_error(),
@@ -1708,6 +2072,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(
             !err.is_retryable(),
@@ -1723,6 +2090,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         }
     }
 
@@ -1734,6 +2104,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: Some(ApiErrorCode::parse(code)),
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         }
     }
 
@@ -1755,6 +2128,9 @@ mod tests {
                 retry_after_secs: None,
                 should_retry: None,
                 error_code: Some(ApiErrorCode::InvalidImage),
+                upstream_state: None,
+                upstream_type: None,
+                upstream_details: Default::default(),
             }
             .is_image_processing_error()
         );
@@ -1787,6 +2163,7 @@ mod tests {
     #[test]
     fn image_processing_error_stream_requires_code() {
         let stream = |code: Option<&str>, message: &str| SamplingError::StreamError {
+ upstream: Default::default(),
             error_type: "invalid_request_error".into(),
             message: message.into(),
             code: code.map(ApiErrorCode::parse),
@@ -1851,6 +2228,7 @@ mod tests {
             "429",
         ] {
             let err = SamplingError::StreamError {
+ upstream: Default::default(),
                 error_type: error_type.into(),
                 message: TPM_RATE_LIMIT_BODY.into(),
                 code: None,
@@ -1865,6 +2243,7 @@ mod tests {
     #[test]
     fn stream_rate_limit_code_is_not_a_size_overflow() {
         let err = SamplingError::StreamError {
+ upstream: Default::default(),
             error_type: "invalid_request_error".into(),
             message: TPM_RATE_LIMIT_BODY.into(),
             code: Some(ApiErrorCode::parse("rate_limit_error")),
@@ -1877,6 +2256,7 @@ mod tests {
         // The carve-out must never outrank a structured size code: a server that
         // stamps both is telling us the request itself is too big.
         let err = SamplingError::StreamError {
+ upstream: Default::default(),
             error_type: "rate_limit_error".into(),
             message: TPM_RATE_LIMIT_BODY.into(),
             code: Some(ApiErrorCode::parse("request_too_large")),
@@ -1889,6 +2269,7 @@ mod tests {
         // Regression guard for the carve-out: a real overflow carries no
         // rate-limit type and must keep reaching the input ladder.
         let err = SamplingError::StreamError {
+ upstream: Default::default(),
             error_type: "invalid_request_error".into(),
             message: "prompt is too long: 300000 tokens > 200000 maximum".into(),
             code: None,
@@ -1983,6 +2364,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         }
     }
 
@@ -2001,6 +2385,59 @@ mod tests {
                 !api_status_err(code).is_retryable(),
                 "origin-TLS {code} must not be retried"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod upstream_contract_tests {
+    use super::*;
+
+    #[test]
+    fn direct_flux_state() {
+        let body = br#"{"error":{"type":"rate_limit_exceeded","state":"free_cap_reached","message":"monthly allowance exhausted"}}"#;
+        assert_eq!(parse_error_state(body).as_deref(), Some("free_cap_reached"));
+        assert_eq!(
+            parse_error_type(body).as_deref(),
+            Some("rate_limit_exceeded")
+        );
+    }
+
+    #[test]
+    fn litellm_state_survives_prefix_double_encoding_and_message_cap() {
+        let inner = serde_json::json!({"error":{"type":"rate_limit_exceeded","state":"free_cap_reached","message":"monthly allowance exhausted"}});
+        for payload in [
+            inner.to_string(),
+            serde_json::to_string(&inner.to_string()).unwrap(),
+        ] {
+            let body = serde_json::json!({"error":{"message":format!("litellm.RateLimitError: model=\"flux-auto\": {}{} trailing proxy detail", "prefix ".repeat(50), payload),"code":"429"}}).to_string();
+            assert!(body.len() > 280);
+            assert!(!parse_error_bytes(body.as_bytes()).contains("free_cap_reached"));
+            assert_eq!(
+                parse_error_state(body.as_bytes()).as_deref(),
+                Some("free_cap_reached")
+            );
+            assert_eq!(
+                parse_error_type(body.as_bytes()).as_deref(),
+                Some("rate_limit_exceeded")
+            );
+        }
+    }
+
+    #[test]
+    fn flat_gateway_and_non_slug_state_are_ignored() {
+        assert_eq!(parse_error_state(br#"{"code":"429","error":"busy"}"#), None);
+        for state in [
+            serde_json::json!("free cap reached"),
+            serde_json::json!("x".repeat(65)),
+            serde_json::json!("CAP"),
+            serde_json::json!(""),
+            serde_json::json!("secret\nvalue"),
+            serde_json::json!(42),
+            serde_json::json!({"state":"hold"}),
+        ] {
+            let body = serde_json::json!({"error":{"state":state,"message":"busy"}}).to_string();
+            assert_eq!(parse_error_state(body.as_bytes()), None, "{body}");
         }
     }
 }

@@ -1462,10 +1462,13 @@ mod history_browse_panel_tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    fn agent_with_history(prompts: &[&str]) -> AgentView {
-        let mut agent = super::test_fixtures::make_agent();
+    fn agent_with_history(prompts: &[&str]) -> (tempfile::TempDir, AgentView) {
+        // Accepting an @ token can briefly start file search. Keep its teardown
+        // independent of the shared scratch directory's size and contents.
+        let workspace = tempfile::tempdir().unwrap();
+        let mut agent = crate::test_util::make_agent_view(None, workspace.path().to_str().unwrap());
         agent.session.prompt_history = prompts.iter().map(|s| (*s).to_string()).collect();
-        agent
+        (workspace, agent)
     }
 
     /// Spin-poll the panel's background matcher until `expect` results are visible (the daemon fills the snapshot asynchronously after open).
@@ -1488,7 +1491,7 @@ mod history_browse_panel_tests {
     /// Up on an empty prompt opens the panel with the newest prompt selected AND already filled into the composer.
     #[test]
     fn up_opens_browse_panel_and_populates_newest() {
-        let mut agent = agent_with_history(&["say cherry", "say apple"]);
+        let (_workspace, mut agent) = agent_with_history(&["say cherry", "say apple"]);
         let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Up));
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(agent.prompt.history_search.is_active());
@@ -1500,7 +1503,7 @@ mod history_browse_panel_tests {
     /// composer; Up at the oldest stays put.
     #[test]
     fn selection_moves_live_populate_the_composer() {
-        let mut agent = agent_with_history(&["say cherry", "say apple"]);
+        let (_workspace, mut agent) = agent_with_history(&["say cherry", "say apple"]);
         open_browse(&mut agent, 2);
 
         agent.handle_prompt_key_for_test(&key(KeyCode::Up));
@@ -1516,7 +1519,7 @@ mod history_browse_panel_tests {
     /// Down at the newest entry (the position the panel opens on) closes the panel and restores the empty composer.
     #[test]
     fn down_immediately_after_open_closes_the_panel() {
-        let mut agent = agent_with_history(&["say cherry", "say apple"]);
+        let (_workspace, mut agent) = agent_with_history(&["say cherry", "say apple"]);
         open_browse(&mut agent, 2);
 
         agent.handle_prompt_key_for_test(&key(KeyCode::Down));
@@ -1527,7 +1530,7 @@ mod history_browse_panel_tests {
 
     #[test]
     fn down_never_opens_the_panel() {
-        let mut agent = agent_with_history(&["say cherry"]);
+        let (_workspace, mut agent) = agent_with_history(&["say cherry"]);
         agent.handle_prompt_key_for_test(&key(KeyCode::Down));
         assert!(!agent.prompt.history_search.is_active());
         assert_eq!(agent.prompt.text(), "");
@@ -1536,7 +1539,7 @@ mod history_browse_panel_tests {
     /// Typing while browsing detaches: the panel closes and the key lands in the populated text as a normal edit.
     #[test]
     fn typing_detaches_and_edits_the_populated_text() {
-        let mut agent = agent_with_history(&["say cherry"]);
+        let (_workspace, mut agent) = agent_with_history(&["say cherry"]);
         open_browse(&mut agent, 1);
 
         agent.handle_prompt_key_for_test(&key(KeyCode::Char('!')));
@@ -1547,7 +1550,7 @@ mod history_browse_panel_tests {
     /// `! cmd` entries populate into bash mode (prefix stripped); the composer returns to Normal on other entries and on close.
     #[test]
     fn bash_entries_populate_bash_mode_and_back() {
-        let mut agent = agent_with_history(&["! ls -la", "say apple"]);
+        let (_workspace, mut agent) = agent_with_history(&["! ls -la", "say apple"]);
         agent.handle_prompt_key_for_test(&key(KeyCode::Up));
         assert_eq!(agent.prompt.text(), "ls -la");
         assert_eq!(agent.prompt_input_mode, PromptInputMode::Bash);
@@ -1570,7 +1573,7 @@ mod history_browse_panel_tests {
     /// Esc while browsing restores the pre-open (empty, Normal) composer, even off a bash entry that flipped the input mode.
     #[test]
     fn esc_restores_empty_normal_composer() {
-        let mut agent = agent_with_history(&["! ls -la"]);
+        let (_workspace, mut agent) = agent_with_history(&["! ls -la"]);
         agent.handle_prompt_key_for_test(&key(KeyCode::Up));
         assert_eq!(agent.prompt_input_mode, PromptInputMode::Bash);
 
@@ -1583,7 +1586,7 @@ mod history_browse_panel_tests {
     /// Ctrl+R opens the session picker; the history panel stays reachable only through /history.
     #[test]
     fn ctrl_r_opens_the_picker_and_not_history() {
-        let mut agent = agent_with_history(&["say cherry"]);
+        let (_workspace, mut agent) = agent_with_history(&["say cherry"]);
 
         let outcome = agent
             .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
@@ -1599,7 +1602,7 @@ mod history_browse_panel_tests {
     /// With a redo waiting after Ctrl+Z, Ctrl+R still opens the session picker; the composer redoes on Ctrl+Shift+Z or Alt+Z.
     #[test]
     fn ctrl_r_opens_the_picker_even_with_a_redo_stack() {
-        let mut agent = agent_with_history(&[]);
+        let (_workspace, mut agent) = agent_with_history(&[]);
         agent.handle_prompt_key_for_test(&key(KeyCode::Char('d')));
         agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
 
@@ -1615,7 +1618,7 @@ mod history_browse_panel_tests {
 
     #[test]
     fn up_with_a_draft_does_not_open() {
-        let mut agent = agent_with_history(&["say cherry"]);
+        let (_workspace, mut agent) = agent_with_history(&["say cherry"]);
         agent.handle_prompt_key_for_test(&key(KeyCode::Char('d')));
         agent.handle_prompt_key_for_test(&key(KeyCode::Up));
         assert!(!agent.prompt.history_search.is_active());
@@ -1624,7 +1627,7 @@ mod history_browse_panel_tests {
 
     #[test]
     fn bash_mode_up_does_not_open() {
-        let mut agent = agent_with_history(&["say cherry"]);
+        let (_workspace, mut agent) = agent_with_history(&["say cherry"]);
         agent.prompt_input_mode = PromptInputMode::Bash;
         agent.handle_prompt_key_for_test(&key(KeyCode::Up));
         assert!(!agent.prompt.history_search.is_active());
@@ -1634,7 +1637,7 @@ mod history_browse_panel_tests {
     /// Up with no history consumes the key without opening an empty panel.
     #[test]
     fn up_with_empty_history_is_a_quiet_no_op() {
-        let mut agent = agent_with_history(&[]);
+        let (_workspace, mut agent) = agent_with_history(&[]);
         let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Up));
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(!agent.prompt.history_search.is_active());
@@ -1645,7 +1648,7 @@ mod history_browse_panel_tests {
     /// Same suppression the populate path applies.
     #[test]
     fn accepted_at_token_does_not_rearm_file_dropdown() {
-        let mut agent = agent_with_history(&["run a subagent for @crates/codegen"]);
+        let (_workspace, mut agent) = agent_with_history(&["run a subagent for @crates/codegen"]);
         open_browse(&mut agent, 1);
         agent.handle_prompt_key_for_test(&key(KeyCode::Enter));
         assert!(!agent.prompt.history_search.is_active(), "accept closes");
@@ -1660,7 +1663,7 @@ mod history_browse_panel_tests {
     /// The panel is modal (its intercept runs first) and populate drops the `@` context, so Up/Down keep browsing and Down still closes.
     #[test]
     fn populated_at_token_does_not_steal_arrows() {
-        let mut agent = agent_with_history(&["run a subagent for @crates/codegen", "older"]);
+        let (_workspace, mut agent) = agent_with_history(&["run a subagent for @crates/codegen", "older"]);
         agent.handle_prompt_key_for_test(&key(KeyCode::Up));
         assert_eq!(agent.prompt.text(), "run a subagent for @crates/codegen");
         assert!(

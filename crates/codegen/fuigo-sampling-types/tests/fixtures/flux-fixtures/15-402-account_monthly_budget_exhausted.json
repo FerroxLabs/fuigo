@@ -1,0 +1,64 @@
+{
+ "status": 402,
+ "headers": {
+  "date": "<HTTP-date>",
+  "server": "uvicorn",
+  "x-flux-alias": "deepseek-v4-flash",
+  "content-type": "application/json",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "connection": "close",
+  "content-length": "<n>"
+ },
+ "body": {
+  "error": {
+   "message": "account_monthly_budget_exhausted",
+   "type": "None",
+   "param": "None",
+   "code": "402",
+   "provider_specific_fields": {
+    "error": "account_monthly_budget_exhausted",
+    "account_max_budget_usd": 50.0,
+    "spent_usd_this_month": 50.0213,
+    "inflight_usd": 0.0,
+    "message": "This account has reached its $50.00 monthly spend ceiling. The ceiling rises automatically as your account builds payment history — adding credit will not lift it. Email support@fluxrouter.ai if you need it raised sooner.",
+    "upgrade_url": "https://fluxrouter.ai/home/billing"
+   }
+  }
+ },
+ "endpoint": "/v1/chat/completions",
+ "per_endpoint": {
+  "/v1/messages": {
+   "status": 402,
+   "headers": {
+    "content-length": "293",
+    "content-type": "application/json"
+   },
+   "body": {
+    "type": "error",
+    "error": {
+     "type": "invalid_request_error",
+     "message": "This account has reached its $50.00 monthly spend ceiling. The ceiling rises automatically as your account builds payment history — adding credit will not lift it. Email support@fluxrouter.ai if you need it raised sooner."
+    }
+   }
+  },
+  "/v1/responses": {
+   "status": 402,
+   "headers": {
+    "content-length": "421",
+    "content-type": "application/json"
+   },
+   "body": {
+    "error": {
+     "error": "account_monthly_budget_exhausted",
+     "account_max_budget_usd": 50.0,
+     "spent_usd_this_month": 50.0213,
+     "inflight_usd": 0.0,
+     "message": "This account has reached its $50.00 monthly spend ceiling. The ceiling rises automatically as your account builds payment history — adding credit will not lift it. Email support@fluxrouter.ai if you need it raised sooner.",
+     "upgrade_url": "https://fluxrouter.ai/home/billing"
+    }
+   }
+  }
+ }
+}

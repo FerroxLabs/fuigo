@@ -1,0 +1,62 @@
+{
+ "status": 402,
+ "headers": {
+  "date": "<HTTP-date>",
+  "server": "uvicorn",
+  "x-flux-alias": "deepseek-v4-flash",
+  "content-type": "application/json",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "connection": "close",
+  "content-length": "<n>"
+ },
+ "body": {
+  "error": {
+   "message": "key_lifetime_cap_exhausted",
+   "type": "None",
+   "param": "None",
+   "code": "402",
+   "provider_specific_fields": {
+    "error": "key_lifetime_cap_exhausted",
+    "lifetime_cap_usd": 25.0,
+    "spent_usd_lifetime": 25.0041,
+    "message": "This key's $25.00 lifetime spend cap is exhausted. Raise the cap on this key or use a different key.",
+    "upgrade_url": "https://fluxrouter.ai/home/billing"
+   }
+  }
+ },
+ "endpoint": "/v1/chat/completions",
+ "per_endpoint": {
+  "/v1/messages": {
+   "status": 402,
+   "headers": {
+    "content-length": "170",
+    "content-type": "application/json"
+   },
+   "body": {
+    "type": "error",
+    "error": {
+     "type": "invalid_request_error",
+     "message": "This key's $25.00 lifetime spend cap is exhausted. Raise the cap on this key or use a different key."
+    }
+   }
+  },
+  "/v1/responses": {
+   "status": 402,
+   "headers": {
+    "content-length": "265",
+    "content-type": "application/json"
+   },
+   "body": {
+    "error": {
+     "error": "key_lifetime_cap_exhausted",
+     "lifetime_cap_usd": 25.0,
+     "spent_usd_lifetime": 25.0041,
+     "message": "This key's $25.00 lifetime spend cap is exhausted. Raise the cap on this key or use a different key.",
+     "upgrade_url": "https://fluxrouter.ai/home/billing"
+    }
+   }
+  }
+ }
+}

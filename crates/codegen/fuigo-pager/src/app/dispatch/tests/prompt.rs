@@ -1988,6 +1988,7 @@ fn prompt_response_refused_destination_is_not_stashed_for_reauth() {
                     &FuigoSessionUpdate::RetryState(RetryState::Failed {
                         error_type: AUTH_DESTINATION_REFUSED_ERROR_TYPE.into(),
                         message: raw.clone(),
+                        upstream: Default::default(),
                         verdicts: None,
                     }),
                     &mut agent.session,

@@ -593,6 +593,10 @@ pub fn stream_messages<'a>(
                         should_retry: None,
                         // Messages-style error events carry no code slot.
                         error_code: None,
+                        upstream_state: None,
+                        upstream_type: Some(error.r#type.clone()).filter(|s| fuigo_sampling_types::error::is_upstream_slug(s)),
+                        upstream_details: fuigo_sampling_types::error::UpstreamError::default().with_body(500,
+                            &serde_json::to_vec(&serde_json::json!({"error":{"type": error.r#type, "message": error.message}})).expect("error envelope")),
                     };
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),

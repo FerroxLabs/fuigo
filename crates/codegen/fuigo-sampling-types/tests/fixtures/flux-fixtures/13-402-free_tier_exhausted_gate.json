@@ -1,0 +1,54 @@
+{
+ "status": 402,
+ "headers": {
+  "date": "<HTTP-date>",
+  "server": "uvicorn",
+  "x-flux-alias": "deepseek-v4-flash",
+  "content-type": "application/json",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "connection": "close",
+  "content-length": "<n>"
+ },
+ "body": {
+  "error": {
+   "message": "Your $1 free credit is used up. Add a card at https://fluxrouter.ai/home/billing to keep going.",
+   "type": "None",
+   "param": "None",
+   "code": "402"
+  }
+ },
+ "endpoint": "/v1/chat/completions",
+ "per_endpoint": {
+  "/v1/messages": {
+   "status": 402,
+   "headers": {
+    "content-length": "165",
+    "content-type": "application/json"
+   },
+   "body": {
+    "type": "error",
+    "error": {
+     "type": "invalid_request_error",
+     "message": "Your $1 free credit is used up. Add a card at https://fluxrouter.ai/home/billing to keep going."
+    }
+   }
+  },
+  "/v1/responses": {
+   "status": 402,
+   "headers": {
+    "content-length": "164",
+    "content-type": "application/json"
+   },
+   "body": {
+    "error": {
+     "message": "Your $1 free credit is used up. Add a card at https://fluxrouter.ai/home/billing to keep going.",
+     "type": "api_error",
+     "param": null,
+     "code": "402"
+    }
+   }
+  }
+ }
+}

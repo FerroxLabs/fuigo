@@ -673,6 +673,7 @@ mod notification_hook_filter_tests {
             max_retries: 3,
             reason: "timeout".into(),
             error_type: None,
+            upstream: Default::default(),
             verdicts: None,
             discard_emitted: false,
             message_id: None,

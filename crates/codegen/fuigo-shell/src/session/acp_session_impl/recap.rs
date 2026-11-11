@@ -138,7 +138,7 @@ impl SessionActor {
         let parent_session_id = self.session_info.id.to_string();
         let asked_at = chrono::Utc::now();
 
-        let sampling_client = self.prepare_chat_completion(false).await.map_err(|e| {
+        let sampling_client = self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side).await.map_err(|e| {
             SideQuestionError::PrepareClient(crate::sampling::error::acp_error_text(&e))
         })?;
 
@@ -650,7 +650,7 @@ impl SessionActor {
         cwd: &str,
         model_override: Option<&str>,
     ) -> Option<String> {
-        let sampling_client = self.prepare_chat_completion(false).await.ok()?;
+        let sampling_client = self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side).await.ok()?;
 
         let system = "You are a shell command autocomplete engine. \
             Given a partial command, output ONLY the completed command. \
@@ -770,7 +770,7 @@ impl SessionActor {
         };
 
         self.refresh_token_if_expired().await;
-        let mut sampling_config = self.reconstruct_full_config().await;
+        let mut sampling_config = self.reconstruct_full_config(crate::session::acp_session::CallRole::Side).await;
         let suggest_entry = self.models_manager.catalog_entry(&model);
         if !suggest_route_allowed(&sampling_config, suggest_entry.as_ref()) {
             // P192: the override below swaps only the wire model and keeps the session's
@@ -943,6 +943,9 @@ mod tests {
             retry_after_secs: None,
             should_retry,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         }
     }
 
@@ -990,6 +993,7 @@ mod tests {
             api(500, CALL_LIMIT, Some(false)),
             api(429, WALL_LIMIT, Some(false)),
             SamplingError::StreamError {
+                upstream: Default::default(),
                 error_type: "overloaded_error".into(),
                 message: format!("provider said: {CALL_LIMIT}"),
                 code: None,
@@ -1007,6 +1011,7 @@ mod tests {
     fn side_question_retries_transient_failures_only() {
         // Transient: overload (stream error, proxy-wrapped 500, 529), generic 5xx, and Cloudflare edge 52x (/btw once died on a 522)
         assert!(should_retry_side_question(&SamplingError::StreamError {
+            upstream: Default::default(),
             error_type: "overloaded_error".into(),
             message: "Overloaded".into(),
             code: None,
@@ -1055,6 +1060,7 @@ mod tests {
         let result: Result<(), SamplingError> = (|| async {
             calls.set(calls.get() + 1);
             Err(SamplingError::StreamError {
+                upstream: Default::default(),
                 error_type: "overloaded_error".into(),
                 message: "Overloaded".into(),
                 code: None,

@@ -31,6 +31,7 @@ tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
+sha2 = { workspace = true }
 tempfile = { workspace = true }
 # Mock HTTP server for actor / request_task integration tests.
 axum = { workspace = true }

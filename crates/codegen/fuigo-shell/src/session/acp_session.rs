@@ -135,6 +135,8 @@ pub(crate) use laziness::*;
 #[path = "acp_session_impl/queue_mutation.rs"]
 mod queue_mutation;
 use queue_mutation::{InputOrigin, QueueMutationPolicy};
+#[path = "acp_session_impl/held_wakes.rs"]
+pub(crate) mod held_wakes;
 #[path = "acp_session_impl/prompt_queue.rs"]
 mod prompt_queue;
 pub(super) use prompt_queue::QueueInputRequest;
@@ -179,7 +181,7 @@ mod child_tool_projection;
 mod length_salvage;
 #[path = "acp_session_impl/sampler_turn.rs"]
 mod sampler_turn;
-pub(crate) use sampler_turn::ParkGate;
+pub(crate) use sampler_turn::{CallRole, ParkGate, side_model_gate};
 use sampler_turn::*;
 #[path = "acp_session_impl/tool_dispatch.rs"]
 mod tool_dispatch;
@@ -807,6 +809,8 @@ pub(crate) struct SessionActor {
     /// The idle-resume model refresh in this file calls `crate::auth::attribution::record_auth_401` directly using this handle.
     /// `None` for tests / BYOK that don't need refresh or the attribution emit.
     pub(crate) auth_manager: Option<Arc<AuthManager>>,
+    pub(crate) held_wakes: Arc<std::sync::Mutex<held_wakes::HeldWakes>>,
+    pub(crate) refusal_prompt: Arc<std::sync::Mutex<fuigo_sampling_types::refusal::PromptSM>>,
     /// Set from the `session/new` / `session/load` `_meta` chat kind and sticky for the session.
     /// Chat-kind ACU/list sources product REST skills, never Build disk skills.
     pub(crate) is_chat_kind: bool,

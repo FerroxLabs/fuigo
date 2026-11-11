@@ -1037,6 +1037,7 @@ fn fuigo_only_transcript_forwards_but_stays_empty() {
             max_retries: 3,
             reason: "overloaded".into(),
             error_type: None,
+            upstream: Default::default(),
             verdicts: None,
             discard_emitted: false,
             message_id: None,

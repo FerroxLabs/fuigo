@@ -69,6 +69,7 @@ mod tests {
     fn cfg() -> SamplerConfig {
         SamplerConfig {
             api_key: None,
+            flux_base_url: None,
             base_url: "https://example.test".into(),
             model: "test-model".into(),
             max_completion_tokens: None,

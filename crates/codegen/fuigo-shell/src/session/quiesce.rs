@@ -1181,3 +1181,17 @@ mod tests {
         assert!(fires.into_texts()[0].len() <= MAX_FOLDED_FIRE_BYTES);
     }
 }
+
+/// Every prompt gate governing a child's dispatch, starting with its own.
+pub(crate) fn ancestors_including_self(session_id: &str) -> Vec<String> {
+    let inner = lock();
+    let mut current = session_id;
+    let mut ids = vec![current.to_owned()];
+    for _ in 0..MAX_DEPTH {
+        let Some(parent) = inner.parents.get(current) else { break; };
+        if ids.contains(parent) { break; }
+        ids.push(parent.clone());
+        current = parent;
+    }
+    ids
+}

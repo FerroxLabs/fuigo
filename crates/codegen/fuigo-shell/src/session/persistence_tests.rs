@@ -2103,6 +2103,7 @@ async fn disk_full_failure_is_mirrored_on_the_standard_rail() {
     let failed = RetryState::Failed {
         error_type: DISK_FULL_ERROR_TYPE.to_string(),
         message: DISK_FULL_USER_MESSAGE.to_string(),
+        upstream: Default::default(),
         verdicts: None,
     };
     let mut fuigo_rail = Vec::new();
@@ -2213,6 +2214,7 @@ async fn disk_full_mirror_takes_the_session_queue_when_one_is_installed() {
             RetryState::Failed {
                 error_type: DISK_FULL_ERROR_TYPE.to_string(),
                 message: DISK_FULL_USER_MESSAGE.to_string(),
+                upstream: Default::default(),
                 verdicts: None,
             }
         ),

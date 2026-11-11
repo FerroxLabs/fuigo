@@ -1,0 +1,59 @@
+{
+ "status": 402,
+ "headers": {
+  "date": "<HTTP-date>",
+  "server": "uvicorn",
+  "x-flux-alias": "deepseek-v4-flash",
+  "content-length": "308",
+  "content-type": "application/json",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "connection": "close"
+ },
+ "body": {
+  "error": {
+   "message": "free_tier_exhausted",
+   "type": "None",
+   "param": "None",
+   "code": "402",
+   "provider_specific_fields": {
+    "error": "free_tier_exhausted",
+    "message": "Free tier monthly allowance exhausted. Upgrade to Builder ($29/mo) for $20 of included usage + BYOK.",
+    "upgrade_url": "https://fluxrouter.ai/home/billing"
+   }
+  }
+ },
+ "endpoint": "/v1/chat/completions",
+ "per_endpoint": {
+  "/v1/messages": {
+   "status": 429,
+   "headers": {
+    "content-length": "210",
+    "content-type": "application/json"
+   },
+   "body": {
+    "type": "error",
+    "error": {
+     "type": "rate_limit_error",
+     "message": "Rate limit exceeded for api_key: KEYHASH_REDACTED. Limit type: requests. Current limit: 1, Remaining: 0. Limit resets at: 2026-11-10 20:08:21 UTC"
+    }
+   }
+  },
+  "/v1/responses": {
+   "status": 429,
+   "headers": {
+    "content-length": "214",
+    "content-type": "application/json"
+   },
+   "body": {
+    "error": {
+     "message": "Rate limit exceeded for api_key: KEYHASH_REDACTED. Limit type: requests. Current limit: 1, Remaining: 0. Limit resets at: 2026-11-10 20:08:21 UTC",
+     "type": "api_error",
+     "param": null,
+     "code": "429"
+    }
+   }
+  }
+ }
+}

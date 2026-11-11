@@ -500,6 +500,7 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
             api_key_provider: None,
             auth_provider: self.auth.clone(),
             attribution_callback: None,
+            dispatch_gate: None,
             system_reminder_tag: fuigo_tools::reminders::DEFAULT_REMINDER_TAG,
         }
     }
@@ -660,6 +661,7 @@ pub mod test_support {
                 api_key_provider: None,
                 auth_provider: None,
                 attribution_callback: None,
+                dispatch_gate: None,
                 system_reminder_tag: fuigo_tools::reminders::DEFAULT_REMINDER_TAG,
             }
         }

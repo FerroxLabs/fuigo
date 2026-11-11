@@ -1,0 +1,54 @@
+{
+ "status": 429,
+ "headers": {
+  "date": "<HTTP-date>",
+  "server": "uvicorn",
+  "x-flux-alias": "deepseek-v4-flash",
+  "content-type": "application/json",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "connection": "close",
+  "content-length": "<n>"
+ },
+ "body": {
+  "error": {
+   "message": "Flux Router error: No deployments available for selected model, Try again in 60 seconds. Passed model=flux-fast. pre-call-checks=False, cooldown_list=['KEYHASH_REDACTED']",
+   "type": null,
+   "param": null,
+   "code": "429"
+  }
+ },
+ "endpoint": "/v1/chat/completions",
+ "per_endpoint": {
+  "/v1/messages": {
+   "status": 500,
+   "headers": {
+    "content-length": "228",
+    "content-type": "application/json"
+   },
+   "body": {
+    "type": "error",
+    "error": {
+     "type": "api_error",
+     "message": "Flux Router error: No deployments available for selected model, Try again in 60 seconds. Passed model=flux-fast. pre-call-checks=False, cooldown_list=['KEYHASH_REDACTED']"
+    }
+   }
+  },
+  "/v1/responses": {
+   "status": 502,
+   "headers": {
+    "content-length": "266",
+    "content-type": "application/json"
+   },
+   "body": {
+    "error": {
+     "message": "upstream provider error: RouterRateLimitError: No deployments available for selected model, Try again in 60 seconds. Passed model=flux-fast. pre-call-checks=False, cooldown_list=['KEYHASH_REDACTED']",
+     "type": "api_error",
+     "param": null,
+     "code": null
+    }
+   }
+  }
+ }
+}

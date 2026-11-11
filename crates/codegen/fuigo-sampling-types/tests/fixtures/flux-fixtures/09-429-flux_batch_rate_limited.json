@@ -1,0 +1,64 @@
+{
+ "status": 429,
+ "headers": {
+  "date": "<HTTP-date>",
+  "server": "uvicorn",
+  "retry-after": "1",
+  "x-flux-error": "batch_rate_limited",
+  "x-flux-alias": "deepseek-v4-flash",
+  "content-length": "382",
+  "content-type": "application/json",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "connection": "close"
+ },
+ "body": {
+  "error": {
+   "message": "This key is limited to 1 concurrent requests (batch traffic class). Retry after 1 second.",
+   "type": "rate_limit_exceeded",
+   "param": null,
+   "code": "429",
+   "provider_specific_fields": {
+    "error": {
+     "type": "rate_limit_exceeded",
+     "state": "batch_concurrency",
+     "message": "This key is limited to 1 concurrent requests (batch traffic class). Retry after 1 second.",
+     "retry_after": 1
+    }
+   }
+  }
+ },
+ "endpoint": "/v1/chat/completions",
+ "per_endpoint": {
+  "/v1/messages": {
+   "status": 429,
+   "headers": {
+    "content-length": "154",
+    "content-type": "application/json"
+   },
+   "body": {
+    "type": "error",
+    "error": {
+     "type": "rate_limit_error",
+     "message": "This key is limited to 1 concurrent requests (batch traffic class). Retry after 1 second."
+    }
+   }
+  },
+  "/v1/responses": {
+   "status": 429,
+   "headers": {
+    "content-length": "186",
+    "content-type": "application/json"
+   },
+   "body": {
+    "error": {
+     "type": "rate_limit_exceeded",
+     "state": "batch_concurrency",
+     "message": "This key is limited to 1 concurrent requests (batch traffic class). Retry after 1 second.",
+     "retry_after": 1
+    }
+   }
+  }
+ }
+}

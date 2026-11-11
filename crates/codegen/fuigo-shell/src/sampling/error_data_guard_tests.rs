@@ -51,6 +51,7 @@ const TYPED_DATA_HELPERS: &[&str] = &[
     "error_data",
     "error_data_with_fields",
     "terminal_error_data",
+    "sampling_error_data",
     "compact_error_data",
     "typed_error_data",
 ];

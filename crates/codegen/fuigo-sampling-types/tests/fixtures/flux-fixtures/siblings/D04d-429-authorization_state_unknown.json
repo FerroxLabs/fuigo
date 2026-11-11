@@ -1,0 +1,32 @@
+{
+ "status": 429,
+ "headers": {
+  "content-length": "267",
+  "content-type": "application/json"
+ },
+ "body": {
+  "error": {
+   "type": "rate_limit_exceeded",
+   "state": "authorization_state_unknown",
+   "message": "This request could not be authorized: the account's entitlement state could not be interpreted by this service. Contact support@fluxrouter.ai.",
+   "support": "support@fluxrouter.ai"
+  }
+ },
+ "endpoint": "/v1/responses",
+ "per_endpoint": {
+  "/v1/messages": {
+   "status": 429,
+   "headers": {
+    "content-length": "207",
+    "content-type": "application/json"
+   },
+   "body": {
+    "type": "error",
+    "error": {
+     "type": "rate_limit_error",
+     "message": "This request could not be authorized: the account's entitlement state could not be interpreted by this service. Contact support@fluxrouter.ai."
+    }
+   }
+  }
+ }
+}

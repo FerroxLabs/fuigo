@@ -1,0 +1,56 @@
+{
+ "status": 429,
+ "headers": {
+  "date": "<HTTP-date>",
+  "server": "uvicorn",
+  "x-flux-alias": "deepseek-v4-flash",
+  "content-type": "application/json",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "connection": "close",
+  "content-length": "<n>",
+  "retry-after": "2",
+  "x-flux-hold-reason": "concurrency"
+ },
+ "body": {
+  "error": {
+   "message": "Available credit is low because other requests have temporarily reserved it. Wait for them to finish or top up to run more requests in parallel. Retry in 2s.",
+   "type": "None",
+   "param": "None",
+   "code": "429"
+  }
+ },
+ "endpoint": "/v1/chat/completions",
+ "per_endpoint": {
+  "/v1/messages": {
+   "status": 429,
+   "headers": {
+    "content-length": "222",
+    "content-type": "application/json"
+   },
+   "body": {
+    "type": "error",
+    "error": {
+     "type": "rate_limit_error",
+     "message": "Available credit is low because other requests have temporarily reserved it. Wait for them to finish or top up to run more requests in parallel. Retry in 2s."
+    }
+   }
+  },
+  "/v1/responses": {
+   "status": 429,
+   "headers": {
+    "content-length": "226",
+    "content-type": "application/json"
+   },
+   "body": {
+    "error": {
+     "message": "Available credit is low because other requests have temporarily reserved it. Wait for them to finish or top up to run more requests in parallel. Retry in 2s.",
+     "type": "api_error",
+     "param": null,
+     "code": "429"
+    }
+   }
+  }
+ }
+}

@@ -26,7 +26,11 @@ impl SessionActor {
                     "error": format!("{err}"),
                 })),
             );
-            return crate::acp_error::auth_required(msg);
+            let mut mapped = crate::acp_error::auth_required(msg);
+            if let Some(data) = mapped.data.as_mut() {
+                data["upstream"] = serde_json::json!(err.upstream());
+            }
+            return mapped;
         }
         map_sampling_err_to_acp(err)
     }

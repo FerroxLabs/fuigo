@@ -332,7 +332,7 @@ mod interjection_broadcast_tests {
                 let payload = payload.expect("an fuigo/session/interjection broadcast");
                 assert_eq!(
                     payload.get("sessionId").and_then(|v| v.as_str()),
-                    Some("test-actor"),
+                    Some(actor.session_info.id.0.as_ref()),
                     "broadcast must carry the session id"
                 );
                 assert_eq!(

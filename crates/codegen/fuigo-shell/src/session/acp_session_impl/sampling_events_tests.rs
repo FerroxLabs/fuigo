@@ -410,6 +410,7 @@ async fn completed_event_releases_stream_drain_barrier_and_timeout_keeps_request
                 .await;
             actor
                 .handle_sampling_event(SamplingEvent::Retrying {
+                    upstream: Default::default(),
                     request_id: late_req.clone(),
                     attempt: 1,
                     max_retries: 2,
@@ -604,6 +605,7 @@ async fn unowned_retry_does_not_notify_the_next_turn() {
 
             actor
                 .handle_sampling_event(SamplingEvent::Retrying {
+                    upstream: Default::default(),
                     request_id: RequestId::random(),
                     attempt: 1,
                     max_retries: 2,
@@ -683,6 +685,9 @@ async fn failed_event_preserves_streaming_capture_for_takeout() {
                         retry_after_secs: None,
                         should_retry: None,
                         error_code: None,
+                        upstream_state: None,
+                        upstream_type: None,
+                        upstream_details: Default::default(),
                         model_metadata: None,
                         empty_response_context: None,
                         doom_loop_triggers: None,
@@ -728,6 +733,9 @@ async fn failed_event_preserves_streaming_capture_for_takeout() {
                         retry_after_secs: None,
                         should_retry: None,
                         error_code: None,
+                        upstream_state: None,
+                        upstream_type: None,
+                        upstream_details: Default::default(),
                         model_metadata: None,
                         empty_response_context: None,
                         doom_loop_triggers: None,
@@ -759,6 +767,9 @@ async fn failed_event_preserves_streaming_capture_for_takeout() {
                         retry_after_secs: None,
                         should_retry: None,
                         error_code: None,
+                        upstream_state: None,
+                        upstream_type: None,
+                        upstream_details: Default::default(),
                         model_metadata: None,
                         empty_response_context: None,
                         doom_loop_triggers: None,
@@ -1008,6 +1019,7 @@ async fn doom_loop_recovery_stamps_capture_segments_and_counters() {
             // The recovery discards the doomed attempt and resamples.
             actor
                 .handle_sampling_event(SamplingEvent::Retrying {
+                    upstream: Default::default(),
                     request_id: req.clone(),
                     attempt: 1,
                     max_retries: 2,
@@ -1020,6 +1032,7 @@ async fn doom_loop_recovery_stamps_capture_segments_and_counters() {
             // Replaying the same ordinal must be idempotent.
             actor
                 .handle_sampling_event(SamplingEvent::Retrying {
+                    upstream: Default::default(),
                     request_id: req.clone(),
                     attempt: 1,
                     max_retries: 2,
@@ -1321,6 +1334,9 @@ async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
                 retry_after_secs: None,
                 should_retry: None,
                 error_code: None,
+                upstream_state: None,
+                upstream_type: None,
+                upstream_details: Default::default(),
                 model_metadata: None,
                 empty_response_context: Some(EmptyResponseContext {
                     reason: EmptyReason::ReasoningOnly,

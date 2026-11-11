@@ -1,0 +1,1612 @@
+{
+ "expected_counts": {
+  "fixture_leaves": 93,
+  "rows": 126,
+  "rows_v21": 124,
+  "witness_traces": 25
+ },
+ "final_matrix_upstream": {
+  "account_monthly_budget_exhausted-401": {
+   "hold_reason": "account_monthly_budget_exhausted",
+   "http_status": 401
+  },
+  "account_monthly_budget_exhausted-402": {
+   "code": "account_monthly_budget_exhausted",
+   "codes": [
+    "account_monthly_budget_exhausted"
+   ],
+   "http_status": 402
+  },
+  "account_monthly_budget_exhausted-429": {
+   "codes": [
+    "account_monthly_budget_exhausted"
+   ],
+   "http_status": 429,
+   "state": "account_monthly_budget_exhausted"
+  },
+  "authorization_state_unknown-401": {
+   "hold_reason": "authorization_state_unknown",
+   "http_status": 401
+  },
+  "authorization_state_unknown-402": {
+   "code": "authorization_state_unknown",
+   "codes": [
+    "authorization_state_unknown"
+   ],
+   "http_status": 402
+  },
+  "authorization_state_unknown-429": {
+   "codes": [
+    "authorization_state_unknown"
+   ],
+   "http_status": 429,
+   "state": "authorization_state_unknown"
+  },
+  "builder_auto_bump_eligible-401": {
+   "hold_reason": "builder_auto_bump_eligible",
+   "http_status": 401
+  },
+  "builder_auto_bump_eligible-402": {
+   "code": "builder_auto_bump_eligible",
+   "codes": [
+    "builder_auto_bump_eligible"
+   ],
+   "http_status": 402
+  },
+  "builder_auto_bump_eligible-429": {
+   "codes": [
+    "builder_auto_bump_eligible"
+   ],
+   "http_status": 429,
+   "state": "builder_auto_bump_eligible"
+  },
+  "cap_reached-401": {
+   "hold_reason": "cap_reached",
+   "http_status": 401
+  },
+  "cap_reached-402": {
+   "code": "cap_reached",
+   "codes": [
+    "cap_reached"
+   ],
+   "http_status": 402
+  },
+  "cap_reached-429": {
+   "codes": [
+    "cap_reached"
+   ],
+   "http_status": 429,
+   "state": "cap_reached"
+  },
+  "credit_exhausted-401": {
+   "hold_reason": "credit_exhausted",
+   "http_status": 401
+  },
+  "credit_exhausted-402": {
+   "code": "credit_exhausted",
+   "codes": [
+    "credit_exhausted"
+   ],
+   "http_status": 402
+  },
+  "credit_exhausted-429": {
+   "codes": [
+    "credit_exhausted"
+   ],
+   "http_status": 429,
+   "state": "credit_exhausted"
+  },
+  "credit_hold-401": {
+   "hold_reason": "credit_hold",
+   "http_status": 401
+  },
+  "credit_hold-402": {
+   "code": "credit_hold",
+   "codes": [
+    "credit_hold"
+   ],
+   "http_status": 402
+  },
+  "credit_hold-429": {
+   "codes": [
+    "credit_hold"
+   ],
+   "http_status": 429,
+   "state": "credit_hold"
+  },
+  "credit_unresolved-401": {
+   "hold_reason": "credit_unresolved",
+   "http_status": 401
+  },
+  "credit_unresolved-402": {
+   "code": "credit_unresolved",
+   "codes": [
+    "credit_unresolved"
+   ],
+   "http_status": 402
+  },
+  "credit_unresolved-429": {
+   "codes": [
+    "credit_unresolved"
+   ],
+   "http_status": 429,
+   "state": "credit_unresolved"
+  },
+  "daily_cap-401": {
+   "hold_reason": "daily_cap",
+   "http_status": 401
+  },
+  "daily_cap-402": {
+   "code": "daily_cap",
+   "codes": [
+    "daily_cap"
+   ],
+   "http_status": 402
+  },
+  "daily_cap-429": {
+   "codes": [
+    "daily_cap"
+   ],
+   "http_status": 429,
+   "state": "daily_cap"
+  },
+  "entitlement_missing-401": {
+   "hold_reason": "entitlement_missing",
+   "http_status": 401
+  },
+  "entitlement_missing-402": {
+   "code": "entitlement_missing",
+   "codes": [
+    "entitlement_missing"
+   ],
+   "http_status": 402
+  },
+  "entitlement_missing-429": {
+   "codes": [
+    "entitlement_missing"
+   ],
+   "http_status": 429,
+   "state": "entitlement_missing"
+  },
+  "free_cap_reached-401": {
+   "hold_reason": "free_cap_reached",
+   "http_status": 401
+  },
+  "free_cap_reached-402": {
+   "code": "free_cap_reached",
+   "codes": [
+    "free_cap_reached"
+   ],
+   "http_status": 402
+  },
+  "free_cap_reached-429": {
+   "codes": [
+    "free_cap_reached"
+   ],
+   "http_status": 429,
+   "state": "free_cap_reached"
+  },
+  "free_tier_exhausted-401": {
+   "hold_reason": "free_tier_exhausted",
+   "http_status": 401
+  },
+  "free_tier_exhausted-402": {
+   "code": "free_tier_exhausted",
+   "codes": [
+    "free_tier_exhausted"
+   ],
+   "http_status": 402
+  },
+  "free_tier_exhausted-429": {
+   "codes": [
+    "free_tier_exhausted"
+   ],
+   "http_status": 429,
+   "state": "free_tier_exhausted"
+  },
+  "hourly_burn_limit-401": {
+   "hold_reason": "hourly_burn_limit",
+   "http_status": 401
+  },
+  "hourly_burn_limit-402": {
+   "code": "hourly_burn_limit",
+   "codes": [
+    "hourly_burn_limit"
+   ],
+   "http_status": 402
+  },
+  "hourly_burn_limit-429": {
+   "codes": [
+    "hourly_burn_limit"
+   ],
+   "http_status": 429,
+   "state": "hourly_burn_limit"
+  },
+  "key_budget_reached-401": {
+   "hold_reason": "key_budget_reached",
+   "http_status": 401
+  },
+  "key_budget_reached-402": {
+   "code": "key_budget_reached",
+   "codes": [
+    "key_budget_reached"
+   ],
+   "http_status": 402
+  },
+  "key_budget_reached-429": {
+   "codes": [
+    "key_budget_reached"
+   ],
+   "http_status": 429,
+   "state": "key_budget_reached"
+  },
+  "key_lifetime_cap_exhausted-401": {
+   "hold_reason": "key_lifetime_cap_exhausted",
+   "http_status": 401
+  },
+  "key_lifetime_cap_exhausted-402": {
+   "code": "key_lifetime_cap_exhausted",
+   "codes": [
+    "key_lifetime_cap_exhausted"
+   ],
+   "http_status": 402
+  },
+  "key_lifetime_cap_exhausted-429": {
+   "codes": [
+    "key_lifetime_cap_exhausted"
+   ],
+   "http_status": 429,
+   "state": "key_lifetime_cap_exhausted"
+  },
+  "key_not_found-401": {
+   "hold_reason": "key_not_found",
+   "http_status": 401
+  },
+  "key_not_found-402": {
+   "code": "key_not_found",
+   "codes": [
+    "key_not_found"
+   ],
+   "http_status": 402
+  },
+  "key_not_found-429": {
+   "codes": [
+    "key_not_found"
+   ],
+   "http_status": 429,
+   "state": "key_not_found"
+  },
+  "key_revoked-401": {
+   "hold_reason": "key_revoked",
+   "http_status": 401
+  },
+  "key_revoked-402": {
+   "code": "key_revoked",
+   "codes": [
+    "key_revoked"
+   ],
+   "http_status": 402
+  },
+  "key_revoked-429": {
+   "codes": [
+    "key_revoked"
+   ],
+   "http_status": 429,
+   "state": "key_revoked"
+  },
+  "monthly_cap-401": {
+   "hold_reason": "monthly_cap",
+   "http_status": 401
+  },
+  "monthly_cap-402": {
+   "code": "monthly_cap",
+   "codes": [
+    "monthly_cap"
+   ],
+   "http_status": 402
+  },
+  "monthly_cap-429": {
+   "codes": [
+    "monthly_cap"
+   ],
+   "http_status": 429,
+   "state": "monthly_cap"
+  },
+  "subscription_account_mismatch-401": {
+   "hold_reason": "subscription_account_mismatch",
+   "http_status": 401
+  },
+  "subscription_account_mismatch-402": {
+   "code": "subscription_account_mismatch",
+   "codes": [
+    "subscription_account_mismatch"
+   ],
+   "http_status": 402
+  },
+  "subscription_account_mismatch-429": {
+   "codes": [
+    "subscription_account_mismatch"
+   ],
+   "http_status": 429,
+   "state": "subscription_account_mismatch"
+  }
+ },
+ "projection_required": {
+  "12.resp": {
+   "resets_at": "2026-12-01T00:00:00Z"
+  }
+ },
+ "terminal_by_row": {
+  "01.resp": true,
+  "02.resp": true,
+  "03.resp": true,
+  "04.resp": true,
+  "05.resp": false,
+  "06.resp": false,
+  "07.resp": false,
+  "08.resp": false,
+  "09.resp": false,
+  "10.resp": true,
+  "11.resp": false,
+  "12.resp": true,
+  "13.resp": true,
+  "14.resp": true,
+  "15.resp": true,
+  "16.resp": true,
+  "17.resp": true,
+  "18.resp": true,
+  "19.free_key/resp": false,
+  "19.resp": false,
+  "20.resp": false,
+  "D04a.resp": true,
+  "D04b.resp": true,
+  "D04c.resp": true,
+  "D04d.resp": true,
+  "D07.resp": false,
+  "D09.resp": false,
+  "D12.resp": true,
+  "D16a.resp": true,
+  "D16b.resp": true,
+  "D16c.resp": true,
+  "D16d.resp": true,
+  "D16e.resp": true,
+  "D17.resp": true,
+  "X11": true,
+  "X13": true,
+  "X14": true,
+  "X15": true,
+  "X17": true,
+  "X18": false,
+  "X19": false,
+  "X2": true,
+  "X21": true,
+  "X22": true,
+  "X23": true,
+  "X4": true,
+  "X5": true,
+  "X8": true,
+  "X9": true
+ },
+ "upstream_by_row": {
+  "01.resp": {
+   "codes": [
+    "free_cap_reached",
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "state": "free_cap_reached",
+   "type": "rate_limit_exceeded"
+  },
+  "02.resp": {
+   "codes": [
+    "builder_auto_bump_eligible",
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "state": "builder_auto_bump_eligible",
+   "type": "rate_limit_exceeded"
+  },
+  "03.resp": {
+   "codes": [
+    "cap_reached",
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "state": "cap_reached",
+   "type": "rate_limit_exceeded"
+  },
+  "04.resp": {
+   "codes": [
+    "key_revoked",
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "state": "key_revoked",
+   "type": "rate_limit_exceeded"
+  },
+  "05.resp": {
+   "codes": [
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "limit": "rpm",
+   "retry_after_s": 60,
+   "type": "rate_limit_exceeded"
+  },
+  "06.resp": {
+   "codes": [
+    "billing_system_degraded"
+   ],
+   "http_status": 429,
+   "retry_after_s": 30,
+   "type": "billing_system_degraded"
+  },
+  "07.resp": {
+   "codes": [
+    "api_error"
+   ],
+   "http_status": 429,
+   "type": "api_error"
+  },
+  "08.resp": {
+   "codes": [
+    "api_error"
+   ],
+   "http_status": 429,
+   "type": "api_error"
+  },
+  "09.resp": {
+   "codes": [
+    "batch_concurrency",
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "retry_after_s": 1,
+   "state": "batch_concurrency",
+   "type": "rate_limit_exceeded"
+  },
+  "10.resp": {
+   "code": "hourly_burn_limit",
+   "codes": [
+    "hourly_burn_limit"
+   ],
+   "http_status": 429,
+   "retry_after_s": 1800
+  },
+  "11.resp": {
+   "codes": [
+    "api_error"
+   ],
+   "http_status": 429,
+   "type": "api_error"
+  },
+  "12.resp": {
+   "code": "key_budget_reached",
+   "codes": [
+    "key_budget_reached"
+   ],
+   "http_status": 402,
+   "limit": "monthly_spend",
+   "resets_at": "2026-12-01T00:00:00Z"
+  },
+  "13.resp": {
+   "codes": [
+    "api_error"
+   ],
+   "http_status": 402,
+   "type": "api_error"
+  },
+  "14.resp": {
+   "codes": [
+    "authentication_error"
+   ],
+   "http_status": 401,
+   "type": "authentication_error"
+  },
+  "15.resp": {
+   "code": "account_monthly_budget_exhausted",
+   "codes": [
+    "account_monthly_budget_exhausted"
+   ],
+   "http_status": 402
+  },
+  "16.resp": {
+   "codes": [
+    "api_error"
+   ],
+   "http_status": 402,
+   "type": "api_error"
+  },
+  "17.resp": {
+   "codes": [
+    "api_error"
+   ],
+   "http_status": 402,
+   "type": "api_error"
+  },
+  "18.resp": {
+   "code": "key_lifetime_cap_exhausted",
+   "codes": [
+    "key_lifetime_cap_exhausted"
+   ],
+   "http_status": 402
+  },
+  "19.free_key/resp": {
+   "codes": [
+    "api_error"
+   ],
+   "http_status": 502,
+   "type": "api_error"
+  },
+  "19.resp": {
+   "codes": [
+    "api_error"
+   ],
+   "http_status": 502,
+   "type": "api_error"
+  },
+  "20.resp": {
+   "codes": [
+    "api_error"
+   ],
+   "http_status": 502,
+   "type": "api_error"
+  },
+  "D04a.resp": {
+   "codes": [
+    "entitlement_missing",
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "state": "entitlement_missing",
+   "type": "rate_limit_exceeded"
+  },
+  "D04b.resp": {
+   "codes": [
+    "subscription_account_mismatch",
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "state": "subscription_account_mismatch",
+   "type": "rate_limit_exceeded"
+  },
+  "D04c.resp": {
+   "codes": [
+    "key_not_found",
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "state": "key_not_found",
+   "type": "rate_limit_exceeded"
+  },
+  "D04d.resp": {
+   "codes": [
+    "authorization_state_unknown",
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "state": "authorization_state_unknown",
+   "type": "rate_limit_exceeded"
+  },
+  "D07.resp": {
+   "codes": [
+    "api_error"
+   ],
+   "http_status": 429,
+   "type": "api_error"
+  },
+  "D09.resp": {
+   "codes": [
+    "batch_rate",
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "retry_after_s": 1,
+   "state": "batch_rate",
+   "type": "rate_limit_exceeded"
+  },
+  "D12.resp": {
+   "code": "key_budget_reached",
+   "codes": [
+    "key_budget_reached"
+   ],
+   "http_status": 402,
+   "limit": "bot_monthly_spend",
+   "resets_at": "2026-12-01T00:00:00Z"
+  },
+  "D16a.resp": {
+   "codes": [
+    "api_error"
+   ],
+   "http_status": 402,
+   "type": "api_error"
+  },
+  "D16b.resp": {
+   "codes": [
+    "api_error"
+   ],
+   "http_status": 402,
+   "type": "api_error"
+  },
+  "D16c.resp": {
+   "codes": [
+    "api_error"
+   ],
+   "http_status": 402,
+   "type": "api_error"
+  },
+  "D16d.resp": {
+   "codes": [
+    "api_error"
+   ],
+   "http_status": 402,
+   "type": "api_error"
+  },
+  "D16e.resp": {
+   "codes": [
+    "api_error"
+   ],
+   "http_status": 402,
+   "type": "api_error"
+  },
+  "D17.resp": {
+   "codes": [
+    "api_error"
+   ],
+   "http_status": 402,
+   "type": "api_error"
+  },
+  "X11": {
+   "codes": [
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "type": "rate_limit_exceeded"
+  },
+  "X13": {
+   "codes": [
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "type": "rate_limit_exceeded"
+  },
+  "X14": {
+   "codes": [
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "type": "rate_limit_exceeded"
+  },
+  "X15": {
+   "codes": [
+    "permission_error"
+   ],
+   "http_status": 403,
+   "type": "permission_error"
+  },
+  "X17": {
+   "codes": [
+    "key_revoked",
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "retry_after_s": 5,
+   "state": "key_revoked",
+   "type": "rate_limit_exceeded"
+  },
+  "X18": {
+   "codes": [
+    "concurrency",
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "state": "concurrency",
+   "type": "rate_limit_exceeded"
+  },
+  "X19": {
+   "codes": [
+    "invalid_request_error"
+   ],
+   "http_status": 400,
+   "type": "invalid_request_error"
+  },
+  "X2": {
+   "codes": [
+    "credit_unresolved",
+    "authentication_error"
+   ],
+   "http_status": 401,
+   "state": "credit_unresolved",
+   "type": "authentication_error"
+  },
+  "X21": {
+   "code": "key_budget_reached",
+   "codes": [
+    "key_budget_reached"
+   ],
+   "http_status": 402,
+   "limit": "monthly_tokens"
+  },
+  "X22": {
+   "code": "concurrency",
+   "codes": [
+    "concurrency",
+    "key_revoked"
+   ],
+   "http_status": 429
+  },
+  "X23": {
+   "code": "tier_rpm_limit",
+   "codes": [
+    "tier_rpm_limit",
+    "daily_cap"
+   ],
+   "http_status": 429
+  },
+  "X4": {
+   "codes": [
+    "authorization_state_unknown",
+    "permission_error"
+   ],
+   "http_status": 403,
+   "state": "authorization_state_unknown",
+   "type": "permission_error"
+  },
+  "X5": {
+   "codes": [
+    "credit_unresolved",
+    "rate_limit_exceeded"
+   ],
+   "http_status": 429,
+   "state": "credit_unresolved",
+   "type": "rate_limit_exceeded"
+  },
+  "X8": {
+   "code": "key_budget_reached",
+   "codes": [
+    "key_budget_reached"
+   ],
+   "http_status": 402
+  },
+  "X9": {
+   "code": "key_budget_reached",
+   "codes": [
+    "key_budget_reached"
+   ],
+   "http_status": 402
+  }
+ },
+ "vocab": {
+  "final_order": [
+   [
+    "key_revoked",
+    "keyRevoked"
+   ],
+   [
+    "key_not_found",
+    "keyNotFound"
+   ],
+   [
+    "entitlement_missing",
+    "keyAccess"
+   ],
+   [
+    "subscription_account_mismatch",
+    "keyAccess"
+   ],
+   [
+    "authorization_state_unknown",
+    "accessUnknown"
+   ],
+   [
+    "account_monthly_budget_exhausted",
+    "accountCeiling"
+   ],
+   [
+    "key_budget_reached",
+    "keyBudget"
+   ],
+   [
+    "key_lifetime_cap_exhausted",
+    "keyLifetime"
+   ],
+   [
+    "free_cap_reached",
+    "freeCap"
+   ],
+   [
+    "free_tier_exhausted",
+    "freeCredit"
+   ],
+   [
+    "builder_auto_bump_eligible",
+    "requestCap"
+   ],
+   [
+    "cap_reached",
+    "planCap"
+   ],
+   [
+    "credit_exhausted",
+    "credit"
+   ],
+   [
+    "credit_hold",
+    "creditHold"
+   ],
+   [
+    "credit_unresolved",
+    "unresolved"
+   ],
+   [
+    "monthly_cap",
+    "spendCap"
+   ],
+   [
+    "daily_cap",
+    "spendCap"
+   ],
+   [
+    "hourly_burn_limit",
+    "hourly"
+   ]
+  ],
+  "hold_codes": [
+   "concurrency"
+  ],
+  "transient_codes": [
+   "batch_concurrency",
+   "batch_rate",
+   "billing_system_degraded",
+   "key_rate_limit",
+   "model_cooling_down",
+   "provider_rate_limited",
+   "tier_rpm_limit"
+  ]
+ },
+ "witness_traces": [
+  [
+   "W1",
+   true,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "14.resp"
+    ],
+    [
+     "t"
+    ],
+    [
+     "d",
+     "refresh_resubmit",
+     "auto/A"
+    ],
+    [
+     "r",
+     "refresh_resubmit",
+     "ok"
+    ]
+   ],
+   [
+    "ok",
+    2,
+    "DONE"
+   ]
+  ],
+  [
+   "W2",
+   true,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "14.resp"
+    ],
+    [
+     "t"
+    ],
+    [
+     "d",
+     "refresh_resubmit",
+     "auto/A"
+    ],
+    [
+     "r",
+     "refresh_resubmit",
+     "14.resp"
+    ]
+   ],
+   [
+    "ok",
+    2,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W3",
+   true,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "14.resp"
+    ],
+    [
+     "t"
+    ],
+    [
+     "d",
+     "refresh_resubmit",
+     "auto/A"
+    ],
+    [
+     "r",
+     "refresh_resubmit",
+     "14.resp"
+    ],
+    [
+     "d",
+     "sampler_retry",
+     "auto/A"
+    ]
+   ],
+   [
+    "violation",
+    3,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W4",
+   true,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "14.resp"
+    ],
+    [
+     "t"
+    ],
+    [
+     "d",
+     "refresh_resubmit",
+     "auto/A"
+    ],
+    [
+     "r",
+     "refresh_resubmit",
+     "14.resp"
+    ],
+    [
+     "t"
+    ]
+   ],
+   [
+    "violation",
+    2,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W5",
+   false,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "14.resp"
+    ]
+   ],
+   [
+    "ok",
+    1,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W6",
+   false,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "14.resp"
+    ],
+    [
+     "t"
+    ]
+   ],
+   [
+    "violation",
+    1,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W7",
+   true,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "X2"
+    ],
+    [
+     "t"
+    ]
+   ],
+   [
+    "violation",
+    1,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W8",
+   true,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "X15"
+    ],
+    [
+     "t"
+    ]
+   ],
+   [
+    "violation",
+    1,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W9",
+   true,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "X4"
+    ]
+   ],
+   [
+    "ok",
+    1,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W10",
+   true,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "X4"
+    ],
+    [
+     "d",
+     "transient_4d",
+     "auto/A"
+    ]
+   ],
+   [
+    "violation",
+    2,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W11",
+   true,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "X4"
+    ],
+    [
+     "d",
+     "provider_4c",
+     "fast/B"
+    ]
+   ],
+   [
+    "violation",
+    2,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W12",
+   false,
+   [
+    [
+     "d",
+     "side",
+     "fast/S"
+    ],
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "side",
+     "16.resp"
+    ],
+    [
+     "r",
+     "main",
+     "16.resp"
+    ]
+   ],
+   [
+    "ok",
+    2,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W13",
+   false,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "01.resp"
+    ],
+    [
+     "d",
+     "side",
+     "fast/S"
+    ]
+   ],
+   [
+    "violation",
+    2,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W14",
+   false,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "01.resp"
+    ],
+    [
+     "d",
+     "compact",
+     "auto/A-compacted"
+    ]
+   ],
+   [
+    "violation",
+    2,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W15",
+   false,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "01.resp"
+    ]
+   ],
+   [
+    "ok",
+    1,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W16",
+   false,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "01.resp"
+    ],
+    [
+     "d",
+     "resume",
+     "auto/A"
+    ]
+   ],
+   [
+    "violation",
+    2,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W17",
+   false,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "X11"
+    ],
+    [
+     "d",
+     "sampler_retry",
+     "auto/A"
+    ]
+   ],
+   [
+    "violation",
+    2,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W18",
+   false,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "09.resp"
+    ],
+    [
+     "d",
+     "sampler_retry",
+     "auto/A"
+    ],
+    [
+     "r",
+     "sampler_retry",
+     "ok"
+    ]
+   ],
+   [
+    "ok",
+    2,
+    "DONE"
+   ]
+  ],
+  [
+   "W19",
+   false,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "01.resp"
+    ],
+    [
+     "new"
+    ],
+    [
+     "d",
+     "main",
+     "auto/A2"
+    ]
+   ],
+   [
+    "ok",
+    1,
+    "OPEN"
+   ]
+  ],
+  [
+   "W20",
+   true,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "X1"
+    ],
+    [
+     "t"
+    ]
+   ],
+   [
+    "violation",
+    1,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W21",
+   true,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "14.resp"
+    ],
+    [
+     "t"
+    ],
+    [
+     "d",
+     "refresh_resubmit",
+     "auto/A"
+    ],
+    [
+     "r",
+     "refresh_resubmit",
+     "09.resp"
+    ],
+    [
+     "d",
+     "side",
+     "fast/S"
+    ]
+   ],
+   [
+    "violation",
+    3,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W22",
+   true,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "14.resp"
+    ],
+    [
+     "t"
+    ],
+    [
+     "d",
+     "refresh_resubmit",
+     "auto/A"
+    ],
+    [
+     "r",
+     "refresh_resubmit",
+     "11.resp"
+    ],
+    [
+     "d",
+     "side",
+     "fast/S"
+    ]
+   ],
+   [
+    "violation",
+    3,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W23",
+   true,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "14.resp"
+    ],
+    [
+     "t"
+    ],
+    [
+     "d",
+     "refresh_resubmit",
+     "auto/A"
+    ],
+    [
+     "r",
+     "refresh_resubmit",
+     "X18"
+    ],
+    [
+     "d",
+     "sampler_retry",
+     "auto/A"
+    ]
+   ],
+   [
+    "violation",
+    3,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W24",
+   true,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "14.resp"
+    ],
+    [
+     "t"
+    ],
+    [
+     "d",
+     "refresh_resubmit",
+     "auto/A"
+    ],
+    [
+     "r",
+     "refresh_resubmit",
+     "X19"
+    ],
+    [
+     "d",
+     "side",
+     "fast/S"
+    ]
+   ],
+   [
+    "violation",
+    3,
+    "TERMINAL"
+   ]
+  ],
+  [
+   "W25",
+   true,
+   [
+    [
+     "d",
+     "main",
+     "auto/A"
+    ],
+    [
+     "r",
+     "main",
+     "14.resp"
+    ],
+    [
+     "t"
+    ],
+    [
+     "d",
+     "refresh_resubmit",
+     "auto/A"
+    ],
+    [
+     "r",
+     "refresh_resubmit",
+     "09.resp"
+    ],
+    [
+     "t"
+    ]
+   ],
+   [
+    "violation",
+    2,
+    "TERMINAL"
+   ]
+  ]
+ ]
+}

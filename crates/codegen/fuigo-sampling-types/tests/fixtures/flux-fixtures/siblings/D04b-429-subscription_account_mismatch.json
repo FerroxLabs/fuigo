@@ -1,0 +1,32 @@
+{
+ "status": 429,
+ "headers": {
+  "content-length": "315",
+  "content-type": "application/json"
+ },
+ "body": {
+  "error": {
+   "type": "rate_limit_exceeded",
+   "state": "subscription_account_mismatch",
+   "message": "This key's subscription does not resolve to this account, so no entitlement could be resolved. This is a data-integrity fault rather than a billing state — contact support@fluxrouter.ai.",
+   "support": "support@fluxrouter.ai"
+  }
+ },
+ "endpoint": "/v1/responses",
+ "per_endpoint": {
+  "/v1/messages": {
+   "status": 429,
+   "headers": {
+    "content-length": "253",
+    "content-type": "application/json"
+   },
+   "body": {
+    "type": "error",
+    "error": {
+     "type": "rate_limit_error",
+     "message": "This key's subscription does not resolve to this account, so no entitlement could be resolved. This is a data-integrity fault rather than a billing state — contact support@fluxrouter.ai."
+    }
+   }
+  }
+ }
+}

@@ -248,7 +248,14 @@ async fn is_real_dir_chain(sessions_root: &Path, assets_dir: &Path) -> bool {
 /// `Auth`, `InvalidConfiguration`, `Serialization` and `IdleTimeout` are all deterministic by construction.
 /// Re-issuing the same request cannot change the outcome: auth state, config, payload shape, and stuck-model conditions all persist.
 fn classify_sampling_error(err: SamplingError) -> CompactFailure {
-    let acp_err = crate::acp_error::compaction(format!("{COMPACT_FAILED_PREFIX}{err}"));
+    let mut acp_err = crate::acp_error::compaction(format!("{COMPACT_FAILED_PREFIX}{err}"));
+    if let Some(data) = acp_err.data.as_mut() {
+        data["upstream"] = serde_json::json!(fuigo_sampler::SamplingErrorInfo::from(&err).upstream());
+    }
+    // A boundary STOP/PAUSE also vetoes the size ladder, before any retry decision.
+    if err.is_terminal_refusal() {
+        return CompactFailure::Deterministic(acp_err);
+    }
     // Size beats the generic 4xx rule so the input ladder sees it; 413
     // matches by status because proxies send it with generic body text.
     // Deliberately not laddering on `is_likely_body_rejected()`: the same

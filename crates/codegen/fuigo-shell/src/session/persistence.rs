@@ -299,6 +299,10 @@ impl AckGate {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum PersistenceMsg {
+    HeldWakes {
+        queue: crate::session::acp_session::held_wakes::HeldWakes,
+        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
+    },
     PresentationHints {
         hints: crate::session::tool_presentation::PresentationHints,
         respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
@@ -1872,6 +1876,7 @@ impl SessionPersistence {
         let state = RetryState::Failed {
             error_type: DISK_FULL_ERROR_TYPE.to_string(),
             message: DISK_FULL_USER_MESSAGE.to_string(),
+            upstream: Default::default(),
             verdicts: None,
         };
         let notification = FuigoSessionNotification {
@@ -2445,6 +2450,12 @@ impl SessionPersistence {
                     if let Some(sync) = &self.remote_sync {
                         sync.set_model_id(model_id.0.to_string());
                     }
+                }
+                PersistenceMsg::HeldWakes { queue, respond_to } => {
+                    let result = self.storage.session_writer(&self.info)
+                        .and_then(|writer| queue.save(&writer));
+                    self.observe_io(&result);
+                    let _ = respond_to.send(result);
                 }
                 PersistenceMsg::PlanState(state) => {
                     // Atomic-rename: durable at write time, never on the dirty set

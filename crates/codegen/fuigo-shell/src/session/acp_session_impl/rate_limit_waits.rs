@@ -131,7 +131,7 @@ impl RateLimitWaitBudget {
         let Some(state) = self.state.as_mut() else {
             return RateLimitWaitDecision::Disabled;
         };
-        if !matches!(error.kind, SamplingErrorKind::RateLimited) {
+        if error.upstream().classification().is_terminal() || !matches!(error.kind, SamplingErrorKind::RateLimited) {
             return RateLimitWaitDecision::NotRateLimited;
         }
         state.decide_rate_limited(error.retry_after_secs)

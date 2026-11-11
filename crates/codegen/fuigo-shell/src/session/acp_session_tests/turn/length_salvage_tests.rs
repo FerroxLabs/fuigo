@@ -224,6 +224,9 @@ fn error_with_tiny_window(
         message: "terminal failure".to_string(),
         should_retry: None,
         error_code: None,
+        upstream_state: None,
+        upstream_type: None,
+        upstream_details: Default::default(),
         is_retryable: false,
         retry_after_secs: None,
         model_metadata: Some(fuigo_sampling_types::ResponseModelMetadata {

@@ -118,6 +118,8 @@ pub struct AgentBuilder {
     context_window_tokens: Option<u64>,
     api_key_provider: Option<fuigo_tools::types::SharedApiKeyProvider>,
     attribution_callback: Option<fuigo_tools::SharedAttributionCallback>,
+    /// The session's veto over model requests made by tools.
+    dispatch_gate: Option<fuigo_tools::implementations::web_search::client::SharedModelDispatchGate>,
     /// Session-scoped MCP tool-result inline cap (bytes).
     /// When `Some`, it is seeded into the toolset's `TruncationCfg` resource after finalize.
     /// The MCP truncation path consults that resource before the process-global cap.
@@ -266,6 +268,7 @@ impl AgentBuilder {
             context_window_tokens: None,
             api_key_provider: None,
             attribution_callback: None,
+            dispatch_gate: None,
             mcp_max_output_bytes: None,
             system_reminder_tag: fuigo_tools::reminders::DEFAULT_REMINDER_TAG,
             persisted_announced_skill_names: None,
@@ -543,6 +546,13 @@ impl AgentBuilder {
     /// `fuigo_sampler::SamplerConfig::attribution_callback` so
     /// all 401s share the same `AuthManager` reference and land in
     /// the same Axiom dataset.
+    pub fn with_dispatch_gate(
+        mut self,
+        gate: fuigo_tools::implementations::web_search::client::SharedModelDispatchGate,
+    ) -> Self {
+        self.dispatch_gate = Some(gate);
+        self
+    }
     pub fn with_attribution_callback(
         mut self,
         callback: fuigo_tools::SharedAttributionCallback,
@@ -1190,6 +1200,7 @@ impl AgentBuilder {
                 api_key_provider: self.api_key_provider,
                 auth_provider: None,
                 attribution_callback: self.attribution_callback,
+                dispatch_gate: self.dispatch_gate,
                 system_reminder_tag: self.system_reminder_tag,
             },
         )

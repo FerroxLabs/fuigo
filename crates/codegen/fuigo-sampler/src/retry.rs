@@ -150,6 +150,7 @@ pub fn classify_error(
     if err.is_auth_error() {
         return RetryDecision::EmitToSession(clone_error(err));
     }
+    if err.is_terminal_refusal() { return RetryDecision::Fatal(clone_error(err)); }
     if err.is_encrypted_content_error() {
         return RetryDecision::EmitToSession(clone_error(err));
     }
@@ -371,9 +372,13 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
         SamplingError::Auth {
             message,
             credential,
+            status,
+            upstream,
         } => SamplingError::Auth {
             message: message.clone(),
             credential: *credential,
+            status: *status,
+            upstream: upstream.clone(),
         },
         SamplingError::InvalidConfiguration(msg) => SamplingError::InvalidConfiguration(msg),
         SamplingError::MtlsConfiguration(msg) => SamplingError::MtlsConfiguration(msg.clone()),
@@ -386,6 +391,9 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
             retry_after_secs,
             should_retry,
             error_code,
+            upstream_state,
+            upstream_type,
+            upstream_details,
         } => SamplingError::Api {
             status: *status,
             message: message.clone(),
@@ -393,13 +401,18 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
             retry_after_secs: *retry_after_secs,
             should_retry: *should_retry,
             error_code: error_code.clone(),
+            upstream_state: upstream_state.clone(),
+            upstream_type: upstream_type.clone(),
+            upstream_details: upstream_details.clone(),
         },
         SamplingError::EventStreamError(msg) => SamplingError::EventStreamError(msg.clone()),
         SamplingError::StreamError {
             error_type,
             message,
             code,
+            upstream,
         } => SamplingError::StreamError {
+ upstream: upstream.clone(),
             error_type: error_type.clone(),
             message: message.clone(),
             code: code.clone(),
@@ -436,6 +449,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         }
     }
 
@@ -447,6 +463,9 @@ mod tests {
             retry_after_secs: Some(retry_after),
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         }
     }
 
@@ -599,6 +618,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: Some(false),
             error_code: Some(ApiErrorCode::InvalidImage),
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(matches!(
             classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
@@ -609,6 +631,7 @@ mod tests {
     #[test]
     fn classify_image_stream_error_strips_instead_of_blind_retry() {
         let err = SamplingError::StreamError {
+ upstream: Default::default(),
             error_type: "invalid_request_error".into(),
             message: "Base64 string of provided image cannot be decoded.".into(),
             code: Some(ApiErrorCode::InvalidImage),
@@ -619,6 +642,7 @@ mod tests {
         ));
 
         let unrelated = SamplingError::StreamError {
+ upstream: Default::default(),
             error_type: "overloaded_error".into(),
             message: "The server is overloaded.".into(),
             code: None,
@@ -656,6 +680,9 @@ mod tests {
             retry_after_secs: Some(7),
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
             RetryDecision::RetryWithBackoff {
@@ -833,6 +860,9 @@ mod tests {
                 retry_after_secs: None,
                 should_retry,
                 error_code: None,
+                upstream_state: None,
+                upstream_type: None,
+                upstream_details: Default::default(),
             };
             match classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
                 RetryDecision::Fatal(SamplingError::Api { status, .. }) => {
@@ -895,6 +925,7 @@ mod tests {
     #[test]
     fn classify_stream_error_is_retryable() {
         let err = SamplingError::StreamError {
+ upstream: Default::default(),
             error_type: "transient".into(),
             message: "x".into(),
             code: None,
@@ -973,6 +1004,7 @@ mod tests {
     #[test]
     fn clone_error_preserves_stream_error_code() {
         let cloned = clone_error(&SamplingError::StreamError {
+ upstream: Default::default(),
             error_type: "invalid_request_error".into(),
             message: "bad image".into(),
             code: Some(ApiErrorCode::InvalidImage),
@@ -1031,6 +1063,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: Some(false),
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -1047,6 +1082,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -1066,6 +1104,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(matches!(
             classify_error(&api_500, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -1073,6 +1114,7 @@ mod tests {
         ));
 
         let stream = SamplingError::StreamError {
+ upstream: Default::default(),
             error_type: "BAD_REQUEST".into(),
             message: "Input length (300000 tokens) exceeds the maximum allowed length \
                       (200000 tokens)"
@@ -1086,6 +1128,7 @@ mod tests {
 
         // Token-tier code with an opaque message: fatal, no strip.
         let coded = SamplingError::StreamError {
+ upstream: Default::default(),
             error_type: "BAD_REQUEST".into(),
             message: "request rejected".into(),
             code: Some(fuigo_sampling_types::ApiErrorCode::parse(
@@ -1103,6 +1146,7 @@ mod tests {
         // Byte-size codes get the 413 remedy: strip images and retry once; the caller upgrades to Fatal when nothing is left to strip
         for code in ["413", "payload_too_large", "request_too_large"] {
             let coded = SamplingError::StreamError {
+ upstream: Default::default(),
                 error_type: "BAD_REQUEST".into(),
                 message: "request rejected".into(),
                 code: Some(fuigo_sampling_types::ApiErrorCode::parse(code)),
@@ -1126,6 +1170,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: Some(true),
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -1142,6 +1189,9 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -1174,6 +1224,9 @@ mod tests {
             retry_after_secs: Some(10),
             should_retry: Some(false),
             error_code: None,
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: Default::default(),
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),

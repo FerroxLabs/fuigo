@@ -4851,6 +4851,7 @@ dependencies = [
  "reqwest 0.12.24",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "strum 0.27.2",
  "tempfile",
  "tokio",
@@ -4874,10 +4875,12 @@ dependencies = [
  "fuigo-tools",
  "fuigo-workspace-types",
  "indexmap",
+ "regex",
  "reqwest 0.12.24",
  "schemars 1.0.4",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -5618,7 +5621,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.42"
+version = "1.0.43"
 dependencies = [
  "semver",
 ]

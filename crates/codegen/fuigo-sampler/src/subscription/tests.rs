@@ -520,6 +520,7 @@ async fn subscription_transient_5xx_retries_and_keeps_the_providers_explanation(
     )
     .await;
     let err = subscription_error(SubscriptionKind::Xai, &server).await;
+    err.assert_boundary_classified();
     let SamplingError::Api {
         status,
         message,
@@ -565,6 +566,7 @@ async fn subscription_429_carries_the_providers_retry_after_and_error_code() {
     )
     .await;
     let err = subscription_error(SubscriptionKind::Chatgpt, &server).await;
+    err.assert_boundary_classified();
     assert_eq!(err.retry_after(), Some(7), "Retry-After must not be dropped");
     assert!(err.is_rate_limited());
     let SamplingError::Api {
@@ -598,6 +600,7 @@ async fn subscription_401_stays_fatal() {
     )
     .await;
     let err = subscription_error(SubscriptionKind::Chatgpt, &server).await;
+    err.assert_boundary_classified();
     assert!(err.is_auth_error());
     assert!(!err.is_retryable());
     assert!(matches!(
@@ -617,6 +620,7 @@ async fn subscription_oversized_error_body_is_truncated_and_never_echoed() {
     );
     let server = error_server(StatusCode::BAD_GATEWAY, vec![], body).await;
     let err = subscription_error(SubscriptionKind::Xai, &server).await;
+    err.assert_boundary_classified();
     let rendered = format!("{err} {err:?}");
     assert!(
         !rendered.contains("marker-must-not-echo"),
@@ -640,6 +644,7 @@ async fn subscription_long_structured_error_message_is_capped() {
     );
     let server = error_server(StatusCode::INTERNAL_SERVER_ERROR, vec![], body).await;
     let err = subscription_error(SubscriptionKind::Xai, &server).await;
+    err.assert_boundary_classified();
     let SamplingError::Api { message, .. } = &err else {
         panic!("expected SamplingError::Api, got {err:?}");
     };
