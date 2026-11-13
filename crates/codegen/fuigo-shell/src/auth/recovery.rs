@@ -370,8 +370,7 @@ impl UnauthorizedRecovery {
                     "expires_at": disk_auth.expires_at.map(|e| e.to_rfc3339()),
                 })),
             );
-            self.auth_manager.hot_swap(disk_auth.clone());
-            Some(disk_auth)
+            Some(self.auth_manager.hot_swap(disk_auth))
         } else {
             tracing::debug!("auth recovery: disk token is same as rejected, skipping");
             fuigo_telemetry::unified_log::debug(

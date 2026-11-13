@@ -331,7 +331,7 @@ impl UserPromptBlock {
         } else if self.is_bash {
             "$ "
         } else if self.is_cron {
-            "\u{21BB}  "
+            crate::glyphs::cron_prompt_prefix()
         } else {
             crate::glyphs::prompt_arrow()
         };
@@ -1139,8 +1139,8 @@ mod tests {
         assert_eq!(lines.len(), 1);
         let text = line_text(&lines[0].content);
         assert!(
-            text.starts_with("\u{21BB}  "),
-            "Cron prompt should start with \u{21BB}, got: {text:?}"
+            text.starts_with(crate::glyphs::cron_prompt_prefix()),
+            "Cron prompt should use its console-specific prefix, got: {text:?}"
         );
         assert!(text.contains("/pr-babysit check"));
     }
@@ -1377,5 +1377,20 @@ mod sent_image_tests {
                 .any(|s| s.content.as_ref() == "/review"),
             "skill token span survives"
         );
+    }
+
+    #[test]
+    fn row_80_b9_extra_cron_prompt_uses_legacy_glyph() {
+        for width in [40, 43, 60, 80] {
+            let block = UserPromptBlock::cron("scheduled task");
+            let lines = block.wrap_prompt_lines(width, None, true, false);
+            let text = lines[0].content.to_string();
+            let prefix = if crate::glyphs::is_legacy_windows_console() {
+                "@  "
+            } else {
+                "\u{21bb}  "
+            };
+            assert!(text.starts_with(prefix), "{width}: {text}");
+        }
     }
 }

@@ -15,8 +15,11 @@ fuigo --sandbox workspace
 # Read-only mode (read everywhere, write only to ~/.fuigo/ + temp dirs)
 fuigo --sandbox read-only
 
-# Most restrictive profile (read CWD + system paths + ~/.fuigo, write CWD + ~/.fuigo/sessions + temp dirs, no child network)
+# Restrict reads and child network, keeping launch-folder writes
 fuigo --sandbox strict
+
+# Strict reads, no launch-folder writes; state and temp remain writable
+fuigo --sandbox minimal
 ```
 
 ---
@@ -30,6 +33,7 @@ fuigo --sandbox strict
 | `devbox`              | Everywhere                     | All top-level dirs except `/data`              | Allowed       | Disposable dev VMs                |
 | `read-only`           | Everywhere                     | `~/.fuigo/` + `/tmp` + `/var/tmp`               | Blocked¹      | Exploration, code review          |
 | `strict`              | CWD + system paths + `~/.fuigo` | CWD + `~/.fuigo/sessions` + `/tmp` + `/var/tmp` | Blocked¹      | Untrusted code                    |
+| `minimal`             | Same as `strict`               | `~/.fuigo/sessions` + temp, excluding CWD       | Blocked¹      | Review without launch-folder writes |
 
 ¹ Child-network blocking is enforced on **Linux only** (via seccomp). On macOS it is a no-op — these profiles do not restrict child-process network there.
 
@@ -43,11 +47,17 @@ To block specific files (e.g. `.env` or credential paths) on top of a profile, d
 
 **read-only** -- Use when you want the agent to analyze code without modifying your project files. The agent can read everything but can only write to `~/.fuigo/` (needed for session persistence) and temp directories. Child-process network access is blocked on Linux (no-op on macOS).
 
-**strict** -- The most restrictive profile, for reviewing untrusted code. The agent can read the current working directory, essential system paths, and `~/.fuigo`. Writes are limited to CWD, `~/.fuigo/sessions`, and temp directories — not the whole `~/.fuigo` tree. Child-process network access is blocked on Linux (no-op on macOS).
+**strict** -- Restricts reads for working with untrusted code. The agent can read the current working directory, essential system paths, and `~/.fuigo`. Writes are limited to CWD, `~/.fuigo/sessions`, and temp directories — not the whole `~/.fuigo` tree. Child-process network access is blocked on Linux (no-op on macOS).
+
+**minimal** -- Uses the same read set and network policy as `strict`, but explicitly makes the launch folder read-only. Writes are limited to `~/.fuigo/sessions` (when session persistence is enabled), temp directories, and the existing runtime devices used for terminals and entropy. The strict read set includes existing system libraries and configuration paths (`/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc`, `/dev`, `/proc`, `/sys`, `/tmp`, `/run`, `/var`), plus `/System`, `/Library`, `/private`, and `~/Library` where present on macOS. Fuigo can still contact its API; child-network blocking remains Linux-only.
+
+The launch-folder boundary takes precedence over writable ancestors such as `/tmp` and over custom `read_write` entries. Keep Fuigo state and writable scratch directories outside the launch folder: if they are inside it, they are read-only too. Fuigo warns at startup when its sessions directory resolves inside that boundary and continues starting. Temp permissions otherwise match `strict`: `/tmp`, `/var/tmp`, an existing `$TMPDIR`, and existing macOS `/private/tmp`, `/private/var/tmp`, `/private/var/folders` directories. Existing profiles retain their behavior; in particular, legacy `read-only` omits a workspace grant but does not subtract the workspace from overlapping temp grants.
+
+Linux uses a final read-only bubblewrap mount plus Landlock, and verifies the mount before reporting successful sandbox application. macOS uses specific Seatbelt write-deny actions. Seatbelt generation is covered by tests on Linux; this addition still needs a live macOS enforcement run. Windows continues with its existing warning that sandboxing is unavailable.
 
 ### Direct global hook write protection
 
-Under `workspace`, `read-only`, and `strict` (and custom profiles that extend those bases), the kernel **write-denies** the Fuigo-owned direct disk paths used as user-global hook sources (they stay readable when granted). Built-in `strict` can read `~/.fuigo` (hooks stay readable); writes are CWD + `~/.fuigo/sessions` + temp, not the whole tree. Write-deny still applies where the profile grants write:
+Under `workspace`, `read-only`, `strict`, and `minimal` (and custom profiles that extend those bases), the kernel **write-denies** the Fuigo-owned direct disk paths used as user-global hook sources (they stay readable when granted). Built-in `strict` can read `~/.fuigo` (hooks stay readable); writes are CWD + `~/.fuigo/sessions` + temp, not the whole tree. Write-deny still applies where the profile grants write:
 
 - `~/.fuigo/hooks/` (hook directory)
 - `~/.fuigo/hooks-paths` (registry file; not loaded as hook JSON — only its absolute targets are)
@@ -68,6 +78,7 @@ Create custom sandbox profiles in `~/.fuigo/sandbox.toml` (global) or `.fuigo/sa
 # Start from a built-in profile, then add overrides
 extends = "workspace"
 restrict_network = true
+workspace_write = false
 
 # Paths the agent can read but NOT write/delete
 read_only = ["/data"]
@@ -85,7 +96,7 @@ Use the custom profile:
 fuigo --sandbox project
 ```
 
-A custom profile can't reuse a built-in name. `--sandbox devbox` always runs the built-in `devbox` profile, shadowing any `[profiles.devbox]` you define.
+A user-global `[profiles.minimal]` in `$FUIGO_HOME/sandbox.toml` takes precedence over the new built-in `minimal`, preserving existing custom profiles, including their grants and deny lists. Fuigo reports this shadowing once as a stderr WARNING naming the built-in; the built-in is selected when no user-global custom `minimal` is defined. Project definitions using any built-in name (`minimal`, `workspace`, `devbox`, `read-only`/`readonly`, `strict`, `off`/`none`) are ignored with a stderr WARNING naming the file and asking you to rename the profile. Other project custom names retain their existing behavior. Other built-in names keep their existing precedence: for example, `--sandbox devbox` always runs the built-in. `extends` accepts only built-in bases: when a user-global custom `minimal` is defined, `extends = "minimal"` retains the existing error that custom profiles cannot extend other custom profiles.
 
 If the user and project files define the same custom profile differently, Fuigo uses the user profile and shows a startup warning. Run `/doctor` to see both file locations and how to resolve the conflict. Identical definitions do not produce a warning.
 
@@ -93,11 +104,16 @@ If the user and project files define the same custom profile differently, Fuigo 
 
 | Field              | Type     | Description                                          |
 | ------------------ | -------- | ---------------------------------------------------- |
-| `extends`          | String   | Base built-in profile to inherit from (`workspace`, `devbox`, `read-only`, `strict`). Defaults to `workspace` when omitted |
+| `extends`          | String   | Base built-in profile to inherit from (`workspace`, `devbox`, `read-only`, `strict`, `minimal`). Defaults to `workspace` when omitted |
 | `restrict_network` | Boolean  | Block network access for child processes             |
+| `workspace_write`  | Boolean  | `true` grants launch-folder writes; `false` makes the launch tree read-only, even under writable ancestors. Omitted: preserve the base profile unchanged |
 | `read_only`        | String[] | Additional read-only paths                           |
 | `read_write`       | String[] | Additional read-write paths                          |
 | `deny`             | String[] | Paths or globs to kernel-deny (read + write/rename; see notes). An entry with `*`, `?`, or `[` is a glob |
+
+Omitting `workspace_write` preserves existing custom profiles exactly: `workspace` (the default base), `strict`, and `devbox` grant launch-folder writes; `read-only` omits that grant; `minimal` installs the explicit read-only boundary. Setting `true` on a `minimal` or `read-only` base grants launch-folder writes, subject to the profile's other protections. The value must be a TOML boolean (`false`, not `"false"`); bad types produce a config parse warning. Unknown custom profile keys are ignored with a stderr warning naming each key. `workspace_write` belongs in `[profiles.<name>]` in `sandbox.toml`, not `[sandbox]` in `config.toml`.
+
+Like any path-based sandbox, workspace write protection does not revoke access through aliases that already exist outside the workspace, such as a pre-existing hard link or a writable bind mount under a writable temp directory. Those paths retain their own access permissions; the sandbox does not search for or block pre-existing aliases.
 
 > **Note on `read_only` / `read_write`:** These are **literal directory grants**,
 > not globs. A trailing `/**` (or `/*`) is treated as the parent directory, so

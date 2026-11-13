@@ -3152,6 +3152,9 @@ pub enum TaskResult {
     },
     /// Shell acknowledged logout (auth cleared).
     LogoutComplete,
+    LogoutFailed {
+        error: String,
+    },
     /// Best-effort `fuigo/auth/cancel` finished (no UI update; state already left Authenticating).
     AuthCancelComplete,
     /// Shell responded to `fuigo/auth/check_subscription`.

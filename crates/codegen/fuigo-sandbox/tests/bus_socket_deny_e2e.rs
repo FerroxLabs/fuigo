@@ -2,9 +2,10 @@
 //! sockets, through which it could ask systemd or a bus service to start a unit outside the
 //! sandbox. Soft-skips when enforcement is unavailable or no bus socket exists on the host;
 //! `SANDBOX_E2E_REQUIRE_ENFORCEMENT` hard-requires enforcement.
+//! Linux only: macOS has no systemd and no system D-Bus that could start a unit for the caller.
 // Test code: its prints reach a harness, never a user, so the workspace print deny is waived.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
-#![cfg(all(unix, feature = "enforce"))]
+#![cfg(all(target_os = "linux", feature = "enforce"))]
 use std::fs;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};

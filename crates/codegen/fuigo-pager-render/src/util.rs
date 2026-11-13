@@ -2,7 +2,8 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 pub use fuigo_config::fuigo_home;
 pub use fuigo_tools::util::format_bytes;
@@ -207,21 +208,45 @@ pub fn format_age(created_at: i64, now: i64) -> String {
 
 /// Truncate to at most `max_width` display columns (CJK counts 2), ending with `…` when cut; a zero budget yields an empty string.
 pub fn truncate_to_width(s: &str, max_width: usize) -> Cow<'_, str> {
-    if byte_offset_at_width(s, max_width) == s.len() {
-        return Cow::Borrowed(s);
-    }
     if max_width == 0 {
         return Cow::Borrowed("");
     }
-    let end = byte_offset_at_width(s, max_width - 1);
+    // Use the shared policy that preserves emoji joiners and valid flag tags.
+    // Ordinary clean labels remain borrowed and need no allocation.
+    let s = if s
+        .chars()
+        .any(|c| fuigo_tty_utils::is_unsafe_title_char(c) || matches!(c, '\u{E0020}'..='\u{E007F}'))
+    {
+        let mut normalized = String::with_capacity(s.len());
+        let mut in_control_run = false;
+        for c in fuigo_tty_utils::strip_loose_tags(s).chars() {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                if !in_control_run {
+                    normalized.push(' ');
+                }
+                in_control_run = true;
+            } else if !fuigo_tty_utils::is_unsafe_title_char(c) {
+                normalized.push(c);
+                in_control_run = false;
+            }
+        }
+        Cow::Owned(normalized)
+    } else {
+        Cow::Borrowed(s)
+    };
+    if byte_offset_at_width(&s, max_width) == s.len() {
+        return s;
+    }
+    let end = byte_offset_at_width(&s, max_width - 1);
     Cow::Owned(format!("{}…", &s[..end]))
 }
 
-/// Byte offset at which display width would exceed `max_width`, or `s.len()`.
+/// Grapheme boundary at which display width would exceed `max_width`, or `s.len()`.
+/// The offset refers to the original string; callers sanitize untrusted text before slicing.
 pub fn byte_offset_at_width(s: &str, max_width: usize) -> usize {
     let mut width = 0;
-    for (i, ch) in s.char_indices() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+    for (i, grapheme) in s.grapheme_indices(true) {
+        let cw = grapheme.width();
         if width + cw > max_width {
             return i;
         }
@@ -256,6 +281,53 @@ pub fn group_thousands(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r5_8_control_runs_collapse_to_one_space() {
+        for controls in ["\r\n", "\t\t\n", "\x00\x1b\t\n\r\u{202e}"] {
+            assert_eq!(
+                truncate_to_width(&format!("hello{controls}世界"), 80),
+                "hello 世界"
+            );
+            assert_eq!(
+                truncate_to_width(&format!("hello{controls}世界"), 8),
+                "hello …"
+            );
+        }
+        assert_eq!(truncate_to_width("hello  world", 80), "hello  world");
+    }
+
+    #[test]
+    fn r4_7_truncation_keeps_word_boundaries() {
+        for separator in [
+            '\t', '\n', '\r', '\u{000b}', '\u{000c}', '\u{0085}', '\u{2028}', '\u{2029}',
+        ] {
+            let text = format!("hello{separator}世界");
+            assert_eq!(truncate_to_width(&text, 80), "hello 世界");
+            assert_eq!(truncate_to_width(&text, 8), "hello …");
+        }
+    }
+
+    #[test]
+    fn r3_2_truncation_preserves_grapheme_clusters() {
+        let family = "👨‍👩‍👧‍👦";
+        assert_eq!(truncate_to_width(family, 2), family);
+        assert_eq!(
+            truncate_to_width(&format!("{family}abc"), 3),
+            format!("{family}…")
+        );
+        assert_eq!(byte_offset_at_width(family, 1), 0);
+        assert_eq!(byte_offset_at_width(family, 2), family.len());
+        assert_eq!(truncate_to_width("e\u{301}abc", 2), "e\u{301}…");
+    }
+
+    #[test]
+    fn r3_2_truncation_drops_unsafe_controls_before_measuring() {
+        let text = "a\x00\x1b\t\n\r\u{202e}b👨‍👩‍👧‍👦c";
+        assert_eq!(truncate_to_width(text, 80), "a b👨‍👩‍👧‍👦c");
+        assert_eq!(truncate_to_width(text, 5), "a b…");
+        assert_eq!(truncate_to_width(text, 4), "a b…");
+    }
 
     #[test]
     fn format_age_buckets_relative_to_now() {

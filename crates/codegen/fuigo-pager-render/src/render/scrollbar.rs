@@ -210,8 +210,10 @@ pub fn render_scrollbar(
 /// A foreground-only thumb therefore renders striped with dark bars; the background fill covers the whole cell box.
 fn thumb_fill_style(thumb_style: Style) -> Style {
     match thumb_style.fg {
+        None | Some(ratatui::style::Color::Reset) => {
+            thumb_style.add_modifier(ratatui::style::Modifier::REVERSED)
+        }
         Some(fg) => thumb_style.bg(fg),
-        None => thumb_style,
     }
 }
 
@@ -285,7 +287,8 @@ pub fn render_scrollbar_styled(
             dst.set_symbol(" ");
             dst.set_style(track_style);
         } else {
-            dst.set_symbol("\u{2588}");
+            // Native terminal selection copies only spaces, including under NO_COLOR.
+            dst.set_symbol(" ");
             dst.set_style(thumb_fill);
         }
     }
@@ -295,6 +298,89 @@ pub fn render_scrollbar_styled(
 mod tests {
     use super::*;
     use ratatui::style::Color;
+
+    #[test]
+    fn r3_3_native_selection_of_colour_scrollbar_contains_only_spaces() {
+        for width in [40, 43, 60, 80] {
+            for height in [1, 2, 3, 10] {
+                for offset in [0, 45, 99] {
+                    let area = Rect::new(0, 0, width, height);
+                    let (_, scrollbar) = split_area_for_scrollbar(area);
+                    let mut buf = Buffer::empty(area);
+                    render_scrollbar_styled(
+                        &mut buf,
+                        scrollbar,
+                        100,
+                        height,
+                        offset,
+                        Style::new().bg(Color::Black),
+                        Style::new().fg(Color::White),
+                    );
+                    let sb = scrollbar.unwrap();
+                    // Native selection copies cell text, not its background colour.
+                    let selected: Vec<String> = (sb.y..sb.bottom())
+                        .map(|y| buf[(sb.x, y)].symbol().to_owned())
+                        .collect();
+                    assert_eq!(selected, vec![" "; height as usize]);
+                    assert!(selected.iter().all(|row| row.trim_end().is_empty()));
+                    assert!(
+                        buf.content.iter().any(|cell| cell.bg == Color::White),
+                        "a visible thumb must actually have been rendered"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn r2_7_monochrome_thumb_remains_visible() {
+        for thumb in [Style::default(), Style::default().fg(Color::Reset)] {
+            let area = Rect::new(0, 0, 1, 10);
+            let mut buf = Buffer::empty(area);
+            render_scrollbar_styled(&mut buf, Some(area), 100, 10, 0, Style::default(), thumb);
+            assert!(buf.content.iter().any(|cell| cell.symbol() != " "
+                || cell.modifier.contains(ratatui::style::Modifier::REVERSED)));
+        }
+    }
+
+    #[test]
+    fn row_80_b12_native_selection_copies_no_scrollbar_glyphs() {
+        use crate::theme::color_support::{ColorLevel, quantize_color};
+        // NO_COLOR quantizes the thumb foreground to Reset.
+        let no_color = quantize_color(Color::White, ColorLevel::None);
+        assert_eq!(no_color, Color::Reset);
+        for thumb in [
+            Style::new().fg(Color::White),
+            Style::default(),
+            Style::new().fg(no_color),
+        ] {
+            for width in [40, 43, 60, 80] {
+                for height in [1, 2, 3, 10] {
+                    let area = Rect::new(0, 0, width, height);
+                    let (_, scrollbar) = split_area_for_scrollbar(area);
+                    let mut buf = Buffer::empty(area);
+                    render_scrollbar_styled(
+                        &mut buf,
+                        scrollbar,
+                        100,
+                        height,
+                        0,
+                        Style::new().bg(Color::Black),
+                        thumb,
+                    );
+                    if let Some(sb) = scrollbar {
+                        for y in sb.y..sb.bottom() {
+                            assert_eq!(
+                                buf[(sb.x, y)].symbol(),
+                                " ",
+                                "native copy includes scrollbar at {width}x{height}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_split_area_normal() {
@@ -430,7 +516,7 @@ mod tests {
         let mut thumb_cells = 0;
         for y in 0..sb.height {
             let cell = &buf[(sb.x, sb.y + y)];
-            if cell.symbol() == "\u{2588}" {
+            if cell.style().bg == Some(Color::White) {
                 thumb_cells += 1;
                 assert_eq!(
                     cell.style().bg,
@@ -450,18 +536,21 @@ mod tests {
         let (_, scrollbar_area) = split_area_for_scrollbar(area);
         let sb = scrollbar_area.unwrap();
 
+        let track = Style::default().bg(ratatui::style::Color::Black);
+        let thumb = Style::default().fg(ratatui::style::Color::White);
+
         // At top
         let mut buf_top = Buffer::empty(area);
-        render_scrollbar(&mut buf_top, scrollbar_area, 100, 10, 0, false);
+        render_scrollbar_styled(&mut buf_top, scrollbar_area, 100, 10, 0, track, thumb);
 
         // At bottom
         let mut buf_bottom = Buffer::empty(area);
-        render_scrollbar(&mut buf_bottom, scrollbar_area, 100, 10, 90, false);
+        render_scrollbar_styled(&mut buf_bottom, scrollbar_area, 100, 10, 90, track, thumb);
 
-        // Count thumb cells (non-space)
+        // Count the background-filled thumb cells.
         let count_thumb = |buf: &Buffer| -> usize {
             (0..sb.height)
-                .filter(|&y| buf[(sb.x, sb.y + y)].symbol() != " ")
+                .filter(|&y| buf[(sb.x, sb.y + y)].style().bg == thumb.fg)
                 .count()
         };
 
@@ -474,7 +563,7 @@ mod tests {
 
         let thumb_positions = |buf: &Buffer| -> Vec<u16> {
             (0..sb.height)
-                .filter(|&y| buf[(sb.x, sb.y + y)].symbol() != " ")
+                .filter(|&y| buf[(sb.x, sb.y + y)].style().bg == thumb.fg)
                 .collect()
         };
 

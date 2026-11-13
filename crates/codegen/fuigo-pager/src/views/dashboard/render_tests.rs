@@ -2269,7 +2269,7 @@ fn render_rows_emits_group_headers_in_state_order() {
     }
 }
 
-/// The list scrollbar is a thick `█` thumb overlaid on the right edge, and it does NOT reserve a column.
+/// The list scrollbar is a full-cell background thumb overlaid on the right edge, and it does NOT reserve a column.
 /// The row content is byte-for-byte identical whether or not the scrollbar shows (no layout shift).
 #[test]
 fn render_rows_scrollbar_is_thick_overlay_without_layout_shift() {
@@ -2304,13 +2304,11 @@ fn render_rows_scrollbar_is_thick_overlay_without_layout_shift() {
         &mut state_scroll,
     );
 
-    // The thick `█` thumb is painted on the rightmost column.
+    // Background fill paints the full cell without adding glyphs to native selection.
     let last_x = w - 1;
-    let has_thumb = (0..h).any(|y| buf_scroll[(last_x, y)].symbol() == "\u{2588}");
-    assert!(has_thumb, "scrollbar thumb (█) must overlay the right edge");
-    // Old thin `│`-only thumb is gone.
-    let thin_only = (0..h).all(|y| buf_scroll[(last_x, y)].symbol() != "\u{2588}");
-    assert!(!thin_only, "thumb must be the thick block glyph");
+    let has_thumb = (0..h).any(|y| buf_scroll[(last_x, y)].bg == theme.scrollbar_fg);
+    assert!(has_thumb, "scrollbar thumb must overlay the right edge");
+    assert!((0..h).all(|y| buf_scroll[(last_x, y)].symbol() == " "));
 
     // No layout shift: every content column (all but the overlaid right edge) matches the no-scrollbar render across the visible top
     for y in 0..h {
@@ -4689,4 +4687,52 @@ fn narrow_rows_mark_only_the_spinner() {
     let mut state = DashboardState::new();
     render_narrow_rows(&mut buf, area, &theme, &rows, &mut state);
     assert_eq!(PaintedAnimations::default(), state.painted_animations);
+}
+
+#[test]
+fn row_80_b10_dashboard_uses_compact_rows_at_40_to_43_columns() {
+    use crate::app::roster::{RosterActivity, RosterEntry, RosterOrigin};
+
+    for width in 40..=43 {
+        let area = Rect::new(0, 0, width, 24);
+        let mut buf = Buffer::empty(area);
+        let mut agents: IndexMap<AgentId, AgentView> = IndexMap::new();
+        let mut state = DashboardState::new();
+        let registry = crate::actions::ActionRegistry::defaults();
+        let roster = [RosterEntry {
+            session_id: "sess-fleet-1".into(),
+            title: Some("Fix fleet dashboard".into()),
+            cwd: "/repo/work".into(),
+            is_worktree: false,
+            model_id: None,
+            yolo: false,
+            activity: RosterActivity::Working,
+            last_turn_summary: None,
+            resident: true,
+            last_change_unix_ms: 1_725_000_000_000,
+            origin: RosterOrigin::default(),
+        }];
+
+        let _ = render_dashboard(
+            &mut buf,
+            area,
+            &mut state,
+            &mut agents,
+            &registry,
+            None,
+            &roster,
+            false,
+            None,
+            false,
+            None,
+            None,
+        );
+
+        assert!(!state.row_rects.is_empty());
+        assert!(
+            state.row_rects.iter().all(|(_, rect)| rect.height == 1),
+            "width {width}: {:?}",
+            state.row_rects
+        );
+    }
 }

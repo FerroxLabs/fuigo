@@ -441,7 +441,13 @@ impl BlockContent for SearchToolCallBlock {
                                     Span::styled(match_indent.to_string(), theme.primary()),
                                     Span::styled(line_num_str, theme.muted()),
                                     Span::styled("  ".to_string(), theme.primary()),
-                                    Span::styled(content_trimmed.to_string(), theme.primary()),
+                                    Span::styled(
+                                        fuigo_pager_render::appearance::expand_tabs(
+                                            content_trimmed,
+                                        )
+                                        .into_owned(),
+                                        theme.primary(),
+                                    ),
                                 ]))
                                 .with_panel_background(theme.bg_dark),
                             );
@@ -525,6 +531,48 @@ impl BlockContent for SearchToolCallBlock {
         match current {
             DisplayMode::Collapsed => DisplayMode::Expanded,
             _ => DisplayMode::Collapsed,
+        }
+    }
+}
+
+#[cfg(test)]
+mod row_tests {
+    use super::*;
+
+    #[test]
+    fn row_80_b2_grep_expands_tabs() {
+        let block = SearchToolCallBlock::new("value").with_matches(
+            1,
+            vec![SearchFileMatch {
+                path: "sample.rs".into(),
+                matches: vec![SearchLineMatch {
+                    line_number: 10,
+                    content: "\tlet\tvalue = 1;".into(),
+                }],
+            }],
+        );
+        for width in [40, 43, 60, 80] {
+            let ctx = BlockContext {
+                width,
+                mode: DisplayMode::Expanded,
+                is_running: false,
+                raw: false,
+                max_lines: None,
+                appearance: Default::default(),
+                is_selected: false,
+                cwd: None,
+            };
+            let output = block.output(&ctx);
+            let text = output
+                .lines
+                .iter()
+                .map(|line| line.content.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!text.contains('\t'), "{width}: {text:?}");
+            assert!(text.contains(
+                fuigo_pager_render::appearance::expand_tabs("\tlet\tvalue = 1;").as_ref()
+            ));
         }
     }
 }

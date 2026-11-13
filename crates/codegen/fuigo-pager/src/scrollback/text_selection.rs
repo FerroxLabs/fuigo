@@ -4257,6 +4257,7 @@ mod tests {
             line_count: LINES.len(),
             n_cols: 1,
             cells: vec![TableCellCopy {
+                code_text: None,
                 text: "foo\n\nbar".into(),
                 joins: vec![CellJoin::Tight, CellJoin::Gap("\n\n".into())],
             }],

@@ -23,11 +23,11 @@ use super::actions::{Action, Effect, TaskResult};
 use super::app_view::{
     ActiveView, AppView, AuthState, InputOutcome, PasteProvenance, TrustState, VoiceState,
 };
+use super::reader_thread::ReaderThread;
 use super::session_load_barrier::{
     AcpDrainArm, SessionLoadAcpTick, SessionLoadBarrier, session_load_agent_id,
 };
 use super::{PagerArgs, PagerTerminal, acp_handler, dispatch, effects};
-use super::reader_thread::ReaderThread;
 
 /// During a continuous terminal drag, dozens of resize events fire per second, and each would rebuild the layout of every entry.
 /// One deferred draw runs after the size stabilizes instead.
@@ -390,7 +390,10 @@ fn reconnect_restore_outcome(
 /// The folder the trust question is about (75.B4): the folder a resumed or forked session was recorded in when that
 /// is known at startup and still exists, otherwise the launch folder. Enforcement already judges each session by its
 /// own cwd; this keeps the question in step with it, so resuming a session of another folder asks about that folder.
-fn trust_question_cwd(launch: &std::path::Path, recorded: Option<&std::path::Path>) -> std::path::PathBuf {
+fn trust_question_cwd(
+    launch: &std::path::Path,
+    recorded: Option<&std::path::Path>,
+) -> std::path::PathBuf {
     match recorded {
         Some(dir) if !dir.as_os_str().is_empty() && dir.is_dir() => dir.to_path_buf(),
         _ => launch.to_path_buf(),
@@ -410,22 +413,23 @@ fn seed_trust_state(
     match decide(&cwd, std::io::stdin().is_terminal()) {
         TrustDecision::Prompt(reason) => match fuigo_workspace::trust::trust_key(&cwd) {
             Ok(key) => {
-                app.trust_state = TrustState::Pending {
+                app.set_trust_state(TrustState::Pending {
                     workspace: key,
                     upgrade: reason == PromptReason::Upgrade,
-                };
+                    painted_at: None,
+                });
             }
-            Err(_) => app.trust_state = TrustState::Done,
+            Err(_) => app.set_trust_state(TrustState::Done),
         },
         TrustDecision::Untrusted(reason) => {
-            app.trust_state = TrustState::Done;
+            app.set_trust_state(TrustState::Done);
             // u35 t1 (design d2 §5.1): no question at home or root, one dim line instead.
             if reason.unrecordable() {
                 app.show_toast("Home or root folder: settings not loaded, every command asks.");
             }
         }
         TrustDecision::Trusted => {
-            app.trust_state = TrustState::Done;
+            app.set_trust_state(TrustState::Done);
             // u35 t1 (D2): the user switched folder trust off; say so once.
             if fuigo_workspace::folder_trust::folder_trust_disabled() {
                 app.show_toast(fuigo_workspace::folder_trust::DISABLED_WARNING);
@@ -444,7 +448,7 @@ pub(crate) fn seed_consent_state_from_gate(
         .ok()
         .map(|root| fuigo_shell::util::config::load_config_from_toml(&root).consent)
         .unwrap_or_default();
-    app.consent_state = consent_verdict(&ConsentInputs {
+    app.set_consent_state(consent_verdict(&ConsentInputs {
         gate,
         answered_this_run: app
             .consent_answered
@@ -453,7 +457,7 @@ pub(crate) fn seed_consent_state_from_gate(
         answers: &stored.answers,
         account: app.account_email.as_deref(),
         minimal: app.screen_mode.is_minimal(),
-    });
+    }));
 }
 
 /// Pause terminal input and wait up to `timeout` for the reader to acknowledge.
@@ -690,11 +694,33 @@ impl Presenter {
     }
 }
 
-fn writer_event_sequence(event: crate::render::draw::WriterEvent) -> std::io::Result<u64> {
+fn writer_event_sequence(
+    event: crate::render::draw::WriterEvent,
+) -> std::io::Result<(u64, std::time::Instant)> {
     match event {
-        crate::render::draw::WriterEvent::Written(sequence) => Ok(sequence),
+        crate::render::draw::WriterEvent::Written {
+            sequence,
+            flushed_at,
+        } => Ok((sequence, flushed_at)),
         crate::render::draw::WriterEvent::Failed(error) => Err(error),
     }
+}
+
+/// Collection can await terminal-reply fragments while the writer flushes a question.
+/// Apply every completed receipt before routing input; the gates compare the input's
+/// arrival time with the matching frame's flush time, independent of select order.
+fn drain_writer_receipts(
+    writer_event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::render::draw::WriterEvent>,
+    app: &mut AppView,
+    presenter: &mut Presenter,
+) -> anyhow::Result<()> {
+    while let Ok(event) = writer_event_rx.try_recv() {
+        let (sequence, flushed_at) =
+            writer_event_sequence(event).context("terminal output failed")?;
+        app.welcome_frame_written(sequence, flushed_at);
+        presenter.acknowledge(sequence);
+    }
+    Ok(())
 }
 
 /// Re-assert mouse capture through the writer queue; an inline stderr write here deadlocks the
@@ -1604,7 +1630,7 @@ pub(crate) async fn run(
             //
             // `error: None` keeps it out of the error colour. The welcome menu
             // explains itself, and "Enter API key" is its first row.
-            app.auth_state = super::app_view::AuthState::Pending { error: None };
+            app.set_auth_state(super::app_view::AuthState::Pending { error: None });
             vec![]
         } else {
             dispatch::dispatch(Action::Login, &mut app)
@@ -2804,7 +2830,7 @@ pub(crate) async fn run(
                     super::keep_unshown_leader_notices(std::mem::take(&mut app.leader_notices));
                     return Err(anyhow::anyhow!("terminal writer stopped"));
                 };
-                let sequence = match writer_event_sequence(writer_event)
+                let (sequence, flushed_at) = match writer_event_sequence(writer_event)
                     .context("terminal output failed")
                 {
                     Ok(sequence) => sequence,
@@ -2816,6 +2842,7 @@ pub(crate) async fn run(
                         return Err(e);
                     }
                 };
+                app.welcome_frame_written(sequence, flushed_at);
                 presenter.acknowledge(sequence);
             }
 
@@ -3084,7 +3111,17 @@ pub(crate) async fn run(
                 let result = drain_and_process(
                     ev, &mut input_rx, &mut app, &mut tasks, &progress_tx,
                     &mut csi_filter, &mut x10_filter, &mut xt_filter, live_input_started_at,
+                    &mut writer_event_rx, &mut presenter,
                 ).await;
+                let result = match result {
+                    Ok(result) => result,
+                    Err(e) => {
+                        app.finish_startup(fuigo_telemetry::startup::StartupOutcome::Error);
+                        flush_pending_stall(&mut stall_rollup);
+                        super::keep_unshown_leader_notices(std::mem::take(&mut app.leader_notices));
+                        return Err(e);
+                    }
+                };
                 if let Some(window) =
                     stall_rollup.observe(waited, stall_activity, result.handled, handled_at)
                 {
@@ -3951,7 +3988,9 @@ async fn drain_and_process(
     x10_filter: &mut super::x10_filter::X10ReassemblyFilter,
     xt_filter: &mut super::xt_filter::XtversionFilter,
     live_input_started_at: std::time::Instant,
-) -> DrainResult {
+    writer_event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::render::draw::WriterEvent>,
+    presenter: &mut Presenter,
+) -> anyhow::Result<DrainResult> {
     let mut needs_draw = false;
     let mut had_resize = false;
     let mut had_non_resize_change = false;
@@ -4000,10 +4039,13 @@ async fn drain_and_process(
         .map(|event| normalize_input_event(event, live_input_started_at))
         .collect::<Vec<_>>();
 
+    drain_writer_receipts(writer_event_rx, app, presenter)?;
+
     let mut handled: u32 = 0;
 
     let suspend_armed_after_event = std::cell::Cell::new(false);
-    let mut handle_one = |routed: &RoutedInputEvent| -> bool {
+    let mut handle_one = |routed: &RoutedInputEvent| -> anyhow::Result<bool> {
+        drain_writer_receipts(writer_event_rx, app, presenter)?;
         let ev = &routed.event;
         // FocusGained / FocusLost return below without reaching `handle_input`: clear the peer dialog's painted proof here,
         // at first sight, so a later key of this batch cannot act on a stale screen.
@@ -4043,7 +4085,7 @@ async fn drain_and_process(
                 // The user may have just subscribed in the browser and tabbed back
                 let effs = app.fire_subscription_check("focus");
                 if process_effects(effs, tasks, app, progress_tx) {
-                    return true;
+                    return Ok(true);
                 }
                 // Restore Prompt on refocus: needs-input overlay always, else idle non-vim.
                 match app.active_view {
@@ -4072,7 +4114,7 @@ async fn drain_and_process(
                                 app,
                             );
                             if process_effects(effs, tasks, app, progress_tx) {
-                                return true;
+                                return Ok(true);
                             }
                             needs_draw = true;
                             had_non_resize_change = true;
@@ -4090,7 +4132,7 @@ async fn drain_and_process(
                     // Refocusing the terminal must not override the user's choice (e.g. vim overview focus).
                     ActiveView::AgentDashboard => {}
                 }
-                return false;
+                return Ok(false);
             }
             Event::FocusLost => {
                 crate::views::welcome::set_focused(false);
@@ -4100,7 +4142,7 @@ async fn drain_and_process(
                     app.gboom_release_all_games();
                     needs_draw = true;
                 }
-                return false;
+                return Ok(false);
             }
             _ => {}
         }
@@ -4134,12 +4176,12 @@ async fn drain_and_process(
             if let Some(action) = action {
                 let effs = dispatch::dispatch(action, app);
                 if process_effects(effs, tasks, app, progress_tx) {
-                    return true;
+                    return Ok(true);
                 }
                 needs_draw = true;
                 had_non_resize_change = true;
             }
-            return false;
+            return Ok(false);
         }
         let is_resize = matches!(ev, Event::Resize(_, _));
         // Replayed startup keys carry the modifiers they were typed with; sampling the CURRENT OS
@@ -4156,7 +4198,7 @@ async fn drain_and_process(
             InputOutcome::Action(action) => {
                 let effs = dispatch::dispatch(action, app);
                 if process_effects(effs, tasks, app, progress_tx) {
-                    return true;
+                    return Ok(true);
                 }
                 needs_draw = true;
                 had_non_resize_change = true;
@@ -4171,7 +4213,7 @@ async fn drain_and_process(
                     app,
                 );
                 if process_effects(effs, tasks, app, progress_tx) {
-                    return true;
+                    return Ok(true);
                 }
                 needs_draw = true;
                 had_non_resize_change = true;
@@ -4180,11 +4222,11 @@ async fn drain_and_process(
                 // Effect barrier: first must fully resolve before second (e.g. revert preview then open reset).
                 let effs = dispatch::dispatch(first, app);
                 if process_effects(effs, tasks, app, progress_tx) {
-                    return true;
+                    return Ok(true);
                 }
                 let effs = dispatch::dispatch(second, app);
                 if process_effects(effs, tasks, app, progress_tx) {
-                    return true;
+                    return Ok(true);
                 }
                 needs_draw = true;
                 had_non_resize_change = true;
@@ -4206,19 +4248,19 @@ async fn drain_and_process(
             InputOutcome::Unchanged => {}
         }
         suspend_armed_after_event.set(tty_suspend_armed(app));
-        false
+        Ok(false)
     };
 
     for routed in &coalesced {
         handled = handled.saturating_add(1);
-        if handle_one(routed) {
-            return DrainResult {
+        if handle_one(routed)? {
+            return Ok(DrainResult {
                 needs_draw,
                 should_quit: true,
                 resize_only: false,
                 force_repaint: false,
                 handled,
-            };
+            });
         }
         // Hand off to the TTY-taking child before later buffered events mutate UI state.
         if suspend_armed_after_event.get() {
@@ -4226,13 +4268,13 @@ async fn drain_and_process(
         }
     }
 
-    DrainResult {
+    Ok(DrainResult {
         needs_draw,
         should_quit: false,
         resize_only: had_resize && !had_non_resize_change,
         force_repaint,
         handled,
-    }
+    })
 }
 
 // ── Paste coalescing for terminals without bracketed paste ───────────
@@ -4315,6 +4357,11 @@ pub(super) fn drain_immediate(
 
 /// Minimum key events in a run to trigger paste coalescing.
 const PASTE_COALESCE_THRESHOLD: usize = 3;
+
+// Coalesce >=256 single-line key events averaging <=1 ms per event into one
+// Paste, preserving trailing Enter keys as submits. Keep small or human-paced input
+// as keys so completion, key bindings and ordinary typing retain their semantics.
+const LARGE_TEXT_PASTE_THRESHOLD: usize = 256;
 
 /// Minimum run length for the Windows path-shape coalesce branch.
 /// Covers the shortest realistic dropped image path (`C:\x.png`, `/a.png`) while leaving short typed prose alone.
@@ -4417,6 +4464,9 @@ fn is_voice_chord(ke: &KeyEvent) -> bool {
 ///    So this coalesces the paste (e.g. `"foo\r\n"`) without swallowing a genuine submit.
 /// 2. **Windows only:** `>= PATH_COALESCE_THRESHOLD` events AND the assembled text starts with a drag-drop-style path anchor.
 ///    Some Windows Terminal versions deliver dropped paths as keystrokes instead of a bracketed paste; this branch recovers them.
+///
+/// 3. A single-line burst of at least 256 events averaging at most 1 ms per event.
+///    A trailing Enter is kept as a key, so submitting immediately after pasting still works.
 ///
 /// No-op when bracketed paste already arrives as `Event::Paste`.
 /// Split replayed startup type-ahead (stamped before `live_input_started_at`) off the front and
@@ -4526,6 +4576,17 @@ fn coalesce_rapid_keys(events: Vec<TimedInputEvent>) -> Vec<TimedInputEvent> {
                 && crate::prompt_images::starts_with_drop_anchor(&text);
             #[cfg(not(target_os = "windows"))]
             let path_shaped_drop = false;
+            let trailing_enters = events[run_start..i]
+                .iter()
+                .rev()
+                .take_while(|ev| matches!(ev.event, Event::Key(key) if key.code == KeyCode::Enter))
+                .count();
+            let text_run_len = run_len - trailing_enters;
+            let large_text_paste = text_run_len >= LARGE_TEXT_PASTE_THRESHOLD
+                && events[i - trailing_enters - 1]
+                    .arrived_at
+                    .saturating_duration_since(arrived_at)
+                    <= Duration::from_millis(text_run_len as u64);
             if multiline_paste || path_shaped_drop {
                 tracing::debug!(
                     run_len,
@@ -4537,6 +4598,15 @@ fn coalesce_rapid_keys(events: Vec<TimedInputEvent>) -> Vec<TimedInputEvent> {
                     event: Event::Paste(text),
                     arrived_at,
                 });
+            } else if large_text_paste {
+                // Each trailing Enter contributed one newline byte. Preserve
+                // those keys separately; they are submits, not pasted newlines.
+                text.truncate(text.len() - trailing_enters);
+                result.push(TimedInputEvent {
+                    event: Event::Paste(text),
+                    arrived_at,
+                });
+                result.extend_from_slice(&events[i - trailing_enters..i]);
             } else {
                 for ev in &events[run_start..i] {
                     result.push(ev.clone());
@@ -5089,6 +5159,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(MEMORY_RELEASE_DEFER)]
     fn welcome_shift_tab_applies_mode_before_session_new_is_sent() {
         for (
             initial_mode,
@@ -5151,6 +5222,156 @@ mod tests {
         }
     }
 
+    // Drive the actual collection wait: a frame flushes after the batch starts,
+    // but its receipt cannot reach the outer select until this batch returns.
+    async fn assert_question_receipt_during_fragment_wait(
+        mouse: bool,
+        before_flush: bool,
+        minimal: bool,
+    ) {
+        use crate::app::consent::ConsentState;
+        use crate::render::draw::{TermWriter, WriterSync, flush_payload_for_test};
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use std::future::Future;
+        use std::task::Poll;
+
+        let mut app = crate::app::app_view::tests::test_app();
+        app.set_consent_state(ConsentState::Done);
+        app.set_trust_state(TrustState::Pending {
+            // A relative key is refused before touching the trust store. The
+            // resulting trust_error (or Done on an inert dev build) proves the
+            // real accept action was dispatched without saving a trust grant.
+            workspace: "receipt-order-test".into(),
+            upgrade: false,
+            painted_at: None,
+        });
+        let (tx, payloads) = std::sync::mpsc::channel();
+        let (sync, mut receipts) = WriterSync::new_for_test();
+        let writer = TermWriter::new(tx, sync.clone()).unwrap();
+        let mut terminal = fuigo_ratatui_inline::Terminal::with_options(
+            ratatui::backend::CrosstermBackend::new(writer),
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 100, 40)),
+            },
+        )
+        .unwrap();
+        app.draw(&mut terminal);
+        // The minimal renderer is installed by the binary, not this crate's
+        // unit tests. Exercise minimal input with the same shared question and
+        // writer receipt, without installing a process-global renderer hook.
+        if minimal {
+            app.screen_mode = crate::app::ScreenMode::Minimal;
+        }
+        assert!(sync.queued() > 0);
+        assert_eq!(sync.written(), 0);
+        let answer = if mouse {
+            let rect = app.welcome_menu_rects[0];
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            })
+        } else {
+            Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+        };
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut tasks = JoinSet::new();
+        let mut csi_filter = super::super::csi_filter::CsiFragmentFilter::new();
+        let mut x10_filter = super::super::x10_filter::X10ReassemblyFilter::new();
+        let mut xt_filter = super::super::xt_filter::XtversionFilter::with_armed(true);
+        let mut presenter = Presenter::new();
+        presenter.in_flight_target = Some(sync.queued());
+        let first = TimedInputEvent::now(Event::Key(KeyEvent::new(
+            KeyCode::Char('P'),
+            KeyModifiers::ALT,
+        )));
+        let mut batch = Box::pin(drain_and_process(
+            first,
+            &mut input_rx,
+            &mut app,
+            &mut tasks,
+            &progress_tx,
+            &mut csi_filter,
+            &mut x10_filter,
+            &mut xt_filter,
+            test_live_input_start(),
+            &mut receipts,
+            &mut presenter,
+        ));
+        // No sleeps: poll through collection to the pending reply-fragment recv.
+        std::future::poll_fn(|cx| {
+            assert!(matches!(batch.as_mut().poll(cx), Poll::Pending));
+            Poll::Ready(())
+        })
+        .await;
+        let early_answer = TimedInputEvent::now(answer.clone());
+        for payload in payloads.try_iter() {
+            flush_payload_for_test(&payload, &sync).unwrap();
+        }
+        assert_eq!(sync.written(), sync.queued());
+        input_tx
+            .send(if before_flush {
+                early_answer
+            } else {
+                TimedInputEvent::now(answer)
+            })
+            .unwrap();
+        // End an incomplete reply without changing the global terminal identity.
+        drop(input_tx);
+        let result = batch.await.unwrap();
+        assert!(!result.should_quit);
+        assert_eq!(
+            result.handled, 2,
+            "prefix and deliberate answer share this batch"
+        );
+        let accepted = app.trust_error.is_some() || matches!(app.trust_state, TrustState::Done);
+        assert_eq!(
+            accepted, !before_flush,
+            "answer dispatch must depend on arrival versus flush, not receipt servicing order"
+        );
+        if let TrustState::Pending { painted_at, .. } = app.trust_state {
+            assert!(
+                painted_at.is_some(),
+                "the matching receipt must be applied even to rejected input"
+            );
+        }
+        assert!(
+            presenter.in_flight_target.is_none(),
+            "the receipt also releases presentation"
+        );
+        assert!(receipts.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(MEMORY_RELEASE_DEFER)]
+    async fn regression_r4_post_flush_key_during_fragment_wait() {
+        assert_question_receipt_during_fragment_wait(false, false, false).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(MEMORY_RELEASE_DEFER)]
+    async fn regression_r4_post_flush_click_during_fragment_wait() {
+        assert_question_receipt_during_fragment_wait(true, false, false).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(MEMORY_RELEASE_DEFER)]
+    async fn regression_r4_pre_flush_input_during_fragment_wait() {
+        for mouse in [false, true] {
+            assert_question_receipt_during_fragment_wait(mouse, true, false).await;
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(MEMORY_RELEASE_DEFER)]
+    async fn regression_r4_minimal_input_during_fragment_wait() {
+        for before_flush in [false, true] {
+            assert_question_receipt_during_fragment_wait(false, before_flush, true).await;
+        }
+    }
+
     #[tokio::test]
     async fn welcome_paste_preserves_create_and_forwarded_prompt() {
         let mut app = crate::app::app_view::tests::test_app();
@@ -5175,8 +5396,11 @@ mod tests {
             &mut xt_filter,
             // Tests drive live input only: everything arrived after the reader started.
             std::time::Instant::now() - std::time::Duration::from_secs(60),
+            &mut tokio::sync::mpsc::unbounded_channel().1,
+            &mut Presenter::new(),
         )
-        .await;
+        .await
+        .unwrap();
 
         assert!(!result.should_quit);
         assert!(matches!(
@@ -5221,8 +5445,11 @@ mod tests {
             &mut xt_filter,
             // Tests drive live input only: everything arrived after the reader started.
             std::time::Instant::now() - std::time::Duration::from_secs(60),
+            &mut tokio::sync::mpsc::unbounded_channel().1,
+            &mut Presenter::new(),
         )
-        .await;
+        .await
+        .unwrap();
 
         assert!(
             !result.should_quit,
@@ -5418,8 +5645,16 @@ mod tests {
         let launch = tempfile::tempdir().unwrap();
         let recorded = tempfile::tempdir().unwrap();
         let (l, r) = (launch.path(), recorded.path());
-        assert_eq!(trust_question_cwd(l, Some(r)), r, "resume: the session's folder");
-        assert_eq!(trust_question_cwd(l, None), l, "no resume: the launch folder");
+        assert_eq!(
+            trust_question_cwd(l, Some(r)),
+            r,
+            "resume: the session's folder"
+        );
+        assert_eq!(
+            trust_question_cwd(l, None),
+            l,
+            "no resume: the launch folder"
+        );
         assert_eq!(trust_question_cwd(l, Some(std::path::Path::new(""))), l);
         assert_eq!(
             trust_question_cwd(l, Some(&r.join("gone"))),
@@ -5896,12 +6131,18 @@ mod tests {
         seed(&mut app);
         presenter.request(false);
         presenter.present_if_dirty(&mut app, &mut terminal);
-        assert!(transmitted(&app), "a plain frame must not forget what was transmitted");
+        assert!(
+            transmitted(&app),
+            "a plain frame must not forget what was transmitted"
+        );
 
         presenter.in_flight_target = None;
         presenter.request(true);
         presenter.present_if_dirty(&mut app, &mut terminal);
-        assert!(!transmitted(&app), "a forced repaint must forget what was transmitted");
+        assert!(
+            !transmitted(&app),
+            "a forced repaint must forget what was transmitted"
+        );
     }
 
     #[test]
@@ -6312,6 +6553,49 @@ mod tests {
     }
 
     #[test]
+    fn coalesce_large_single_line_paste_preserves_submit() {
+        let text = "abcdefghijklmnopqrstuvwxyz".repeat(8_000);
+        let mut events = press_run(&text);
+        events.push(press(KeyCode::Enter));
+        let result = coalesce_rapid_keys(events);
+        assert_eq!(
+            result.len(),
+            2,
+            "large text must not be handled one key at a time"
+        );
+        assert_eq!(result[0].event, Event::Paste(text));
+        assert!(matches!(result[1].event, Event::Key(key) if key.code == KeyCode::Enter));
+    }
+
+    #[test]
+    fn coalesce_large_slow_typing_keeps_key_semantics() {
+        let started = std::time::Instant::now();
+        let events: Vec<_> = (0..512)
+            .map(|i| {
+                let mut event = press(KeyCode::Char('x'));
+                event.arrived_at = started + Duration::from_millis(i * 50);
+                event
+            })
+            .collect();
+        assert_eq!(coalesce_rapid_keys(events).len(), 512);
+    }
+
+    #[test]
+    fn coalesce_large_bursts_preserve_shortcuts() {
+        let text = "x".repeat(512);
+        let mut events = press_run(&text);
+        events.push(press_ctrl(KeyCode::Char('c')));
+        events.extend(press_run(&text));
+        let result = coalesce_rapid_keys(events);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].event, Event::Paste(text.clone()));
+        assert!(
+            matches!(result[1].event, Event::Key(key) if key.modifiers == KeyModifiers::CONTROL)
+        );
+        assert_eq!(result[2].event, Event::Paste(text));
+    }
+
+    #[test]
     fn coalesce_crlf_paste_ending_in_newline_is_paste() {
         // Windows paste of "foo\r\n": Enter (`\r`) then Ctrl+J (`\n`)
         // The CRLF pair marks a paste, so the trailing Enter inserts as text instead of submitting
@@ -6662,7 +6946,6 @@ mod tests {
     //
     // Windows-gated: the path-shape branch only exists on Windows (other platforms reliably get bracketed paste for drag-drop)
 
-    #[cfg(target_os = "windows")]
     fn press_run(text: &str) -> Vec<TimedInputEvent> {
         text.chars().map(|c| press(KeyCode::Char(c))).collect()
     }

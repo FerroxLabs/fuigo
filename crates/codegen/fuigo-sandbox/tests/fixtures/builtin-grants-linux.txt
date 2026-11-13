@@ -1,0 +1,4 @@
+workspace: read=[] write=["/tmp", "/var/tmp", "<state>", "<workspace>"] default_read=true restrict_network=false
+devbox: read=[] write=["<workspace>", "<existing top-level directories except data, proc, sys, dev>"] default_read=true restrict_network=false
+read-only: read=[] write=["/tmp", "/var/tmp", "<state>"] default_read=true restrict_network=true
+strict: read=["<existing strict system paths>", "<workspace>", "<state>"] write=["/tmp", "/var/tmp", "<state>/sessions", "<workspace>"] default_read=false restrict_network=true

@@ -230,6 +230,9 @@ pub(crate) fn test_app() -> AppView {
         optimistic_home_husk: None,
         welcome_menu_index: None,
         welcome_menu_rects: Vec::new(),
+        welcome_painted_at: Some(std::time::Instant::now()),
+        welcome_frame: None,
+        welcome_needs_redraw: false,
         welcome_show_changelog_action: false,
         welcome_import_banner_rect: None,
         last_mouse_pos: None,
@@ -857,8 +860,15 @@ fn tick_demand_welcome_is_slow_unless_loading() {
     // Unit tests never spin the mark, so this welcome screen is at rest: a heartbeat, not the shimmer cadence
     assert_eq!(app.tick_demand(), TickDemand::Rest);
     assert!(app.needs_animation(), "a heartbeat still counts as ticking");
-    app.welcome_toast = Some(("hi".into(), std::time::Instant::now() + std::time::Duration::from_secs(2)));
-    assert_eq!(app.tick_demand(), TickDemand::Slow, "a toast on screen ticks at the shimmer cadence");
+    app.welcome_toast = Some((
+        "hi".into(),
+        std::time::Instant::now() + std::time::Duration::from_secs(2),
+    ));
+    assert_eq!(
+        app.tick_demand(),
+        TickDemand::Slow,
+        "a toast on screen ticks at the shimmer cadence"
+    );
     app.welcome_toast = None;
     app.session_picker_content_loading = true;
     assert_eq!(app.tick_demand(), TickDemand::Fast);
@@ -872,10 +882,15 @@ fn resting_welcome_screen_wakes_the_loop_rarely_and_repaints_nothing() {
     assert_eq!(app.active_view, ActiveView::Welcome);
     let mut tick_at = None;
     crate::app::event_loop::schedule_tick(&mut tick_at, &app, std::time::Duration::from_millis(33));
-    let delay = tick_at.expect("a welcome screen still ticks").saturating_duration_since(tokio::time::Instant::now());
+    let delay = tick_at
+        .expect("a welcome screen still ticks")
+        .saturating_duration_since(tokio::time::Instant::now());
     let wakeups_per_second = 1000.0 / delay.as_millis().max(1) as f64;
     eprintln!("idle welcome wakeups/s: {wakeups_per_second:.1} (interval {delay:?})");
-    assert!(wakeups_per_second <= 2.5, "a resting welcome screen wakes {wakeups_per_second:.1} times a second");
+    assert!(
+        wakeups_per_second <= 2.5,
+        "a resting welcome screen wakes {wakeups_per_second:.1} times a second"
+    );
     // The first tick may repaint once to settle on the resting frame; after that nothing changes
     let _ = app.tick_with_input(false);
     let mut redraws = 0;
@@ -2408,6 +2423,7 @@ fn welcome_trust_decline_keys_continue_untrusted_and_q_quits() {
         app.trust_state = TrustState::Pending {
             workspace: std::path::PathBuf::from("/tmp/x"),
             upgrade: false,
+            painted_at: Some(Instant::now()),
         };
         let outcome = app.handle_input(&key_event(code, KeyModifiers::NONE));
         assert!(
@@ -2420,10 +2436,14 @@ fn welcome_trust_decline_keys_continue_untrusted_and_q_quits() {
         app.trust_state = TrustState::Pending {
             workspace: std::path::PathBuf::from("/tmp/x"),
             upgrade: false,
+            painted_at: Some(Instant::now()),
         };
         let outcome = app.handle_input(&key_event(code, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::QuitConfirmed | Action::Quit)),
+            matches!(
+                outcome,
+                InputOutcome::Action(Action::QuitConfirmed | Action::Quit)
+            ),
             "{code:?} on the trust prompt must quit, got {outcome:?}"
         );
     }
@@ -2431,6 +2451,7 @@ fn welcome_trust_decline_keys_continue_untrusted_and_q_quits() {
     app.trust_state = TrustState::Pending {
         workspace: std::path::PathBuf::from("/tmp/x"),
         upgrade: false,
+        painted_at: Some(Instant::now()),
     };
     let outcome = app.handle_input(&key_event(KeyCode::Char('y'), KeyModifiers::NONE));
     assert!(matches!(outcome, InputOutcome::Action(Action::TrustFolder)));
@@ -2443,6 +2464,7 @@ fn consent_pending_app() -> AppView {
     app.trust_state = TrustState::Pending {
         workspace: std::path::PathBuf::from("/tmp/x"),
         upgrade: false,
+        painted_at: None,
     };
     app.consent_state = crate::app::consent::ConsentState::Pending {
         notice: ConsentNotice {
@@ -2606,7 +2628,11 @@ fn consent_paint_records_what_the_renderer_reported() {
         painted_at: None,
     };
     let mut state = pending();
-    record_consent_paint(&mut state, Some(ConsentLegibility::Illegible));
+    record_consent_paint(
+        &mut state,
+        Some(ConsentLegibility::Illegible),
+        Instant::now(),
+    );
     let ConsentState::Pending {
         painted_at,
         legibility,
@@ -2618,8 +2644,8 @@ fn consent_paint_records_what_the_renderer_reported() {
     assert!(painted_at.is_some(), "an illegible paint is still a paint");
     assert_eq!(*legibility, ConsentLegibility::Illegible);
     let mut state = pending();
-    record_consent_paint(&mut state, Some(ConsentLegibility::Painted));
-    record_consent_paint(&mut state, None);
+    record_consent_paint(&mut state, Some(ConsentLegibility::Painted), Instant::now());
+    record_consent_paint(&mut state, None, Instant::now());
     let ConsentState::Pending {
         painted_at,
         legibility,
@@ -3161,7 +3187,10 @@ fn ctrl_c_running_cancels_turn_even_with_a_question_card_open() {
         ));
     }
     let outcome = app.handle_input(&ctrl_c());
-    assert!(matches!(outcome, InputOutcome::Action(Action::CancelTurn)), "got {outcome:?}");
+    assert!(
+        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+        "got {outcome:?}"
+    );
 }
 #[test]
 fn ctrl_c_cancelling_escalates_to_quit_pending() {
@@ -3251,7 +3280,10 @@ fn single_ctrl_c_app(setting: Option<bool>) -> AppView {
 fn single_ctrl_c_quit_quits_on_one_press_when_nothing_would_be_lost() {
     let mut app = single_ctrl_c_app(Some(true));
     let outcome = app.handle_input(&ctrl_c());
-    assert!(matches!(outcome, InputOutcome::Action(Action::Quit)), "got {outcome:?}");
+    assert!(
+        matches!(outcome, InputOutcome::Action(Action::Quit)),
+        "got {outcome:?}"
+    );
     assert!(app.pending_action.is_none());
 }
 /// Default behaviour unchanged: unset and `false` both keep the existing arm-then-confirm quit.
@@ -3260,10 +3292,17 @@ fn single_ctrl_c_quit_off_keeps_the_two_press_quit() {
     for setting in [None, Some(false)] {
         let mut app = single_ctrl_c_app(setting);
         let outcome = app.handle_input(&ctrl_c());
-        assert!(matches!(outcome, InputOutcome::Changed), "{setting:?}: {outcome:?}");
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "{setting:?}: {outcome:?}"
+        );
         assert_pending_quit(&app);
     }
-    assert!(!fuigo_shell::agent::config::UiConfig::default().single_ctrl_c_quit.unwrap_or(false));
+    assert!(
+        !fuigo_shell::agent::config::UiConfig::default()
+            .single_ctrl_c_quit
+            .unwrap_or(false)
+    );
 }
 #[test]
 fn single_ctrl_c_quit_never_quits_a_running_turn() {
@@ -3271,13 +3310,21 @@ fn single_ctrl_c_quit_never_quits_a_running_turn() {
     let id = super::super::agent::AgentId(0);
     app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
     let outcome = app.handle_input(&ctrl_c());
-    assert!(matches!(outcome, InputOutcome::Action(Action::CancelTurn)), "got {outcome:?}");
+    assert!(
+        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+        "got {outcome:?}"
+    );
 }
 #[test]
 fn single_ctrl_c_quit_never_quits_over_a_draft() {
     let mut app = single_ctrl_c_app(Some(true));
     let id = super::super::agent::AgentId(0);
-    app.agents.get_mut(&id).unwrap().prompt.textarea.set_text("draft prompt");
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .prompt
+        .textarea
+        .set_text("draft prompt");
     let outcome = app.handle_input(&ctrl_c());
     assert!(matches!(outcome, InputOutcome::Changed), "got {outcome:?}");
     assert!(app.agents[&id].prompt.textarea.text().is_empty());
@@ -3287,9 +3334,16 @@ fn single_ctrl_c_quit_never_quits_over_a_draft() {
 fn single_ctrl_c_quit_never_quits_with_a_queued_prompt() {
     let mut app = single_ctrl_c_app(Some(true));
     let id = super::super::agent::AgentId(0);
-    app.agents.get_mut(&id).unwrap().session.enqueue_bash_command("ls".to_owned());
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .enqueue_bash_command("ls".to_owned());
     let outcome = app.handle_input(&ctrl_c());
-    assert!(!matches!(outcome, InputOutcome::Action(Action::Quit)), "got {outcome:?}");
+    assert!(
+        !matches!(outcome, InputOutcome::Action(Action::Quit)),
+        "got {outcome:?}"
+    );
 }
 #[test]
 fn single_ctrl_c_quit_never_quits_with_a_question_pending() {
@@ -3317,7 +3371,10 @@ fn single_ctrl_c_quit_never_quits_with_a_question_pending() {
     }
     assert!(!app.agents[&id].nothing_lost_on_quit());
     let outcome = app.handle_input(&ctrl_c());
-    assert!(!matches!(outcome, InputOutcome::Action(Action::Quit)), "got {outcome:?}");
+    assert!(
+        !matches!(outcome, InputOutcome::Action(Action::Quit)),
+        "got {outcome:?}"
+    );
 }
 #[test]
 fn ctrl_c_idle_prompt_with_text_clears_text() {
@@ -6202,10 +6259,16 @@ fn graduated_back_out_defers_to_open_modal() {
         Some(crate::views::extensions_modal::ExtensionsModalState::new(
             crate::views::extensions_modal::ExtensionsTab::Plugins,
         ));
-    suppressed(&mut app, "an open extensions modal must suppress the graduated back-out");
+    suppressed(
+        &mut app,
+        "an open extensions modal must suppress the graduated back-out",
+    );
     app.agents.get_mut(&id).unwrap().extensions_modal = None;
     app.agents.get_mut(&id).unwrap().agents_modal = Some(open_agents_modal());
-    suppressed(&mut app, "an open agents modal must suppress the graduated back-out");
+    suppressed(
+        &mut app,
+        "an open agents modal must suppress the graduated back-out",
+    );
     app.agents.get_mut(&id).unwrap().agents_modal = None;
     app.agents.get_mut(&id).unwrap().active_modal =
         Some(crate::views::modal::ActiveModal::CommandPalette {
@@ -6213,7 +6276,10 @@ fn graduated_back_out_defers_to_open_modal() {
             state: crate::views::picker::PickerState::default(),
             window: crate::views::modal_window::ModalWindowState::new(),
         });
-    suppressed(&mut app, "an open active_modal must suppress the graduated back-out");
+    suppressed(
+        &mut app,
+        "an open active_modal must suppress the graduated back-out",
+    );
 }
 /// Install a plan-approval overlay on the agent and put it in the "focused dashboard overlay, prompt pane" state the graduated back-out cares about.
 fn install_plan_overlay(app: &mut AppView, id: super::super::agent::AgentId) {
@@ -7365,7 +7431,10 @@ fn press(app: &mut AppView, c: char) -> InputOutcome {
 fn picker_digits_run_the_row_they_number() {
     use fuigo_shell::auth::subscription::SubscriptionProvider;
     let mut app = picker_input_app();
-    assert!(matches!(press(&mut app, '1'), InputOutcome::Action(Action::EnterApiKey)));
+    assert!(matches!(
+        press(&mut app, '1'),
+        InputOutcome::Action(Action::EnterApiKey)
+    ));
     assert!(matches!(
         press(&mut app, '2'),
         InputOutcome::Action(Action::SignInSubscription(SubscriptionProvider::Chatgpt))
@@ -7374,7 +7443,10 @@ fn picker_digits_run_the_row_they_number() {
         press(&mut app, '3'),
         InputOutcome::Action(Action::SignInSubscription(SubscriptionProvider::Xai))
     ));
-    assert!(matches!(press(&mut app, '4'), InputOutcome::Action(Action::ProviderKeysPage)));
+    assert!(matches!(
+        press(&mut app, '4'),
+        InputOutcome::Action(Action::ProviderKeysPage)
+    ));
     assert!(matches!(press(&mut app, '9'), InputOutcome::Unchanged));
 }
 
@@ -7403,13 +7475,22 @@ fn a_flux_key_in_the_environment_makes_row_one_apply_it_by_name() {
 fn picker_q_quits_first_run_and_cancels_the_login_modal() {
     let mut app = picker_input_app();
     let first_run = press(&mut app, 'q');
-    assert!(matches!(first_run, InputOutcome::Action(Action::Quit)), "{first_run:?}");
+    assert!(
+        matches!(first_run, InputOutcome::Action(Action::Quit)),
+        "{first_run:?}"
+    );
     app.picker_modal = true;
-    assert!(matches!(press(&mut app, 'q'), InputOutcome::Action(Action::CancelPicker)));
+    assert!(matches!(
+        press(&mut app, 'q'),
+        InputOutcome::Action(Action::CancelPicker)
+    ));
     let esc = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(matches!(esc, InputOutcome::Action(Action::CancelPicker)));
     // In the modal the last row is Cancel, and it is numbered like any other row.
-    assert!(matches!(press(&mut app, '5'), InputOutcome::Action(Action::CancelPicker)));
+    assert!(matches!(
+        press(&mut app, '5'),
+        InputOutcome::Action(Action::CancelPicker)
+    ));
 }
 
 #[test]
@@ -7430,7 +7511,10 @@ fn esc_during_a_subscription_sign_in_steps_back_instead_of_quitting() {
 fn the_provider_key_page_is_navigable_by_digit_and_by_b() {
     let mut app = picker_input_app();
     app.picker_page = crate::app::pending_menu::PickerPage::ProviderKeys;
-    assert!(matches!(press(&mut app, 'b'), InputOutcome::Action(Action::PickerBack)));
+    assert!(matches!(
+        press(&mut app, 'b'),
+        InputOutcome::Action(Action::PickerBack)
+    ));
     match press(&mut app, '1') {
         InputOutcome::Action(Action::ProviderKeyInfo(id)) => assert!(!id.is_empty()),
         other => panic!("expected ProviderKeyInfo, got {other:?}"),
@@ -7448,7 +7532,10 @@ fn esc_on_the_key_screen_steps_back_to_the_picker() {
         mode: AuthMode::ApiKey,
     };
     let esc = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(matches!(esc, InputOutcome::Action(Action::CancelSignIn)), "{esc:?}");
+    assert!(
+        matches!(esc, InputOutcome::Action(Action::CancelSignIn)),
+        "{esc:?}"
+    );
 }
 
 fn active_run(status: &str) -> crate::views::workflows::WorkflowRunSnapshot {
@@ -7501,4 +7588,477 @@ fn quit_label_is_plain_when_no_workflow_is_running() {
     let outcome = app.handle_input(&ctrl_q());
     assert!(matches!(outcome, InputOutcome::Changed));
     assert_eq!(app.pending_action.as_ref().unwrap().label, Some("quit"));
+}
+
+#[test]
+#[serial_test::serial(MEMORY_RELEASE_DEFER)]
+fn regression_trust_ignores_keys_before_first_paint() {
+    for code in [
+        KeyCode::Char('y'),
+        KeyCode::Char('Y'),
+        KeyCode::Char('n'),
+        KeyCode::Char('N'),
+        KeyCode::Enter,
+        KeyCode::Esc,
+        KeyCode::Char('q'),
+        KeyCode::Char('Q'),
+    ] {
+        let mut app = consent_pending_app();
+        app.consent_state = ConsentState::Done;
+        let outcome = app.handle_input(&key_event(code, KeyModifiers::NONE));
+        assert!(
+            matches!(outcome, InputOutcome::Unchanged),
+            "{code:?}: {outcome:?}"
+        );
+        paint_welcome_for_regression(&mut app);
+        let outcome = app.handle_input(&key_event(code, KeyModifiers::NONE));
+        assert!(
+            matches!(
+                outcome,
+                InputOutcome::Action(
+                    Action::TrustFolder
+                        | Action::DeclineTrustFolder
+                        | Action::QuitConfirmed
+                        | Action::Quit
+                )
+            ),
+            "{code:?}: {outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn regression_consent_followup_click_does_not_trust() {
+    let mut app = consent_pending_app();
+    let click = left_mouse(MouseEventKind::Down(MouseButton::Left), 12, 20);
+    assert!(matches!(
+        app.handle_input(&click),
+        InputOutcome::Action(Action::AcceptConsent)
+    ));
+    // The consent answer transitions to the pending folder question before its next draw.
+    crate::app::dispatch::dispatch(Action::AcceptConsent, &mut app);
+    let outcome = app.handle_input(&click);
+    assert!(matches!(outcome, InputOutcome::Unchanged), "{outcome:?}");
+}
+
+#[test]
+#[serial_test::serial(MEMORY_RELEASE_DEFER)]
+fn regression_trust_answer_invalidates_welcome_hit_rects() {
+    let mut app = consent_pending_app();
+    app.consent_state = ConsentState::Done;
+    app.set_trust_state(TrustState::Done);
+    assert!(app.welcome_menu_rects.is_empty());
+    assert!(matches!(
+        app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 12, 20)),
+        InputOutcome::Unchanged
+    ));
+}
+
+struct HeldWelcomeFrame {
+    _terminal: PagerTerminal,
+    payloads: std::sync::mpsc::Receiver<crate::render::draw::WriterPayload>,
+    sync: crate::render::draw::WriterSync,
+    events: tokio::sync::mpsc::UnboundedReceiver<crate::render::draw::WriterEvent>,
+}
+
+impl HeldWelcomeFrame {
+    fn flush(&mut self, app: &mut AppView) -> String {
+        let mut output = Vec::new();
+        for payload in self.payloads.try_iter() {
+            output.extend_from_slice(payload.data());
+            crate::render::draw::flush_payload_for_test(&payload, &self.sync).unwrap();
+        }
+        while let Ok(event) = self.events.try_recv() {
+            match event {
+                crate::render::draw::WriterEvent::Written {
+                    sequence,
+                    flushed_at,
+                } => {
+                    app.welcome_frame_written(sequence, flushed_at);
+                }
+                crate::render::draw::WriterEvent::Failed(error) => panic!("{error}"),
+            }
+        }
+        String::from_utf8(output).unwrap()
+    }
+}
+
+fn queue_welcome_for_regression(app: &mut AppView) -> HeldWelcomeFrame {
+    queue_welcome_at_size_for_regression(app, 100, 40)
+}
+
+fn queue_welcome_at_size_for_regression(
+    app: &mut AppView,
+    width: u16,
+    height: u16,
+) -> HeldWelcomeFrame {
+    let (tx, payloads) = std::sync::mpsc::channel();
+    let (sync, events) = crate::render::draw::WriterSync::new_for_test();
+    let writer = crate::render::draw::TermWriter::new(tx, sync.clone()).unwrap();
+    let backend = ratatui::backend::CrosstermBackend::new(writer);
+    let mut terminal = fuigo_ratatui_inline::Terminal::with_options(
+        backend,
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, width, height)),
+        },
+    )
+    .unwrap();
+    app.draw(&mut terminal);
+    assert!(sync.queued() > 0);
+    assert_eq!(sync.written(), 0);
+    HeldWelcomeFrame {
+        _terminal: terminal,
+        payloads,
+        sync,
+        events,
+    }
+}
+
+fn paint_welcome_for_regression(app: &mut AppView) {
+    queue_welcome_for_regression(app).flush(app);
+}
+
+#[test]
+#[serial_test::serial(MEMORY_RELEASE_DEFER)]
+fn regression_trust_rejects_queued_input_after_paint_and_accepts_fresh_input() {
+    for event in [
+        key_event(KeyCode::Char('y'), KeyModifiers::NONE),
+        left_mouse(MouseEventKind::Down(MouseButton::Left), 0, 0),
+    ] {
+        let mut app = consent_pending_app();
+        app.consent_state = ConsentState::Done;
+        let arrived_at = Instant::now();
+        paint_welcome_for_regression(&mut app);
+        let event = if matches!(event, Event::Mouse(_)) {
+            let rect = app.welcome_menu_rects[0];
+            left_mouse(MouseEventKind::Down(MouseButton::Left), rect.x, rect.y)
+        } else {
+            event
+        };
+        let outcome = app.handle_input_at_with_paste_provenance(
+            &event,
+            arrived_at,
+            PasteProvenance::Terminal,
+        );
+        assert!(matches!(outcome, InputOutcome::Unchanged), "{outcome:?}");
+        assert!(matches!(
+            app.handle_input(&event),
+            InputOutcome::Action(Action::TrustFolder)
+        ));
+    }
+}
+
+#[test]
+fn trust_unpainted_quit_chords_remain_live() {
+    for ch in ['c', 'd'] {
+        let mut app = consent_pending_app();
+        app.consent_state = ConsentState::Done;
+        let outcome = app.handle_input(&key_event(KeyCode::Char(ch), KeyModifiers::CONTROL));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Changed | InputOutcome::Action(Action::Quit)
+        ));
+        assert!(matches!(
+            app.pending_action.as_ref().map(|pending| &pending.action),
+            Some(Action::Quit)
+        ));
+    }
+}
+
+#[test]
+#[serial_test::serial(MEMORY_RELEASE_DEFER)]
+fn auth_menu_transition_rejects_stale_click_even_after_redraw() {
+    let mut app = test_app();
+    crate::app::dispatch::dispatch(Action::OpenSignInPicker, &mut app);
+    paint_welcome_for_regression(&mut app);
+    assert!(!app.welcome_menu_rects.is_empty());
+    let arrived_at = Instant::now();
+    crate::app::dispatch::dispatch(Action::ProviderKeysPage, &mut app);
+    assert!(app.welcome_menu_rects.is_empty());
+    assert!(app.welcome_painted_at.is_none());
+    paint_welcome_for_regression(&mut app);
+    let rect = app.welcome_menu_rects[0];
+    let click = left_mouse(MouseEventKind::Down(MouseButton::Left), rect.x, rect.y);
+    assert!(matches!(
+        app.handle_input_at_with_paste_provenance(&click, arrived_at, PasteProvenance::Terminal),
+        InputOutcome::Unchanged
+    ));
+    assert!(matches!(app.handle_input(&click), InputOutcome::Action(_)));
+}
+
+#[test]
+#[serial_test::serial(MEMORY_RELEASE_DEFER)]
+fn regression_r2_trust_waits_for_writer_flush() {
+    for mouse in [false, true] {
+        let mut app = consent_pending_app();
+        app.consent_state = ConsentState::Done;
+        // Hold the real frame until both the key and mouse gates have been checked.
+        let mut frame = queue_welcome_for_regression(&mut app);
+        let event = if mouse {
+            let rect = app.welcome_menu_rects[0];
+            left_mouse(MouseEventKind::Down(MouseButton::Left), rect.x, rect.y)
+        } else {
+            key_event(KeyCode::Char('y'), KeyModifiers::NONE)
+        };
+        let outcome = app.handle_input(&event);
+        assert!(
+            matches!(outcome, InputOutcome::Unchanged),
+            "unflushed: {outcome:?}"
+        );
+        let queued_at = Instant::now();
+        frame.flush(&mut app);
+        assert!(matches!(
+            app.handle_input_at_with_paste_provenance(&event, queued_at, PasteProvenance::Terminal),
+            InputOutcome::Unchanged
+        ));
+        assert!(matches!(
+            app.handle_input(&event),
+            InputOutcome::Action(Action::TrustFolder)
+        ));
+    }
+}
+
+#[test]
+#[serial_test::serial(MEMORY_RELEASE_DEFER)]
+fn regression_r2_consent_waits_for_writer_flush() {
+    for mouse in [false, true] {
+        let mut app = consent_pending_app();
+        app.invalidate_welcome_input();
+        let mut frame = queue_welcome_for_regression(&mut app);
+        let event = if mouse {
+            let rect = app.welcome_menu_rects[0];
+            left_mouse(MouseEventKind::Down(MouseButton::Left), rect.x, rect.y)
+        } else {
+            key_event(KeyCode::Char('a'), KeyModifiers::NONE)
+        };
+        let outcome = app.handle_input(&event);
+        assert!(
+            matches!(outcome, InputOutcome::Unchanged),
+            "unflushed: {outcome:?}"
+        );
+        let queued_at = Instant::now();
+        frame.flush(&mut app);
+        assert!(matches!(
+            app.handle_input_at_with_paste_provenance(&event, queued_at, PasteProvenance::Terminal),
+            InputOutcome::Unchanged
+        ));
+        assert!(matches!(
+            app.handle_input(&event),
+            InputOutcome::Action(Action::AcceptConsent)
+        ));
+    }
+}
+
+#[test]
+#[serial_test::serial(MEMORY_RELEASE_DEFER)]
+fn regression_r2_satisfied_consent_reseed_keeps_visible_trust_answerable() {
+    for mouse in [false, true] {
+        let mut app = consent_pending_app();
+        app.consent_state = ConsentState::Done;
+        paint_welcome_for_regression(&mut app);
+        let rect = app.welcome_menu_rects[0];
+        app.set_consent_state(ConsentState::Done);
+        let event = if mouse {
+            left_mouse(MouseEventKind::Down(MouseButton::Left), rect.x, rect.y)
+        } else {
+            key_event(KeyCode::Char('y'), KeyModifiers::NONE)
+        };
+        let outcome = app.handle_input(&event);
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::TrustFolder)),
+            "unchanged screen: {outcome:?}"
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial(MEMORY_RELEASE_DEFER)]
+fn regression_r2_old_frame_receipt_cannot_paint_the_next_question() {
+    let mut app = consent_pending_app();
+    app.invalidate_welcome_input();
+    let mut frame = queue_welcome_for_regression(&mut app);
+    for payload in frame.payloads.try_iter() {
+        crate::render::draw::flush_payload_for_test(&payload, &frame.sync).unwrap();
+    }
+    // The old frame's receipt arrives after a different question has been queued.
+    app.set_consent_state(ConsentState::Done);
+    app.draw(&mut frame._terminal);
+    while let Ok(event) = frame.events.try_recv() {
+        let crate::render::draw::WriterEvent::Written {
+            sequence,
+            flushed_at,
+        } = event
+        else {
+            panic!("writer failed");
+        };
+        app.welcome_frame_written(sequence, flushed_at);
+    }
+    let event = key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+    assert!(matches!(app.handle_input(&event), InputOutcome::Unchanged));
+    // Re-seeding before the receipt must preserve this pending frame too.
+    app.set_consent_state(ConsentState::Done);
+    frame.flush(&mut app);
+    assert!(matches!(
+        app.handle_input(&event),
+        InputOutcome::Action(Action::TrustFolder)
+    ));
+}
+
+#[test]
+#[serial_test::serial(MEMORY_RELEASE_DEFER)]
+fn regression_r2_delayed_receipt_uses_flush_time_not_event_loop_time() {
+    let mut app = consent_pending_app();
+    app.consent_state = ConsentState::Done;
+    let mut frame = queue_welcome_for_regression(&mut app);
+    for payload in frame.payloads.try_iter() {
+        crate::render::draw::flush_payload_for_test(&payload, &frame.sync).unwrap();
+    }
+    // The user answered after the frame was flushed, but before the loop received its ack.
+    let arrived_at = Instant::now();
+    frame.flush(&mut app);
+    let event = key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+    assert!(matches!(
+        app.handle_input_at_with_paste_provenance(&event, arrived_at, PasteProvenance::Terminal),
+        InputOutcome::Action(Action::TrustFolder)
+    ));
+}
+
+#[test]
+#[serial_test::serial(MEMORY_RELEASE_DEFER)]
+fn regression_r2_noop_question_setters_preserve_paint_and_real_changes_invalidate() {
+    let mut app = consent_pending_app();
+    app.consent_state = ConsentState::Done;
+    paint_welcome_for_regression(&mut app);
+    let original_rects = app.welcome_menu_rects.clone();
+    app.set_auth_state(AuthState::Done);
+    app.set_trust_state(TrustState::Pending {
+        workspace: "/tmp/x".into(),
+        upgrade: false,
+        painted_at: None,
+    });
+    assert_eq!(app.welcome_menu_rects, original_rects);
+    let event = key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+    assert!(matches!(
+        app.handle_input(&event),
+        InputOutcome::Action(Action::TrustFolder)
+    ));
+    app.set_trust_state(TrustState::Pending {
+        workspace: "different-project".into(),
+        upgrade: false,
+        painted_at: None,
+    });
+    assert!(app.welcome_menu_rects.is_empty());
+    assert!(matches!(app.handle_input(&event), InputOutcome::Unchanged));
+
+    let mut app = consent_pending_app();
+    let notice = match &app.consent_state {
+        ConsentState::Pending { notice, .. } => notice.clone(),
+        _ => unreachable!(),
+    };
+    app.set_consent_state(ConsentState::Pending {
+        notice: notice.clone(),
+        legibility: crate::app::consent::ConsentLegibility::Illegible,
+        painted_at: None,
+    });
+    let event = key_event(KeyCode::Char('a'), KeyModifiers::NONE);
+    assert!(matches!(
+        app.handle_input(&event),
+        InputOutcome::Action(Action::AcceptConsent)
+    ));
+    let mut changed = notice;
+    changed.title.push_str(" changed");
+    app.set_consent_state(ConsentState::Pending {
+        notice: changed,
+        legibility: crate::app::consent::ConsentLegibility::Illegible,
+        painted_at: None,
+    });
+    assert!(matches!(app.handle_input(&event), InputOutcome::Unchanged));
+}
+
+#[test]
+#[serial_test::serial(MEMORY_RELEASE_DEFER)]
+fn regression_r3_short_trust_accepts_fresh_answer_after_flush() {
+    assert_short_trust_input(false);
+}
+
+#[test]
+#[serial_test::serial(MEMORY_RELEASE_DEFER)]
+fn regression_r3_clipped_upgrade_rejects_answers_after_flush() {
+    assert_short_trust_input(true);
+}
+
+fn assert_short_trust_input(upgrade: bool) {
+    let mut first_visible = None;
+    for height in 1..=24 {
+        let mut app = consent_pending_app();
+        app.set_consent_state(ConsentState::Done);
+        if let TrustState::Pending { upgrade: value, .. } = &mut app.trust_state {
+            *value = upgrade;
+        }
+        let event = key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+        let mut frame = queue_welcome_at_size_for_regression(&mut app, 80, height);
+        assert!(matches!(app.handle_input(&event), InputOutcome::Unchanged));
+        let queued_at = Instant::now();
+        let output = frame.flush(&mut app);
+        let mut screen = fuigo_pager_pty_harness::ScreenTracker::new(height, 80);
+        screen.feed(output.as_bytes());
+        let visible = screen.contains("Do you trust the files in this folder?");
+        let painted = matches!(
+            app.trust_state,
+            TrustState::Pending {
+                painted_at: Some(_),
+                ..
+            }
+        );
+        assert_eq!(painted, visible, "upgrade={upgrade}, height={height}");
+        if height == 14 && !upgrade {
+            assert!(painted, "the question is visible at 80x14");
+        }
+        assert!(matches!(
+            app.handle_input_at_with_paste_provenance(&event, queued_at, PasteProvenance::Terminal),
+            InputOutcome::Unchanged
+        ));
+        if visible {
+            first_visible.get_or_insert(height);
+            assert!(matches!(
+                app.handle_input(&event),
+                InputOutcome::Action(Action::TrustFolder)
+            ));
+        } else {
+            assert!(matches!(app.handle_input(&event), InputOutcome::Unchanged));
+        }
+    }
+    eprintln!(
+        "upgrade={upgrade}: first flushed, answerable trust question: 80x{}",
+        first_visible.unwrap()
+    );
+}
+
+#[test]
+#[serial_test::serial(MEMORY_RELEASE_DEFER)]
+fn regression_r3_auth_done_reseed_preserves_trust_answer() {
+    let mut app = consent_pending_app();
+    app.set_consent_state(ConsentState::Done);
+    paint_welcome_for_regression(&mut app);
+    app.set_auth_state(AuthState::Done);
+    assert!(matches!(
+        app.handle_input(&key_event(KeyCode::Char('y'), KeyModifiers::NONE)),
+        InputOutcome::Action(Action::TrustFolder)
+    ));
+}
+
+#[test]
+fn regression_r3_real_screen_changes_request_redraw() {
+    for state in 0..3 {
+        let mut app = consent_pending_app();
+        // Avoid welcome animation ticks masking a missing redraw request.
+        app.active_view = ActiveView::Agent(crate::app::agent::AgentId(999));
+        app.tick();
+        match state {
+            0 => app.set_auth_state(AuthState::Pending { error: None }),
+            1 => app.set_trust_state(TrustState::Done),
+            _ => app.set_consent_state(ConsentState::Done),
+        }
+        assert!(app.tick(), "state setter {state} must request a frame");
+    }
 }

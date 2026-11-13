@@ -8,9 +8,7 @@ use crate::auth::{AuthManager, FuigoAuth, FuigoComConfig, run_auth_flow};
 use crate::leader::protocol::InternalMethod;
 use crate::util::fuigo_home;
 use agent_client_protocol as acp;
-use fuigo_acp_lib::{
-    AcpAgentGatewaySender as GatewaySender,
-};
+use fuigo_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use parking_lot::Mutex;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -161,9 +159,10 @@ fn spawn_agent_local(
     tokio::task::spawn_local(
         fuigo_acp_lib::AcpGatewayReceiver::<agent_client_protocol::AgentSide, _>::new(
             gw_rx,
-            crate::agent::park_hold::ParkHoldClient::new(conn, park_hold))
-            .with_on_meta(fuigo_file_utils::trace_context::span_from_meta_traceparent)
-            .run(),
+            crate::agent::park_hold::ParkHoldClient::new(conn, park_hold),
+        )
+        .with_on_meta(fuigo_file_utils::trace_context::span_from_meta_traceparent)
+        .run(),
     );
     handle_io
 }
@@ -256,6 +255,7 @@ where
 fn spawn_stdio_config_watcher<W>(
     acp_incoming_tx: &Arc<TokioMutex<W>>,
     agent_config: &AgentConfig,
+    auth_manager: &Arc<AuthManager>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> (
     Option<Rc<std::cell::RefCell<crate::config::watcher::ConfigFileWatcher>>>,
@@ -267,7 +267,11 @@ where
     let recursive_config_watch_enabled = {
         let user_cfg = crate::config::load_from_disk().ok();
         let requirements = crate::agent::config::read_requirements_toml();
-        crate::util::config::resolve_mcp_recursive_config_watch(requirements.as_ref(), user_cfg.as_ref(), None)
+        crate::util::config::resolve_mcp_recursive_config_watch(
+            requirements.as_ref(),
+            user_cfg.as_ref(),
+            None,
+        )
     };
     let cwd = std::env::current_dir().unwrap_or_default();
     let mut watch_paths = crate::config::find_project_configs(&cwd);
@@ -276,11 +280,12 @@ where
         watch_paths.push(home.join(".claude.json"));
     }
     let auth_scope = agent_config.fuigo_com_config.auth_scope();
-    let initial_auth_key_hash = fuigo_config::user_fuigo_home()
-        .map(|g| crate::auth::auth_json_path(&g))
-        .and_then(|auth_path| crate::auth::read_auth_json(&auth_path).ok())
+    let initial_auth_key_hash = auth_manager
+        .read_store()
+        .ok()
         .and_then(|store| {
-            crate::auth::lookup_auth(&store, &auth_scope).map(|a| crate::config::reloader::hash_auth_key(&a.key))
+            crate::auth::lookup_auth(&store, &auth_scope)
+                .map(|a| crate::config::reloader::hash_auth_key(&a.key))
         })
         .unwrap_or(0);
     let Some((watcher, events_rx)) = crate::config::watcher::ConfigFileWatcher::start(
@@ -311,9 +316,10 @@ where
         });
         tx
     });
-    let (config_update_tx, mut config_update_rx) = mpsc::unbounded_channel::<crate::config::reloader::ConfigUpdate>();
-    let initial_config =
-        crate::config::load_from_disk().unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
+    let (config_update_tx, mut config_update_rx) =
+        mpsc::unbounded_channel::<crate::config::reloader::ConfigUpdate>();
+    let initial_config = crate::config::load_from_disk()
+        .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
     let reloader = crate::config::reloader::ConfigReloader::new(
         fuigo_home::fuigo_home(),
         initial_auth_key_hash,
@@ -322,7 +328,8 @@ where
         None,
         config_update_tx,
         agent_config.memory_enabled_override,
-    );
+    )
+    .with_auth_manager(auth_manager.clone());
     tokio::spawn(reloader.run(events_rx, cancel));
     let acp_tx = acp_incoming_tx.clone();
     tokio::task::spawn_local(async move {
@@ -357,7 +364,10 @@ where
             };
             // A notification, not a request: its handling sends nothing back, so the client's stdout carries no reply
             // it never asked for.
-            let line = format!("{}\n", crate::leader::protocol::internal_notification(method, params));
+            let line = format!(
+                "{}\n",
+                crate::leader::protocol::internal_notification(method, params)
+            );
             let mut tx = acp_tx.lock().await;
             if let Err(e) = tx.write_all(line.as_bytes()).await {
                 warn!(error = %e, "failed to inject config reload into ACP stream");
@@ -444,8 +454,12 @@ pub async fn run_stdio_agent(
             auth_manager.start_system_power_listener();
             crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
             apply_otel_config(&auth_manager, &agent_config.fuigo_com_config);
-            let (_config_watcher, config_watcher_path_tx) =
-                spawn_stdio_config_watcher(&config_watcher_tx, &agent_config, cancel_for_agent.clone());
+            let (_config_watcher, config_watcher_path_tx) = spawn_stdio_config_watcher(
+                &config_watcher_tx,
+                &agent_config,
+                &auth_manager,
+                cancel_for_agent.clone(),
+            );
             let handle_io = spawn_agent_local(
                 agent_config,
                 auth_manager,
@@ -488,9 +502,9 @@ pub async fn run_headless(
     agent_config.mode = crate::agent::config::AgentMode::Headless;
     // P93: refuse a relay that is not FluxRouter-operated and not opted in to before anything else (no login, no
     // prefetch); `spawn_headless_relay` decides again on the relay config it opens.
-    if let Err(refused) = crate::agent::relay_opt_in::relay_bridge_gate(
-        &agent_config.fuigo_com_config.fuigo_ws_url,
-    ) {
+    if let Err(refused) =
+        crate::agent::relay_opt_in::relay_bridge_gate(&agent_config.fuigo_com_config.fuigo_ws_url)
+    {
         refused.record("headless");
         anyhow::bail!("{refused}");
     }
@@ -767,7 +781,10 @@ fn relay_config_for_session(
 }
 /// When the relay's socket drops, every ownership claim the relay held lapses (a session it owned goes to the first queued
 /// local claimant, or to the next local load).
-fn watch_relay_link(handle: &crate::agent::relay::RelayHandle, board: &crate::leader::RelayRefusalBoard) {
+fn watch_relay_link(
+    handle: &crate::agent::relay::RelayHandle,
+    board: &crate::leader::RelayRefusalBoard,
+) {
     if let Some(owners) = board.owner_board() {
         handle.on_link_down(std::sync::Arc::new(move || owners.relay_dropped()));
     }
@@ -1339,9 +1356,7 @@ pub async fn run_leader(
                 watch_paths.push(home.join(".claude.json"));
             }
             let auth_scope = agent_config.fuigo_com_config.auth_scope();
-            let initial_auth_key_hash = fuigo_config::user_fuigo_home()
-                .map(|g| crate::auth::auth_json_path(&g))
-                .and_then(|auth_path| crate::auth::read_auth_json(&auth_path).ok())
+            let initial_auth_key_hash = auth_manager_for_config.read_store().ok()
                 .and_then(|store| {
                     crate::auth::lookup_auth(&store, &auth_scope)
                         .map(|a| crate::config::reloader::hash_auth_key(&a.key))
@@ -1385,7 +1400,7 @@ pub async fn run_leader(
                     None,
                     config_update_tx,
                     agent_config.memory_enabled_override,
-                );
+                ).with_auth_manager(auth_manager_for_config.clone());
                 tokio::spawn(reloader.run(events_rx, cancel_clone.clone()));
                 Some(watcher)
             } else {
@@ -1401,6 +1416,17 @@ pub async fn run_leader(
             tokio::task::spawn_local(async move {
                 use crate::config::reloader::ConfigUpdate;
                 while let Some(update) = config_update_rx.recv().await {
+                    // Recheck queued auth notifications through the manager's store boundary.
+                    let update = match update {
+                        ConfigUpdate::Auth(_) | ConfigUpdate::AuthCleared => {
+                            match auth_manager_for_config.apply_store_reload() {
+                                Ok(Some(auth)) => ConfigUpdate::Auth(Box::new(auth)),
+                                Ok(None) => ConfigUpdate::AuthCleared,
+                                Err(_) => continue,
+                            }
+                        }
+                        update => update,
+                    };
                     match update {
                         ConfigUpdate::Auth(auth) => {
                             info!(
@@ -1418,10 +1444,7 @@ pub async fn run_leader(
                                 }),
                                 ),
                             );
-                            let session_for_relay = deferred_relay_arm
-                                .is_some()
-                                .then(|| (*auth).clone());
-                            auth_manager_for_config.hot_swap(*auth);
+                            let session_for_relay = deferred_relay_arm.is_some().then_some(*auth);
                             if let (Some(arm), Some(session)) = (
                                 deferred_relay_arm.take(),
                                 session_for_relay,
@@ -1441,7 +1464,6 @@ pub async fn run_leader(
                             }
                         }
                         ConfigUpdate::AuthCleared => {
-                            auth_manager_for_config.clear_in_memory();
                             let line = internal_reload_request_line(
                                 "config-auth-cleared",
                                 InternalMethod::AuthCleared,
@@ -1562,15 +1584,24 @@ pub async fn run_leader(
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     Ok(())
 }
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
-#[cfg(test)]
-#[path = "p93_relay_opt_in_tests.rs"]
-mod p93_relay_opt_in_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "p125_relay_tests.rs"]
 mod p125_relay_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
+#[cfg(test)]
+#[path = "p93_relay_opt_in_tests.rs"]
+mod p93_relay_opt_in_tests;
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1686,7 +1717,9 @@ mod tests {
         (format!("{wss}/"), "https://api.fluxrouter.ai".to_string())
     }
     /// A `RelayConfig` built via the production constructor (`for_session`) with a relay-eligible x.ai OIDC session.
-    fn test_relay_config((ws_url, ws_origin): (String, String)) -> crate::agent::relay::RelayConfig {
+    fn test_relay_config(
+        (ws_url, ws_origin): (String, String),
+    ) -> crate::agent::relay::RelayConfig {
         let auth = FuigoAuth {
             auth_mode: AuthMode::Oidc,
             oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_string()),
@@ -1796,7 +1829,10 @@ mod tests {
         for (ws_url, origin) in [
             (format!("ws://{addr}"), format!("http://{addr}")),
             (format!("wss://{addr}"), format!("https://{addr}")),
-            (format!("wss://localhost:{}", addr.port()), format!("https://localhost:{}", addr.port())),
+            (
+                format!("wss://localhost:{}", addr.port()),
+                format!("https://localhost:{}", addr.port()),
+            ),
         ] {
             let (tx, rx) = mpsc::unbounded_channel();
             let (_to_ws, handle) = crate::agent::relay::spawn_relay_connection(
@@ -1811,12 +1847,49 @@ mod tests {
         // reconnect loop), well before anyone cancels it.
         for mut rx in loops_done {
             let closed = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
-            assert!(matches!(closed, Ok(None)), "the refused relay loop must stop by itself");
+            assert!(
+                matches!(closed, Ok(None)),
+                "the refused relay loop must stop by itself"
+            );
         }
         assert!(!cancel.is_cancelled());
-        assert_eq!(count.load(Ordering::SeqCst), 0, "a refused relay URL was connected");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "a refused relay URL was connected"
+        );
         cancel.cancel();
     }
+    #[tokio::test]
+    async fn r7_1_headless_inline_auth_on_fresh_home_starts() {
+        let Some(front) = relay_child("r7_1_headless_inline_auth_on_fresh_home_starts") else {
+            return;
+        };
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+        crate::agent::config::Config::install_test_trusted_origins();
+        let (addr, count) = spawn_mock_relay_server().await;
+        let (ws_url, ws_origin) = fronted_relay(&front, addr);
+        let mut config = AgentConfig::default();
+        config.fuigo_com_config.fuigo_ws_url = ws_url;
+        config.fuigo_com_config.fuigo_ws_origin = ws_origin;
+        let auth = FuigoAuth {
+            email: None,
+            user_id: String::new(),
+            ..oidc_session("inline-test-access", chrono::Utc::now())
+        };
+        let _inline =
+            fuigo_test_support::EnvGuard::set("FUIGO_AUTH", &serde_json::to_string(&auth).unwrap());
+        let path = crate::auth::auth_json_path(&fuigo_home::fuigo_home());
+        assert!(!path.exists());
+        tokio::select! {
+            result = run_headless(&config, false, None) => {
+                panic!("headless exited before connecting its relay: {result:?}");
+            }
+            () = wait_for_connection(&count, "headless with inline auth") => {}
+        }
+        assert!(!path.exists(), "inline auth must remain memory only");
+    }
+
     /// Regression test for the bare-leader relay gating bug.
     /// A bare `fuigo agent leader` (devbox/systemd: no local IPC clients, `relay_on_demand == false`) must connect the grok.com relay eagerly.
     /// Remote prompts arrive *through* the relay, so on such a leader no headless-registration demand signal can ever fire.

@@ -784,7 +784,7 @@ pub(in crate::app::dispatch) fn dispatch_decline_trust_folder(app: &mut AppView)
 /// Resolves `trust_state` to `Done`, focuses the welcome prompt, and replays the deferred session startup once auth is also resolved.
 /// Drains only when [`AppView::session_startup_allowed`], the same predicate `AuthComplete` uses, so whichever gate resolves last drains exactly once.
 pub(in crate::app::dispatch) fn finish_trust(app: &mut AppView) -> Vec<Effect> {
-    app.trust_state = TrustState::Done;
+    app.set_trust_state(TrustState::Done);
     app.trust_error = None;
     app.welcome_prompt_focused = !app.is_access_blocked();
     if app.session_startup_allowed() {
@@ -821,7 +821,7 @@ pub(in crate::app::dispatch) fn dispatch_accept_consent(app: &mut AppView) -> Ve
     effects
 }
 fn finish_consent(app: &mut AppView) -> Vec<Effect> {
-    app.consent_state = ConsentState::Done;
+    app.set_consent_state(ConsentState::Done);
     app.welcome_prompt_focused = !app.is_access_blocked();
     if app.session_startup_allowed() {
         drain_startup_actions(app)

@@ -3469,3 +3469,54 @@ fn u42_b3_delete_refusal_reaches_scrollback_whole_with_one_prefix() {
         assert_eq!(u42_last_system_text(&app), format!("Couldn't delete session: {refusal}"));
     }
 }
+
+#[tokio::test]
+async fn r5_3_logout_keeps_session_on_failure_and_exits_on_success() {
+    use fuigo_acp_lib::AcpAgentMessage;
+    for failure in [Some("auth lock timed out"), Some("Permission denied"), None] {
+        let mut app = test_app_with_agent();
+        app.auth_state = AuthState::Done;
+        let session = app.active_agent().unwrap().session.session_id.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (progress_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut tasks = tokio::task::JoinSet::new();
+        crate::app::effects::execute(
+            Effect::Logout,
+            &mut tasks,
+            &tx,
+            std::path::Path::new("."),
+            &crate::app::effects::SessionFlags::default(),
+            &progress_tx,
+        );
+        let AcpAgentMessage::ExtMethod(request) = rx.recv().await.unwrap() else {
+            panic!("logout request")
+        };
+        assert_eq!(request.request.method.as_ref(), "fuigo/auth/logout");
+        let response = match failure {
+            Some(message) => {
+                Err(acp::Error::internal_error().data(serde_json::json!({"message": message})))
+            }
+            None => Ok(acp::ExtResponse::new(std::sync::Arc::from(
+                serde_json::value::to_raw_value(&serde_json::json!({})).unwrap(),
+            ))),
+        };
+        request.response_tx.send(response).unwrap();
+        let result = tasks.join_next().await.unwrap().unwrap();
+        if failure.is_some() {
+            assert!(
+                !matches!(result, TaskResult::LogoutComplete),
+                "failed logout must not report completion"
+            );
+        } else {
+            assert!(matches!(result, TaskResult::LogoutComplete));
+        }
+        dispatch_task_result(result, &mut app);
+        if let Some(message) = failure {
+            assert!(matches!(app.auth_state, AuthState::Done));
+            assert_eq!(app.active_agent().unwrap().session.session_id, session);
+            assert!(read_toast(&app).contains(message));
+        } else {
+            assert!(matches!(app.auth_state, AuthState::Pending { error: None }));
+        }
+    }
+}

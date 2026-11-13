@@ -990,6 +990,17 @@ fn deny_exact_paths_block_read_write_rename() {
     );
 }
 #[test]
+fn deny_dot_prefixed_paths_block_read_write_rename() {
+    run_deny_case(
+        "dotted",
+        "denydot",
+        &["./.env", "./src/./server.pem"],
+        &[".env", "src/server.pem"],
+        &["readable.txt"],
+        &[],
+    );
+}
+#[test]
 fn deny_globs_block_read_write_rename() {
     run_deny_case(
         "glob",

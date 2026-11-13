@@ -1,0 +1,6 @@
+--bind
+/tmp
+/tmp
+--ro-bind
+/tmp/fuigo-workspace-write-golden
+/tmp/fuigo-workspace-write-golden

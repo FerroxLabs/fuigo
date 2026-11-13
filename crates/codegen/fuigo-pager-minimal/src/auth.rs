@@ -27,7 +27,10 @@ pub(super) enum MinimalAuthHint {
     /// Authenticated, but the cwd has untrusted repo-local config: ask before creating a session.
     /// Input (y/Enter trust, n/Esc continue untrusted, q quit) is handled by the welcome interceptor in `AppView::handle_input`; this is render-only.
     /// `error`: why the last "yes" recorded nothing (P167), shown under the question until it is answered.
-    TrustFolder { workspace: PathBuf, error: Option<String> },
+    TrustFolder {
+        workspace: PathBuf,
+        error: Option<String>,
+    },
     /// Authenticated and trusted; the session is being created (brief transient).
     Starting,
 }
@@ -93,7 +96,9 @@ pub(super) fn auth_hint_rows(hint: &MinimalAuthHint, width: u16) -> u16 {
             let path = workspace.display().to_string();
             let path_rows = wrapped_char_rows(&path, width, Shown::Placeholder);
             // + blank + wrapped error, when the last "yes" recorded nothing
-            let error_rows = error.as_deref().map_or(0, |e| 1 + wrapped_char_rows(e, width, Shown::Placeholder));
+            let error_rows = error
+                .as_deref()
+                .map_or(0, |e| 1 + wrapped_char_rows(e, width, Shown::Placeholder));
             1 + path_rows + error_rows + 1 + 2 + 1 + 3 + 1 + 1
         }
         MinimalAuthHint::Starting => 1,
@@ -338,7 +343,10 @@ pub(super) fn render_auth(buf: &mut Buffer, area: Rect, theme: &Theme, hint: &Mi
                 area,
                 y,
                 bottom,
-                Line::from(Span::styled("No: settings not loaded, every command asks.", gray)),
+                Line::from(Span::styled(
+                    "No: settings not loaded, every command asks.",
+                    gray,
+                )),
             );
             y = put_line(buf, area, y, bottom, Line::default());
             y = put_line(
@@ -410,7 +418,15 @@ mod tests {
         );
         let area = Rect::new(0, 0, 60, 3);
         let mut buf = Buffer::empty(area);
-        render_url(&mut buf, area, 0, 3, dirty, Style::default(), Shown::UrlBytes);
+        render_url(
+            &mut buf,
+            area,
+            0,
+            3,
+            dirty,
+            Style::default(),
+            Shown::UrlBytes,
+        );
         let row: String = (0..60).map(|x| buf[(x, 0)].symbol().to_string()).collect();
         assert_eq!(row.trim_end(), shown);
     }
@@ -421,10 +437,21 @@ mod tests {
     fn path_painting_shows_hidden_characters_as_a_placeholder() {
         let area = Rect::new(0, 0, 40, 3);
         let mut buf = Buffer::empty(area);
-        render_url(&mut buf, area, 0, 3, "/tmp/a\u{00ad}b\u{e0041}c", Style::default(), Shown::Placeholder);
+        render_url(
+            &mut buf,
+            area,
+            0,
+            3,
+            "/tmp/a\u{00ad}b\u{e0041}c",
+            Style::default(),
+            Shown::Placeholder,
+        );
         let row: String = (0..40).map(|x| buf[(x, 0)].symbol().to_string()).collect();
         assert_eq!(row.trim_end(), "/tmp/a\u{fffd}b\u{fffd}c");
-        assert_eq!(wrapped_char_rows("/tmp/a\u{00ad}b\u{e0041}c", 5, Shown::Placeholder), 2);
+        assert_eq!(
+            wrapped_char_rows("/tmp/a\u{00ad}b\u{e0041}c", 5, Shown::Placeholder),
+            2
+        );
     }
 
     #[test]
@@ -502,6 +529,7 @@ mod tests {
         let trust = TrustState::Pending {
             workspace: PathBuf::from("/tmp/untrusted-repo"),
             upgrade: false,
+            painted_at: None,
         };
         match minimal_auth_hint(&AuthState::Done, &trust, true, false, None) {
             MinimalAuthHint::TrustFolder { workspace, error } => {
@@ -523,7 +551,13 @@ mod tests {
 
         // Trust is not offered while auth is still in flight.
         assert!(matches!(
-            minimal_auth_hint(&AuthState::Pending { error: None }, &trust, true, false, None),
+            minimal_auth_hint(
+                &AuthState::Pending { error: None },
+                &trust,
+                true,
+                false,
+                None
+            ),
             MinimalAuthHint::SigningIn { .. }
         ));
     }
@@ -569,11 +603,20 @@ mod tests {
             text.contains("/home/agent/project"),
             "workspace path: {text:?}"
         );
-        assert!(text.contains("Yes, trust this folder"), "yes option: {text:?}");
-        assert!(text.contains("No, continue without trusting it"), "no option: {text:?}");
+        assert!(
+            text.contains("Yes, trust this folder"),
+            "yes option: {text:?}"
+        );
+        assert!(
+            text.contains("No, continue without trusting it"),
+            "no option: {text:?}"
+        );
         assert!(text.contains("Quit"), "quit option: {text:?}");
         assert!(text.contains("Enter or y to trust"), "hint line: {text:?}");
-        assert!(text.contains("runs shell commands here"), "what trust means: {text:?}");
+        assert!(
+            text.contains("runs shell commands here"),
+            "what trust means: {text:?}"
+        );
     }
 
     /// P167: when the last "yes" recorded nothing, the minimal trust question shows why (it paints no welcome toast).
@@ -584,6 +627,7 @@ mod tests {
         let trust = TrustState::Pending {
             workspace: PathBuf::from("/home/agent/project"),
             upgrade: false,
+            painted_at: None,
         };
         let reason = "Couldn't save folder trust: the trust store could not be read.";
         let hint = minimal_auth_hint(&AuthState::Done, &trust, true, false, Some(reason));
@@ -591,8 +635,14 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_auth(&mut buf, area, &theme, &hint);
         let text = buffer_text(&buf, area);
-        assert!(text.contains("trust store could not be read"), "error: {text:?}");
-        assert!(text.contains("Yes, trust this folder"), "the question stays answerable: {text:?}");
+        assert!(
+            text.contains("trust store could not be read"),
+            "error: {text:?}"
+        );
+        assert!(
+            text.contains("Yes, trust this folder"),
+            "the question stays answerable: {text:?}"
+        );
         let without = MinimalAuthHint::TrustFolder {
             workspace: PathBuf::from("/home/agent/project"),
             error: None,

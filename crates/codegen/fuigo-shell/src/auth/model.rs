@@ -43,8 +43,39 @@ pub enum AuthMode {
 /// Single source for every comparison site.
 pub(crate) const TEAM_PRINCIPAL_TYPE: &str = "Team";
 
+/// Exact persisted entry observed by a credential reader. Kept in memory only.
+/// The outer option distinguishes an absent entry from a present legacy login.
+#[derive(Clone, Debug)]
+pub struct LoginSnapshot {
+    pub scope: String,
+    pub generation: Option<Option<String>>,
+    /// Sign-in migration also observes its destination before I/O. Refresh has none.
+    pub destination: Option<Box<LoginSnapshot>>,
+}
+
+impl LoginSnapshot {
+    pub(crate) fn matches(&self, store: &AuthStore) -> bool {
+        store.get(&self.scope).map(|auth| &auth.login_generation) == self.generation.as_ref()
+            && self
+                .destination
+                .as_ref()
+                .is_none_or(|destination| destination.matches(store))
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FuigoAuth {
+    /// Source key and generation for conditional persistence; never serialized.
+    #[serde(skip)]
+    pub login_snapshot: Option<LoginSnapshot>,
+    /// Identifies one sign-in in this scope, independently of tokens and account enrichment.
+    /// Legacy entries deserialize as None: an unchanged legacy login can be replaced on
+    /// its first upgrade sign-in. Every completed sign-in installs a fresh generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_generation: Option<String>,
+    /// Digest of the configured external command, never its potentially secret text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_provider_id: Option<String>,
     pub key: String,
     pub auth_mode: AuthMode,
     pub create_time: DateTime<Utc>,
@@ -182,6 +213,8 @@ impl FuigoAuth {
 
     /// Carry `/user`-derived fields from a previous auth so refresh rebuilds don't drop them.
     pub(crate) fn carry_user_profile_from(&mut self, prev: &FuigoAuth) {
+        self.login_generation = prev.login_generation.clone();
+        self.login_snapshot = prev.login_snapshot.clone();
         self.user_id = prev.user_id.clone();
         self.email = prev.email.clone();
         self.principal_type = prev.principal_type.clone();
@@ -201,6 +234,9 @@ impl FuigoAuth {
 impl Default for FuigoAuth {
     fn default() -> Self {
         Self {
+            login_generation: None,
+            external_provider_id: None,
+            login_snapshot: None,
             key: String::new(),
             auth_mode: AuthMode::Oidc,
             create_time: Utc::now(),
@@ -295,26 +331,27 @@ pub(crate) struct UserInfo {
 /// They are validated via a per-request DB lookup server-side, which fails at high volume.
 /// Skipping them here forces affected users to re-authenticate via OIDC on next launch.
 pub fn lookup_auth(map: &AuthStore, scope: &str) -> Option<FuigoAuth> {
-    let auth = map
-        .get(scope)
-        .cloned()
-        .or_else(|| inherited_lookup(map, scope))?;
+    use crate::auth::backend::{ActiveAuthBackend, AuthBackend};
+    let key = if map.contains_key(scope) {
+        scope
+    } else {
+        ActiveAuthBackend::default()
+            .inherited_scopes()
+            .iter()
+            .copied()
+            .find(|key| *key != scope && map.contains_key(*key))?
+    };
+    let mut auth = map.get(key)?.clone();
     if auth.auth_mode == AuthMode::WebLogin {
         tracing::info!("auth: ignoring legacy WebLogin token — re-authentication required");
         return None;
     }
+    auth.login_snapshot = Some(LoginSnapshot {
+        destination: None,
+        scope: key.to_owned(),
+        generation: Some(auth.login_generation.clone()),
+    });
     Some(auth)
-}
-
-/// Falls back to a scope the active backend inherits, skipping the one already tried.
-fn inherited_lookup(map: &AuthStore, scope: &str) -> Option<FuigoAuth> {
-    use crate::auth::backend::{ActiveAuthBackend, AuthBackend};
-
-    ActiveAuthBackend::default()
-        .inherited_scopes()
-        .iter()
-        .filter(|inherited| **inherited != scope)
-        .find_map(|inherited| map.get(*inherited).cloned())
 }
 
 /// Early-invalidation buffer.
@@ -348,6 +385,9 @@ mod tests {
 
     fn make_auth(mode: AuthMode) -> FuigoAuth {
         FuigoAuth {
+            login_generation: None,
+            external_provider_id: None,
+            login_snapshot: None,
             key: "k".into(),
             auth_mode: mode,
             create_time: Utc::now(),

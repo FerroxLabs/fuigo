@@ -272,6 +272,17 @@ impl BlockContent for WebFetchToolCallBlock {
                     );
                 }
 
+                if let Some(error) = &self.error {
+                    lines.push(Line::default().into());
+                    lines.extend(
+                        crate::render::wrapping::word_wrap_lines(
+                            [Line::styled(error.clone(), theme.fg(theme.accent_error))],
+                            ctx.content_width().max(1),
+                        )
+                        .into_iter()
+                        .map(BlockLine::from),
+                    );
+                }
                 BlockOutput { lines }
             }
         }
@@ -315,7 +326,7 @@ impl BlockContent for WebFetchToolCallBlock {
     }
 
     fn is_foldable(&self) -> bool {
-        self.error.is_none() && self.output.is_some()
+        self.error.is_some() || self.output.is_some()
     }
 
     fn default_display_mode(&self) -> DisplayMode {
@@ -368,6 +379,25 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn row_80_b1_expanded_failed_fetch_shows_reason() {
+        let block =
+            WebFetchToolCallBlock::new("https://example.com").with_error("connection timed out");
+        for width in [40, 43, 60, 80] {
+            let mut context = ctx(DisplayMode::Expanded);
+            context.width = width;
+            let text = block
+                .output(&context)
+                .lines
+                .iter()
+                .map(|line| line.content.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains("connection timed out"), "{width}: {text}");
+            assert!(block.is_foldable(), "failed fetch must be expandable");
+        }
     }
 
     #[test]

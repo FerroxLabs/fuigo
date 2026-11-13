@@ -2210,6 +2210,12 @@ mod tests {
         }
     }
 
+    #[test]
+    fn row_82_b12_question_copy_label_keeps_inline_code() {
+        // The question card's y handler copies this normalized label plus the raw description.
+        assert_eq!(normalize_label("Use `sample()`\nnow"), "Use `sample()` now");
+    }
+
     /// Regression: `draw()` used to size the question panel by wrapping at the full inner width.
     /// The renderer wraps at `width - QUESTION_VIEW_HPAD`, so the under-allocated panel let the unclipped chrome walk past the buffer bottom.
     /// That aborted in ratatui (`index outside of buffer: ... but index is (5, H)`).

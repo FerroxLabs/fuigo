@@ -244,14 +244,33 @@ fn home_writable_scenario(home: &Path) {
         "rewrite ~/.gitconfig",
         fs::write(home.join(".gitconfig"), "[core]\n\thooksPath = /tmp/evil\n"),
     );
-    expect_ok(
-        "mkdir ~/.config/git",
-        fs::create_dir_all(home.join(".config/git")),
-    );
-    expect_denied(
-        "create ~/.config/git/config",
-        fs::write(home.join(".config/git/config"), "[core]\n\tfsmonitor = evil\n"),
-    );
+    // macOS denies creating a missing ancestor of a protected config (GitPathKind::MissingAncestor),
+    // so a prepared directory holding `config` cannot be renamed into place; Linux binds the leaf.
+    if cfg!(target_os = "macos") {
+        expect_denied(
+            "mkdir ~/.config/git",
+            fs::create_dir_all(home.join(".config/git")),
+        );
+        match fs::write(
+            home.join(".config/git/config"),
+            "[core]\n\tfsmonitor = evil\n",
+        ) {
+            Ok(()) => fail("create ~/.config/git/config was permitted".into()),
+            Err(_) => eprintln!("OK: create ~/.config/git/config impossible"),
+        }
+    } else {
+        expect_ok(
+            "mkdir ~/.config/git",
+            fs::create_dir_all(home.join(".config/git")),
+        );
+        expect_denied(
+            "create ~/.config/git/config",
+            fs::write(
+                home.join(".config/git/config"),
+                "[core]\n\tfsmonitor = evil\n",
+            ),
+        );
+    }
     expect_ok("write other home file", fs::write(home.join("notes.txt"), "x"));
 }
 

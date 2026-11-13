@@ -837,7 +837,7 @@ fn tab_content(
             TabContent::from_lines(context_tab_lines(state, theme, width))
         }
         UsageInfoTab::UsageLimit => {
-            TabContent::from_lines(usage_limit_lines(state, balance, theme))
+            TabContent::from_lines(usage_limit_lines(state, balance, theme, width as usize))
         }
         UsageInfoTab::SessionInfo => session_info_content(state, theme),
     }
@@ -878,6 +878,7 @@ fn usage_limit_lines(
     state: &UsageInfoModalState,
     balance: Option<&CreditBalance>,
     theme: &Theme,
+    width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -888,7 +889,7 @@ fn usage_limit_lines(
     } else if let Some(url) = &state.ctx.billing_redirect_url {
         lines.push(plain(theme, format!("Please check your usage on {url}")));
     } else if let Some(bal) = balance {
-        lines.extend(allowance_lines(state, bal, theme));
+        lines.extend(allowance_lines(state, bal, theme, width));
     } else if let Some(error) = &state.billing_error {
         lines.push(muted_line(theme, format!("Couldn't load usage: {error}")));
     } else if state.billing_loading {
@@ -914,13 +915,14 @@ fn usage_limit_lines(
         }
         lines.push(muted_line(theme, "Loading session usage\u{2026}"));
     }
-    lines
+    crate::render::wrapping::word_wrap_lines(lines, width.max(1))
 }
 
 fn allowance_lines(
     state: &UsageInfoModalState,
     bal: &CreditBalance,
     theme: &Theme,
+    width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -932,23 +934,22 @@ fn allowance_lines(
     lines.push(Line::styled(header, header_style(theme)));
     lines.push(Line::default());
 
-    const BAR_WIDTH: usize = 30;
+    let percentage = format!("  {}%", bal.usage_pct.floor() as i64);
+    let bar_width =
+        30.min(width.saturating_sub(unicode_width::UnicodeWidthStr::width(percentage.as_str())));
     let pct = bal.usage_pct.clamp(0.0, 100.0);
-    let filled = (((pct / 100.0) * BAR_WIDTH as f64).round() as usize).min(BAR_WIDTH);
+    let filled = (((pct / 100.0) * bar_width as f64).round() as usize).min(bar_width);
     lines.push(Line::from(vec![
         Span::styled(
             "\u{2588}".repeat(filled),
             Style::default().fg(theme.gray_bright),
         ),
         Span::styled(
-            "\u{2591}".repeat(BAR_WIDTH - filled),
+            "\u{2591}".repeat(bar_width - filled),
             Style::default().fg(theme.gray_dim),
         ),
         // Floored to match the backend's truncation.
-        Span::styled(
-            format!("  {}%", bal.usage_pct.floor() as i64),
-            Style::default().fg(theme.text_primary),
-        ),
+        Span::styled(percentage, Style::default().fg(theme.text_primary)),
     ]));
 
     if let Some(reset) = &bal.period_end_display {
@@ -1090,6 +1091,59 @@ mod tests {
     }
 
     #[test]
+    fn row_80_b5_narrow_usage_keeps_percentage_and_billing_url() {
+        let _theme = crate::theme::cache::pin_theme();
+        let theme = Theme::current();
+        let bal = CreditBalance {
+            usage_pct: 100.0,
+            effective_usage_pct: 100.0,
+            period_end_display: None,
+            pay_as_you_go: false,
+            on_demand_cap_cents: None,
+            on_demand_used_cents: None,
+            prepaid_balance_cents: None,
+            period_type: None,
+            is_unified_billing_user: None,
+        };
+        for width in [40, 43, 60, 80] {
+            let area = Rect::new(0, 0, width, 24);
+            let mut state = state_with_session();
+            state.ctx.subscription_tier = None;
+            let mut buf = Buffer::empty(area);
+            render_usage_modal(&mut buf, area, &mut state, Some(&bal), false, &theme);
+            let text = (0..area.height)
+                .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains("100%"), "{width}: {text}");
+            let url = "https://example.com/billing/account";
+            state.ctx.billing_redirect_url = Some(url.into());
+            render_usage_modal(&mut buf, area, &mut state, None, false, &theme);
+            let visible = (state.content_rect.y..state.content_rect.bottom())
+                .map(|y| {
+                    (state.content_rect.x..state.content_rect.right())
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                        .trim()
+                        .to_owned()
+                })
+                .collect::<String>();
+            assert!(visible.contains(url), "{width}: {visible}");
+            for height in [1, 2, 3] {
+                let area = Rect::new(0, 0, width, height);
+                render_usage_modal(
+                    &mut Buffer::empty(area),
+                    area,
+                    &mut state,
+                    None,
+                    false,
+                    &theme,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn tab_cycling_wraps_and_resets_scroll() {
         let mut state = state_with_session();
         state.scroll = 7;
@@ -1135,7 +1189,7 @@ mod tests {
             is_unified_billing_user: None,
         };
         let theme = Theme::current();
-        let lines = usage_limit_lines(&state, Some(&bal), &theme);
+        let lines = usage_limit_lines(&state, Some(&bal), &theme, 80);
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         assert_eq!(text[0], "Weekly limit (SuperGrok)");
         assert!(text[2].ends_with("50%"), "bar row: {:?}", text[2]);
@@ -1157,20 +1211,20 @@ mod tests {
         let theme = Theme::current();
         let mut state = state_with_session();
         state.billing_loading = true;
-        let lines = usage_limit_lines(&state, None, &theme);
+        let lines = usage_limit_lines(&state, None, &theme, 80);
         assert!(lines[0].to_string().contains("Loading usage"));
 
         state.ctx.billing_redirect_url = Some("https://x.example/usage".to_string());
-        let lines = usage_limit_lines(&state, None, &theme);
+        let lines = usage_limit_lines(&state, None, &theme, 80);
         assert!(lines[0].to_string().contains("https://x.example/usage"));
 
         state.ctx.usage_visible = false;
-        let lines = usage_limit_lines(&state, None, &theme);
+        let lines = usage_limit_lines(&state, None, &theme, 80);
         assert!(lines[0].to_string().contains("managed by your team"));
 
         // Gateway chat sessions show no billing at all
         state.ctx.chat_kind = true;
-        let lines = usage_limit_lines(&state, None, &theme);
+        let lines = usage_limit_lines(&state, None, &theme, 80);
         assert!(lines[0].to_string().contains("Loading session usage"));
     }
 

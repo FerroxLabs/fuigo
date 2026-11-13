@@ -582,9 +582,12 @@ async fn devbox_purge_waits_for_a_held_lock_and_never_purges_unlocked() {
     let (dir, before, _held) = held_lock_home();
     let mgr = manager(dir.path());
     let started = std::time::Instant::now();
-    let result = bounded(mgr.purge_and_save(manager_auth("new-000001".into())))
-        .await
-        .map(drop);
+    let result = bounded(mgr.purge_and_save(
+        manager_auth("new-000001".into()),
+        mgr.read_login_auth().as_ref(),
+    ))
+    .await
+    .map(drop);
     assert_waited_out_and_untouched(dir.path(), &before, started, result);
 }
 

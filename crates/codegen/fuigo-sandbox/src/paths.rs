@@ -9,11 +9,17 @@ pub(crate) fn fuigo_home() -> PathBuf {
     fuigo_config::fuigo_home()
 }
 
+/// The sessions root used by sandbox grants, diagnostics, and the root audit log.
+/// This names the root; writes within individual session folders use SessionWriter.
+pub(crate) fn sessions_root() -> PathBuf {
+    fuigo_home().join("sessions")
+}
+
 /// On-disk JSONL audit log under the sessions directory.
 ///
 /// Strict writes it via the sessions directory grant (not a file grant on the fuigo home parent, which would follow a planted symlink).
 pub(crate) fn sandbox_events_log_path() -> PathBuf {
-    fuigo_home().join("sessions").join("sandbox-events.jsonl")
+    sessions_root().join("sandbox-events.jsonl")
 }
 
 // ── Device files & directories ──────────────────────────────────────────────
@@ -93,7 +99,7 @@ pub(crate) fn essential_writable_paths_strict(workspace: &Path) -> Vec<PathBuf> 
 fn strict_writable_paths(workspace: &Path, persistence_off: bool) -> Vec<PathBuf> {
     let mut paths = vec![workspace.to_path_buf()];
     if !persistence_off {
-        paths.push(fuigo_home().join("sessions"));
+        paths.push(sessions_root());
     }
     paths.extend(temp_writable_paths());
     paths
@@ -119,6 +125,9 @@ mod r2_tests {
         assert!(strict_writable_paths(workspace, false).contains(&sessions));
         let off = strict_writable_paths(workspace, true);
         assert!(!off.iter().any(|p| p.starts_with(&sessions)), "{off:?}");
-        assert!(off.contains(&workspace.to_path_buf()), "the workspace stays writable: {off:?}");
+        assert!(
+            off.contains(&workspace.to_path_buf()),
+            "the workspace stays writable: {off:?}"
+        );
     }
 }

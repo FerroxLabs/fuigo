@@ -1988,7 +1988,7 @@ fn render_picker_content_inner(
         let msg_style = Style::default().fg(theme.gray);
         let cx = content_area.x + content_area.width.saturating_sub(msg.width() as u16) / 2;
         let cy = content_area.y + content_area.height / 2;
-        buf.set_string(cx, cy, msg, msg_style);
+        buf.set_stringn(cx, cy, msg, content_area.width as usize, msg_style);
         return empty_hit;
     }
 
@@ -1997,7 +1997,13 @@ fn render_picker_content_inner(
         let msg_style = Style::default()
             .fg(theme.gray_dim)
             .bg(picker_base_bg(bg, theme));
-        buf.set_string(content_area.x, content_area.y, "  No matches", msg_style);
+        buf.set_stringn(
+            content_area.x,
+            content_area.y,
+            "  No matches",
+            content_area.width as usize,
+            msg_style,
+        );
         return empty_hit;
     }
 
@@ -3193,6 +3199,75 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         })
+    }
+
+    #[test]
+    fn r2_10_loading_picker_stays_inside_content() {
+        let theme = Theme::current();
+        for width in [1, 3, 8, 40, 43, 60, 80] {
+            for height in [1, 2, 3] {
+                let area = Rect::new(0, 0, width + 2, height + 2);
+                let inner = Rect::new(1, 1, width, height);
+                let mut buf = Buffer::empty(area);
+                for y in 0..area.height {
+                    buf.set_string(width + 1, y, "|", Style::default());
+                }
+                render_picker_content_inner(
+                    &mut buf,
+                    inner,
+                    &theme,
+                    &mut PickerState::default(),
+                    &[],
+                    &[],
+                    &[],
+                    None,
+                    true,
+                    0,
+                    None,
+                );
+                for y in 0..area.height {
+                    assert_eq!(
+                        buf[(width + 1, y)].symbol(),
+                        "|",
+                        "width={width}, height={height}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn row_81_b25_empty_picker_stays_inside_content() {
+        let theme = Theme::current();
+        for width in [1, 3, 8, 40, 43, 60, 80] {
+            let area = Rect::new(0, 0, width + 2, 3);
+            let inner = Rect::new(1, 1, width, 1);
+            let mut buf = Buffer::empty(area);
+            buf.set_string(width + 1, 1, "|", Style::default());
+            let mut state = PickerState::default();
+            render_picker_content_inner(
+                &mut buf,
+                inner,
+                &theme,
+                &mut state,
+                &[],
+                &[],
+                &[],
+                None,
+                false,
+                0,
+                None,
+            );
+            assert_eq!(
+                buf[(width + 1, 1)].symbol(),
+                "|",
+                "border overwritten at {width}"
+            );
+            if width >= 40 {
+                let text: String = (1..=width).map(|x| buf[(x, 1)].symbol()).collect();
+                assert!(text.contains("No matches"), "{text}");
+            }
+        }
     }
 
     /// Clicking the search bar hides the list selection; leaving search with Esc must bring it back.

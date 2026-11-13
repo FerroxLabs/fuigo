@@ -1,4 +1,4 @@
-//! Sandbox profiles. Built-in: `workspace`, `devbox`, `read-only`, `strict`,
+//! Sandbox profiles. Built-in: `workspace`, `devbox`, `read-only`, `strict`, `minimal`,
 //! `off`. Custom profiles via `~/.fuigo/sandbox.toml` or `.fuigo/sandbox.toml`.
 //! A custom profile's `deny` list is kernel-enforced (read and write/rename) on both platforms.
 
@@ -60,6 +60,9 @@ pub struct ProfileConfig {
     pub extends: Option<String>,
     #[serde(default)]
     pub restrict_network: Option<bool>,
+    /// Omission preserves the base profile; false write-denies the launch tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_write: Option<bool>,
     #[serde(default)]
     pub read_only: Vec<String>,
     #[serde(default)]
@@ -72,6 +75,16 @@ pub struct ProfileConfig {
 pub struct SandboxConfig {
     #[serde(default)]
     pub profiles: HashMap<String, ProfileConfig>,
+    /// Definition provenance, supplied by the file loader, never by TOML.
+    /// Configs built directly by callers retain the user-global interpretation.
+    #[serde(skip)]
+    pub sources: HashMap<String, ProfileSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileSource {
+    UserGlobal(PathBuf),
+    Project(PathBuf),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -81,13 +94,35 @@ pub enum ProfileName {
     Devbox,
     ReadOnly,
     Strict,
+    Minimal,
     Off,
     Custom(String),
 }
 
 impl ProfileName {
+    /// Select a profile using the merged config. User-global custom `minimal` wins;
+    /// A shadowed name also remains custom when validating an `extends` base.
+    pub fn selected<'a>(&'a self, config: &SandboxConfig) -> std::borrow::Cow<'a, Self> {
+        if *self == Self::Minimal
+            && config.profiles.contains_key("minimal")
+            && !matches!(
+                config.sources.get("minimal"),
+                Some(ProfileSource::Project(_))
+            )
+        {
+            if crate::startup_warnings::first("shadowed-minimal".into()) {
+                fuigo_tty_utils::cli_eprintln!(
+                    "WARNING: user sandbox profile 'minimal' shadows the built-in 'minimal' profile"
+                );
+            }
+            std::borrow::Cow::Owned(Self::Custom("minimal".into()))
+        } else {
+            std::borrow::Cow::Borrowed(self)
+        }
+    }
+
     pub(crate) fn restricts_network(&self) -> bool {
-        matches!(self, Self::ReadOnly | Self::Strict)
+        matches!(self, Self::ReadOnly | Self::Strict | Self::Minimal)
     }
 }
 
@@ -98,6 +133,7 @@ impl std::fmt::Display for ProfileName {
             Self::Devbox => write!(f, "devbox"),
             Self::ReadOnly => write!(f, "read-only"),
             Self::Strict => write!(f, "strict"),
+            Self::Minimal => write!(f, "minimal"),
             Self::Off => write!(f, "off"),
             Self::Custom(name) => write!(f, "{name}"),
         }
@@ -112,6 +148,7 @@ impl std::str::FromStr for ProfileName {
             "devbox" => Ok(Self::Devbox),
             "read-only" | "readonly" => Ok(Self::ReadOnly),
             "strict" => Ok(Self::Strict),
+            "minimal" => Ok(Self::Minimal),
             "off" | "none" => Ok(Self::Off),
             // Validation happens when we try to load it from config.
             other => Ok(Self::Custom(other.to_string())),
@@ -145,9 +182,11 @@ pub fn load_sandbox_config(workspace: &Path) -> SandboxConfig {
 
 pub fn sandbox_profile_conflicts(workspace: &Path) -> Vec<String> {
     let global = load_config_file(&fuigo_home().join(SANDBOX_CONFIG_FILENAME)).unwrap_or_default();
-    let project =
-        load_config_file_in(&workspace.join(".fuigo").join(SANDBOX_CONFIG_FILENAME), Some(workspace))
-            .unwrap_or_default();
+    let project = load_config_file_in(
+        &workspace.join(".fuigo").join(SANDBOX_CONFIG_FILENAME),
+        Some(workspace),
+    )
+    .unwrap_or_default();
     mismatched_profile_names(&global, &project)
 }
 
@@ -155,7 +194,9 @@ fn mismatched_profile_names(global: &SandboxConfig, project: &SandboxConfig) -> 
     let mut names: Vec<String> = project
         .profiles
         .iter()
-        .filter(|(name, _)| matches!(name.parse(), Ok(ProfileName::Custom(_))))
+        .filter(|(name, _)| {
+            name.as_str() == "minimal" || matches!(name.parse(), Ok(ProfileName::Custom(_)))
+        })
         .filter_map(|(name, project_profile)| {
             global
                 .profiles
@@ -171,7 +212,26 @@ fn mismatched_profile_names(global: &SandboxConfig, project: &SandboxConfig) -> 
 /// Names already defined globally are ignored so a workspace cannot replace a global custom profile's policy.
 fn merge_project_profiles(config: &mut SandboxConfig, project: SandboxConfig) {
     for (name, profile) in project.profiles {
-        config.profiles.entry(name).or_insert(profile);
+        if !matches!(name.parse(), Ok(ProfileName::Custom(_))) {
+            if let Some(ProfileSource::Project(path)) = project.sources.get(&name)
+                && crate::startup_warnings::first(format!("project-builtin:{path:?}:{name:?}"))
+            {
+                fuigo_tty_utils::cli_eprintln!(
+                    "WARNING: project sandbox profile '{}' in {} uses a built-in name and is ignored; rename the profile",
+                    fuigo_tty_utils::untrusted(&name),
+                    fuigo_tty_utils::untrusted(&path.display())
+                );
+            }
+            continue;
+        }
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            config.profiles.entry(name.clone())
+        {
+            entry.insert(profile);
+            if let Some(source) = project.sources.get(&name) {
+                config.sources.insert(name, source.clone());
+            }
+        }
     }
 }
 
@@ -188,11 +248,59 @@ fn load_config_file_in(path: &Path, root: Option<&Path>) -> Option<SandboxConfig
     if content.trim().is_empty() {
         return Some(SandboxConfig::default());
     }
-    match toml::from_str(&content) {
-        Ok(config) => Some(config),
+    match toml::from_str::<SandboxConfig>(&content) {
+        Ok(mut config) => {
+            let source = if root.is_some() {
+                ProfileSource::Project(path.to_path_buf())
+            } else {
+                ProfileSource::UserGlobal(path.to_path_buf())
+            };
+            config.sources = config
+                .profiles
+                .keys()
+                .map(|name| (name.clone(), source.clone()))
+                .collect();
+            warn_unknown_profile_keys(path, &content);
+            Some(config)
+        }
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "Failed to parse sandbox config");
             None
+        }
+    }
+}
+
+/// Keep tolerant parsing, but make misspelled security options visible once per process.
+fn warn_unknown_profile_keys(path: &Path, content: &str) {
+    let Ok(value) = toml::from_str::<toml::Value>(content) else {
+        return;
+    };
+    let Some(profiles) = value.get("profiles").and_then(toml::Value::as_table) else {
+        return;
+    };
+    for (name, profile) in profiles {
+        let Some(table) = profile.as_table() else {
+            continue;
+        };
+        for key in table.keys() {
+            if matches!(
+                key.as_str(),
+                "extends"
+                    | "restrict_network"
+                    | "workspace_write"
+                    | "read_only"
+                    | "read_write"
+                    | "deny"
+            ) {
+                continue;
+            }
+            if crate::startup_warnings::first(format!("unknown:{path:?}:{name:?}:{key:?}")) {
+                fuigo_tty_utils::cli_eprintln!(
+                    "WARNING: unknown sandbox profile key {:?} in [profiles.{:?}]; ignoring it",
+                    key,
+                    name
+                );
+            }
         }
     }
 }
@@ -256,11 +364,35 @@ impl ProfileName {
         }
 
         let profile = self.resolve_profile(workspace, config)?;
-        Self::capability_set_from_profile(workspace, &profile)
+        let mut caps = Self::capability_set_from_profile(
+            workspace,
+            &profile,
+            self.denies_workspace_write(config),
+        )?;
+        crate::workspace_write::apply_seatbelt_boundary(
+            self, workspace, config, &profile, &mut caps,
+        )?;
+        Ok(caps)
     }
 
     #[cfg(all(feature = "enforce", unix))]
-    fn read_write_grant_path(path: &Path, home: &Path) -> Option<PathBuf> {
+    fn read_write_grant_path(
+        path: &Path,
+        home: &Path,
+        readonly_workspace: Option<&Path>,
+    ) -> Option<PathBuf> {
+        let absolute;
+        let path = if let Some(workspace) = readonly_workspace {
+            absolute = workspace.join(path);
+            if crate::git_write_deny::canonical_path(&absolute)
+                .starts_with(crate::git_write_deny::canonical_path(workspace))
+            {
+                return None;
+            }
+            absolute.as_path()
+        } else {
+            path
+        };
         match std::fs::symlink_metadata(path) {
             Ok(meta) if meta.file_type().is_symlink() => {
                 if !(path != home && path.starts_with(home)) {
@@ -273,8 +405,8 @@ impl ProfileName {
                 if real == home.join(path.file_name()?) {
                     return Some(real);
                 }
-                let default_sessions =
-                    fuigo_dirs::home_dir().map(|user_home| user_home.join(".fuigo").join("sessions"));
+                let default_sessions = fuigo_dirs::home_dir()
+                    .map(|user_home| user_home.join(".fuigo").join("sessions"));
                 if path.file_name() == Some(std::ffi::OsStr::new("sessions"))
                     && default_sessions.as_ref() == Some(&real)
                 {
@@ -297,6 +429,7 @@ impl ProfileName {
     pub(crate) fn capability_set_from_profile(
         workspace: &Path,
         profile: &SandboxProfile,
+        readonly_workspace: bool,
     ) -> anyhow::Result<CapabilitySet> {
         let mut caps = CapabilitySet::new();
 
@@ -325,7 +458,9 @@ impl ProfileName {
         // canonical dir is this home's same-named child or default ~/.fuigo/sessions.
         let home = fuigo_home();
         for path in &profile.read_write {
-            let Some(grant) = Self::read_write_grant_path(path, &home) else {
+            let Some(grant) =
+                Self::read_write_grant_path(path, &home, readonly_workspace.then_some(workspace))
+            else {
                 tracing::warn!(path = ?path, "skipping read_write grant");
                 continue;
             };
@@ -424,7 +559,11 @@ impl ProfileName {
         workspace: &Path,
         config: &SandboxConfig,
     ) -> anyhow::Result<(SandboxProfile, Vec<PathBuf>)> {
+        if let std::borrow::Cow::Owned(selected) = self.selected(config) {
+            return selected.resolve_profile_with_runtime_sockets(workspace, config);
+        }
         let mut profile = self.resolve(workspace, config)?;
+        crate::workspace_write::resolve_boundary(self, workspace, config, &mut profile);
         // Same gate as the hook write-deny: `write_deny` is empty exactly for `off` and
         // devbox-based profiles (it always carries the trust-boundary files otherwise)
         if !profile.write_deny.is_empty() {
@@ -494,7 +633,7 @@ impl ProfileName {
             // Reaching here is almost always a custom profile with `extends = "off"` / `"none"`; return Err, never panic
             Self::Off => anyhow::bail!(
                 "sandbox profile 'off' cannot be resolved as a base profile; \
-                 choose a built-in base (workspace, devbox, read-only, strict)"
+                 choose a built-in base (workspace, devbox, read-only, strict, minimal)"
             ),
 
             Self::Workspace => Ok(SandboxProfile {
@@ -556,7 +695,7 @@ impl ProfileName {
                 restrict_network: true,
             }),
 
-            Self::Strict => {
+            Self::Strict | Self::Minimal => {
                 let home = fuigo_dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
                 let system_read: Vec<PathBuf> = [
                     "/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/dev", "/proc", "/sys",
@@ -584,7 +723,7 @@ impl ProfileName {
                 .collect();
 
                 Ok(SandboxProfile {
-                    name: "strict".to_string(),
+                    name: self.to_string(),
                     read_only: system_read,
                     read_write: essential_writable_paths_strict(workspace),
                     deny: vec![],
@@ -611,6 +750,7 @@ impl ProfileName {
                     let base: ProfileName = base_name.parse().map_err(|e: String| {
                         anyhow::anyhow!("Profile '{name}' extends invalid base: {e}")
                     })?;
+                    let base = base.selected(config).into_owned();
                     if matches!(base, Self::Off) {
                         anyhow::bail!(
                             "Profile '{name}' extends '{base_name}', but 'off'/'none' \
@@ -647,9 +787,14 @@ impl ProfileName {
                     }
                 }
 
-                // Deny entries stay raw: globs there are partitioned and enforced as patterns, not directory grants
+                // Deny entries stay raw (globs there are partitioned and enforced as patterns, not
+                // directory grants), except that a leading `~` means the home, as in the per-command policy
+                let home = fuigo_dirs::home_dir();
                 for path_str in &profile_config.deny {
-                    profile.deny.push(PathBuf::from(path_str));
+                    profile.deny.push(crate::deny::expand_home(
+                        Path::new(path_str),
+                        home.as_deref(),
+                    ));
                 }
 
                 if matches!(base, Self::Devbox) {
@@ -666,6 +811,16 @@ impl ProfileName {
 mod tests {
     use super::*;
     use crate::test_util::{network_inheritance_config, skip_if_host_hook_write_deny_unresolvable};
+
+    #[test]
+    fn legacy_minimal_global_definition_wins_and_reports_project_conflict() {
+        let mut global: SandboxConfig =
+            toml::from_str("[profiles.minimal]\ndeny = [\"./secret\"]\n").unwrap();
+        let project: SandboxConfig = toml::from_str("[profiles.minimal]\n").unwrap();
+        assert_eq!(mismatched_profile_names(&global, &project), ["minimal"]);
+        merge_project_profiles(&mut global, project);
+        assert_eq!(global.profiles["minimal"].deny, ["./secret"]);
+    }
 
     #[test]
     fn parse_profile_names() {
@@ -887,11 +1042,13 @@ mod tests {
         }
         let workspace = std::env::current_dir().unwrap();
         let config = SandboxConfig {
+            sources: HashMap::new(),
             profiles: HashMap::from([(
                 "project".to_string(),
                 ProfileConfig {
                     extends: Some("workspace".to_string()),
                     restrict_network: Some(true),
+                    workspace_write: None,
                     read_only: vec!["/data".to_string()],
                     read_write: vec![],
                     deny: vec!["/data/private".to_string()],
@@ -911,11 +1068,13 @@ mod tests {
         // Inheriting it into the kernel deny set would wrongly read-deny /data and force fail-closed
         let workspace = std::env::current_dir().unwrap();
         let config = SandboxConfig {
+            sources: HashMap::new(),
             profiles: HashMap::from([(
                 "mydev".to_string(),
                 ProfileConfig {
                     extends: Some("devbox".to_string()),
                     restrict_network: None,
+                    workspace_write: None,
                     read_only: vec![],
                     read_write: vec![],
                     deny: vec![],
@@ -949,17 +1108,20 @@ mod tests {
         let profile = |restrict_network| ProfileConfig {
             extends: Some("workspace".to_string()),
             restrict_network: Some(restrict_network),
+            workspace_write: None,
             read_only: vec![],
             read_write: vec![],
             deny: vec![],
         };
         let global = SandboxConfig {
+            sources: HashMap::new(),
             profiles: HashMap::from([
                 ("dev".to_string(), profile(false)),
                 ("same".to_string(), profile(false)),
             ]),
         };
         let project = SandboxConfig {
+            sources: HashMap::new(),
             profiles: HashMap::from([
                 ("dev".to_string(), profile(true)),
                 ("same".to_string(), profile(false)),
@@ -978,14 +1140,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path().join("ws");
         std::fs::create_dir_all(ws.join(".fuigo")).unwrap();
-        std::fs::write(tmp.path().join("outside.toml"), "[profiles.evil]\nextends = \"workspace\"\n").unwrap();
+        std::fs::write(
+            tmp.path().join("outside.toml"),
+            "[profiles.evil]\nextends = \"workspace\"\n",
+        )
+        .unwrap();
         let project = ws.join(".fuigo").join(SANDBOX_CONFIG_FILENAME);
         std::os::unix::fs::symlink(tmp.path().join("outside.toml"), &project).unwrap();
         assert!(load_config_file_in(&project, Some(&ws)).is_none());
         // User scope (no root) follows the link.
         assert!(load_config_file(&project).is_some());
 
-        std::fs::write(ws.join("inside.toml"), "[profiles.ok]\nextends = \"workspace\"\n").unwrap();
+        std::fs::write(
+            ws.join("inside.toml"),
+            "[profiles.ok]\nextends = \"workspace\"\n",
+        )
+        .unwrap();
         std::fs::remove_file(&project).unwrap();
         std::os::unix::fs::symlink(ws.join("inside.toml"), &project).unwrap();
         let loaded = load_config_file_in(&project, Some(&ws)).unwrap();
@@ -1013,6 +1183,51 @@ read_write = ["/tmp/ci-artifacts"]
         assert_eq!(config.profiles["devbox"].deny, vec!["/data/private"]);
     }
 
+    /// A `~` deny entry means the home, exact or glob, as in the per-command policy; it is never
+    /// anchored at the workspace (`<ws>/~/.aws` would leave the real `~/.aws` open).
+    #[test]
+    fn custom_profile_deny_expands_a_leading_tilde_to_home() {
+        if skip_if_host_hook_write_deny_unresolvable() {
+            return;
+        }
+        let Some(home) = fuigo_dirs::home_dir() else {
+            return;
+        };
+        let workspace = std::env::current_dir().unwrap();
+        let config = SandboxConfig {
+            sources: HashMap::new(),
+            profiles: HashMap::from([(
+                "home-secrets".to_string(),
+                ProfileConfig {
+                    extends: Some("workspace".to_string()),
+                    restrict_network: None,
+                    workspace_write: None,
+                    read_only: vec![],
+                    read_write: vec![],
+                    deny: vec!["~/.aws".to_string(), "~/vault/**".to_string()],
+                },
+            )]),
+        };
+        let resolved = ProfileName::Custom("home-secrets".to_string())
+            .resolve_profile(&workspace, &config)
+            .expect("profile resolves");
+        assert!(
+            resolved.deny.contains(&home.join(".aws")),
+            "{:?}",
+            resolved.deny
+        );
+        assert!(
+            resolved.deny.contains(&home.join("vault/**")),
+            "{:?}",
+            resolved.deny
+        );
+        assert!(
+            !resolved.deny.iter().any(|p| p.starts_with("~")),
+            "{:?}",
+            resolved.deny
+        );
+    }
+
     /// Custom-profile resolve: allow entries are normalized, deny entries are not.
     #[test]
     fn custom_profile_strips_allow_globs_keeps_deny_globs() {
@@ -1021,11 +1236,13 @@ read_write = ["/tmp/ci-artifacts"]
         }
         let workspace = std::env::current_dir().unwrap();
         let config = SandboxConfig {
+            sources: HashMap::new(),
             profiles: HashMap::from([(
                 "cargo".to_string(),
                 ProfileConfig {
                     extends: Some("workspace".to_string()),
                     restrict_network: None,
+                    workspace_write: None,
                     read_only: vec!["/opt/tooling/**".to_string()],
                     read_write: vec![
                         "/home/user/.cargo/registry/cache/**".to_string(),
@@ -1061,7 +1278,10 @@ read_write = ["/tmp/ci-artifacts"]
         let mut actual = resolved.deny.clone();
         expected.sort();
         actual.sort();
-        assert_eq!(expected, actual, "deny must be globs plus the materialized dbus sockets");
+        assert_eq!(
+            expected, actual,
+            "deny must be globs plus the materialized dbus sockets"
+        );
     }
 
     /// Building the capability set pre-creates missing `read_write` dirs.
@@ -1089,11 +1309,13 @@ read_write = ["/tmp/ci-artifacts"]
         let workspace = root.join("ws");
         std::fs::create_dir_all(&workspace).unwrap();
         let config = SandboxConfig {
+            sources: HashMap::new(),
             profiles: HashMap::from([(
                 "cargo".to_string(),
                 ProfileConfig {
                     extends: Some("workspace".to_string()),
                     restrict_network: None,
+                    workspace_write: None,
                     read_only: vec![],
                     read_write: vec![allow_glob],
                     deny: vec![],
@@ -1118,11 +1340,13 @@ read_write = ["/tmp/ci-artifacts"]
     fn project_cannot_redefine_global_profile() {
         // Global "secure" with a real deny list must win over a project hollow-out.
         let mut config = SandboxConfig {
+            sources: HashMap::new(),
             profiles: HashMap::from([(
                 "secure".to_string(),
                 ProfileConfig {
                     extends: Some("workspace".to_string()),
                     restrict_network: Some(true),
+                    workspace_write: None,
                     read_only: vec![],
                     read_write: vec![],
                     deny: vec!["/home/user/.ssh".to_string()],
@@ -1130,12 +1354,14 @@ read_write = ["/tmp/ci-artifacts"]
             )]),
         };
         let project = SandboxConfig {
+            sources: HashMap::new(),
             profiles: HashMap::from([
                 (
                     "secure".to_string(),
                     ProfileConfig {
                         extends: Some("workspace".to_string()),
                         restrict_network: Some(false),
+                        workspace_write: None,
                         read_only: vec![],
                         read_write: vec!["/".to_string()],
                         deny: vec![],
@@ -1146,6 +1372,7 @@ read_write = ["/tmp/ci-artifacts"]
                     ProfileConfig {
                         extends: Some("workspace".to_string()),
                         restrict_network: None,
+                        workspace_write: None,
                         read_only: vec![],
                         read_write: vec![],
                         deny: vec!["./secrets".to_string()],
@@ -1177,11 +1404,13 @@ read_write = ["/tmp/ci-artifacts"]
     fn extends_off_returns_err_not_panic() {
         let workspace = std::env::current_dir().unwrap();
         let config = SandboxConfig {
+            sources: HashMap::new(),
             profiles: HashMap::from([(
                 "broken".to_string(),
                 ProfileConfig {
                     extends: Some("off".to_string()),
                     restrict_network: None,
+                    workspace_write: None,
                     read_only: vec![],
                     read_write: vec![],
                     deny: vec![],

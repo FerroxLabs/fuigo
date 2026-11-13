@@ -179,6 +179,7 @@ pub(crate) async fn run_external_auth_provider(
     over_stale_credential: bool,
     on_stderr: Option<StderrCallback>,
 ) -> anyhow::Result<(FuigoAuth, bool)> {
+    let login_at_start = auth_manager.read_login_auth();
     let inherit_stderr = on_stderr.is_none();
     // P70: the configured command line may embed a credential; logs and errors name its fingerprint, never its text.
     let cmd_fp = fuigo_auth::bearer_fingerprint(command);
@@ -239,6 +240,7 @@ pub(crate) async fn run_external_auth_provider(
     }
     let mut auth = parse_output(&output)
         .map_err(|e| anyhow::anyhow!("external auth provider (command {cmd_fp}): {e}"))?;
+    auth.external_provider_id = Some(crate::auth::external_auth::provider_id(command));
     let principal_policy =
         crate::auth::oidc::login_principal_policy(auth_manager.fuigo_com_config());
     crate::auth::oidc::enforce_login_principal(
@@ -250,7 +252,7 @@ pub(crate) async fn run_external_auth_provider(
         _ => auth_manager.enrich_auth_inline(&mut auth).await,
     }
     let auth = auth_manager
-        .update(auth)
+        .complete_login(auth, login_at_start.as_ref())
         .await
         .map_err(|e| anyhow::anyhow!("failed to save external auth credentials: {e}"))?;
     tracing::info!(
@@ -305,9 +307,11 @@ pub(crate) async fn run_auth_flow_with_stderr_bridge(
         }
     };
     if force_interactive {
-        let auth = run_auth_flow_interactive(
+        let auth = run_auth_flow_inner(
             auth_manager,
             fuigo_com_config,
+            reauth,
+            true,
             Some(on_stderr),
             Some(url_tx),
             Some(channels.code_rx),
@@ -461,8 +465,8 @@ pub(super) async fn run_auth_flow_steps(
         "auth: starting auth flow"
     );
     if reauth {
-        auth_manager.clear()?;
-        let _ = auth_manager.remove_scope(LEGACY_AUTH_SCOPE);
+        auth_manager.clear_for_login().await?;
+        let _ = auth_manager.remove_scope_async(LEGACY_AUTH_SCOPE).await;
     }
     if !force_interactive && let Some(auth) = auth_manager.current() {
         if is_cached_credential_compatible(&auth, fuigo_com_config) {
@@ -479,7 +483,7 @@ pub(super) async fn run_auth_flow_steps(
             "auth: cached credential incompatible with requested flow, proceeding to interactive login"
         );
         if auth.auth_mode == super::AuthMode::WebLogin
-            && let Err(e) = auth_manager.remove_scope(LEGACY_AUTH_SCOPE)
+            && let Err(e) = auth_manager.remove_scope_async(LEGACY_AUTH_SCOPE).await
         {
             tracing::warn!(error = ?e, "auth: failed to remove legacy scope entry (non-fatal)");
         }
@@ -512,8 +516,7 @@ pub(super) async fn run_auth_flow_steps(
                 None,
             );
             let d = disk_auth.unwrap();
-            let ret = d.clone();
-            auth_manager.hot_swap(d);
+            let ret = auth_manager.hot_swap(d);
             return Ok((ret, false));
         }
         drop(file_lock);
@@ -535,8 +538,7 @@ pub(super) async fn run_auth_flow_steps(
                             "error": format!("{e}"),
                         })),
                     );
-                    let ret = d.clone();
-                    auth_manager.hot_swap(d);
+                    let ret = auth_manager.hot_swap(d);
                     return Ok((ret, false));
                 }
                 fuigo_telemetry::unified_log::warn(
@@ -567,10 +569,14 @@ pub(super) async fn run_auth_flow_steps(
         && crate::auth::devbox_login::is_devbox_environment()
     {
         tracing::info!("auth: devbox detected, attempting devbox login before interactive flow");
+        let login_at_start = auth_manager.read_login_auth();
         match crate::auth::devbox_login::mint_devbox_auth(auth_manager).await {
-            Ok(new_auth) => match auth_manager.save_without_enrichment(new_auth).await {
+            Ok(new_auth) => match auth_manager
+                .save_new_login_without_enrichment(new_auth, login_at_start.as_ref())
+                .await
+            {
                 Ok(auth) => {
-                    let _ = auth_manager.remove_scope(LEGACY_AUTH_SCOPE);
+                    let _ = auth_manager.remove_legacy_scope_after_login(&auth).await;
                     fuigo_telemetry::unified_log::info(
                         "auth: devbox migration in auth flow succeeded",
                         None,
@@ -735,9 +741,11 @@ pub(crate) async fn mint_session_noninteractive(
         }
     }
     if crate::auth::devbox_login::is_devbox_environment() {
+        let login_at_start = auth_manager.read_login_auth();
         match crate::auth::devbox_login::mint_devbox_auth(auth_manager).await {
             Ok(new_auth) => {
-                return Some(persist_or_use_minted(auth_manager, new_auth).await);
+                return persist_or_use_minted(auth_manager, new_auth, login_at_start.as_ref())
+                    .await;
             }
             Err(e) => {
                 tracing::debug!(error = %e, "mint_session_noninteractive: devbox mint failed");
@@ -746,16 +754,24 @@ pub(crate) async fn mint_session_noninteractive(
     }
     None
 }
-/// Persist a minted token; on persist failure, return it unpersisted rather than dropping a valid credential.
-async fn persist_or_use_minted(auth_manager: &AuthManager, new_auth: FuigoAuth) -> FuigoAuth {
-    match auth_manager.save_without_enrichment(new_auth.clone()).await {
+/// Persist a minted token; a failed save does not complete the sign-in.
+async fn persist_or_use_minted(
+    auth_manager: &AuthManager,
+    new_auth: FuigoAuth,
+    started_with: Option<&FuigoAuth>,
+) -> Option<FuigoAuth> {
+    match auth_manager
+        .save_new_login_without_enrichment(new_auth, started_with)
+        .await
+    {
         Ok(auth) => {
-            let _ = auth_manager.remove_scope(LEGACY_AUTH_SCOPE);
-            auth
+            let _ = auth_manager.remove_legacy_scope_after_login(&auth).await;
+            Some(auth)
         }
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => None,
         Err(e) => {
-            tracing::warn!(error = %e, "mint persist failed; using unpersisted token");
-            new_auth
+            tracing::warn!(error = %e, "mint persist failed");
+            None
         }
     }
 }
@@ -763,7 +779,9 @@ async fn persist_or_use_minted(auth_manager: &AuthManager, new_auth: FuigoAuth) 
 pub(crate) fn report_signed_in(auth: &FuigoAuth) {
     fuigo_tty_utils::cli_eprint_trusted!("\r\x1b[K");
     match auth.email {
-        Some(ref email) => fuigo_tty_utils::cli_eprintln!("✓ Signed in as {}", fuigo_tty_utils::untrusted(&email)),
+        Some(ref email) => {
+            fuigo_tty_utils::cli_eprintln!("✓ Signed in as {}", fuigo_tty_utils::untrusted(&email))
+        }
         None => fuigo_tty_utils::cli_eprintln!("✓ Signed in"),
     }
 }
@@ -797,7 +815,7 @@ pub async fn ensure_authenticated_with_override(
         }
         tracing::info!("auth: skipping cached WebLogin credential, will migrate to OIDC");
         auth_manager.clear_in_memory();
-        let _ = auth_manager.remove_scope(LEGACY_AUTH_SCOPE);
+        let _ = auth_manager.remove_scope_async(LEGACY_AUTH_SCOPE).await;
     }
     if let Some(msg) = message_prefix {
         fuigo_tty_utils::cli_eprintln!("{}", fuigo_tty_utils::untrusted(&msg));
@@ -947,6 +965,34 @@ pub fn perform_logout(
     auth_manager: &AuthManager,
     scope: Option<&str>,
 ) -> std::io::Result<LogoutResult> {
+    let result = prepare_logout(auth_manager, scope);
+    if result.was_logged_in {
+        if let Some(scope) = scope {
+            auth_manager.remove_scope(scope)?;
+        } else {
+            auth_manager.clear()?;
+        }
+    }
+    Ok(finish_logout(result))
+}
+
+/// Logout with an asynchronous wait for the cross-process auth lock.
+pub async fn perform_logout_async(
+    auth_manager: &AuthManager,
+    scope: Option<&str>,
+) -> std::io::Result<LogoutResult> {
+    let result = prepare_logout(auth_manager, scope);
+    if result.was_logged_in {
+        if let Some(scope) = scope {
+            auth_manager.remove_scope_async(scope).await?;
+        } else {
+            auth_manager.clear_async().await?;
+        }
+    }
+    Ok(finish_logout(result))
+}
+
+fn prepare_logout(auth_manager: &AuthManager, scope: Option<&str>) -> LogoutResult {
     let auth = auth_manager.current_or_expired();
     let email = auth.as_ref().and_then(|a| a.email.clone());
     let was_logged_in = auth.is_some();
@@ -959,22 +1005,22 @@ pub fn perform_logout(
             "user_id": auth.as_ref().map(|a| a.user_id.clone()),
         })),
     );
-    if was_logged_in {
-        fuigo_telemetry::external::set_identity(fuigo_telemetry::external::IdentityAttrs::default());
-        fuigo_telemetry::external::flush();
-        if let Some(scope) = scope {
-            auth_manager.remove_scope(scope)?;
-        } else {
-            auth_manager.clear()?;
-        }
-        crate::managed_config::clear_orphan();
-    }
-    Ok(LogoutResult {
+    LogoutResult {
         was_logged_in,
         email,
         api_key_still_set: crate::agent::auth_method::has_fuigo_api_key_env(),
-    })
+    }
 }
+
+fn finish_logout(result: LogoutResult) -> LogoutResult {
+    if result.was_logged_in {
+        fuigo_telemetry::external::set_identity(fuigo_telemetry::external::IdentityAttrs::default());
+        fuigo_telemetry::external::flush();
+        crate::managed_config::clear_orphan();
+    }
+    result
+}
+
 pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<()> {
     let fuigo_home = fuigo_home::fuigo_home();
     let auth_manager = AuthManager::new(&fuigo_home, config.fuigo_com_config.clone());
@@ -990,7 +1036,10 @@ pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<(
         return Ok(());
     }
     if let Some(email) = result.email {
-        fuigo_tty_utils::cli_eprintln!("Logged out (was signed in as {})", fuigo_tty_utils::untrusted(&email));
+        fuigo_tty_utils::cli_eprintln!(
+            "Logged out (was signed in as {})",
+            fuigo_tty_utils::untrusted(&email)
+        );
     } else {
         fuigo_tty_utils::cli_eprintln!("Logged out");
     }
@@ -1001,7 +1050,10 @@ pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<(
     }
     Ok(())
 }
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1104,27 +1156,84 @@ mod tests {
         });
         assert!(expired_refreshable_session(&mgr).is_none());
     }
-    #[cfg(unix)]
     #[tokio::test]
-    async fn persist_or_use_minted_returns_token_when_save_fails() {
-        use std::os::unix::fs::PermissionsExt;
+    async fn r6_2_minted_inherited_login_survives_legacy_cleanup() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
-        let mgr = Arc::new(AuthManager::new(dir.path(), FuigoComConfig::default()));
-        let minted = oidc_session("minted-token", Some("rt"));
-        let save = mgr.save_without_enrichment(minted.clone()).await;
-        if unsafe { libc::geteuid() } == 0 {
-            return;
-        }
-        assert!(
-            save.is_err(),
-            "non-root: save into a read-only dir must fail"
-        );
-        let out = persist_or_use_minted(&mgr, minted).await;
-        assert_eq!(
-            out.key, "minted-token",
-            "must return the unpersisted minted token"
-        );
+        let manager =
+            AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default());
+        let mut store = crate::auth::model::AuthStore::new();
+        store.insert(LEGACY_AUTH_SCOPE.into(), FuigoAuth::test_default());
+        crate::auth::storage::write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
+        let before = manager.read_disk_auth().unwrap();
+        let minted = FuigoAuth {
+            key: "minted-inherited-login".into(),
+            ..FuigoAuth::test_default()
+        };
+        let out = persist_or_use_minted(&manager, minted, Some(&before))
+            .await
+            .unwrap();
+        assert_eq!(manager.read_disk_auth().map(|auth| auth.key), Some(out.key));
+    }
+
+    #[tokio::test]
+    async fn r5_1_minted_signin_also_gets_a_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(AuthManager::new(dir.path(), FuigoComConfig::default()));
+        let first = persist_or_use_minted(
+            &manager,
+            FuigoAuth::test_default(),
+            manager.read_login_auth().as_ref(),
+        )
+        .await
+        .unwrap();
+        let second = persist_or_use_minted(
+            &manager,
+            FuigoAuth::test_default(),
+            manager.read_login_auth().as_ref(),
+        )
+        .await
+        .unwrap();
+        assert!(first.login_generation.is_some());
+        assert!(second.login_generation.is_some());
+        assert_ne!(first.login_generation, second.login_generation);
+    }
+
+    #[tokio::test]
+    async fn r5_1_external_refresh_preserves_generation() {
+        let mut previous = FuigoAuth::test_default();
+        previous.login_generation = Some("original-generation".into());
+        let fresh = crate::auth::external_auth::refresh_with_command(
+            "printf '%s' refreshed-token",
+            &previous,
+        )
+        .await
+        .unwrap();
+        assert_eq!(fresh.login_generation, previous.login_generation);
+    }
+
+    #[tokio::test]
+    async fn r10_4_minted_signin_lock_failure_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default())
+                .with_test_auth_lock_timeout(std::time::Duration::from_millis(25));
+        let old = manager
+            .save_new_login_without_enrichment(FuigoAuth::test_default(), None)
+            .await
+            .unwrap();
+        let before = std::fs::read(manager.auth_json_path()).unwrap();
+        let _held =
+            crate::auth::manager::lock::try_lock_auth_file_nonblocking(manager.auth_json_path())
+                .unwrap();
+        let out = persist_or_use_minted(
+            &manager,
+            oidc_session("minted-token", Some("rt")),
+            Some(&old),
+        )
+        .await;
+        assert!(out.is_none());
+        assert_eq!(manager.current_or_expired().unwrap().key, old.key);
+        assert_eq!(std::fs::read(manager.auth_json_path()).unwrap(), before);
     }
     /// Proxy URL on a closed port: inline enrichment fails fast instead of reaching outside the test.
     fn dead_proxy_url() -> String {
@@ -1542,6 +1651,9 @@ mod tests {
             team_blocked_reasons: vec![],
             coding_data_retention_opt_out: false,
             has_fuigo_code_access: None,
+            login_generation: None,
+            external_provider_id: None,
+            login_snapshot: None,
             refresh_token: None,
             expires_at: None,
             oidc_issuer: None,

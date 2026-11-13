@@ -315,3 +315,13 @@ fn the_largest_allowed_body_paints_at_every_height_it_promises() {
         );
     }
 }
+
+#[test]
+fn regression_consent_tiny_areas() {
+    for (w, h) in (1..=8)
+        .flat_map(|w| (1..=8).map(move |h| (w, h)))
+        .chain((1..=3).map(|h| (80, h)))
+    {
+        render(w, h);
+    }
+}

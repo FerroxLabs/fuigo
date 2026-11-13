@@ -1792,3 +1792,17 @@ fn fetch_failures_surface_in_open_modal() {
     assert_eq!(state.session_error.as_deref(), Some("info boom"));
     assert_eq!(state.context_error.as_deref(), Some("ctx boom"));
 }
+
+#[test]
+fn r6_4_logout_lock_timeout_has_specific_short_toast() {
+    let error = "failed to logout: auth.json.lock still held by another writer (holder pid Some(12345)); auth.json left unchanged";
+    let wire = fuigo_shell::acp_error::internal_error(error);
+    let real_text = crate::app::effects::acp_error_user_text(&wire);
+    assert_eq!(real_text, format!("Internal error: {error}"));
+    let toast = scrub_error_for_toast(&real_text);
+    assert_eq!(
+        toast,
+        "Sign-out is busy in another window. Try again shortly."
+    );
+    assert!(toast.len() <= 120);
+}

@@ -191,7 +191,9 @@ impl ReadToolCallBlock {
         } else if let Some(media) = &self.media_kind {
             match media {
                 ReadMediaKind::Image => " (image)".to_string(),
-                ReadMediaKind::Pdf { pages } => format!(" ({pages} pages)"),
+                ReadMediaKind::Pdf { pages } => {
+                    format!(" ({})", crate::views::count_label(*pages, "page"))
+                }
             }
         } else {
             String::new()
@@ -337,7 +339,11 @@ impl ReadToolCallBlock {
 /// The first line of a read failure, shortened for the header: the card says why the read failed without being opened.
 fn failure_reason(error: &str) -> String {
     const MAX_CHARS: usize = 60;
-    let first = error.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("unknown error");
+    let first = error
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("unknown error");
     if first.chars().count() <= MAX_CHARS {
         first.to_string()
     } else {
@@ -475,6 +481,21 @@ mod tests {
     use super::*;
     use crate::scrollback::types::{BlockContext, DisplayMode};
 
+    #[test]
+    fn regression_pdf_page_count_labels() {
+        for (pages, noun) in [(1, "page"), (2, "pages")] {
+            let mut block = ReadToolCallBlock::new("/work/document.pdf");
+            block.media_kind = Some(ReadMediaKind::Pdf { pages });
+            let text: String = block.output(&make_ctx()).lines[0]
+                .content
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            assert!(text.contains(&format!("({pages} {noun})")), "{text}");
+        }
+    }
+
     fn make_ctx() -> BlockContext {
         BlockContext {
             width: 80,
@@ -490,6 +511,26 @@ mod tests {
 
     /// 54.5: a failed read says why on the collapsed header.
     #[test]
+    fn row_80_b7_read_header_fits_cjk_widths() {
+        for width in [40, 43, 60, 80] {
+            let mut ctx = make_ctx();
+            ctx.width = width;
+            let block = ReadToolCallBlock::new(format!("/work/{}/file.rs", "界🙂".repeat(30)));
+            let output = block.output(&ctx);
+            assert!(
+                output
+                    .lines
+                    .iter()
+                    .all(|line| line.content.width() <= ctx.content_width())
+            );
+            let area = ratatui::layout::Rect::new(0, 0, width, 1);
+            let mut buf = ratatui::buffer::Buffer::empty(area);
+            buf.set_line(0, 0, &output.lines[0].content, width);
+            assert!(buf[(0, 0)].symbol() == "R");
+        }
+    }
+
+    #[test]
     fn a_failed_read_explains_why_in_its_header() {
         let block = ReadToolCallBlock::new("/work/missing.rs")
             .with_error("No such file or directory (os error 2)\nsecond line");
@@ -500,9 +541,17 @@ mod tests {
             .map(|s| s.content.as_ref())
             .collect();
         assert!(text.starts_with("Read "), "{text}");
-        assert!(text.ends_with("(failed: No such file or directory (os error 2))"), "{text}");
+        assert!(
+            text.ends_with("(failed: No such file or directory (os error 2))"),
+            "{text}"
+        );
         let long = ReadToolCallBlock::new("/work/x.rs").with_error("e".repeat(200));
-        let text: String = long.output(&make_ctx()).lines[0].content.spans.iter().map(|s| s.content.as_ref()).collect();
+        let text: String = long.output(&make_ctx()).lines[0]
+            .content
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
         assert!(text.contains("(failed: ") && text.contains('…'), "{text}");
     }
 

@@ -356,23 +356,31 @@ impl AuthManager {
         }
         // Weak ref so the manager and the listener never form an Arc cycle
         let weak = Arc::downgrade(self);
-        let listener = fuigo_system_power::SystemPowerListener::start(move |event| {
-            if let Some(this) = weak.upgrade() {
-                let imminent = matches!(event, fuigo_system_power::PowerEvent::WillSleep);
-                this.set_system_sleep_imminent(imminent);
-            }
-        });
-        let available = listener.is_some();
-        if available {
+        let report_registration = |available| {
+            fuigo_telemetry::unified_log::info(
+                "auth.sleep.power_listener_init",
+                None,
+                Some(serde_json::json!({ "available": available })),
+            );
+        };
+        let listener = fuigo_system_power::SystemPowerListener::start_with_status(
+            move |event| {
+                if let Some(this) = weak.upgrade() {
+                    let imminent = matches!(event, fuigo_system_power::PowerEvent::WillSleep);
+                    this.set_system_sleep_imminent(imminent);
+                }
+            },
+            report_registration,
+        );
+        if listener.is_some() {
+            // On Linux this owns a started worker; registration reports availability
+            // asynchronously. A failed registration leaves notifications off for this run.
             *self.power_listener.lock() = listener;
         } else {
-            // Unavailable (unsupported OS, no logind, or a registration failure): release the guard so a later call can retry
+            // No listener/worker started. Permit a later explicit startup attempt.
             self.power_listener_started.store(false, Ordering::Release);
+            #[cfg(target_os = "linux")]
+            report_registration(false);
         }
-        fuigo_telemetry::unified_log::info(
-            "auth.sleep.power_listener_init",
-            None,
-            Some(serde_json::json!({ "available": available })),
-        );
     }
 }

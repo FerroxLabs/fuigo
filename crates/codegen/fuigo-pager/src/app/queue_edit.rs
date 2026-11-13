@@ -286,7 +286,9 @@ impl AgentView {
         };
         if let Some((_, QueueEntryKind::Command, ..)) = entry_data {
             // A queued command (`/compact`) is not text to rework; loading it would replace the draft in the composer
-            self.show_toast("A queued command can't be edited. Remove it and type the command again");
+            self.show_toast(
+                "A queued command can't be edited. Remove it and type the command again",
+            );
             return;
         }
         if let Some((text, kind, server_id, images, chip_elements)) = entry_data {
@@ -613,7 +615,7 @@ impl AgentView {
                 });
         }
         let stash = self.stashed_prompt.take().unwrap_or_default();
-        self.prompt.restore(stash);
+        self.restore_card_prompt(stash);
         self.finish_editing_exit();
     }
 

@@ -227,6 +227,9 @@ pub(super) fn build_fuigo_auth(
 ) -> FuigoAuth {
     let now = Utc::now();
     FuigoAuth {
+        login_generation: None,
+        external_provider_id: None,
+        login_snapshot: None,
         key: tokens.access_token,
         auth_mode: AuthMode::Oidc,
         create_time: now,

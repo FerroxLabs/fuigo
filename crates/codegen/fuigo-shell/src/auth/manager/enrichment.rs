@@ -7,8 +7,8 @@ use std::time::Duration as StdDuration;
 use super::AuthManager;
 use super::lock::{Heartbeat, try_lock_auth_file_async};
 use crate::auth::manager::AUTH_LOCK_TIMEOUT;
-use crate::auth::model::{FuigoAuth, UserInfo, lookup_auth};
-use crate::auth::storage::{read_auth_json, write_auth_json};
+use crate::auth::model::{FuigoAuth, UserInfo};
+use crate::auth::storage::write_auth_json;
 
 /// Timeout for the `/user` fetch, shared by the inline (login) and background paths.
 const USER_FETCH_TIMEOUT: StdDuration = StdDuration::from_secs(10);
@@ -56,7 +56,11 @@ pub(super) fn spawn(manager: Arc<AuthManager>, auth: FuigoAuth) {
     });
 }
 
-async fn fetch_user_info(manager: &AuthManager, auth: &FuigoAuth, log_label: &str) -> Option<UserInfo> {
+async fn fetch_user_info(
+    manager: &AuthManager,
+    auth: &FuigoAuth,
+    log_label: &str,
+) -> Option<UserInfo> {
     let user_url = format!("{}/user", manager.proxy_base_url);
     // P47: a session credential goes only where the service-endpoint trust class admits `/user` (a static
     // `AuthMode::ApiKey` keeps its own rules). A refusal is logged (with its remedy) and enrichment is skipped.
@@ -159,8 +163,7 @@ pub(super) async fn enrich_inline(manager: &AuthManager, auth: &mut FuigoAuth) {
 
 async fn run_user_info_enrichment(manager: &AuthManager, auth: FuigoAuth) {
     let started = std::time::Instant::now();
-    let Some(user_info) = fetch_user_info(manager, &auth, "auth update enrichment").await
-    else {
+    let Some(user_info) = fetch_user_info(manager, &auth, "auth update enrichment").await else {
         return;
     };
     let user_elapsed_ms = started.elapsed().as_millis() as u64;
@@ -191,7 +194,7 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: FuigoAuth) {
     // The file lock orders processes (every auth.json writer takes it); the auth-state lock pairs this merge's disk write
     // with its in-memory write (see `auth_state_lock`). Held from the read through the in-memory write below.
     let _state = crate::auth::storage::auth_state_lock();
-    let Ok(mut map) = read_auth_json(&manager.path) else {
+    let Ok(mut map) = manager.read_store() else {
         fuigo_telemetry::unified_log::warn(
             "auth update enrichment skipped",
             None,
@@ -199,7 +202,11 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: FuigoAuth) {
         );
         return;
     };
-    let Some(mut disk) = lookup_auth(&map, &manager.scope) else {
+    let snapshot = manager.login_snapshot(Some(&auth));
+    if !snapshot.matches(&map) {
+        return;
+    }
+    let Some(mut disk) = map.get(&snapshot.scope).cloned() else {
         fuigo_telemetry::unified_log::info(
             "auth update enrichment skipped",
             None,
@@ -211,7 +218,10 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: FuigoAuth) {
     // Skip enrichment then, so stale profile data never overwrites the sibling's fresher entry
     // OR, not AND: during a concurrent refresh usually only the key changes while the refresh token stays
     // Team-login transitions (a placeholder user_id becoming real) rotate no tokens, so they still pass this check and get enriched
-    if disk.key != auth.key || disk.refresh_token != auth.refresh_token {
+    if disk.login_generation != auth.login_generation
+        || disk.key != auth.key
+        || disk.refresh_token != auth.refresh_token
+    {
         fuigo_telemetry::unified_log::info(
             "auth update enrichment skipped",
             None,
@@ -226,7 +236,11 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: FuigoAuth) {
     // The same test against memory: a logout, a cleared session, or a newer credential that reached memory but not disk
     // (an `update` whose write failed keeps it in memory) must not be replaced by this older credential's merge.
     let memory_moved = manager.with_inner_read(|current| {
-        current.is_none_or(|c| c.key != auth.key || c.refresh_token != auth.refresh_token)
+        current.is_none_or(|c| {
+            c.login_generation != auth.login_generation
+                || c.key != auth.key
+                || c.refresh_token != auth.refresh_token
+        })
     });
     if memory_moved {
         fuigo_telemetry::unified_log::info(
@@ -241,7 +255,8 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: FuigoAuth) {
 
     apply_user_info_enrichment(&mut disk, user_info);
 
-    map.insert(manager.scope.clone(), disk.clone());
+    disk.login_snapshot = Some(snapshot.clone());
+    map.insert(snapshot.scope, disk.clone());
     let write_started = std::time::Instant::now();
     if let Err(e) = write_auth_json(&manager.path, &map) {
         fuigo_telemetry::unified_log::error(
@@ -256,7 +271,7 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: FuigoAuth) {
         );
         return;
     }
-    manager.with_inner_write(|inner| *inner = Some(disk));
+    manager.reconcile_credential(disk, super::CredentialChange::Persisted);
     fuigo_telemetry::unified_log::info(
         "auth update enrichment done",
         None,
@@ -356,12 +371,10 @@ mod p43_identity_tests {
     /// carries no client version.
     #[tokio::test(flavor = "current_thread")]
     async fn user_enrichment_sends_no_identity_to_a_non_fluxrouter_proxy() {
-        let (base, seen, handle) =
-            crate::remote::identity_tests::spawn_recording_mock("{}").await;
+        let (base, seen, handle) = crate::remote::identity_tests::spawn_recording_mock("{}").await;
         let dir = tempfile::tempdir().unwrap();
-        let manager =
-            super::AuthManager::new(dir.path(), crate::auth::FuigoComConfig::default())
-                .with_proxy_base_url(&base);
+        let manager = super::AuthManager::new(dir.path(), crate::auth::FuigoComConfig::default())
+            .with_proxy_base_url(&base);
         // A static API key: P47's service-endpoint gate leaves it alone, so the request reaches the loopback mock
         // and this test still observes what P43 decides about identity.
         let auth = crate::auth::FuigoAuth {

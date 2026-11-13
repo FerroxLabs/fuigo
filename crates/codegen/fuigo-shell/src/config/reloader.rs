@@ -67,6 +67,7 @@ pub enum ConfigUpdate {
 /// Receives raw [`ConfigChangeEvent`]s from the file watcher and diffs them against last-known state.
 /// It then sends [`ConfigUpdate`] messages to the agent via an `mpsc` channel.
 pub(crate) struct ConfigReloader {
+    auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
     last_auth_key_hash: u64,
     last_global_config: toml::Value,
     last_effective_config: toml::Value,
@@ -93,6 +94,7 @@ impl ConfigReloader {
         let last_effective_config =
             crate::config::load_effective_config().unwrap_or_else(|_| initial_config.clone());
         Self {
+            auth_manager: None,
             last_auth_key_hash: initial_auth_key_hash,
             last_global_config: initial_config,
             last_effective_config,
@@ -103,6 +105,14 @@ impl ConfigReloader {
             config_update_tx,
             memory_enabled_override,
         }
+    }
+
+    pub(crate) fn with_auth_manager(
+        mut self,
+        manager: std::sync::Arc<crate::auth::AuthManager>,
+    ) -> Self {
+        self.auth_manager = Some(manager);
+        self
     }
 
     /// Main loop. Batches all events from each debounce tick before processing.
@@ -241,12 +251,18 @@ impl ConfigReloader {
     /// The login file the reloader reads: the same resolver the auth manager uses (`FUIGO_AUTH_PATH` as given, else
     /// `<home>/auth.json`), so a login stored at a custom path reloads like the default one.
     fn auth_path(&self) -> PathBuf {
-        crate::auth::auth_json_path(&self.fuigo_home)
+        self.auth_manager
+            .as_ref()
+            .map(|manager| manager.auth_json_path().to_path_buf())
+            .unwrap_or_else(|| crate::auth::auth_json_path(&self.fuigo_home))
     }
 
     pub(crate) fn reload_auth(&mut self) -> anyhow::Result<()> {
         let auth_path = self.auth_path();
-        let store = read_auth_json(&auth_path)?;
+        let store = match &self.auth_manager {
+            Some(manager) => manager.read_store()?,
+            None => read_auth_json(&auth_path)?,
+        };
 
         match crate::auth::lookup_auth(&store, &self.auth_scope) {
             Some(auth) => {
@@ -477,13 +493,17 @@ fn hash_project_mcp_config(cwd: &Path) -> Option<u64> {
     use fuigo_dirs::contained::PinnedRoot;
     let mcp_root = crate::util::config::project_mcp_root(cwd);
     let cwd_root = PinnedRoot::pin(cwd).ok();
-    let mut paths: Vec<(std::path::PathBuf, Option<PinnedRoot>)> = crate::config::find_project_configs(cwd)
-        .into_iter()
-        .map(|f| {
-            let owner = f.parent().and_then(Path::parent).and_then(|d| PinnedRoot::pin(d).ok());
-            (f, owner)
-        })
-        .collect();
+    let mut paths: Vec<(std::path::PathBuf, Option<PinnedRoot>)> =
+        crate::config::find_project_configs(cwd)
+            .into_iter()
+            .map(|f| {
+                let owner = f
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(|d| PinnedRoot::pin(d).ok());
+                (f, owner)
+            })
+            .collect();
     paths.extend(
         crate::util::config::find_mcp_json_files(cwd)
             .into_iter()
@@ -566,7 +586,10 @@ fn extract_ui_fields(config: &toml::Value) -> (Option<String>, bool, Option<Stri
     (theme, yolo, fork)
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,7 +900,8 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         git2::Repository::init(&repo).unwrap();
         std::fs::write(tmp.path().join("outside.json"), "a").unwrap();
-        std::os::unix::fs::symlink(tmp.path().join("outside.json"), repo.join(".mcp.json")).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("outside.json"), repo.join(".mcp.json"))
+            .unwrap();
         let before = hash_project_mcp_config(&repo).expect("hashable");
         std::fs::write(tmp.path().join("outside.json"), "b").unwrap();
         assert_eq!(before, hash_project_mcp_config(&repo).expect("hashable"));
@@ -955,7 +979,10 @@ ignore = ["/tmp"]
         let on_and_tuned: toml::Value =
             toml::from_str("[memory]\nenabled = true\n[memory.search]\nmax_results = 3").unwrap();
 
-        assert_eq!(changed_memory_config(&off, &on, Some(false), None), Ok(None));
+        assert_eq!(
+            changed_memory_config(&off, &on, Some(false), None),
+            Ok(None)
+        );
         let changed = changed_memory_config(&off, &on_and_tuned, Some(false), None)
             .unwrap()
             .expect("the tuned search parameter is a change");

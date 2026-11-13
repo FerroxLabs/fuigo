@@ -215,8 +215,12 @@ impl BlockContent for SearchToolCallBlock {
                 if !self.results.is_empty() {
                     lines.push(BlockLine::separator(Line::from("")));
 
+                    let number_width = self.results.len().max(1).ilog10() as usize + 1;
                     for (i, tool) in self.results.iter().enumerate() {
-                        let idx_span = Span::styled(format!("  {}. ", i + 1), theme.muted());
+                        let idx_span = Span::styled(
+                            format!("  {:>digits$}. ", i + 1, digits = number_width),
+                            theme.muted(),
+                        );
 
                         // Strip the trusted server prefix from tool_name and title-case both halves
                         // Show the action bold and the server name dimmed on the right
@@ -348,5 +352,48 @@ mod tests {
             score: 1.0,
         };
         assert_eq!(discovered_tool_action(&tool), "search");
+    }
+}
+
+#[cfg(test)]
+mod row_tests {
+    use super::*;
+    #[test]
+    fn row_80_b6_tool_search_double_digit_numbers_align() {
+        let mut block = SearchToolCallBlock::new("sample");
+        block.results = (0..12)
+            .map(|_| DiscoveredTool {
+                name: "action".into(),
+                server: "server".into(),
+                description: String::new(),
+                score: 1.0,
+            })
+            .collect();
+        block.result_count = 12;
+        for width in [40, 43, 60, 80] {
+            let ctx = BlockContext {
+                width,
+                mode: DisplayMode::Expanded,
+                is_running: false,
+                raw: false,
+                max_lines: None,
+                appearance: Default::default(),
+                is_selected: false,
+                cwd: None,
+            };
+            let rows: Vec<String> = block
+                .output(&ctx)
+                .lines
+                .iter()
+                .map(|line| line.content.to_string())
+                .filter(|line| line.contains("Action"))
+                .collect();
+            assert_eq!(rows.len(), 12);
+            let col = rows[0].find("Action").unwrap();
+            assert!(
+                rows.iter().all(|line| line.find("Action") == Some(col)),
+                "{rows:?}"
+            );
+        }
     }
 }

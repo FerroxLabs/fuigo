@@ -4677,3 +4677,55 @@ async fn a_failed_session_load_reports_the_agents_reason() {
     assert!(msg.contains("bad checksum"), "the reason must survive: {msg}");
     assert!(!msg.contains("Session does not exist"), "{msg}");
 }
+
+#[tokio::test]
+async fn headless_resume_blank_is_rejected_before_resolving_cwd() {
+    for value in ["", " ", "\t\n", "\u{2003}"] {
+        let mut options = timeout_test_options(None);
+        options.resume = Some(value.into());
+        let missing = tempfile::tempdir().unwrap();
+        options.cwd = Some(missing.path().join("not-created"));
+        let mut emitter = super::HeadlessEmitter::new(super::OutputFormat::Plain, false);
+        let error = super::run_single_turn_inner(
+            None,
+            false,
+            options,
+            &mut emitter,
+            super::InterruptWatch::inert(),
+        )
+        .await
+        .expect_err("blank resume must fail before startup");
+        let message = error.to_string();
+        assert!(
+            message.contains("--resume") && message.contains("--continue"),
+            "{message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn headless_resume_id_and_title_pass_early_validation() {
+    for value in [
+        "31b75b60-c03d-4570-9607-0019505fae78",
+        "A real session title",
+    ] {
+        let mut options = timeout_test_options(None);
+        options.resume = Some(value.into());
+        let missing = tempfile::tempdir().unwrap();
+        options.cwd = Some(missing.path().join("not-created"));
+        let mut emitter = super::HeadlessEmitter::new(super::OutputFormat::Plain, false);
+        let error = super::run_single_turn_inner(
+            None,
+            false,
+            options,
+            &mut emitter,
+            super::InterruptWatch::inert(),
+        )
+        .await
+        .expect_err("must reach cwd resolution");
+        assert!(
+            error.downcast_ref::<std::io::Error>().is_some(),
+            "{error:#}"
+        );
+    }
+}

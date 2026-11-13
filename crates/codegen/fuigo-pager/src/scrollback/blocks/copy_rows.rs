@@ -81,7 +81,7 @@ fn table_grid(meta: &TableCopyMeta) -> Option<Vec<Vec<String>>> {
             .chunks(meta.n_cols)
             .map(|row| {
                 row.iter()
-                    .map(|cell| cell.text.replace(['\n', '\r'], " "))
+                    .map(|cell| cell.copy_text().replace(['\n', '\r'], " "))
                     .collect()
             })
             .collect(),
@@ -209,11 +209,24 @@ mod tests {
             cells: cells
                 .iter()
                 .map(|t| TableCellCopy {
+                    code_text: None,
                     text: (*t).to_string(),
                     joins: Vec::new(),
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn row_82_b12_table_copy_keeps_inline_code() {
+        let content = super::super::markdown_content::MarkdownContent::new(
+            "| Name |\n| --- |\n| `sample()` |",
+        );
+        content.with_table_copy_meta(|tables| {
+            assert_eq!(tables.len(), 1);
+            let copied = table_markdown(&tables[0]).unwrap();
+            assert!(copied.contains("`sample()`"), "{copied}");
+        });
     }
 
     #[test]

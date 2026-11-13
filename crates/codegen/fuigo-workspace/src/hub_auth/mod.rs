@@ -38,6 +38,8 @@ fn identity_from_entry(entry: &AuthEntry) -> AuthIdentity {
 struct AuthEntry {
     key: String,
     #[serde(default)]
+    login_generation: Option<String>,
+    #[serde(default)]
     user_id: String,
     #[serde(default)]
     refresh_token: Option<String>,
@@ -59,6 +61,7 @@ impl std::fmt::Debug for AuthEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Self {
             key: _,
+            login_generation: _,
             user_id,
             refresh_token,
             oidc_issuer,
@@ -126,6 +129,14 @@ enum OidcProviderKind {
     Proactive,
 }
 
+/// The exact stored login whose refresh token this provider uses. Retained across
+/// refresh callbacks and retries; a refresh never adopts another login's generation.
+#[derive(Clone)]
+struct StoredLogin {
+    scope_key: String,
+    generation: Option<String>,
+}
+
 /// Refreshed tokens that could not be written to `auth.json` (lock timeout or I/O error): the newest unsaved event, if any.
 /// The same shape as the shell's unsaved subscription credential: the rotated tokens stay usable from memory, the failure is
 /// reported loudly, and the write is retried until it lands or a newer refresh supersedes it.
@@ -139,12 +150,12 @@ const UNSAVED_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(
 /// The proactive provider already offloads this onto its persist worker, whose seq check drops stale writes.
 /// A nested spawn here would run `write_refreshed_token` after that check and let a stale write land over a newer one.
 /// A failed write is not just logged: the event is kept as unsaved and retried on a detached thread (see [`persist_event`]).
-pub(crate) fn persist_on_refresh(auth_path: PathBuf, scope_key: String) -> OnRefreshCallback {
+fn persist_on_refresh(auth_path: PathBuf, login: StoredLogin) -> OnRefreshCallback {
     let unsaved: UnsavedSlot = Arc::new(parking_lot::Mutex::new(None));
     Arc::new(move |event: &RefreshEvent| {
         let _ = persist_event(
             &auth_path,
-            &scope_key,
+            &login,
             event,
             &unsaved,
             AUTH_LOCK_TIMEOUT,
@@ -158,14 +169,14 @@ pub(crate) fn persist_on_refresh(auth_path: PathBuf, scope_key: String) -> OnRef
 /// retry thread's handle. A newer event (a later refresh) replaces the unsaved one, and the retry then stands down.
 fn persist_event(
     path: &Path,
-    scope_key: &str,
+    login: &StoredLogin,
     event: &RefreshEvent,
     unsaved: &UnsavedSlot,
     lock_timeout: std::time::Duration,
     retry_delay: std::time::Duration,
     retries: u32,
 ) -> Option<std::thread::JoinHandle<()>> {
-    match write_refreshed_token_within(path, scope_key, event, lock_timeout) {
+    match write_refreshed_token_within(path, login, event, lock_timeout) {
         Ok(()) => {
             *unsaved.lock() = None;
             None
@@ -179,8 +190,12 @@ fn persist_event(
                  close other fuigo processes holding auth.json.lock, or run `fuigo login`"
             );
             *unsaved.lock() = Some(event.clone());
-            let (path, scope_key, event, unsaved) =
-                (path.to_owned(), scope_key.to_owned(), event.clone(), unsaved.clone());
+            let (path, login, event, unsaved) = (
+                path.to_owned(),
+                login.clone(),
+                event.clone(),
+                unsaved.clone(),
+            );
             Some(std::thread::spawn(move || {
                 for _ in 0..retries {
                     std::thread::sleep(retry_delay);
@@ -191,12 +206,15 @@ fn persist_event(
                     if !still_ours {
                         return;
                     }
-                    if write_refreshed_token_within(&path, &scope_key, &event, lock_timeout).is_ok() {
+                    if write_refreshed_token_within(&path, &login, &event, lock_timeout).is_ok() {
                         let mut slot = unsaved.lock();
-                        if slot.as_ref().is_some_and(|u| u.access_token == event.access_token) {
+                        if slot
+                            .as_ref()
+                            .is_some_and(|u| u.access_token == event.access_token)
+                        {
                             *slot = None;
                         }
-                        tracing::info!(path = %path.display(), "refreshed token saved to auth.json after an earlier failure");
+                        tracing::info!(path = %path.display(), "refreshed token persist retry resolved");
                         return;
                     }
                 }
@@ -211,8 +229,8 @@ fn persist_event(
 
 /// SDK `on_refresh` is invoked from the async refresh path, which has no PersistGate.
 /// Offload the same write so a contended flock cannot stall the runtime.
-fn persist_on_refresh_off_thread(auth_path: PathBuf, scope_key: String) -> OnRefreshCallback {
-    let persist = persist_on_refresh(auth_path, scope_key);
+fn persist_on_refresh_off_thread(auth_path: PathBuf, login: StoredLogin) -> OnRefreshCallback {
+    let persist = persist_on_refresh(auth_path, login);
     Arc::new(move |event: &RefreshEvent| {
         let persist = persist.clone();
         let event = event.clone();
@@ -236,6 +254,11 @@ fn build_oidc_provider(
         anyhow::anyhow!("auth entry has no oidc_client_id — cannot refresh expired tokens")
     })?;
 
+    let login = StoredLogin {
+        scope_key,
+        generation: entry.login_generation.clone(),
+    };
+
     if refresh_cfg.enabled {
         return Ok((
             Arc::new(ProactiveOidcAuthProvider::new(ProactiveOidcParams {
@@ -246,7 +269,7 @@ fn build_oidc_provider(
                 identity: identity_from_entry(entry),
                 expires_at: entry.expires_at,
                 refresh: refresh_cfg.clone(),
-                on_refresh: Some(persist_on_refresh(auth_path, scope_key)),
+                on_refresh: Some(persist_on_refresh(auth_path, login)),
             })),
             OidcProviderKind::Proactive,
         ));
@@ -269,7 +292,7 @@ fn build_oidc_provider(
     if let Some(exp) = entry.expires_at {
         builder = builder.expires_at(exp);
     }
-    builder = builder.on_refresh(persist_on_refresh_off_thread(auth_path, scope_key));
+    builder = builder.on_refresh(persist_on_refresh_off_thread(auth_path, login));
 
     Ok((Arc::new(builder.build()), OidcProviderKind::Sdk))
 }
@@ -337,18 +360,27 @@ fn lock_inode_is_live(_file: &std::fs::File, _path: &Path) -> bool {
     true
 }
 
+#[cfg(test)]
 pub(crate) fn write_refreshed_token(
     path: &Path,
     scope_key: &str,
     event: &RefreshEvent,
 ) -> anyhow::Result<()> {
-    write_refreshed_token_within(path, scope_key, event, AUTH_LOCK_TIMEOUT)
+    write_refreshed_token_within(
+        path,
+        &StoredLogin {
+            scope_key: scope_key.to_owned(),
+            generation: None,
+        },
+        event,
+        AUTH_LOCK_TIMEOUT,
+    )
 }
 
-/// [`write_refreshed_token`] with the lock wait as a parameter, so a test can exercise the timeout without waiting 10 s.
+/// Persist only while the exact login generation still matches, under the shared file lock.
 fn write_refreshed_token_within(
     path: &Path,
-    scope_key: &str,
+    login: &StoredLogin,
     event: &RefreshEvent,
     lock_timeout: std::time::Duration,
 ) -> anyhow::Result<()> {
@@ -363,12 +395,31 @@ fn write_refreshed_token_within(
         );
     };
 
-    let content = std::fs::read_to_string(path)?;
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!("auth.json removed; keeping refreshed token in memory only");
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
     let mut raw: serde_json::Value = serde_json::from_str(&content)?;
 
-    let Some(obj) = raw.get_mut(scope_key).and_then(|e| e.as_object_mut()) else {
-        anyhow::bail!("auth entry '{scope_key}' not found while persisting refreshed token");
+    let Some(obj) = raw
+        .get_mut(&login.scope_key)
+        .and_then(|e| e.as_object_mut())
+    else {
+        tracing::debug!("auth.json login removed; keeping refreshed token in memory only");
+        return Ok(());
     };
+    if obj
+        .get("login_generation")
+        .and_then(serde_json::Value::as_str)
+        != login.generation.as_deref()
+    {
+        tracing::debug!("auth.json login changed; keeping refreshed token in memory only");
+        return Ok(());
+    }
 
     // Never roll disk back to an older token
     // Each refresh persists on its own thread and a sibling shell writes the same file, so writes can arrive out of order
@@ -555,6 +606,7 @@ mod tests {
     #[test]
     fn build_oidc_provider_requires_refresh_token() {
         let entry = AuthEntry {
+            login_generation: None,
             key: "eyJ.tok".into(),
             user_id: "u1".into(),
             refresh_token: None,
@@ -577,6 +629,7 @@ mod tests {
     #[test]
     fn build_oidc_provider_requires_issuer() {
         let entry = AuthEntry {
+            login_generation: None,
             key: "eyJ.tok".into(),
             user_id: "u1".into(),
             refresh_token: Some("rt".into()),
@@ -599,6 +652,7 @@ mod tests {
     #[test]
     fn build_oidc_provider_requires_client_id() {
         let entry = AuthEntry {
+            login_generation: None,
             key: "eyJ.tok".into(),
             user_id: "u1".into(),
             refresh_token: Some("rt".into()),
@@ -621,6 +675,7 @@ mod tests {
     #[test]
     fn build_oidc_provider_succeeds_with_all_fields() {
         let entry = AuthEntry {
+            login_generation: None,
             key: "eyJ.tok".into(),
             user_id: "u1".into(),
             refresh_token: Some("rt".into()),
@@ -653,6 +708,97 @@ mod tests {
         assert_eq!(id.user_id, "u1");
         assert_eq!(id.principal_type.as_deref(), Some("Team"));
         assert_eq!(id.principal_id.as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn r7_2_workspace_refresh_preserves_relogin_and_normal_refresh_persists() {
+        for replacement in [None, Some("new-login")] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_auth_json(
+                dir.path(),
+                r#"{
+                "oidc": { "key": "old-access", "refresh_token": "old-refresh",
+                    "oidc_issuer": "https://issuer.example.test", "login_generation": "original-login" }
+            }"#,
+            );
+            let (scope, entry) = read_auth_entry(&path).unwrap();
+            let persist = persist_on_refresh(
+                path.clone(),
+                StoredLogin {
+                    scope_key: scope,
+                    generation: entry.login_generation,
+                },
+            );
+            if let Some(generation) = replacement {
+                let mut raw: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                raw["oidc"]["login_generation"] = generation.into();
+                raw["oidc"]["key"] = "new-login-access".into();
+                raw["oidc"]["refresh_token"] = "new-login-refresh".into();
+                write_json_atomic(&path, &raw).unwrap();
+            }
+            let before = std::fs::read(&path).unwrap();
+            persist(&locked_event());
+            if replacement.is_some() {
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+            } else {
+                let raw: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                assert_eq!(raw["oidc"]["key"], "eyJ.new");
+                assert_eq!(raw["oidc"]["refresh_token"], "rt-new");
+                assert_eq!(raw["oidc"]["login_generation"], "original-login");
+            }
+        }
+    }
+
+    #[test]
+    fn r7_2_workspace_refresh_retry_cannot_overwrite_a_relogin() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_auth_json(dir.path(), LOCKED_FIXTURE);
+        let held = hold_shared_lock(&path);
+        let unsaved: UnsavedSlot = Arc::new(parking_lot::Mutex::new(None));
+        let short = std::time::Duration::from_millis(100);
+        let retry = persist_event(
+            &path,
+            &legacy_login(),
+            &locked_event(),
+            &unsaved,
+            short,
+            short,
+            20,
+        )
+        .unwrap();
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        raw["oidc"]["login_generation"] = "relogin-during-retry".into();
+        raw["oidc"]["key"] = "new-login-access".into();
+        write_json_atomic(&path, &raw).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        drop(held);
+        retry.join().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(unsaved.lock().is_none());
+    }
+
+    #[test]
+    fn r7_2_workspace_refresh_after_logout_is_memory_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_auth_json(dir.path(), LOCKED_FIXTURE);
+        std::fs::remove_file(&path).unwrap();
+        let unsaved: UnsavedSlot = Arc::new(parking_lot::Mutex::new(None));
+        let short = std::time::Duration::from_millis(10);
+        let retry = persist_event(
+            &path,
+            &legacy_login(),
+            &locked_event(),
+            &unsaved,
+            short,
+            short,
+            0,
+        );
+        assert!(retry.is_none(), "logout is not a retryable storage failure");
+        assert!(unsaved.lock().is_none());
+        assert!(!path.exists());
     }
 
     #[test]
@@ -791,6 +937,13 @@ mod tests {
             "oidc": { "key": "eyJ.old", "user_id": "u1", "refresh_token": "rt-old", "oidc_issuer": "https://auth.x.ai" }
         }"#;
 
+    fn legacy_login() -> StoredLogin {
+        StoredLogin {
+            scope_key: "oidc".into(),
+            generation: None,
+        }
+    }
+
     fn locked_event() -> RefreshEvent {
         RefreshEvent {
             access_token: "eyJ.new".into(),
@@ -827,7 +980,7 @@ mod tests {
 
         let wait = std::time::Duration::from_millis(400);
         let started = std::time::Instant::now();
-        let result = write_refreshed_token_within(&path, "oidc", &locked_event(), wait);
+        let result = write_refreshed_token_within(&path, &legacy_login(), &locked_event(), wait);
         let waited = started.elapsed();
 
         let err = result.expect_err("a held lock must fail the write");
@@ -847,9 +1000,17 @@ mod tests {
         });
 
         let started = std::time::Instant::now();
-        write_refreshed_token_within(&path, "oidc", &locked_event(), std::time::Duration::from_secs(5))
-            .unwrap();
-        assert!(started.elapsed() >= std::time::Duration::from_millis(250), "must have waited for the holder");
+        write_refreshed_token_within(
+            &path,
+            &legacy_login(),
+            &locked_event(),
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(250),
+            "must have waited for the holder"
+        );
         releaser.join().unwrap();
 
         let updated: serde_json::Value =
@@ -865,8 +1026,16 @@ mod tests {
         let unsaved: UnsavedSlot = Arc::new(parking_lot::Mutex::new(None));
         let short = std::time::Duration::from_millis(100);
 
-        let retry = persist_event(&path, "oidc", &locked_event(), &unsaved, short, short, 50)
-            .expect("a failed write must start a retry");
+        let retry = persist_event(
+            &path,
+            &legacy_login(),
+            &locked_event(),
+            &unsaved,
+            short,
+            short,
+            50,
+        )
+        .expect("a failed write must start a retry");
         assert_eq!(
             unsaved.lock().as_ref().map(|e| e.access_token.as_str()),
             Some("eyJ.new"),
@@ -891,7 +1060,16 @@ mod tests {
         let unsaved: UnsavedSlot = Arc::new(parking_lot::Mutex::new(None));
         let short = std::time::Duration::from_millis(50);
 
-        let retry = persist_event(&path, "oidc", &locked_event(), &unsaved, short, short, 3).unwrap();
+        let retry = persist_event(
+            &path,
+            &legacy_login(),
+            &locked_event(),
+            &unsaved,
+            short,
+            short,
+            3,
+        )
+        .unwrap();
         *unsaved.lock() = Some(RefreshEvent {
             access_token: "eyJ.newer".into(),
             new_refresh_token: Some("rt-newer".into()),
@@ -956,6 +1134,7 @@ mod tests {
 
     fn complete_oidc_entry() -> AuthEntry {
         AuthEntry {
+            login_generation: None,
             key: "eyJ.tok".into(),
             user_id: "u1".into(),
             refresh_token: Some("rt".into()),

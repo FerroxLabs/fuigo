@@ -307,7 +307,10 @@ fn render_hooks_expanded_inner(runs: &[HookRunEntry]) -> Vec<BlockLine> {
                 lines.push(
                     Line::from(vec![
                         Span::styled(format!("{}  ", INDENT), theme.muted()),
-                        Span::styled("\u{21a9} ", theme.fg(theme.accent_running)),
+                        Span::styled(
+                            crate::glyphs::hook_blocked_prefix(),
+                            theme.fg(theme.accent_running),
+                        ),
                         Span::styled(run.name.clone(), theme.muted()),
                         Span::styled(format!(" ({}ms)", elapsed.as_millis()), theme.muted()),
                     ])

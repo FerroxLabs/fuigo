@@ -1867,6 +1867,19 @@ pub fn reject_headless_plan_mode(permission_mode: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// An explicit headless resume target must name a session. Interactive mode
+/// may open a picker for bare `--resume`; headless callers use `--continue`
+/// when they intentionally want the most recent session.
+pub fn validate_resume_target(resume: Option<&str>) -> Result<()> {
+    if resume.is_some_and(|value| value.trim().is_empty()) {
+        anyhow::bail!(
+            "--resume requires a session ID or title in headless mode (the value cannot be empty); \
+             use --continue to resume the most recent session"
+        );
+    }
+    Ok(())
+}
+
 /// Run a headless single-turn prompt: spawn the agent, drive the ACP lifecycle, stream to stdout.
 ///
 /// Returns [`HeadlessOutcome`], not `()`: a permission denial ends the run as a distinct,
@@ -2163,6 +2176,7 @@ async fn run_single_turn_inner(
     emitter: &mut HeadlessEmitter,
     interrupt: InterruptWatch,
 ) -> Result<HeadlessOutcome> {
+    validate_resume_target(options.resume.as_deref())?;
     reject_headless_plan_mode(options.permission_mode_flag.as_deref())?;
     // Stamp proxy requests as headless before the agent issues its first request.
     fuigo_shell::http::set_process_client_mode_headless();
@@ -2363,14 +2377,13 @@ async fn run_single_turn_inner(
     );
 
     use crate::app::session_startup::{self, MaterializedStartup, SessionStartupFlags};
-    let has_resume_id = options.resume.as_deref().filter(|s| !s.is_empty());
-    let resume_most_recent = options.resume.as_deref() == Some("");
+    let has_resume_id = options.resume.as_deref();
     let worktree =
         WorktreeSpec::from_cli(options.worktree.as_deref(), options.worktree_ref.as_deref());
     let intent = session_startup::session_startup_intent_from_flags(SessionStartupFlags {
         session_id: options.session_id.as_deref(),
         resume_session_id: has_resume_id,
-        resume_most_recent,
+        resume_most_recent: false,
         continue_last_session: options.continue_last_session,
         fork_session: options.fork_session,
         has_worktree: worktree.is_some(),

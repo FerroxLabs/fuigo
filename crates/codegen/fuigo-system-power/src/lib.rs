@@ -154,7 +154,7 @@ mod imp {
 
 /// A running system-power listener. On macOS/Windows, dropping it stops the
 /// listener and releases its OS resources. On Linux the worker parks on a
-/// blocking logind signal and cannot be cleanly interrupted, so it runs (with
+/// logind signal stream, so it runs (with
 /// its D-Bus connection + sleep-delay inhibitor) until process exit — see the
 /// `linux` module. Intended as a process-lifetime singleton.
 pub struct SystemPowerListener {
@@ -167,8 +167,9 @@ impl SystemPowerListener {
     /// Start listening for system sleep/wake events.
     ///
     /// Returns `None` when the platform mechanism is unavailable — an
-    /// unsupported OS, a missing systemd-logind on Linux, or a registration
-    /// failure. Callers should treat `None` as "no power notifications" and
+    /// unsupported OS or a registration failure. On Linux registration happens
+    /// in the background: `Some` means the worker started, and an unavailable
+    /// bus or logind makes that worker exit without notifications. Callers should treat `None` as "no power notifications" and
     /// degrade gracefully (the dependent feature simply does not engage).
     ///
     /// `callback` is invoked from a platform event thread, so it must be
@@ -177,7 +178,27 @@ impl SystemPowerListener {
     where
         F: Fn(PowerEvent) + Send + Sync + 'static,
     {
-        imp::Listener::start(Box::new(callback)).map(|inner| Self { inner })
+        Self::start_with_status(callback, |_| {})
+    }
+
+    /// Start a listener and report whether registration succeeded once started.
+    /// On Linux `registered` runs on the worker after the bounded bus handshake;
+    /// on other platforms it runs before this function returns. If Linux cannot spawn
+    /// the worker, this returns `None` without calling `registered`. It must be cheap.
+    pub fn start_with_status<F, G>(callback: F, registered: G) -> Option<Self>
+    where
+        F: Fn(PowerEvent) + Send + Sync + 'static,
+        G: FnOnce(bool) + Send + 'static,
+    {
+        #[cfg(target_os = "linux")]
+        let inner = imp::Listener::start_with_status(Box::new(callback), Box::new(registered));
+        #[cfg(not(target_os = "linux"))]
+        let inner = {
+            let inner = imp::Listener::start(Box::new(callback));
+            registered(inner.is_some());
+            inner
+        };
+        inner.map(|inner| Self { inner })
     }
 }
 

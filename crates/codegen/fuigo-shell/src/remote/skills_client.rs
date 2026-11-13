@@ -459,7 +459,11 @@ impl SkillsClient {
         )
         .map_err(|refused| SkillsError::SessionDestinationRefused(refused.to_string()))?;
         // P43: identity only to a FluxRouter-operated destination.
-        let identity = super::account_identity_headers(self.base_url.as_deref().unwrap_or_default(), user_id, email);
+        let identity = super::account_identity_headers(
+            self.base_url.as_deref().unwrap_or_default(),
+            user_id,
+            email,
+        );
         let builder = builder
             .header("Authorization", format!("Bearer {key}"))
             .header(
@@ -526,7 +530,7 @@ impl SkillsClient {
         if self.base_url.is_none() {
             return out;
         }
-        let Ok(store) = crate::auth::read_auth_json(self.auth.auth_json_path()) else {
+        let Ok(store) = self.auth.read_store() else {
             return out;
         };
         out.extend(skills_auth_alt_candidates(
@@ -773,7 +777,10 @@ impl SkillsClient {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 pub(crate) mod tests {
     /// P43 hostile: a skills catalog host that is not FluxRouter-operated gets no identity.
@@ -788,7 +795,7 @@ pub(crate) mod tests {
         crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
         let (base, seen, handle) =
             crate::remote::identity_tests::spawn_recording_mock(r#"{"skills":[]}"#).await;
-            let base = front.front_service(&base);
+        let base = front.front_service(&base);
         let client = SkillsClient::with_base_url(test_auth_manager(), base);
         let _ = client.try_list_catalog("en").await;
         handle.abort();
@@ -982,7 +989,7 @@ pub(crate) mod tests {
         };
         let (base, handle) =
             spawn_skills_mock(200, r#"{"skills":[]}"#, 200, r#"{"skills":[]}"#).await;
-            let base = front.front(&base);
+        let base = front.front(&base);
         let client = SkillsClient::with_base_url(test_auth_manager(), base);
         let (catalog, recovery) = client.try_list_catalog("en").await.expect("ok empty");
         assert!(catalog.bundled.is_empty());
@@ -1001,7 +1008,7 @@ pub(crate) mod tests {
         };
         let (base, handle) =
             spawn_skills_mock(503, r#"{"error":"unavailable"}"#, 200, r#"{"skills":[]}"#).await;
-            let base = front.front(&base);
+        let base = front.front(&base);
         let client = SkillsClient::with_base_url(test_auth_manager(), base);
         let err = client
             .try_list_catalog("en")
@@ -1051,7 +1058,7 @@ pub(crate) mod tests {
         let bundled = r#"{"skills":[{"name":"docx","description":"Word"}]}"#;
         let (base, handle) =
             spawn_skills_mock(200, bundled, 503, r#"{"error":"unavailable"}"#).await;
-            let base = front.front(&base);
+        let base = front.front(&base);
         let client = SkillsClient::with_base_url(test_auth_manager(), base);
         let (catalog, _) = client.try_list_catalog("en").await.expect("bundled ok");
         assert!(catalog.user_list_failed);
@@ -1366,7 +1373,10 @@ pub(crate) mod tests {
         let _c = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_WEB_URL");
         let client = SkillsClient::new(test_auth_manager());
         assert_eq!(client.base_url, None);
-        let err = client.try_list_catalog("en").await.expect_err("no host, no request");
+        let err = client
+            .try_list_catalog("en")
+            .await
+            .expect_err("no host, no request");
         let shown = err.to_string();
         assert!(matches!(err, SkillsError::NotConfigured), "{shown}");
         assert!(shown.contains("FUIGO_SKILLS_BASE_URL"), "{shown}");
@@ -1378,7 +1388,8 @@ pub(crate) mod tests {
     #[test]
     #[serial_test::serial]
     fn skills_client_env_chain_precedence_is_unchanged() {
-        let _web = fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "https://web.example.test");
+        let _web =
+            fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "https://web.example.test");
         assert_eq!(
             SkillsClient::new(test_auth_manager()).base_url.as_deref(),
             Some("https://web.example.test")
@@ -1391,8 +1402,10 @@ pub(crate) mod tests {
             SkillsClient::new(test_auth_manager()).base_url.as_deref(),
             Some("https://conv.example.test")
         );
-        let _skills =
-            fuigo_test_support::EnvGuard::set("FUIGO_SKILLS_BASE_URL", "https://skills.example.test");
+        let _skills = fuigo_test_support::EnvGuard::set(
+            "FUIGO_SKILLS_BASE_URL",
+            "https://skills.example.test",
+        );
         assert_eq!(
             SkillsClient::new(test_auth_manager()).base_url.as_deref(),
             Some("https://skills.example.test")
@@ -1527,7 +1540,6 @@ pub(crate) mod tests {
             "the former vendor default must not be treated differently from any other host"
         );
     }
-
 }
 
 #[cfg(test)]

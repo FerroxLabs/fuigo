@@ -14,11 +14,11 @@ use crate::terminal::{TerminalName, terminal_context};
 
 /// `"❯ "` normally, `"> "` on legacy ConHost. Always 2 columns wide.
 pub fn prompt_arrow() -> &'static str {
-    if is_legacy_windows_console() {
-        "> "
-    } else {
-        "\u{276F} "
-    }
+    prompt_arrow_for(is_legacy_windows_console())
+}
+
+fn prompt_arrow_for(legacy: bool) -> &'static str {
+    if legacy { "> " } else { "\u{276F} " }
 }
 
 /// Display width of [`prompt_arrow`] in columns.
@@ -29,7 +29,11 @@ pub const PROMPT_ARROW_WIDTH: u16 = 2;
 /// Together with a smooth color fade this reads like a studio recording light.
 /// ASCII fallback (`*`/`o`) on legacy ConHost. Always 1 column wide.
 pub fn record_dot(filled: bool) -> &'static str {
-    if is_legacy_windows_console() {
+    record_dot_for(is_legacy_windows_console(), filled)
+}
+
+fn record_dot_for(legacy: bool, filled: bool) -> &'static str {
+    if legacy {
         if filled { "*" } else { "o" }
     } else if filled {
         "\u{25C9}"
@@ -38,24 +42,69 @@ pub fn record_dot(filled: bool) -> &'static str {
     }
 }
 
+/// Scheduled-prompt prefix, including padding. Always three columns.
+pub fn cron_prompt_prefix() -> &'static str {
+    cron_prompt_prefix_for(is_legacy_windows_console())
+}
+
+fn cron_prompt_prefix_for(legacy: bool) -> &'static str {
+    if legacy { "@  " } else { "↻  " }
+}
+
+/// Blocked-hook prefix, including its following space. Always two columns.
+pub fn hook_blocked_prefix() -> &'static str {
+    hook_blocked_prefix_for(is_legacy_windows_console())
+}
+
+fn hook_blocked_prefix_for(legacy: bool) -> &'static str {
+    if legacy { "< " } else { "↩ " }
+}
+
+/// Cancelled workflow marker. The legacy open circle is a CP437 glyph.
+pub fn cancelled_circle() -> &'static str {
+    cancelled_circle_for(is_legacy_windows_console())
+}
+
+fn cancelled_circle_for(legacy: bool) -> &'static str {
+    if legacy { "○" } else { "◌" }
+}
+
+/// Diagram affordance label. Static variants avoid allocating on the render path.
+pub fn mermaid_marker() -> &'static str {
+    mermaid_marker_for(is_legacy_windows_console())
+}
+
+fn mermaid_marker_for(legacy: bool) -> &'static str {
+    if legacy { "○ mermaid" } else { "◇ mermaid" }
+}
+
+/// Pending todo marker, with a one-column ASCII fallback on legacy consoles.
+pub fn pending_todo() -> &'static str {
+    pending_todo_for(is_legacy_windows_console())
+}
+
+fn pending_todo_for(legacy: bool) -> &'static str {
+    if legacy { "o" } else { "□" }
+}
+
 /// `"❙"` normally, `"|"` on legacy ConHost. Always 1 column wide.
 pub fn collapsed_accent() -> &'static str {
-    if is_legacy_windows_console() {
-        "|"
-    } else {
-        "\u{2759}"
-    }
+    collapsed_accent_for(is_legacy_windows_console())
+}
+
+fn collapsed_accent_for(legacy: bool) -> &'static str {
+    if legacy { "|" } else { "\u{2759}" }
 }
 
 /// `"✗"` (U+2717 BALLOT X) normally, `"x"` on legacy ConHost. Always 1 column wide.
 ///
 /// Used for close / cancel / kill buttons and failure status markers.
 pub fn ballot_x() -> &'static str {
-    if is_legacy_windows_console() {
-        "x"
-    } else {
-        "\u{2717}"
-    }
+    ballot_x_for(is_legacy_windows_console())
+}
+
+fn ballot_x_for(legacy: bool) -> &'static str {
+    if legacy { "x" } else { "\u{2717}" }
 }
 
 /// `"✓"` (U+2713 CHECK MARK) normally, `"√"` (U+221A SQUARE ROOT) on legacy ConHost. Always 1 column wide.
@@ -63,11 +112,11 @@ pub fn ballot_x() -> &'static str {
 /// The success / done sibling of [`ballot_x`].
 /// The fallback `√` is a CP437 glyph (code 0xFB), so it renders even on the stripped-down raster font and still reads as a checkmark.
 pub fn check_mark() -> &'static str {
-    if is_legacy_windows_console() {
-        "\u{221A}"
-    } else {
-        "\u{2713}"
-    }
+    check_mark_for(is_legacy_windows_console())
+}
+
+fn check_mark_for(legacy: bool) -> &'static str {
+    if legacy { "\u{221A}" } else { "\u{2713}" }
 }
 
 /// `"↗"` (U+2197 NORTH EAST ARROW) normally, `"o"` on legacy ConHost. Always 1 column wide.
@@ -76,33 +125,33 @@ pub fn check_mark() -> &'static str {
 /// The earlier `⛶` (U+26F6) is missing from many modern monospace fonts and rendered as tofu even on common macOS/Linux terminals.
 /// U+2197 sits in the core Arrows block, which fonts cover well.
 pub fn enlarge() -> &'static str {
-    if is_legacy_windows_console() {
-        "o"
-    } else {
-        "\u{2197}"
-    }
+    enlarge_for(is_legacy_windows_console())
+}
+
+fn enlarge_for(legacy: bool) -> &'static str {
+    if legacy { "o" } else { "\u{2197}" }
 }
 
 /// `"⧉"` (U+29C9 TWO JOINED SQUARES) normally, `"c"` on legacy ConHost. Always 1 column wide.
 ///
 /// The copy button glyph on the scrollback selection box (pairs with [`enlarge`]).
 pub fn copy_icon() -> &'static str {
-    if is_legacy_windows_console() {
-        "c"
-    } else {
-        "\u{29C9}"
-    }
+    copy_icon_for(is_legacy_windows_console())
+}
+
+fn copy_icon_for(legacy: bool) -> &'static str {
+    if legacy { "c" } else { "\u{29C9}" }
 }
 
 /// `"⇣"` (U+21E3 DOWNWARDS DASHED ARROW) normally, `"↓"` (U+2193) on legacy ConHost. Always 1 column wide.
 ///
 /// Used for the context-token count in the turn-status line.
 pub fn token_arrow() -> &'static str {
-    if is_legacy_windows_console() {
-        "\u{2193}"
-    } else {
-        "\u{21E3}"
-    }
+    token_arrow_for(is_legacy_windows_console())
+}
+
+fn token_arrow_for(legacy: bool) -> &'static str {
+    if legacy { "\u{2193}" } else { "\u{21E3}" }
 }
 
 /// Pulsing monitor-indicator frames (`○ ◎ ◉ ◎`) normally; a 1-column dot pulse (`·`, `○`, `•`, `○`) on legacy ConHost.
@@ -111,13 +160,13 @@ pub fn token_arrow() -> &'static str {
 /// Of the fancy frames only `○` is in CP437, so the fallback uses CP437 dots and pulses by fill (faint, ring, solid, ring) rather than by size.
 /// Every frame in both sets is exactly 1 column so the trailing label never shifts as the icon animates.
 pub fn monitor_icon_frames() -> &'static [&'static str] {
+    monitor_icon_frames_for(is_legacy_windows_console())
+}
+
+fn monitor_icon_frames_for(legacy: bool) -> &'static [&'static str] {
     const FANCY: &[&str] = &["\u{25CB}", "\u{25CE}", "\u{25C9}", "\u{25CE}"];
     const FALLBACK: &[&str] = &["\u{00B7}", "\u{25CB}", "\u{2022}", "\u{25CB}"];
-    if is_legacy_windows_console() {
-        FALLBACK
-    } else {
-        FANCY
-    }
+    if legacy { FALLBACK } else { FANCY }
 }
 
 /// `"◆"` (U+25C6 BLACK DIAMOND) normally, `"♦"` (U+2666 BLACK DIAMOND SUIT) on legacy ConHost. Always 1 column wide.
@@ -125,11 +174,11 @@ pub fn monitor_icon_frames() -> &'static [&'static str] {
 /// The filled diamond used across scrollback bullets, status cues, the `/context` bar, picker fold indicators, and dashboard row markers.
 /// The fallback `♦` is a CP437 glyph (code `0x04`), so it renders and still reads as a filled diamond.
 pub fn diamond_filled() -> &'static str {
-    if is_legacy_windows_console() {
-        "\u{2666}"
-    } else {
-        "\u{25C6}"
-    }
+    diamond_filled_for(is_legacy_windows_console())
+}
+
+fn diamond_filled_for(legacy: bool) -> &'static str {
+    if legacy { "\u{2666}" } else { "\u{25C6}" }
 }
 
 /// `"◇"` (U+25C7 WHITE DIAMOND) normally, `"○"` (U+25CB WHITE CIRCLE) on legacy ConHost. Always 1 column wide.
@@ -137,11 +186,11 @@ pub fn diamond_filled() -> &'static str {
 /// The hollow sibling of [`diamond_filled`]: the `/context` bar's free (unused) cells and the dashboard's idle row marker.
 /// The fallback `○` is a CP437 glyph (code `0x09`) and still reads as an empty marker.
 pub fn diamond_hollow() -> &'static str {
-    if is_legacy_windows_console() {
-        "\u{25CB}"
-    } else {
-        "\u{25C7}"
-    }
+    diamond_hollow_for(is_legacy_windows_console())
+}
+
+fn diamond_hollow_for(legacy: bool) -> &'static str {
+    if legacy { "\u{25CB}" } else { "\u{25C7}" }
 }
 
 /// `"◈"` (U+25C8 WHITE DIAMOND CONTAINING BLACK SMALL DIAMOND) normally, `"♦"` (U+2666) on legacy ConHost. Always 1 column wide.
@@ -149,21 +198,35 @@ pub fn diamond_hollow() -> &'static str {
 /// Used for the `/context` bar's tool-definitions category and the collapsed-group scrollback header.
 /// Falls back to the same `♦` as [`diamond_filled`]; both call sites distinguish the category by color, so the collision is harmless.
 pub fn diamond_dotted() -> &'static str {
-    if is_legacy_windows_console() {
-        "\u{2666}"
-    } else {
-        "\u{25C8}"
-    }
+    diamond_dotted_for(is_legacy_windows_console())
+}
+
+fn diamond_dotted_for(legacy: bool) -> &'static str {
+    if legacy { "\u{2666}" } else { "\u{25C8}" }
 }
 
 /// Filled-diamond glyph as a [`char`] (see [`diamond_filled`]), for the tool-usage sequence bar which builds its row from single `char`s.
 pub fn diamond_filled_char() -> char {
-    diamond_filled().chars().next().unwrap_or('\u{25C6}')
+    diamond_filled_char_for(is_legacy_windows_console())
+}
+
+fn diamond_filled_char_for(legacy: bool) -> char {
+    diamond_filled_for(legacy)
+        .chars()
+        .next()
+        .unwrap_or('\u{25C6}')
 }
 
 /// Hollow-diamond glyph as a [`char`] (see [`diamond_hollow`]).
 pub fn diamond_hollow_char() -> char {
-    diamond_hollow().chars().next().unwrap_or('\u{25C7}')
+    diamond_hollow_char_for(is_legacy_windows_console())
+}
+
+fn diamond_hollow_char_for(legacy: bool) -> char {
+    diamond_hollow_for(legacy)
+        .chars()
+        .next()
+        .unwrap_or('\u{25C7}')
 }
 
 /// Rotating braille progress-spinner frames (`⠋⠙⠹⠸⠼⠴⠦⠧`) normally; a 1-column ASCII spinner (`|`, `/`, `-`, `\`) on legacy ConHost.
@@ -171,16 +234,16 @@ pub fn diamond_hollow_char() -> char {
 /// The U+2800 Braille Patterns block is not in CP437, so every caller falls back to the classic ASCII spinner there.
 /// Every frame in both sets is exactly 1 column so the surrounding layout never shifts.
 pub fn braille_spinner_frames() -> &'static [&'static str] {
+    braille_spinner_frames_for(is_legacy_windows_console())
+}
+
+fn braille_spinner_frames_for(legacy: bool) -> &'static [&'static str] {
     const FANCY: &[&str] = &[
         "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
         "\u{2827}",
     ];
     const FALLBACK: &[&str] = &["|", "/", "-", "\\"];
-    if is_legacy_windows_console() {
-        FALLBACK
-    } else {
-        FANCY
-    }
+    if legacy { FALLBACK } else { FANCY }
 }
 
 /// Pulsing dot progress-spinner frames (`⋅ : ⸬ ⁙`) normally; a quiet 1-column dot cycle (`.`, `:`, `·`) on legacy ConHost.
@@ -188,15 +251,15 @@ pub fn braille_spinner_frames() -> &'static [&'static str] {
 /// U+22C5 / U+2E2C / U+2059 are absent from CP437, so every caller falls back to a dot cycle the raster font does render.
 /// Every frame in both sets is exactly 1 column.
 pub fn dot_spinner_frames() -> &'static [&'static str] {
+    dot_spinner_frames_for(is_legacy_windows_console())
+}
+
+fn dot_spinner_frames_for(legacy: bool) -> &'static [&'static str] {
     const FANCY: &[&str] = &[
         "\u{22c5}", ":", "\u{2e2c}", "\u{2059}", "\u{22c5}", ":", "\u{2e2c}", "\u{2059}",
     ];
     const FALLBACK: &[&str] = &[".", ":", "\u{00b7}"];
-    if is_legacy_windows_console() {
-        FALLBACK
-    } else {
-        FANCY
-    }
+    if legacy { FALLBACK } else { FANCY }
 }
 
 /// `"┃"` (U+2503 HEAVY VERTICAL) normally, `"│"` (U+2502 LIGHT VERTICAL, CP437 `0xB3`) on legacy ConHost. Always 1 column wide.
@@ -204,11 +267,11 @@ pub fn dot_spinner_frames() -> &'static [&'static str] {
 /// The left accent rail painted beside scrollback blocks and modal panels.
 /// CP437 ships only the light `│` and double `║` verticals, so the heavy stroke falls back to the light one.
 pub fn accent_bar() -> &'static str {
-    if is_legacy_windows_console() {
-        "\u{2502}"
-    } else {
-        "\u{2503}"
-    }
+    accent_bar_for(is_legacy_windows_console())
+}
+
+fn accent_bar_for(legacy: bool) -> &'static str {
+    if legacy { "\u{2502}" } else { "\u{2503}" }
 }
 
 /// `"▴"` (U+25B4 SMALL UP-POINTING TRIANGLE) normally, `"▲"` (U+25B2, CP437 `0x1E`) on legacy ConHost. Always 1 column wide.
@@ -216,45 +279,53 @@ pub fn accent_bar() -> &'static str {
 /// The timeline sidebar's previous-turn chevron.
 /// The small triangles are absent from CP437; the full-size ones are control-picture glyphs the raster font renders.
 pub fn timeline_chevron_up() -> &'static str {
-    if is_legacy_windows_console() {
-        "\u{25B2}"
-    } else {
-        "\u{25B4}"
-    }
+    timeline_chevron_up_for(is_legacy_windows_console())
+}
+
+fn timeline_chevron_up_for(legacy: bool) -> &'static str {
+    if legacy { "\u{25B2}" } else { "\u{25B4}" }
 }
 
 /// `"▾"` (U+25BE SMALL DOWN-POINTING TRIANGLE) normally, `"▼"` (U+25BC, CP437 `0x1F`) on legacy ConHost. Always 1 column wide.
 ///
 /// The timeline sidebar's next-turn chevron; see [`timeline_chevron_up`].
 pub fn timeline_chevron_down() -> &'static str {
-    if is_legacy_windows_console() {
-        "\u{25BC}"
-    } else {
-        "\u{25BE}"
-    }
+    timeline_chevron_down_for(is_legacy_windows_console())
+}
+
+fn timeline_chevron_down_for(legacy: bool) -> &'static str {
+    if legacy { "\u{25BC}" } else { "\u{25BE}" }
 }
 
 /// `"━"` (U+2501 HEAVY HORIZONTAL) normally, `"─"` (U+2500 LIGHT HORIZONTAL, CP437 `0xC4`) on legacy ConHost. Always 1 column wide.
 ///
 /// Prefer [`timeline_tick_active`] for the sidebar rail: on legacy ConHost this falls back to the same light stroke used for hover.
 pub fn heavy_horizontal() -> &'static str {
-    if is_legacy_windows_console() {
-        "\u{2500}"
-    } else {
-        "\u{2501}"
-    }
+    heavy_horizontal_for(is_legacy_windows_console())
+}
+
+fn heavy_horizontal_for(legacy: bool) -> &'static str {
+    if legacy { "\u{2500}" } else { "\u{2501}" }
 }
 
 /// `"─"` (U+2500 LIGHT HORIZONTAL, CP437 `0xC4`). Always 1 column wide and present on every target.
 /// Exposed so the timeline sidebar's inactive ticks share one glyph source with [`heavy_horizontal`] instead of hardcoding the codepoint.
 pub fn light_horizontal() -> &'static str {
+    light_horizontal_for(is_legacy_windows_console())
+}
+
+fn light_horizontal_for(_legacy: bool) -> &'static str {
     "\u{2500}"
 }
 
 /// Precomposed 2-col active tick for the timeline rail: `"━━"` normally, `"══"` (U+2550, CP437 `0xCD`) on legacy ConHost.
 /// The double stroke keeps the active tick distinct from the light hover/idle stroke there.
 pub fn timeline_tick_active() -> &'static str {
-    if is_legacy_windows_console() {
+    timeline_tick_active_for(is_legacy_windows_console())
+}
+
+fn timeline_tick_active_for(legacy: bool) -> &'static str {
+    if legacy {
         "\u{2550}\u{2550}"
     } else {
         "\u{2501}\u{2501}"
@@ -264,6 +335,10 @@ pub fn timeline_tick_active() -> &'static str {
 /// Precomposed 2-col hover tick for the timeline rail: `"──"` (light horizontal).
 /// Idle ticks reuse a single light cell; this is the wide bright hover form.
 pub fn timeline_tick_hover() -> &'static str {
+    timeline_tick_hover_for(is_legacy_windows_console())
+}
+
+fn timeline_tick_hover_for(_legacy: bool) -> &'static str {
     "\u{2500}\u{2500}"
 }
 
@@ -272,33 +347,33 @@ pub fn timeline_tick_hover() -> &'static str {
 /// The filled status / selection dot used in pickers, the settings and permission modals, the session list, and the file-search view.
 /// Its hollow partner `○` (U+25CB) is already a CP437 glyph (`0x09`) and renders unchanged, so only the filled variant needs a stand-in.
 pub fn filled_dot() -> &'static str {
-    if is_legacy_windows_console() {
-        "\u{2022}"
-    } else {
-        "\u{25CF}"
-    }
+    filled_dot_for(is_legacy_windows_console())
+}
+
+fn filled_dot_for(legacy: bool) -> &'static str {
+    if legacy { "\u{2022}" } else { "\u{25CF}" }
 }
 
 /// `"▏"` (U+258F LEFT ONE EIGHTH BLOCK) normally, `"│"` (U+2502, CP437 `0xB3`) on legacy ConHost. Always 1 column wide.
 ///
 /// The thin left bar marking the selected row in the dashboard and the settings panes.
 pub fn selection_bar() -> &'static str {
-    if is_legacy_windows_console() {
-        "\u{2502}"
-    } else {
-        "\u{258F}"
-    }
+    selection_bar_for(is_legacy_windows_console())
+}
+
+fn selection_bar_for(legacy: bool) -> &'static str {
+    if legacy { "\u{2502}" } else { "\u{258F}" }
 }
 
 /// `"›"` (U+203A SINGLE RIGHT-POINTING ANGLE QUOTATION MARK) normally, `">"` (ASCII) on legacy ConHost. Always 1 column wide.
 ///
 /// The chevron used for collapsed fold indicators, settings breadcrumbs, the integer-stepper increment affordance, and the dashboard "next" button.
 pub fn chevron() -> &'static str {
-    if is_legacy_windows_console() {
-        ">"
-    } else {
-        "\u{203A}"
-    }
+    chevron_for(is_legacy_windows_console())
+}
+
+fn chevron_for(legacy: bool) -> &'static str {
+    if legacy { ">" } else { "\u{203A}" }
 }
 
 /// `"‹"` (U+2039 SINGLE LEFT-POINTING ANGLE QUOTATION MARK) normally, `"<"` (ASCII) on legacy ConHost. Always 1 column wide.
@@ -306,11 +381,11 @@ pub fn chevron() -> &'static str {
 /// The mirror of [`chevron`]: the integer-stepper decrement affordance and the dashboard "prev" button.
 /// Kept in lockstep so a fixed `›`/`>` never sits next to a tofu `‹`.
 pub fn chevron_left() -> &'static str {
-    if is_legacy_windows_console() {
-        "<"
-    } else {
-        "\u{2039}"
-    }
+    chevron_left_for(is_legacy_windows_console())
+}
+
+fn chevron_left_for(legacy: bool) -> &'static str {
+    if legacy { "<" } else { "\u{2039}" }
 }
 
 /// `"⌄"` (U+2304 DOWN ARROWHEAD) normally, `"v"` (ASCII) on legacy ConHost. Always 1 column wide.
@@ -318,22 +393,22 @@ pub fn chevron_left() -> &'static str {
 /// The downward member of the [`chevron`] family; matches `›`'s light visual weight (unlike the solid `▾` disclosure triangle).
 /// Used by the scrollback expandable indicator when the selected row is an expanded verb-group header.
 pub fn chevron_down() -> &'static str {
-    if is_legacy_windows_console() {
-        "v"
-    } else {
-        "\u{2304}"
-    }
+    chevron_down_for(is_legacy_windows_console())
+}
+
+fn chevron_down_for(legacy: bool) -> &'static str {
+    if legacy { "v" } else { "\u{2304}" }
 }
 
 /// `"▾"` (U+25BE BLACK DOWN-POINTING SMALL TRIANGLE) normally, `"v"` (ASCII) on legacy ConHost. Always 1 column wide.
 ///
 /// The "expanded" disclosure indicator for a collapsible dashboard section header (the section's rows are visible below it).
 pub fn disclosure_open() -> &'static str {
-    if is_legacy_windows_console() {
-        "v"
-    } else {
-        "\u{25BE}"
-    }
+    disclosure_open_for(is_legacy_windows_console())
+}
+
+fn disclosure_open_for(legacy: bool) -> &'static str {
+    if legacy { "v" } else { "\u{25BE}" }
 }
 
 /// `"▸"` (U+25B8 BLACK RIGHT-POINTING SMALL TRIANGLE) normally, `">"` (ASCII) on legacy ConHost. Always 1 column wide.
@@ -341,33 +416,33 @@ pub fn disclosure_open() -> &'static str {
 /// The "collapsed" disclosure indicator for a collapsible dashboard section header (the section's rows are hidden).
 /// Pairs with [`disclosure_open`].
 pub fn disclosure_closed() -> &'static str {
-    if is_legacy_windows_console() {
-        ">"
-    } else {
-        "\u{25B8}"
-    }
+    disclosure_closed_for(is_legacy_windows_console())
+}
+
+fn disclosure_closed_for(legacy: bool) -> &'static str {
+    if legacy { ">" } else { "\u{25B8}" }
 }
 
 /// `"[✗]"` normally, `"[x]"` on legacy ConHost. Always 3 columns wide.
 ///
 /// Pre-composed bracketed form of [`ballot_x`] so per-frame render paths reuse a `&'static str` instead of allocating a `format!` each frame.
 pub fn ballot_x_button() -> &'static str {
-    if is_legacy_windows_console() {
-        "[x]"
-    } else {
-        "[\u{2717}]"
-    }
+    ballot_x_button_for(is_legacy_windows_console())
+}
+
+fn ballot_x_button_for(legacy: bool) -> &'static str {
+    if legacy { "[x]" } else { "[\u{2717}]" }
 }
 
 /// `"[↗]"` normally, `"[o]"` on legacy ConHost. Always 3 columns wide.
 ///
 /// Pre-composed bracketed sibling of [`ballot_x_button`] for the bg-task view / enlarge button.
 pub fn enlarge_button() -> &'static str {
-    if is_legacy_windows_console() {
-        "[o]"
-    } else {
-        "[\u{2197}]"
-    }
+    enlarge_button_for(is_legacy_windows_console())
+}
+
+fn enlarge_button_for(legacy: bool) -> &'static str {
+    if legacy { "[o]" } else { "[\u{2197}]" }
 }
 
 /// Substitute the chrome glyphs that legacy ConHost can't render (`✓` to `√`, `✗` to `x`, `⚠` to `!`) in flowing status text such as toasts.
@@ -466,6 +541,113 @@ fn decide_legacy_windows_console(host: HostOs, brand: TerminalName) -> bool {
 mod tests {
     use super::*;
     use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn row_80_b9_scrollback_glyph_fallback_mappings() {
+        for legacy in [false, true] {
+            assert_eq!(pending_todo_for(legacy), if legacy { "o" } else { "□" });
+            assert_eq!(
+                cron_prompt_prefix_for(legacy),
+                if legacy { "@  " } else { "↻  " }
+            );
+            assert_eq!(
+                hook_blocked_prefix_for(legacy),
+                if legacy { "< " } else { "↩ " }
+            );
+            assert_eq!(cancelled_circle_for(legacy), if legacy { "○" } else { "◌" });
+            assert_eq!(
+                mermaid_marker_for(legacy),
+                if legacy { "○ mermaid" } else { "◇ mermaid" }
+            );
+            assert_eq!(
+                diamond_filled_char_for(legacy).to_string(),
+                diamond_filled_for(legacy)
+            );
+            assert_eq!(
+                diamond_hollow_char_for(legacy).to_string(),
+                diamond_hollow_for(legacy)
+            );
+            for glyph in ["○", "→", "│", "─"] {
+                assert_eq!(legacy_glyph_fallback(glyph).as_ref(), glyph);
+            }
+            for (text, width) in [
+                (pending_todo_for(legacy), 1),
+                (cron_prompt_prefix_for(legacy), 3),
+                (hook_blocked_prefix_for(legacy), 2),
+                (cancelled_circle_for(legacy), 1),
+                (mermaid_marker_for(legacy), 9),
+            ] {
+                assert_eq!(text.width(), width);
+            }
+
+            assert_eq!(prompt_arrow_for(legacy), if legacy { "> " } else { "❯ " });
+            assert_eq!(collapsed_accent_for(legacy), if legacy { "|" } else { "❙" });
+            assert_eq!(ballot_x_for(legacy), if legacy { "x" } else { "✗" });
+            assert_eq!(check_mark_for(legacy), if legacy { "√" } else { "✓" });
+            assert_eq!(enlarge_for(legacy), if legacy { "o" } else { "↗" });
+            assert_eq!(copy_icon_for(legacy), if legacy { "c" } else { "⧉" });
+            assert_eq!(token_arrow_for(legacy), if legacy { "↓" } else { "⇣" });
+            assert_eq!(diamond_filled_for(legacy), if legacy { "♦" } else { "◆" });
+            assert_eq!(diamond_hollow_for(legacy), if legacy { "○" } else { "◇" });
+            assert_eq!(diamond_dotted_for(legacy), if legacy { "♦" } else { "◈" });
+            assert_eq!(accent_bar_for(legacy), if legacy { "│" } else { "┃" });
+            assert_eq!(
+                timeline_chevron_up_for(legacy),
+                if legacy { "▲" } else { "▴" }
+            );
+            assert_eq!(
+                timeline_chevron_down_for(legacy),
+                if legacy { "▼" } else { "▾" }
+            );
+            assert_eq!(heavy_horizontal_for(legacy), if legacy { "─" } else { "━" });
+            assert_eq!(light_horizontal_for(legacy), if legacy { "─" } else { "─" });
+            assert_eq!(
+                timeline_tick_active_for(legacy),
+                if legacy { "══" } else { "━━" }
+            );
+            assert_eq!(
+                timeline_tick_hover_for(legacy),
+                if legacy { "──" } else { "──" }
+            );
+            assert_eq!(filled_dot_for(legacy), if legacy { "•" } else { "●" });
+            assert_eq!(selection_bar_for(legacy), if legacy { "│" } else { "▏" });
+            assert_eq!(chevron_for(legacy), if legacy { ">" } else { "›" });
+            assert_eq!(chevron_left_for(legacy), if legacy { "<" } else { "‹" });
+            assert_eq!(chevron_down_for(legacy), if legacy { "v" } else { "⌄" });
+            assert_eq!(disclosure_open_for(legacy), if legacy { "v" } else { "▾" });
+            assert_eq!(
+                disclosure_closed_for(legacy),
+                if legacy { ">" } else { "▸" }
+            );
+            assert_eq!(
+                ballot_x_button_for(legacy),
+                if legacy { "[x]" } else { "[✗]" }
+            );
+            assert_eq!(
+                enlarge_button_for(legacy),
+                if legacy { "[o]" } else { "[↗]" }
+            );
+            if legacy {
+                assert_eq!(braille_spinner_frames_for(legacy), &["|", "/", "-", "\\"]);
+                assert_eq!(dot_spinner_frames_for(legacy), &[".", ":", "·"]);
+                assert_eq!(monitor_icon_frames_for(legacy), &["·", "○", "•", "○"]);
+                assert_eq!(record_dot_for(legacy, true), "*");
+                assert_eq!(record_dot_for(legacy, false), "o");
+            } else {
+                assert_eq!(
+                    braille_spinner_frames_for(legacy),
+                    &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"]
+                );
+                assert_eq!(
+                    dot_spinner_frames_for(legacy),
+                    &["⋅", ":", "⸬", "⁙", "⋅", ":", "⸬", "⁙"]
+                );
+                assert_eq!(monitor_icon_frames_for(legacy), &["○", "◎", "◉", "◎"]);
+                assert_eq!(record_dot_for(legacy, true), "◉");
+                assert_eq!(record_dot_for(legacy, false), "◎");
+            }
+        }
+    }
 
     // Both variants must match `PROMPT_ARROW_WIDTH` so callers using the constant for layout math don't drift between platforms
     #[test]

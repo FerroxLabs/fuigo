@@ -1008,7 +1008,10 @@ async fn stale_persist_does_not_clobber_newer_token() {
     // Production wiring: persist_on_refresh writes synchronously so the PersistGate seq check covers the actual auth.json write
     params.on_refresh = Some(crate::hub_auth::persist_on_refresh(
         auth_path.clone(),
-        "oidc".into(),
+        crate::hub_auth::StoredLogin {
+            scope_key: "oidc".into(),
+            generation: None,
+        },
     ));
     let provider = ProactiveOidcAuthProvider::new(params);
 

@@ -2363,6 +2363,8 @@ fn memory_trace_wanted(memory_override: Option<bool>) -> bool {
     memory_override != Some(false)
 }
 fn main() {
+    // SAFETY: first operation at process entry, before any worker threads exist.
+    unsafe { fuigo_sandbox::consume_startup_warnings() };
     // u35 t1: folder trust gates every git, jj and direnv Fuigo starts; installed before anything can spawn.
     fuigo_workspace::folder_trust::install_process_judges();
     fuigo_version::set_full_version(env!("VERSION_WITH_COMMIT"));

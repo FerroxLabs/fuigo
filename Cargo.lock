@@ -2317,17 +2317,21 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 [[package]]
 name = "crossterm"
 version = "0.28.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
 dependencies = [
  "bitflags 2.13.0",
  "crossterm_winapi",
+ "filedescriptor",
  "futures-core",
+ "libc",
  "mio",
  "parking_lot",
  "rustix 0.38.44",
+ "serde",
+ "serde_json",
+ "serial_test 2.0.0",
  "signal-hook 0.3.18",
  "signal-hook-mio",
+ "temp-env",
  "winapi",
 ]
 
@@ -2567,6 +2571,19 @@ dependencies = [
  "darling_core 0.24.1",
  "quote",
  "syn 3.0.5",
+]
+
+[[package]]
+name = "dashmap"
+version = "5.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
+dependencies = [
+ "cfg-if",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
 ]
 
 [[package]]
@@ -3695,7 +3712,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "serial_test",
+ "serial_test 3.2.0",
  "sha2 0.10.9",
  "strum 0.27.2",
  "tempfile",
@@ -3792,7 +3809,7 @@ dependencies = [
  "ahash",
  "clap",
  "crossbeam",
- "dashmap",
+ "dashmap 6.1.0",
  "dunce",
  "fuigo-paths",
  "git2",
@@ -3849,7 +3866,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
- "dashmap",
+ "dashmap 6.1.0",
  "fuigo-tool-protocol",
  "fuigo-tool-runtime",
  "fuigo-tool-types",
@@ -3888,7 +3905,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
- "dashmap",
+ "dashmap 6.1.0",
  "fastrace",
  "fastrace-opentelemetry",
  "fuigo-computer-hub-core",
@@ -4082,7 +4099,7 @@ dependencies = [
  "bytes",
  "clap",
  "crossbeam",
- "dashmap",
+ "dashmap 6.1.0",
  "dunce",
  "fuigo-dirs",
  "fuigo-gix-status",
@@ -4204,7 +4221,7 @@ dependencies = [
  "notify",
  "notify-debouncer-full",
  "serde",
- "serial_test",
+ "serial_test 3.2.0",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -4389,7 +4406,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
- "serial_test",
+ "serial_test 3.2.0",
  "sse-stream",
  "tempfile",
  "thiserror 2.0.18",
@@ -4556,7 +4573,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "serial_test",
+ "serial_test 3.2.0",
  "sha2 0.10.9",
  "shellexpand",
  "shlex",
@@ -4589,6 +4606,7 @@ version = "1.0.5"
 dependencies = [
  "anyhow",
  "clap",
+ "crossterm",
  "cryptify",
  "dunce",
  "fuigo-acp-lib",
@@ -4598,6 +4616,7 @@ dependencies = [
  "fuigo-extra-ca",
  "fuigo-pager",
  "fuigo-pager-minimal",
+ "fuigo-pager-pty-harness",
  "fuigo-sandbox",
  "fuigo-shell",
  "fuigo-telemetry",
@@ -4610,7 +4629,7 @@ dependencies = [
  "obfstr",
  "semver",
  "serde_json",
- "serial_test",
+ "serial_test 3.2.0",
  "tempfile",
  "tikv-jemalloc-ctl",
  "tikv-jemalloc-sys",
@@ -4712,7 +4731,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "serial_test",
+ "serial_test 3.2.0",
  "shellexpand",
  "strum 0.27.2",
  "supports-color",
@@ -4896,6 +4915,7 @@ dependencies = [
  "fuigo-config",
  "fuigo-dirs",
  "fuigo-file-lock",
+ "fuigo-session-writer",
  "fuigo-tty-utils",
  "globset",
  "ignore",
@@ -4904,7 +4924,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "serial_test",
+ "serial_test 3.2.0",
  "sha2 0.10.9",
  "strum 0.27.2",
  "tempfile",
@@ -5027,7 +5047,7 @@ dependencies = [
  "clap",
  "criterion",
  "ctor 0.4.3",
- "dashmap",
+ "dashmap 6.1.0",
  "dhat",
  "dunce",
  "filetime",
@@ -5132,7 +5152,7 @@ dependencies = [
  "serde",
  "serde_ignored",
  "serde_json",
- "serial_test",
+ "serial_test 3.2.0",
  "sha2 0.10.9",
  "siphasher",
  "strum 0.27.2",
@@ -5279,6 +5299,10 @@ dependencies = [
 name = "fuigo-system-power"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
+ "tempfile",
+ "tokio",
+ "tracing",
  "windows-sys 0.59.0",
  "zbus",
 ]
@@ -5606,7 +5630,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "serial_test",
+ "serial_test 3.2.0",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
@@ -5621,7 +5645,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.43"
+version = "1.0.44"
 dependencies = [
  "semver",
 ]
@@ -5685,7 +5709,7 @@ dependencies = [
  "bstr",
  "chrono",
  "clap",
- "dashmap",
+ "dashmap 6.1.0",
  "dunce",
  "fastrace",
  "flate2",
@@ -6878,7 +6902,7 @@ version = "23.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27850097e1ff9515f46a0dad0f5f9c9d020e972727772dabab9450690c4adb22"
 dependencies = [
- "dashmap",
+ "dashmap 6.1.0",
  "gix-fs",
  "libc",
  "parking_lot",
@@ -12058,6 +12082,20 @@ dependencies = [
 
 [[package]]
 name = "serial_test"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e56dd856803e253c8f298af3f4d7eb0ae5e23a737252cd90bb4f3b435033b2d"
+dependencies = [
+ "dashmap 5.5.3",
+ "futures",
+ "lazy_static",
+ "log",
+ "parking_lot",
+ "serial_test_derive 2.0.0",
+]
+
+[[package]]
+name = "serial_test"
 version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b258109f244e1d6891bf1053a55d63a5cd4f8f4c30cf9a1280989f80e7a1fa9"
@@ -12067,7 +12105,18 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "scc",
- "serial_test_derive",
+ "serial_test_derive 3.2.0",
+]
+
+[[package]]
+name = "serial_test_derive"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91d129178576168c589c9ec973feedf7d3126c01ac2bf08795109aa35b69fb8f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

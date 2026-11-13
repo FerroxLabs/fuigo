@@ -1140,6 +1140,7 @@ fn gated_foreign_pick_replaces_all_prior_startup_intents() {
     app.trust_state = TrustState::Pending {
         workspace: PathBuf::from("/repo"),
         upgrade: false,
+        painted_at: None,
     };
     app.deferred_startup.session =
         Some(crate::app::session_startup::DeferredSessionStartup::Load {

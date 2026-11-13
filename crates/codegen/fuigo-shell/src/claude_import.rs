@@ -720,6 +720,9 @@ mod tests {
     fn gate_load_claude_env_returns_empty_when_marker_set() {
         let _g = MarkerGuard;
         refresh_marker_cache(true);
+        // The env loader lives in fuigo-workspace and reads its own marker, not the shell-side cache.
+        // Without the override this test passes only on hosts with no `~/.claude` env to load.
+        unsafe { std::env::set_var("_FUIGO_CLAUDE_MARKER_OVERRIDE", "1") };
         let dir = tempfile::tempdir().unwrap();
         let env = fuigo_workspace::permission::claude_settings::load_claude_env_with_project(
             dir.path(),

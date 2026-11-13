@@ -8,6 +8,12 @@ use crate::util::subprocess::run_detached_with_timeout;
 use crate::util::subprocess::shell_c;
 use std::time::Duration;
 
+/// Stable identity for external providers that return plain tokens without an issuer.
+pub(crate) fn provider_id(command: &str) -> String {
+    use sha2::Digest as _;
+    format!("{:x}", sha2::Sha256::digest(command.as_bytes()))
+}
+
 /// Parse stdout into a session-credential `FuigoAuth`.
 pub(crate) fn parse_output(output: &std::process::Output) -> anyhow::Result<FuigoAuth> {
     let parsed = parse_token_output(output)?;
@@ -32,6 +38,9 @@ pub(crate) fn parse_output(output: &std::process::Output) -> anyhow::Result<Fuig
         team_blocked_reasons: vec![],
         coding_data_retention_opt_out: crate::auth::default_coding_data_retention_opt_out(),
         has_fuigo_code_access: None,
+        login_generation: None,
+        external_provider_id: None,
+        login_snapshot: None,
         refresh_token: parsed.refresh_token,
         expires_at: parsed.expires_at,
         oidc_issuer: parsed.issuer,
@@ -79,7 +88,8 @@ pub(crate) async fn run_external_refresh(command: &str) -> Option<FuigoAuth> {
     };
 
     match parse_output(&output) {
-        Ok(auth) => {
+        Ok(mut auth) => {
+            auth.external_provider_id = Some(provider_id(command));
             tracing::info!("auth: external auth provider returned fresh token");
             Some(auth)
         }

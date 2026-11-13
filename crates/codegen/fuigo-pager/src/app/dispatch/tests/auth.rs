@@ -1132,3 +1132,40 @@ fn make_default_saves_the_pick_as_the_default() {
     );
     assert!(app.sign_in_notice.clone().unwrap().contains("saved as your default"));
 }
+
+#[test]
+fn row_82_b14_logout_and_cancel_clear_signin_draft() {
+    assert_signin_draft_cleared(true);
+}
+
+#[test]
+fn row_82_b14_cancel_clears_signin_draft_regression() {
+    assert_signin_draft_cleared(false);
+}
+
+fn assert_signin_draft_cleared(logout: bool) {
+    let mut app = test_app_with_agent();
+    app.auth_return_view = Some(ActiveView::Agent(AgentId(0)));
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 1,
+        handle: None,
+        auth_url: Some("https://example.com/stale".into()),
+        mode: AuthMode::Pending,
+    };
+    app.auth_code_input.set_text("stale-code");
+    app.auth_show_raw_url = true;
+    if logout {
+        dispatch(Action::TaskComplete(TaskResult::LogoutComplete), &mut app);
+    } else {
+        dispatch(Action::CancelLogin, &mut app);
+    }
+    assert!(
+        app.auth_code_input.text().is_empty(),
+        "stale code after logout={logout}"
+    );
+    assert!(!app.auth_show_raw_url);
+    assert!(matches!(
+        app.auth_state,
+        AuthState::Done | AuthState::Pending { error: None }
+    ));
+}

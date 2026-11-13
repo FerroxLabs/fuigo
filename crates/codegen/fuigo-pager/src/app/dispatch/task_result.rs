@@ -452,12 +452,23 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             effects
         }
-        TaskResult::FolderTrustClosed { agent_id, session_id, outcome } => {
-            crate::app::folder_trust_reload::handle_closed(app, agent_id, &session_id, outcome)
-        }
-        TaskResult::FolderTrustLoaded { agent_id, session_id, generation, result } => {
-            crate::app::folder_trust_reload::handle_loaded(app, agent_id, &session_id, generation, result)
-        }
+        TaskResult::FolderTrustClosed {
+            agent_id,
+            session_id,
+            outcome,
+        } => crate::app::folder_trust_reload::handle_closed(app, agent_id, &session_id, outcome),
+        TaskResult::FolderTrustLoaded {
+            agent_id,
+            session_id,
+            generation,
+            result,
+        } => crate::app::folder_trust_reload::handle_loaded(
+            app,
+            agent_id,
+            &session_id,
+            generation,
+            result,
+        ),
         TaskResult::SessionMetaFromDisk {
             agent_id,
             title,
@@ -1050,7 +1061,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             } = &app.auth_state
                 && *current_seq == request_seq
             {
-                app.auth_state = AuthState::Pending { error: Some(error) };
+                app.set_auth_state(AuthState::Pending { error: Some(error) });
                 app.auth_code_input.reset();
             }
             vec![]
@@ -1445,7 +1456,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             let target = app
                 .agents
                 .iter()
-                .find(|(_, a)| a.session.session_id.as_ref().is_some_and(|s| s.0.as_ref() == session_id))
+                .find(|(_, a)| {
+                    a.session
+                        .session_id
+                        .as_ref()
+                        .is_some_and(|s| s.0.as_ref() == session_id)
+                })
                 .map(|(id, _)| *id)
                 .or(match app.active_view {
                     ActiveView::Agent(id) => Some(id),
@@ -1722,8 +1738,17 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::CreditLimitRecheckComplete { agent_id, meta } => {
             handle_credit_limit_recheck_complete(app, agent_id, meta)
         }
+        TaskResult::LogoutFailed { error } => {
+            app.show_toast(&format!(
+                "Could not sign out: {}",
+                scrub_error_for_toast(&error)
+            ));
+            vec![]
+        }
         TaskResult::LogoutComplete => {
-            app.auth_state = AuthState::Pending { error: None };
+            app.auth_code_input.reset();
+            app.auth_show_raw_url = false;
+            app.set_auth_state(AuthState::Pending { error: None });
             app.announcement_cta_impressions_logged.clear();
             app.gate = None;
             app.pending_gate_verification = None;

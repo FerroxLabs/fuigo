@@ -366,7 +366,7 @@ impl TableGeometry {
         meta: Option<&TableCopyMeta>,
     ) -> String {
         if let Some(copy) = self.cell_copy(cell, meta) {
-            return copy.text.clone();
+            return copy.copy_text().to_owned();
         }
         let Some(n_cols) = self.checked_n_cols() else {
             return String::new();
@@ -676,18 +676,22 @@ mod tests {
             n_cols: 2,
             cells: vec![
                 TableCellCopy {
+                    code_text: None,
                     text: "Name".into(),
                     joins: vec![],
                 },
                 TableCellCopy {
+                    code_text: None,
                     text: "Notes".into(),
                     joins: vec![],
                 },
                 TableCellCopy {
+                    code_text: None,
                     text: "Alice".into(),
                     joins: vec![],
                 },
                 TableCellCopy {
+                    code_text: None,
                     text: "likes  long   walks".into(),
                     joins: vec![CellJoin::Gap("  ".into()), CellJoin::Gap("   ".into())],
                 },

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::auth::error::AuthError;
 use crate::auth::model::FuigoAuth;
-use crate::auth::refresh::{RefreshReason, TokenRefresher};
+use crate::auth::refresh::{RefreshOutcome, RefreshReason, TokenRefresher};
 use crate::auth::storage::AuthFileLock;
 
 use super::lock::{self, LockAcquire};
@@ -156,7 +156,9 @@ impl AuthManager {
                         Err(err) => RefreshStep::Failed(err),
                     }
                 }
-                RefreshStep::Refreshed(auth) => return Ok(*auth),
+                RefreshStep::Refreshed(auth) => {
+                    return Ok(self.reconcile_credential(*auth, super::CredentialChange::Return));
+                }
                 RefreshStep::Failed(err) => return Err(err),
             };
         }
@@ -173,6 +175,7 @@ impl AuthManager {
             refresher,
             attempted_key,
         } = active;
+        let login_at_start = self.login_snapshot(self.read_exact_auth().as_ref());
         // Never abort an in-flight exchange: the IdP may already have rotated the token.
         let outcome = {
             // Claim the slot before re-checking the gate: a sleep either sees our slot (and waits for us) or we see its gate and back out
@@ -203,6 +206,18 @@ impl AuthManager {
                 None
             };
             refresher.refresh(reason).await
+        };
+        let outcome = match outcome {
+            RefreshOutcome::Success(mut auth) => {
+                // Built-in refreshers retain the credential they actually refreshed.
+                // A provider without a disk credential still snapshots before I/O.
+                if auth.login_snapshot.is_none() {
+                    auth.login_generation = login_at_start.generation.clone().flatten();
+                    auth.login_snapshot = Some(login_at_start);
+                }
+                RefreshOutcome::Success(auth)
+            }
+            outcome => outcome,
         };
         self.apply_refresh_outcome(outcome, reason, attempted_key, &file_lock)
             .await

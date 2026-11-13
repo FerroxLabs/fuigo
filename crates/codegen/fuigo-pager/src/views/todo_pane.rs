@@ -91,7 +91,7 @@ impl TodoListEntry {
 
     fn icon(&self) -> &'static str {
         match self.item.status {
-            TodoStatus::Pending => "□",
+            TodoStatus::Pending => crate::glyphs::pending_todo(),
             TodoStatus::InProgress => "▶",
             TodoStatus::Completed => crate::glyphs::check_mark(),
             TodoStatus::Cancelled => crate::glyphs::ballot_x(),
@@ -500,6 +500,32 @@ mod tests {
         assert_eq!(
             empty_placeholder_message(false, counts(0, 2)),
             "2 cancelled."
+        );
+    }
+}
+
+#[cfg(test)]
+mod row_tests {
+    use super::*;
+    #[test]
+    fn row_80_b4_pending_todo_has_legacy_glyph() {
+        let entry = TodoListEntry::new(
+            0,
+            TodoItem {
+                content: "Pending".into(),
+                status: TodoStatus::Pending,
+                priority: Default::default(),
+                meta: None,
+            },
+            &TodoPaneStyle::default(),
+        );
+        assert_eq!(
+            entry.icon(),
+            if crate::glyphs::is_legacy_windows_console() {
+                "o"
+            } else {
+                "□"
+            }
         );
     }
 }

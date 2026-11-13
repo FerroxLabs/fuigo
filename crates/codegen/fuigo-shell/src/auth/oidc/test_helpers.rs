@@ -49,6 +49,11 @@ pub(super) async fn mock_idp_token() -> (String, String, Discovery, tokio::task:
     (issuer, id_token, discovery, handle)
 }
 pub(super) async fn start_mock_idp() -> (String, tokio::task::JoinHandle<()>) {
+    start_mock_idp_with_nonce(std::sync::Arc::new(parking_lot::Mutex::new(test_nonce()))).await
+}
+pub(super) async fn start_mock_idp_with_nonce(
+    nonce: std::sync::Arc<parking_lot::Mutex<String>>,
+) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let issuer = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
     let issuer_for_discovery = issuer.clone();
@@ -64,7 +69,8 @@ pub(super) async fn start_mock_idp() -> (String, tokio::task::JoinHandle<()>) {
         exp: usize,
     }
 
-    let id_token = {
+    let issuer_for_token = issuer.clone();
+    let id_token = move || {
         let mut hdr = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
         hdr.kid = Some(TEST_KID.to_owned());
         crate::auth::jwt::ensure_jwt_crypto_provider();
@@ -73,9 +79,9 @@ pub(super) async fn start_mock_idp() -> (String, tokio::task::JoinHandle<()>) {
             &Claims {
                 sub: "user-42",
                 email: "test@corp.com",
-                iss: issuer.clone(),
+                iss: issuer_for_token.clone(),
                 aud: TEST_CLIENT_ID,
-                nonce: test_nonce(),
+                nonce: nonce.lock().clone(),
                 exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
             },
             &jsonwebtoken::EncodingKey::from_rsa_pem(rsa_pem.as_bytes()).unwrap(),
@@ -116,7 +122,7 @@ pub(super) async fn start_mock_idp() -> (String, tokio::task::JoinHandle<()>) {
         .route(
             "/token",
             axum::routing::post(move || {
-                let tok = id_token.clone();
+                let tok = id_token();
                 async move {
                     axum::Json(serde_json::json!({
                         "access_token": "mock-access-token",

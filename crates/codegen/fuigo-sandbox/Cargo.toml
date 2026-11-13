@@ -60,6 +60,7 @@ default = ["enforce"]
 enforce = []
 
 [dev-dependencies]
+fuigo-session-writer = { workspace = true }
 serial_test = { workspace = true }
 tempfile = { workspace = true }
 # Compiles the hand-rolled macOS deny-glob regex in tests to assert it matches
