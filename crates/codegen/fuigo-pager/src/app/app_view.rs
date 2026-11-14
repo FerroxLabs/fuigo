@@ -467,7 +467,17 @@ pub enum TrustState {
         workspace: std::path::PathBuf,
         /// u35 t1: the folder was trusted before 1.0.35 for its settings only; the question explains the new scope once.
         upgrade: bool,
+        /// First flushed frame of this question; older input belongs to the preceding screen.
+        painted_at: Option<Instant>,
     },
+}
+/// A rendered welcome screen awaiting the terminal writer's flush receipt.
+/// Cleared on transitions so an older frame cannot authorize the next question.
+#[derive(Debug)]
+pub(crate) struct WelcomeFrame {
+    sequence: u64,
+    trust: bool,
+    consent: Option<crate::app::consent::ConsentLegibility>,
 }
 /// Result of `handle_input`. Tells the event loop what to do next.
 #[derive(Debug)]
@@ -876,6 +886,11 @@ pub struct AppView {
     pub welcome_menu_index: Option<usize>,
     /// Hit-test rects for welcome menu items (populated during render).
     pub welcome_menu_rects: Vec<ratatui::layout::Rect>,
+    /// First flushed frame since the latest welcome screen transition.
+    pub welcome_painted_at: Option<Instant>,
+    pub(crate) welcome_frame: Option<WelcomeFrame>,
+    /// A real screen transition owes one frame even when no animation is running.
+    pub(crate) welcome_needs_redraw: bool,
     /// Whether the welcome menu currently includes a "Changelog" row (above Quit).
     /// Set during render; the input handler uses it to size the menu and map the extra row to the release-notes action.
     pub welcome_show_changelog_action: bool,
@@ -1536,14 +1551,17 @@ impl AppView {
     /// The user's own default model cannot be used (no route to it is set up) but others can:
     /// show "Pick a model:" with the usable ones instead of starting a session that would fail.
     /// Never changes the default. Returns whether the page was opened.
-    pub(crate) fn open_model_pick_if_default_unusable(&mut self, explicit_default: Option<&str>) -> bool {
+    pub(crate) fn open_model_pick_if_default_unusable(
+        &mut self,
+        explicit_default: Option<&str>,
+    ) -> bool {
         let Some(explicit) = explicit_default.map(str::trim).filter(|s| !s.is_empty()) else {
             return false;
         };
         let Some((name, why)) = self.models.unusable_default_reason(explicit) else {
             return false;
         };
-        self.auth_state = AuthState::Pending { error: None };
+        self.set_auth_state(AuthState::Pending { error: None });
         self.picker_modal = false;
         self.picker_page = crate::app::pending_menu::PickerPage::PickModel;
         self.pick_make_default = false;
@@ -1672,6 +1690,9 @@ impl AppView {
             minimal_state: crate::minimal_api::MinimalState::default(),
             welcome_menu_index: None,
             welcome_menu_rects: Vec::new(),
+            welcome_painted_at: None,
+            welcome_frame: None,
+            welcome_needs_redraw: false,
             welcome_show_changelog_action: false,
             welcome_import_banner_rect: None,
             last_mouse_pos: None,
@@ -2745,7 +2766,8 @@ impl AppView {
         let mut scrollback = crate::scrollback::state::ScrollbackState::new();
         scrollback.set_appearance(self.appearance.clone());
         if let Some(raw) = self.current_ui.tool_density.as_deref() {
-            scrollback.set_tool_density(crate::settings::canonical_tool_density(Some(raw)) == "compact");
+            scrollback
+                .set_tool_density(crate::settings::canonical_tool_density(Some(raw)) == "compact");
         }
         scrollback
     }
@@ -3194,6 +3216,7 @@ impl AppView {
                     consent_link_rects: &self.welcome_consent_link_rects,
                     consent_hover_link: &mut self.welcome_consent_hover_link,
                     arrived_at,
+                    painted_at: self.welcome_painted_at,
                     cwd: &self.cwd,
                     mid_session_login: self.auth_return_view.is_some(),
                     auth_code_input: &mut self.auth_code_input,
@@ -3854,6 +3877,7 @@ struct WelcomeInputCtx<'a> {
     consent_hover_link: &'a mut Option<usize>,
     /// When this event reached the process, so a key typed before the notice painted is no answer.
     arrived_at: Instant,
+    painted_at: Option<Instant>,
     /// Live working directory (tracks `Effect::SetWorkingDir`), used to pin the current repo's group to the top of the session picker.
     cwd: &'a std::path::Path,
     /// `true` when the welcome screen is showing only to host a login flow that was started from inside a session.
@@ -4027,6 +4051,13 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             NewWorktreeDialogOutcome::Unchanged => return InputOutcome::Unchanged,
         }
     }
+    if matches!(ev, Event::Mouse(_))
+        && ctx
+            .painted_at
+            .is_none_or(|painted| ctx.arrived_at < painted)
+    {
+        return InputOutcome::Unchanged;
+    }
     if matches!(ctx.auth_state, AuthState::Done)
         && ctx.has_access
         && !ctx.is_zdr_blocked
@@ -4047,10 +4078,17 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
     if matches!(ctx.auth_state, AuthState::Done)
         && ctx.has_access
         && !ctx.is_zdr_blocked
-        && matches!(ctx.trust_state, TrustState::Pending { .. })
+        && let TrustState::Pending { painted_at, .. } = ctx.trust_state
     {
+        let input_predates_question = painted_at.is_none_or(|painted| ctx.arrived_at < painted);
         if let Event::Key(key) = ev {
             if key.kind == KeyEventKind::Release {
+                return InputOutcome::Unchanged;
+            }
+            if key!('c', CONTROL).matches(key) || key!('d', CONTROL).matches(key) {
+                return InputOutcome::Action(Action::Quit);
+            }
+            if input_predates_question {
                 return InputOutcome::Unchanged;
             }
             if key!('y').matches(key) || key!('Y').matches(key) || key!(Enter).matches(key) {
@@ -4064,12 +4102,10 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             if key!('q').matches(key) || key!('Q').matches(key) {
                 return InputOutcome::Action(Action::QuitConfirmed);
             }
-            if key!('c', CONTROL).matches(key) || key!('d', CONTROL).matches(key) {
-                return InputOutcome::Action(Action::Quit);
-            }
             return InputOutcome::Unchanged;
         }
         if let Event::Mouse(mouse) = ev
+            && !input_predates_question
             && matches!(
                 mouse.kind,
                 crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
@@ -4853,7 +4889,9 @@ fn dispatch_pending_menu_action(
         Some(PendingMenuRow::KeyProvider(id)) => {
             InputOutcome::Action(Action::ProviderKeyInfo(id.to_owned()))
         }
-        Some(PendingMenuRow::KeyOther) => InputOutcome::Action(Action::ProviderKeyInfo("other".into())),
+        Some(PendingMenuRow::KeyOther) => {
+            InputOutcome::Action(Action::ProviderKeyInfo("other".into()))
+        }
         Some(PendingMenuRow::Back | PendingMenuRow::MoreConnections) => {
             InputOutcome::Action(Action::PickerBack)
         }
@@ -5108,9 +5146,143 @@ impl AppView {
             }
         }
     }
+    /// Hit targets and paint receipts belong to a single welcome screen.
+    pub(crate) fn invalidate_welcome_input(&mut self) {
+        self.welcome_needs_redraw = true;
+        self.welcome_menu_rects.clear();
+        self.welcome_consent_link_rects.clear();
+        self.welcome_menu_index = None;
+        self.welcome_consent_hover_link = None;
+        self.welcome_painted_at = None;
+        self.welcome_frame = None;
+        if let TrustState::Pending { painted_at, .. } = &mut self.trust_state {
+            *painted_at = None;
+        }
+        if let ConsentState::Pending { painted_at, .. } = &mut self.consent_state {
+            *painted_at = None;
+        }
+    }
+
+    pub(crate) fn set_auth_state(&mut self, state: AuthState) {
+        let same_screen = match (&self.auth_state, &state) {
+            (AuthState::Done, AuthState::Done) => true,
+            (AuthState::Pending { error: a }, AuthState::Pending { error: b }) => a == b,
+            (
+                AuthState::Authenticating {
+                    request_seq: a,
+                    auth_url: au,
+                    mode: am,
+                    ..
+                },
+                AuthState::Authenticating {
+                    request_seq: b,
+                    auth_url: bu,
+                    mode: bm,
+                    ..
+                },
+            ) => a == b && au == bu && am == bm,
+            _ => false,
+        };
+        if !same_screen {
+            self.invalidate_welcome_input();
+        }
+        self.auth_state = state;
+    }
+
+    pub(crate) fn set_trust_state(&mut self, state: TrustState) {
+        let same_question = match (&self.trust_state, &state) {
+            (TrustState::Done, TrustState::Done) => true,
+            (
+                TrustState::Pending {
+                    workspace: a,
+                    upgrade: au,
+                    ..
+                },
+                TrustState::Pending {
+                    workspace: b,
+                    upgrade: bu,
+                    ..
+                },
+            ) => a == b && au == bu,
+            _ => false,
+        };
+        if same_question {
+            return;
+        }
+        self.invalidate_welcome_input();
+        self.trust_state = state;
+    }
+
+    pub(crate) fn set_consent_state(&mut self, state: ConsentState) {
+        let same_question = match (&self.consent_state, &state) {
+            (ConsentState::Done, ConsentState::Done) => true,
+            (ConsentState::Pending { notice: a, .. }, ConsentState::Pending { notice: b, .. }) => {
+                a == b
+            }
+            _ => false,
+        };
+        if same_question {
+            return;
+        }
+        self.invalidate_welcome_input();
+        self.consent_state = state;
+    }
+
+    /// Record what the renderer put in the buffer, without treating it as visible.
+    /// Both full-screen and minimal renderers use the same writer receipt gate.
+    pub fn record_welcome_render(
+        &mut self,
+        trust: bool,
+        consent: Option<crate::app::consent::ConsentLegibility>,
+    ) {
+        self.welcome_frame = Some(WelcomeFrame {
+            sequence: 0,
+            trust,
+            consent,
+        });
+    }
+
+    /// Apply the writer's completion time only to the screen in that exact frame.
+    pub fn welcome_frame_written(&mut self, sequence: u64, flushed_at: Instant) {
+        if self
+            .welcome_frame
+            .as_ref()
+            .is_none_or(|frame| frame.sequence != sequence)
+        {
+            return;
+        }
+        let frame = self.welcome_frame.take().expect("matched frame");
+        self.welcome_painted_at.get_or_insert(flushed_at);
+        if frame.trust
+            && let TrustState::Pending { painted_at, .. } = &mut self.trust_state
+        {
+            painted_at.get_or_insert(flushed_at);
+        }
+        record_consent_paint(&mut self.consent_state, frame.consent, flushed_at);
+    }
+
     /// Render the current view to the terminal.
     pub fn draw(&mut self, terminal: &mut PagerTerminal) {
+        self.welcome_needs_redraw = false;
+        let queued_before = matches!(self.active_view, ActiveView::Welcome)
+            .then(|| terminal.backend_mut().writer_mut().writer_sync().queued());
         self.draw_inner(terminal);
+        if let Some(frame) = &mut self.welcome_frame
+            && frame.sequence == 0
+        {
+            // An identical frame still needs a receipt after a question transition.
+            let writer = terminal.backend_mut().writer_mut();
+            let unchanged = Some(writer.writer_sync().queued()) == queued_before;
+            if unchanged && self.welcome_painted_at.is_some() {
+                // Keep zero-output redraws free once this screen has a receipt.
+                self.welcome_frame = None;
+            } else {
+                if unchanged {
+                    let _ = writer.queue_barrier();
+                }
+                frame.sequence = writer.writer_sync().queued();
+            }
+        }
         fuigo_telemetry::startup::record_first_frame();
         crate::memory_release::run_deferred_release();
     }
@@ -5252,7 +5424,8 @@ impl AppView {
                             && self.sign_in_notice.is_some()
                         {
                             self.sign_in_notice.as_deref()
-                        } else if matches!(self.auth_state, AuthState::Done) && route_note.is_some() {
+                        } else if matches!(self.auth_state, AuthState::Done) && route_note.is_some()
+                        {
                             route_note.as_deref()
                         } else {
                             self.tip.as_deref()
@@ -5293,7 +5466,8 @@ impl AppView {
                             consent_hover_link: self.welcome_consent_hover_link,
                             menu_entries: &menu_entries,
                             picker_modal: self.picker_modal,
-                            sign_in_notice: if matches!(self.auth_state, AuthState::Pending { .. }) {
+                            sign_in_notice: if matches!(self.auth_state, AuthState::Pending { .. })
+                            {
                                 self.sign_in_notice.as_deref()
                             } else {
                                 None
@@ -5358,6 +5532,11 @@ impl AppView {
                             &mut self.welcome_prompt,
                             &mut self.session_picker_state,
                         );
+                        self.welcome_frame = Some(WelcomeFrame {
+                            sequence: 0,
+                            trust: result.trust_painted,
+                            consent: result.consent_legibility,
+                        });
                         self.welcome_menu_rects = result.menu_rects;
                         self.welcome_show_changelog_action = result.changelog_action_present;
                         self.welcome_prompt_rect = result.prompt_rect;
@@ -5369,7 +5548,6 @@ impl AppView {
                         if self.welcome_consent_link_rects.is_empty() {
                             self.welcome_consent_hover_link = None;
                         }
-                        record_consent_paint(&mut self.consent_state, result.consent_legibility);
                         self.welcome_upgrade_cta_rect = result.upgrade_cta_rect;
                         self.welcome_privacy_banner_opt_in_rect = result.privacy_banner_opt_in_rect;
                         self.welcome_privacy_banner_opt_out_rect =
@@ -5878,6 +6056,7 @@ impl AppView {
 fn record_consent_paint(
     state: &mut ConsentState,
     reported: Option<crate::app::consent::ConsentLegibility>,
+    flushed_at: Instant,
 ) {
     let ConsentState::Pending {
         legibility,
@@ -5893,7 +6072,7 @@ fn record_consent_paint(
     };
     *legibility = painted;
     if painted_at.is_none() {
-        *painted_at = Some(Instant::now());
+        *painted_at = Some(flushed_at);
     }
 }
 impl AppView {
@@ -6082,7 +6261,7 @@ impl AppView {
     /// While input waits, the scroll stream is left to the (input-gated) scroll clock, so an overdue animation tick cannot finalize
     /// a stream before the buffered wheel events are processed.
     pub fn tick_with_input(&mut self, input_pending: bool) -> bool {
-        let mut needs_redraw = false;
+        let mut needs_redraw = std::mem::take(&mut self.welcome_needs_redraw);
         needs_redraw |= self.drain_relay_notices();
         needs_redraw |= self.drain_leader_notices();
         needs_redraw |= crate::app::acp_handler::release_parked_plan_requests(self);

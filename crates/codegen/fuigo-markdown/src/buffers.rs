@@ -189,8 +189,17 @@ pub enum CellJoin {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableCellCopy {
+    /// Display text, used for fragment coordinates and wrapping.
     pub text: String,
     pub joins: Vec<CellJoin>,
+    /// Copy form when inline code needs delimiters that are absent from the display.
+    pub code_text: Option<String>,
+}
+
+impl TableCellCopy {
+    pub fn copy_text(&self) -> &str {
+        self.code_text.as_deref().unwrap_or(&self.text)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

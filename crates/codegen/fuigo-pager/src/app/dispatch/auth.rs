@@ -83,9 +83,9 @@ pub(super) fn dispatch_switch_account(app: &mut AppView) -> Vec<Effect> {
     ensure_login_method(app);
 
     let Some(method_id) = app.login_method_id.clone() else {
-        app.auth_state = AuthState::Pending {
+        app.set_auth_state(AuthState::Pending {
             error: Some(no_login_method_error(app)),
-        };
+        });
         return vec![];
     };
 
@@ -94,12 +94,12 @@ pub(super) fn dispatch_switch_account(app: &mut AppView) -> Vec<Effect> {
     let request_seq = app.next_auth_request_seq;
     app.next_auth_request_seq += 1;
     app.auth_code_input.reset();
-    app.auth_state = AuthState::Authenticating {
+    app.set_auth_state(AuthState::Authenticating {
         request_seq,
         handle: None,
         auth_url: None,
         mode: app.auth_start_mode,
-    };
+    });
 
     vec![
         Effect::SwitchAccount {
@@ -218,9 +218,9 @@ pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
 pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
     ensure_login_method(app);
     let Some(method_id) = app.login_method_id.clone() else {
-        app.auth_state = AuthState::Pending {
+        app.set_auth_state(AuthState::Pending {
             error: Some(no_login_method_error(app)),
-        };
+        });
         return vec![];
     };
 
@@ -236,12 +236,12 @@ pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
     let request_seq = app.next_auth_request_seq;
     app.next_auth_request_seq += 1;
     app.auth_code_input.reset();
-    app.auth_state = AuthState::Authenticating {
+    app.set_auth_state(AuthState::Authenticating {
         request_seq,
         handle: None,
         auth_url: None,
         mode: app.auth_start_mode,
-    };
+    });
 
     vec![
         Effect::Authenticate {
@@ -270,7 +270,7 @@ pub(super) fn dispatch_cancel_login(app: &mut AppView) -> Vec<Effect> {
     };
     abort_prior_auth(app);
     app.next_auth_request_seq += 1;
-    app.auth_state = AuthState::Done;
+    app.set_auth_state(AuthState::Done);
     app.picker_modal = false;
     app.picker_page = crate::app::pending_menu::PickerPage::Main;
     app.subscription_signin = None;
@@ -314,7 +314,7 @@ pub(super) fn dispatch_open_sign_in_picker(app: &mut AppView) -> Vec<Effect> {
     app.welcome_prompt_focused = false;
     app.auth_code_input.reset();
     app.auth_show_raw_url = false;
-    app.auth_state = AuthState::Pending { error: None };
+    app.set_auth_state(AuthState::Pending { error: None });
     vec![]
 }
 
@@ -330,7 +330,7 @@ pub(super) fn dispatch_cancel_picker(app: &mut AppView) -> Vec<Effect> {
     app.subscription_signin = None;
     app.auth_show_raw_url = false;
     app.auth_code_input.reset();
-    app.auth_state = AuthState::Done;
+    app.set_auth_state(AuthState::Done);
     if let Some(return_view) = app.auth_return_view.take() {
         restore_auth_return_view(app, return_view);
     }
@@ -352,12 +352,12 @@ pub(super) fn dispatch_sign_in_subscription(
     app.auth_code_input.reset();
     app.sign_in_notice = None;
     app.subscription_signin = Some(provider);
-    app.auth_state = AuthState::Authenticating {
+    app.set_auth_state(AuthState::Authenticating {
         request_seq,
         handle: None,
         auth_url: None,
         mode: AuthMode::Pending,
-    };
+    });
     vec![
         Effect::SubscriptionSignIn {
             request_seq,
@@ -374,7 +374,7 @@ pub(super) fn dispatch_cancel_sign_in(app: &mut AppView) -> Vec<Effect> {
     app.subscription_signin = None;
     app.auth_show_raw_url = false;
     app.auth_code_input.reset();
-    app.auth_state = AuthState::Pending { error: None };
+    app.set_auth_state(AuthState::Pending { error: None });
     vec![]
 }
 
@@ -387,7 +387,7 @@ pub(super) fn dispatch_pick_welcome_model(app: &mut AppView, index: usize) -> Ve
     };
     let make_default = app.pick_make_default;
     app.pick_make_default = false;
-    app.auth_state = AuthState::Done;
+    app.set_auth_state(AuthState::Done);
     app.picker_page = crate::app::pending_menu::PickerPage::Main;
     app.welcome_menu_index = None;
     app.welcome_prompt_focused = true;
@@ -409,11 +409,12 @@ pub(super) fn dispatch_pick_welcome_model(app: &mut AppView, index: usize) -> Ve
                 });
             }
             None => {
-                agent.session.deferred_model_switch = Some(crate::app::agent::DeferredModelSwitch {
-                    model_id: pick.id.clone(),
-                    effort: None,
-                    prev_model_id: None,
-                });
+                agent.session.deferred_model_switch =
+                    Some(crate::app::agent::DeferredModelSwitch {
+                        model_id: pick.id.clone(),
+                        effort: None,
+                        prev_model_id: None,
+                    });
             }
         }
     }
@@ -490,12 +491,12 @@ pub(super) fn dispatch_enter_api_key(app: &mut AppView) -> Vec<Effect> {
     let request_seq = app.next_auth_request_seq;
     app.next_auth_request_seq += 1;
     app.auth_code_input.reset();
-    app.auth_state = AuthState::Authenticating {
+    app.set_auth_state(AuthState::Authenticating {
         request_seq,
         handle: None,
         auth_url: None,
         mode: AuthMode::ApiKey,
-    };
+    });
     vec![]
 }
 
@@ -585,7 +586,7 @@ pub(super) fn handle_auth_complete(
             app.apply_auth_meta(&auth_meta);
         }
 
-        app.auth_state = AuthState::Done;
+        app.set_auth_state(AuthState::Done);
         app.auth_show_raw_url = false;
         app.welcome_prompt_focused = !app.is_access_blocked();
         app.auth_code_input.reset();
@@ -703,6 +704,7 @@ pub(super) fn handle_auth_url_ready(
             _ if external => AuthMode::Command,
             _ => AuthMode::Loopback,
         };
+        app.invalidate_welcome_input();
     }
     vec![]
 }

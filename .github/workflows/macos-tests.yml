@@ -77,6 +77,7 @@ jobs:
           cargo test --locked --no-fail-fast -p fuigo-hooks 2>&1 | tee macos-receipts/fuigo-hooks.log || failed=1
           cargo test --locked -p fuigo-shell --features test-support,config-docs --lib -- config::atomic_write session::prompt_history claude_import 2>&1 | tee macos-receipts/fuigo-shell.log || failed=1
           cargo test --locked -p fuigo-pager-render --lib -- appearance::config 2>&1 | tee macos-receipts/fuigo-pager-render.log || failed=1
+          cargo test --locked -p crossterm --lib -- --test-threads=1 2>&1 | tee macos-receipts/crossterm.log || failed=1
           # P05a crash slots and symbolication.
           cargo test --locked --no-fail-fast -p fuigo-crash-handler 2>&1 | tee macos-receipts/fuigo-crash-handler.log || failed=1
           exit "$failed"

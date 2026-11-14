@@ -634,7 +634,7 @@ fn absolute_deny_entry(
             tail: rest.to_string_lossy().into_owned(),
         }
     } else {
-        DenyEntry::Path(root.join(rest))
+        DenyEntry::Path(crate::deny::without_cur_dir(&root.join(rest)))
     })
 }
 

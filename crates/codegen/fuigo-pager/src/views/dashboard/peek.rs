@@ -1104,6 +1104,48 @@ mod tests {
     }
 
     #[test]
+    fn row_80_b8_narrow_peek_keeps_options_and_input() {
+        let theme = Theme::current();
+        for width in [40, 43, 60, 80] {
+            let area = Rect::new(0, 0, width, 12);
+            let mut panel = PeekPanelState::new(
+                DashboardRowId::TopLevel(AgentId(0)),
+                PeekFields {
+                    label: "agent".into(),
+                    time_ago: String::new(),
+                    response_type: "Awaiting your input".into(),
+                    last_user_message: None,
+                    question: Some("Which approach?".into()),
+                    options: vec![
+                        ("first".into(), "First".into()),
+                        ("second".into(), "Second".into()),
+                        ("__other__".into(), "Other".into()),
+                    ],
+                    request_id: None,
+                    reject_option: Some(2),
+                },
+            );
+            panel.selected_option = Some(2);
+            let mut reply = test_reply();
+            let mut buf = Buffer::empty(area);
+            let result = render_peek_panel(
+                &mut buf, area, &panel, &mut reply, &theme, false, None, false, None, None, None,
+            );
+            let text = (0..area.height)
+                .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+            for label in ["First", "Second", "Other"] {
+                assert!(text.contains(label), "{width}: {text}");
+            }
+            assert!(
+                result.reply_rect.is_some(),
+                "input must remain visible at {width}"
+            );
+        }
+    }
+
+    #[test]
     fn live_tail_middle_bottom_skips_blank_when_only_one_content_row() {
         // status@0, middle from 1, 3-line reply starts at 3, so span 2
         // A blank would leave middle_h=1 (pin-only); expand so pin and body fit

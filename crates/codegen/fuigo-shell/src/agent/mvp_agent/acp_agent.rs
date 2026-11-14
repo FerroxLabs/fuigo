@@ -845,19 +845,21 @@ impl acp::Agent for MvpAgent {
                         None,
                         None,
                     );
+                    let login_at_start = self.auth_manager.read_login_auth();
                     match crate::auth::devbox_login::mint_devbox_auth(&self.auth_manager)
                         .await
                     {
                         Ok(new_auth) => {
                             match self
                                 .auth_manager
-                                .save_without_enrichment(new_auth)
+                                .save_new_login_without_enrichment(new_auth, login_at_start.as_ref())
                                 .await
                             {
-                                Ok(_) => {
+                                Ok(auth) => {
                                     if let Err(e) = self
                                         .auth_manager
-                                        .remove_scope(crate::auth::LEGACY_AUTH_SCOPE)
+                                        .remove_legacy_scope_after_login(&auth)
+                                        .await
                                     {
                                         tracing::warn!(error = ?e, "auth: failed to remove legacy scope (non-fatal)");
                                     }
@@ -926,7 +928,8 @@ impl acp::Agent for MvpAgent {
                     self.auth_manager.clear_in_memory();
                     if let Err(e) = self
                         .auth_manager
-                        .remove_scope(crate::auth::LEGACY_AUTH_SCOPE)
+                        .remove_scope_async(crate::auth::LEGACY_AUTH_SCOPE)
+                        .await
                     {
                         tracing::warn!(error = ?e, "auth: failed to remove legacy scope during WebLogin rejection (non-fatal)");
                     }
@@ -983,9 +986,6 @@ impl acp::Agent for MvpAgent {
                     }),
                     ),
                 );
-                if auth_meta.reauth {
-                    let _ = self.auth_manager.clear();
-                }
                 let cli_oauth = auth_meta.use_oauth.then_some(true);
                 let use_oidc = self.cfg.borrow().resolve_fuigo_oauth(cli_oauth);
                 tracing::debug!(resolved = use_oidc.value, source = ?use_oidc.source, "auth: method resolved");

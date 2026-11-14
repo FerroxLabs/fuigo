@@ -60,9 +60,9 @@ mod modals;
 pub(crate) mod mode_switch;
 mod mouse;
 mod queue_edit;
+mod reader_thread;
 pub(crate) mod screen_mode_relaunch;
 mod session_load_barrier;
-mod reader_thread;
 pub mod signal_handler;
 mod teardown_fence;
 mod terminal_restore;
@@ -594,7 +594,9 @@ pub fn warn_leader_disabled_by_launch_policy() {
 /// 1.0.36 item a: `--leader`, `agent leader` or `fuigo workspace` under a process launch policy: the JSON line, exit 78.
 pub fn exit_leader_conflict() -> ! {
     use fuigo_workspace::permission::launch_policy::{PolicyError, process};
-    let path = process().map(|p| p.path.to_string_lossy().into_owned()).unwrap_or_default();
+    let path = process()
+        .map(|p| p.path.to_string_lossy().into_owned())
+        .unwrap_or_default();
     PolicyError::new(
         "leader_conflict",
         path,
@@ -992,7 +994,9 @@ pub async fn run(
             &args.deny_rules,
         ),
         cli_tools: crate::headless::parse_comma_list(args.cli_tools.as_deref()),
-        cli_disallowed_tools: crate::headless::parse_comma_list(args.cli_disallowed_tools.as_deref()),
+        cli_disallowed_tools: crate::headless::parse_comma_list(
+            args.cli_disallowed_tools.as_deref(),
+        ),
         default_yolo_mode: launch_yolo.yolo,
         default_auto_mode: launch_auto && !launch_yolo.yolo,
         status_line: false,
@@ -1870,8 +1874,17 @@ fn terminal_title_string(title: &str) -> String {
     if sanitized.is_empty() {
         "fuigo".into()
     } else {
-        let truncated: String = sanitized.chars().take(80 - 6).collect();
-        // The cut can leave half a subdivision flag, whose loose tags would hide text
+        use unicode_segmentation::UnicodeSegmentation;
+        use unicode_width::UnicodeWidthStr;
+        let mut width = 0;
+        let truncated: String = sanitized
+            .graphemes(true)
+            .take_while(|grapheme| {
+                width += grapheme.width();
+                width <= 80 - " - fuigo".width()
+            })
+            .collect();
+        // Keep the title's loose-tag sanitization after truncation as well.
         let truncated = fuigo_tty_utils::strip_loose_tags(&truncated);
         format!("{} - fuigo", truncated)
     }
@@ -1879,6 +1892,21 @@ fn terminal_title_string(title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn regression_terminal_title_display_width() {
+        use unicode_width::UnicodeWidthStr;
+        for title in [
+            "界".repeat(80),
+            "👩‍💻".repeat(80),
+            format!(r"C:\Users\dev\{}\file.rs", "資料".repeat(40)),
+            "a".repeat(100),
+        ] {
+            let result = terminal_title_string(&title);
+            assert!(result.width() <= 80, "width {}: {result}", result.width());
+            assert!(result.ends_with(" - fuigo"));
+        }
+    }
+
     /// P71: the withheld-upload notice is replayed after a restore only to a terminal that is still reading.
     #[cfg(unix)]
     #[test]
@@ -1946,11 +1974,11 @@ mod tests {
             terminal_title_string(scotland),
             format!("{scotland} - fuigo")
         );
-        // A cap that cuts through a flag must not leave its loose tags behind
+        // A cap must keep whole graphemes and never leave loose flag tags behind.
         let cut = format!("{}{scotland}", "a".repeat(72));
         assert_eq!(
             terminal_title_string(&cut),
-            format!("{}\u{1f3f4} - fuigo", "a".repeat(72))
+            format!("{} - fuigo", "a".repeat(72))
         );
 
         assert_eq!(
@@ -2052,20 +2080,53 @@ mod tests {
             ("--no-leader", false, true, &on),
             ("default", false, false, &empty_config()),
         ] {
-            let resolved = resolve_leader_mode_inner(leader_flag, no_leader, cfg, None, true, None, true);
-            let unset = resolve_leader_mode_inner(leader_flag, no_leader, cfg, None, true, None, false);
-            assert!(!resolved.use_leader, "{label}: a launch policy means standalone");
-            assert_eq!(resolved.policy_disable_reason, unset.policy_disable_reason, "{label}");
-            assert_eq!(resolved.disabled_by_launch_policy, unset.use_leader, "{label}");
+            let resolved =
+                resolve_leader_mode_inner(leader_flag, no_leader, cfg, None, true, None, true);
+            let unset =
+                resolve_leader_mode_inner(leader_flag, no_leader, cfg, None, true, None, false);
+            assert!(
+                !resolved.use_leader,
+                "{label}: a launch policy means standalone"
+            );
+            assert_eq!(
+                resolved.policy_disable_reason, unset.policy_disable_reason,
+                "{label}"
+            );
+            assert_eq!(
+                resolved.disabled_by_launch_policy, unset.use_leader,
+                "{label}"
+            );
             assert_eq!(resolved.launch_policy_conflict, leader_flag, "{label}");
-            assert!(!unset.disabled_by_launch_policy && !unset.launch_policy_conflict, "{label}: unset is unchanged");
-            assert_eq!(unset, resolve_leader_mode(leader_flag, no_leader, cfg, None, true, None), "{label}");
+            assert!(
+                !unset.disabled_by_launch_policy && !unset.launch_policy_conflict,
+                "{label}: unset is unchanged"
+            );
+            assert_eq!(
+                unset,
+                resolve_leader_mode(leader_flag, no_leader, cfg, None, true, None),
+                "{label}"
+            );
         }
         #[cfg(feature = "release-dist")]
         {
-            let rs = fuigo_shell::util::config::RemoteSettings { leader_mode: Some(true), ..Default::default() };
-            let resolved = resolve_leader_mode_inner(false, false, &empty_config(), Some(&rs), true, None, true);
-            assert!(!resolved.use_leader && resolved.disabled_by_launch_policy && !resolved.launch_policy_conflict);
+            let rs = fuigo_shell::util::config::RemoteSettings {
+                leader_mode: Some(true),
+                ..Default::default()
+            };
+            let resolved = resolve_leader_mode_inner(
+                false,
+                false,
+                &empty_config(),
+                Some(&rs),
+                true,
+                None,
+                true,
+            );
+            assert!(
+                !resolved.use_leader
+                    && resolved.disabled_by_launch_policy
+                    && !resolved.launch_policy_conflict
+            );
         }
     }
     #[test]

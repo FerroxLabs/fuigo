@@ -481,8 +481,14 @@ fn token_fingerprint_matrix() {
     for input in ["abcdefghijklmnop", "short", "123456789012"] {
         let fp = bearer_fingerprint(input);
         assert!(fp.starts_with("sha256:"), "input={input:?} fp={fp}");
-        assert!(fp.ends_with(&format!("/len={}", input.chars().count())), "input={input:?} fp={fp}");
-        assert!(!fp.contains(&input[..4]) && !fp.contains(&input[input.len() - 4..]), "input={input:?} fp={fp}");
+        assert!(
+            fp.ends_with(&format!("/len={}", input.chars().count())),
+            "input={input:?} fp={fp}"
+        );
+        assert!(
+            !fp.contains(&input[..4]) && !fp.contains(&input[input.len() - 4..]),
+            "input={input:?} fp={fp}"
+        );
     }
     assert_eq!(bearer_fingerprint(""), "sha256:e3b0/len=0");
 }
@@ -2439,7 +2445,8 @@ async fn update_writes_disk_before_user_enrichment() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = FuigoComConfig::default();
     let mgr = Arc::new(
-        AuthManager::new(dir.path(), cfg).with_proxy_base_url(&front.front(&format!("http://127.0.0.1:{port}"))),
+        AuthManager::new(dir.path(), cfg)
+            .with_proxy_base_url(&front.front(&format!("http://127.0.0.1:{port}"))),
     );
     let new_auth = FuigoAuth {
         key: "rotated-key".into(),
@@ -2570,7 +2577,8 @@ async fn enrichment_task_preserves_interleaved_token_rotation() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = FuigoComConfig::default();
     let mgr = Arc::new(
-        AuthManager::new(dir.path(), cfg).with_proxy_base_url(&front.front(&format!("http://127.0.0.1:{port}"))),
+        AuthManager::new(dir.path(), cfg)
+            .with_proxy_base_url(&front.front(&format!("http://127.0.0.1:{port}"))),
     );
     let auth_v1 = FuigoAuth {
         key: "key-v1".into(),
@@ -2662,7 +2670,8 @@ async fn enrichment_does_not_resurrect_a_credential_cleared_from_memory() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = FuigoComConfig::default();
     let mgr = Arc::new(
-        AuthManager::new(dir.path(), cfg).with_proxy_base_url(&front.front(&format!("http://127.0.0.1:{port}"))),
+        AuthManager::new(dir.path(), cfg)
+            .with_proxy_base_url(&front.front(&format!("http://127.0.0.1:{port}"))),
     );
     let auth = FuigoAuth {
         key: "key-cleared".into(),
@@ -2814,7 +2823,8 @@ async fn enrichment_overlays_team_login_placeholder_user_id() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = FuigoComConfig::default();
     let mgr = Arc::new(
-        AuthManager::new(dir.path(), cfg).with_proxy_base_url(&front.front(&format!("http://127.0.0.1:{port}"))),
+        AuthManager::new(dir.path(), cfg)
+            .with_proxy_base_url(&front.front(&format!("http://127.0.0.1:{port}"))),
     );
     let team_login = FuigoAuth {
         key: "team-key".into(),
@@ -3233,7 +3243,8 @@ async fn enrich_auth_inline_populates_zdr_flags() {
     let body = r#"{"userId":"u-1","teamBlockedReasons":["BLOCKED_REASON_NO_LOGS"],"codingDataRetentionOptOut":true}"#;
     let base = spawn_user_stub("tok", body).await;
     let dir = tempfile::tempdir().unwrap();
-    let mgr = AuthManager::new(dir.path(), FuigoComConfig::default()).with_proxy_base_url(&front.front(&base));
+    let mgr = AuthManager::new(dir.path(), FuigoComConfig::default())
+        .with_proxy_base_url(&front.front(&base));
     let mut auth = FuigoAuth {
         key: "tok".into(),
         ..FuigoAuth::test_default()
@@ -3254,7 +3265,8 @@ async fn enrich_auth_inline_keeps_fields_absent_from_response() {
     let body = r#"{"userId":"u-1","teamBlockedReasons":["BLOCKED_REASON_NO_LOGS_MODERATED"]}"#;
     let base = spawn_user_stub("tok", body).await;
     let dir = tempfile::tempdir().unwrap();
-    let mgr = AuthManager::new(dir.path(), FuigoComConfig::default()).with_proxy_base_url(&front.front(&base));
+    let mgr = AuthManager::new(dir.path(), FuigoComConfig::default())
+        .with_proxy_base_url(&front.front(&base));
     let mut auth = FuigoAuth {
         key: "tok".into(),
         principal_type: Some("Team".into()),
@@ -4923,4 +4935,1235 @@ api_backend = "responses"
         CredentialResolution::Denied,
         "removing the search pairing must not expose the global or process credential"
     );
+}
+
+#[tokio::test]
+async fn r3_1_logout_never_succeeds_while_completion_holds_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(AuthManager::new_at_path(
+        dir.path().join("auth.json"),
+        FuigoComConfig::default(),
+    ));
+    let before = FuigoAuth::test_default();
+    manager
+        .save_without_enrichment(before.clone())
+        .await
+        .unwrap();
+    // Hold exactly the lock used by complete_login, then race a sibling logout
+    // against the completion's persistence. No sleep or scheduling assumption.
+    let completion_lock = manager.lock_for_write().await.unwrap();
+    let sibling = AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default())
+        .with_test_auth_lock_timeout(StdDuration::from_millis(25));
+    let logout = std::thread::spawn(move || sibling.clear()).join().unwrap();
+    let mut completed = before;
+    completed.key = "completed-login".into();
+    manager
+        .save_without_enrichment_holding_lock(completed, &completion_lock)
+        .unwrap();
+    drop(completion_lock);
+    assert!(
+        logout.is_err() || manager.read_disk_auth().is_none(),
+        "logout reported success but completion left a login on disk"
+    );
+    assert_eq!(logout.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    manager.clear().unwrap();
+    assert!(manager.read_disk_auth().is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn r4_4_logout_lock_wait_yields_to_ui() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(AuthManager::new_at_path(
+        dir.path().join("auth.json"),
+        FuigoComConfig::default(),
+    ));
+    manager
+        .save_without_enrichment(FuigoAuth::test_default())
+        .await
+        .unwrap();
+    let lock = manager.lock_for_write().await.unwrap();
+    let (release, wait) = std::sync::mpsc::channel();
+    // The watchdog prevents a blocking implementation hanging the test forever.
+    let worker = std::thread::spawn(move || {
+        let _ = wait.recv_timeout(std::time::Duration::from_secs(1));
+        drop(lock);
+    });
+    let started = std::time::Instant::now();
+    let (logout, responsive) = tokio::join!(
+        async { crate::auth::perform_logout_async(&manager, None).await },
+        async {
+            tokio::task::yield_now().await;
+            let responsive = started.elapsed() < std::time::Duration::from_millis(500);
+            release.send(()).unwrap_or_default();
+            responsive
+        }
+    );
+    worker.join().unwrap();
+    logout.unwrap();
+    assert!(
+        manager.read_disk_auth().is_none(),
+        "logout must actually remove the login"
+    );
+    assert!(
+        responsive,
+        "waiting for logout's file lock blocked the UI runtime"
+    );
+}
+
+#[tokio::test]
+async fn r4_4_logout_read_failure_does_not_report_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("auth.json");
+    std::fs::create_dir(&path).unwrap();
+    let manager = AuthManager::new_at_path(path.clone(), FuigoComConfig::default());
+    manager.hot_swap(FuigoAuth::test_default());
+    assert!(manager.clear().is_err());
+    assert!(manager.current_or_expired().is_some());
+    assert!(path.is_dir());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn r4_4_relogin_clear_yields_to_ui() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = FuigoComConfig {
+        oidc: None,
+        oauth2: None,
+        auth_provider_command: None,
+        ..Default::default()
+    };
+    let manager = Arc::new(AuthManager::new_at_path(
+        dir.path().join("auth.json"),
+        config.clone(),
+    ));
+    manager
+        .save_without_enrichment(FuigoAuth::test_default())
+        .await
+        .unwrap();
+    let lock = manager.lock_for_write().await.unwrap();
+    let (release, wait) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _ = wait.recv_timeout(std::time::Duration::from_secs(1));
+        drop(lock);
+    });
+    let started = std::time::Instant::now();
+    let mut relogin = Box::pin(crate::auth::flow::run_auth_flow_steps(
+        &manager,
+        &config,
+        true,
+        true,
+        None,
+        None,
+        None,
+        crate::auth::flow::LoginTransportOverride::None,
+    ));
+    let polled = futures::poll!(&mut relogin);
+    let responsive = started.elapsed() < std::time::Duration::from_millis(500);
+    drop(relogin);
+    release.send(()).unwrap_or_default();
+    worker.join().unwrap();
+    assert!(responsive, "re-login clear blocked the UI runtime");
+    assert!(polled.is_pending(), "re-login should await the held lock");
+    assert!(
+        manager.read_disk_auth().is_some(),
+        "a cancelled lock wait must not clear the login"
+    );
+}
+
+#[tokio::test]
+async fn r6_1_stale_enrichment_cannot_restore_a_login_generation() {
+    for generation in [None, Some("old-generation".to_owned())] {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(
+            AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default())
+                .with_proxy_base_url("http://127.0.0.1:1"),
+        );
+        let original = FuigoAuth {
+            login_generation: generation,
+            ..FuigoAuth::test_default()
+        };
+        manager.save_without_enrichment(original).await.unwrap();
+        let snapshot = manager.read_disk_auth().unwrap();
+        let mut replacement = snapshot.clone();
+        replacement.login_generation = Some("new-generation".into());
+        let mut store = read_auth_json(&manager.path).unwrap();
+        store.insert(manager.scope.clone(), replacement.clone());
+        {
+            let _lock = manager.lock_for_write().await.unwrap();
+            write_auth_json(&manager.path, &store).unwrap();
+        }
+        manager
+            .update_unless_superseded(snapshot.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.read_disk_auth().unwrap().login_generation,
+            replacement.login_generation
+        );
+        assert!(
+            manager
+                .complete_login(FuigoAuth::test_default(), Some(&snapshot))
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn r6_2_removed_exact_scope_does_not_match_a_legacy_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(
+        AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default())
+            .with_proxy_base_url("http://127.0.0.1:1"),
+    );
+    assert_ne!(manager.scope, crate::auth::LEGACY_AUTH_SCOPE);
+    manager
+        .save_without_enrichment(FuigoAuth::test_default())
+        .await
+        .unwrap();
+    let snapshot = manager.read_disk_auth().unwrap();
+    let mut store = read_auth_json(&manager.path).unwrap();
+    store.remove(&manager.scope);
+    store.insert(
+        crate::auth::LEGACY_AUTH_SCOPE.into(),
+        FuigoAuth::test_default(),
+    );
+    {
+        let _lock = manager.lock_for_write().await.unwrap();
+        write_auth_json(&manager.path, &store).unwrap();
+    }
+    let bytes = std::fs::read(&manager.path).unwrap();
+    assert!(
+        manager
+            .complete_login(FuigoAuth::test_default(), Some(&snapshot))
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&manager.path).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn r6_3_external_completion_adopts_only_valid_same_account_and_provider() {
+    for mismatch in [
+        "none",
+        "expired",
+        "account",
+        "provider",
+        "mode",
+        "unknown-account",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(
+            AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default())
+                .with_proxy_base_url("http://127.0.0.1:1"),
+        );
+        let completed = FuigoAuth {
+            auth_mode: AuthMode::External,
+            key: "minted-in-this-window".into(),
+            user_id: "account-one".into(),
+            oidc_issuer: Some("https://issuer.example".into()),
+            expires_at: Some(Utc::now() + Duration::hours(1)),
+            ..FuigoAuth::test_default()
+        };
+        let mut sibling = completed.clone();
+        sibling.key = "minted-in-other-window".into();
+        sibling.login_generation = Some("sibling-generation".into());
+        match mismatch {
+            "expired" => sibling.expires_at = Some(Utc::now() - Duration::hours(1)),
+            "account" => sibling.user_id = "account-two".into(),
+            "provider" => sibling.oidc_issuer = Some("https://other.example".into()),
+            "mode" => sibling.auth_mode = AuthMode::Oidc,
+            "unknown-account" => sibling.user_id.clear(),
+            _ => {}
+        }
+        manager
+            .save_without_enrichment(sibling.clone())
+            .await
+            .unwrap();
+        let bytes = std::fs::read(&manager.path).unwrap();
+        let result = manager.complete_login(completed, None).await;
+        if mismatch == "none" {
+            let adopted = result.expect("the same valid external account should be adopted");
+            assert_eq!(adopted.key, sibling.key);
+            assert_eq!(adopted.login_generation, sibling.login_generation);
+            assert_eq!(manager.current_or_expired().unwrap().key, sibling.key);
+        } else {
+            assert!(
+                result.is_err(),
+                "{mismatch} must refuse the raced completion"
+            );
+        }
+        assert_eq!(std::fs::read(&manager.path).unwrap(), bytes, "{mismatch}");
+    }
+}
+
+#[tokio::test]
+async fn r10_4_minted_login_lock_timeout_keeps_empty_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default())
+        .with_test_auth_lock_timeout(StdDuration::from_millis(25));
+    let lock = manager.lock_for_write().await.unwrap();
+    let minted = FuigoAuth {
+        key: "minted-token".into(),
+        ..FuigoAuth::test_default()
+    };
+    let error = manager
+        .save_new_login_without_enrichment(minted.clone(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert_eq!(manager.current_or_expired().map(|a| a.key), None);
+    assert!(!manager.path.exists());
+    drop(lock);
+}
+
+#[tokio::test]
+async fn r6_1_refresh_cannot_overwrite_a_relogin_or_restore_a_removed_scope() {
+    for removed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(
+            AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default())
+                .with_proxy_base_url("http://127.0.0.1:1"),
+        );
+        manager
+            .save_without_enrichment(FuigoAuth::test_default())
+            .await
+            .unwrap();
+        let mut refreshed = manager.read_disk_auth().unwrap();
+        refreshed.key = "rotated-token".into();
+        let mut store = read_auth_json(&manager.path).unwrap();
+        if removed {
+            store.remove(&manager.scope);
+        } else {
+            store.get_mut(&manager.scope).unwrap().login_generation = Some("new-login".into());
+        }
+        {
+            let _lock = manager.lock_for_write().await.unwrap();
+            write_auth_json(&manager.path, &store).unwrap();
+        }
+        let before = std::fs::read(&manager.path).unwrap();
+        let rotated = manager.update(refreshed).await.unwrap();
+        assert_eq!(manager.current_or_expired().unwrap().key, rotated.key);
+        assert_eq!(rotated.key, "rotated-token");
+        assert_eq!(std::fs::read(&manager.path).unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn r6_2_inherited_snapshot_updates_only_its_original_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(
+        AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default())
+            .with_proxy_base_url("http://127.0.0.1:1"),
+    );
+    let mut store = AuthStore::new();
+    store.insert(
+        crate::auth::LEGACY_AUTH_SCOPE.into(),
+        FuigoAuth::test_default(),
+    );
+    write_auth_json(&manager.path, &store).unwrap();
+    let mut snapshot = manager.read_disk_auth().unwrap();
+    snapshot.key = "refreshed-legacy-token".into();
+    manager.update(snapshot).await.unwrap();
+    let disk = read_auth_json(&manager.path).unwrap();
+    assert_eq!(
+        disk.get(crate::auth::LEGACY_AUTH_SCOPE).unwrap().key,
+        "refreshed-legacy-token"
+    );
+    assert!(!disk.contains_key(&manager.scope));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn r6_1_background_enrichment_rejects_identical_token_relogin() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "auth::manager::tests::r6_1_background_enrichment_rejects_identical_token_relogin",
+    ) else {
+        return;
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, user_info_server_app(0))
+            .await
+            .unwrap()
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(
+        AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default())
+            .with_proxy_base_url(&front.front(&format!("http://127.0.0.1:{port}"))),
+    );
+    let (arrived, release) = arm_enrichment_gate(&manager, enrichment::GatePoint::BeforeMerge);
+    manager.update(FuigoAuth::test_default()).await.unwrap();
+    wait_arrived(arrived).await;
+    let mut store = read_auth_json(&manager.path).unwrap();
+    let entry = store.get_mut(&manager.scope).unwrap();
+    entry.login_generation = Some("new-login".into());
+    entry.user_id = "sibling-profile".into();
+    {
+        let _lock = manager.lock_for_write().await.unwrap();
+        write_auth_json(&manager.path, &store).unwrap();
+    }
+    let before = std::fs::read(&manager.path).unwrap();
+    release.send(()).unwrap();
+    wait_enrichments(&manager, 1).await;
+    server.abort();
+    assert_eq!(std::fs::read(&manager.path).unwrap(), before);
+}
+
+#[tokio::test]
+async fn r6_1_profile_edit_rechecks_generation_after_waiting_for_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default());
+    manager
+        .save_without_enrichment(FuigoAuth::test_default())
+        .await
+        .unwrap();
+    let lock = manager.lock_for_write().await.unwrap();
+    let mut edit =
+        Box::pin(manager.edit_stored_credential(|auth| auth.user_id = "edited-profile".into()));
+    assert!(futures::poll!(&mut edit).is_pending());
+    let mut store = read_auth_json(&manager.path).unwrap();
+    store.get_mut(&manager.scope).unwrap().login_generation = Some("replacement".into());
+    write_auth_json(&manager.path, &store).unwrap();
+    let before = std::fs::read(&manager.path).unwrap();
+    drop(lock);
+    assert!(edit.await.is_err());
+    assert_eq!(std::fs::read(&manager.path).unwrap(), before);
+}
+
+#[tokio::test]
+async fn r6_1_api_key_edit_preserves_its_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("auth.json");
+    crate::auth::store_api_key(dir.path(), "original-api-key").unwrap();
+    let mut store = read_auth_json(&path).unwrap();
+    store.values_mut().next().unwrap().login_generation = Some("api-key-generation".into());
+    write_auth_json(&path, &store).unwrap();
+    crate::auth::store_api_key(dir.path(), "updated-api-key").unwrap();
+    let updated = read_auth_json(&path).unwrap();
+    let auth = updated.values().next().unwrap();
+    assert_eq!(auth.key, "updated-api-key");
+    assert_eq!(auth.login_generation.as_deref(), Some("api-key-generation"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn r6_3_two_external_windows_with_plain_tokens_adopt_one_login() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "auth::manager::tests::r6_3_two_external_windows_with_plain_tokens_adopt_one_login",
+    ) else {
+        return;
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let app = axum::Router::new().route(
+        "/user",
+        axum::routing::get(move || {
+            let barrier = barrier.clone();
+            async move {
+                barrier.wait().await;
+                axum::Json(serde_json::json!({"userId": "same-account"}))
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let proxy = front.front(&format!("http://127.0.0.1:{port}"));
+    let first = Arc::new(
+        AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default())
+            .with_proxy_base_url(&proxy),
+    );
+    let second = Arc::new(
+        AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default())
+            .with_proxy_base_url(&proxy),
+    );
+    let command = "printf '%s' plain-provider-token";
+    let (one, two) = tokio::join!(
+        crate::auth::flow::run_external_auth_provider(command, &first, false, None),
+        crate::auth::flow::run_external_auth_provider(command, &second, false, None),
+    );
+    server.abort();
+    let one = one.unwrap().0;
+    let two = two.unwrap().0;
+    assert!(one.login_generation.is_some());
+    assert_eq!(one.login_generation, two.login_generation);
+    assert_eq!(first.current_or_expired().unwrap().key, one.key);
+    assert_eq!(second.current_or_expired().unwrap().key, two.key);
+}
+
+#[tokio::test]
+async fn r6_2_signin_retains_the_inherited_scope_it_started_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(
+        AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default())
+            .with_proxy_base_url("http://127.0.0.1:1"),
+    );
+    let mut store = AuthStore::new();
+    store.insert(
+        crate::auth::LEGACY_AUTH_SCOPE.into(),
+        FuigoAuth::test_default(),
+    );
+    write_auth_json(&manager.path, &store).unwrap();
+    let snapshot = manager
+        .read_login_auth()
+        .expect("sign-in must retain the inherited login snapshot");
+    assert_eq!(
+        snapshot.login_snapshot.as_ref().unwrap().scope,
+        crate::auth::LEGACY_AUTH_SCOPE
+    );
+    {
+        let _lock = manager.lock_for_write().await.unwrap();
+        write_auth_json(&manager.path, &AuthStore::new()).unwrap();
+    }
+    let before = std::fs::read(&manager.path).unwrap();
+    assert!(
+        manager
+            .complete_login(FuigoAuth::test_default(), Some(&snapshot))
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&manager.path).unwrap(), before);
+}
+
+#[tokio::test]
+async fn r6_2_legacy_signin_checks_both_entries_then_migrates() {
+    for destination_changed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(
+            AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default())
+                .with_proxy_base_url("http://127.0.0.1:1"),
+        );
+        let mut store = AuthStore::new();
+        store.insert(
+            crate::auth::LEGACY_AUTH_SCOPE.into(),
+            FuigoAuth::test_default(),
+        );
+        write_auth_json(&manager.path, &store).unwrap();
+        let before = manager.read_login_auth().unwrap();
+        if destination_changed {
+            let _lock = manager.lock_for_write().await.unwrap();
+            store.insert(manager.scope.clone(), FuigoAuth::test_default());
+            write_auth_json(&manager.path, &store).unwrap();
+        }
+        let bytes = std::fs::read(&manager.path).unwrap();
+        let result = manager
+            .complete_login(FuigoAuth::test_default(), Some(&before))
+            .await;
+        if destination_changed {
+            assert!(
+                result.is_err(),
+                "a new destination login must not be overwritten through a legacy snapshot"
+            );
+            assert_eq!(std::fs::read(&manager.path).unwrap(), bytes);
+        } else {
+            let auth = result.unwrap();
+            assert!(auth.login_generation.is_some());
+            assert_eq!(auth.login_snapshot.as_ref().unwrap().scope, manager.scope);
+            manager
+                .remove_legacy_scope_after_login(&auth)
+                .await
+                .unwrap();
+            let stored = read_auth_json(&manager.path).unwrap();
+            assert_eq!(stored.get(&manager.scope).unwrap().key, auth.key);
+            assert!(!stored.contains_key(crate::auth::LEGACY_AUTH_SCOPE));
+        }
+    }
+}
+
+#[tokio::test]
+async fn r7_1_snapshotless_credential_on_empty_store_stays_in_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(AuthManager::new_at_path(
+        dir.path().join("auth.json"),
+        FuigoComConfig::default(),
+    ));
+    let auth = FuigoAuth::test_default();
+    assert!(auth.login_snapshot.is_none());
+    let kept = manager
+        .update_unless_superseded(auth.clone())
+        .await
+        .unwrap();
+    assert_eq!(kept.key, auth.key);
+    assert!(!manager.path.exists());
+}
+
+#[tokio::test]
+async fn r7_3_memory_only_login_keeps_rotated_refresh_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(
+        AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default())
+            .with_test_auth_lock_timeout(StdDuration::from_millis(25)),
+    );
+    r10_detached_login(&manager, false).await;
+    let before = std::fs::read(&manager.path).unwrap();
+    let mut refreshed = manager.current_or_expired().unwrap();
+    refreshed.key = "rotated-access".into();
+    refreshed.refresh_token = Some("rotated-refresh".into());
+    let result = manager.update(refreshed.clone()).await;
+    assert_eq!(
+        manager.current_or_expired().unwrap().refresh_token,
+        refreshed.refresh_token
+    );
+    assert!(result.is_ok());
+    assert_eq!(std::fs::read(&manager.path).unwrap(), before);
+}
+
+#[tokio::test]
+async fn r7_4_own_refresh_removal_still_cancels_open_signin() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(AuthManager::new_at_path(
+        dir.path().join("auth.json"),
+        FuigoComConfig::default(),
+    ));
+    let old = FuigoAuth {
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rejected-refresh".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        ..FuigoAuth::test_default()
+    };
+    manager.save_without_enrichment(old).await.unwrap();
+    let started = manager.read_login_auth().unwrap();
+    manager.set_refresher(Arc::new(FailingRefresher {
+        call_count: Arc::new(AtomicU32::new(0)),
+    }));
+    assert!(
+        manager
+            .refresh_chain(TokenType::OidcSession, RefreshReason::PreRequest)
+            .await
+            .is_err()
+    );
+    assert!(!manager.path.exists());
+    // A local removal marker alone cannot prove no sibling logout followed it.
+    // Retain the conservative refusal until removals have durable provenance.
+    let error = manager
+        .complete_login(FuigoAuth::test_default(), Some(&started))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+    assert!(!manager.path.exists());
+}
+
+#[tokio::test]
+async fn r7_3_refresh_cannot_replace_a_newer_in_memory_login() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(AuthManager::new_at_path(
+        dir.path().join("auth.json"),
+        FuigoComConfig::default(),
+    ));
+    let old = manager
+        .save_new_login_without_enrichment(FuigoAuth::test_default(), None)
+        .await
+        .unwrap();
+    let newer = manager
+        .save_new_login_without_enrichment(FuigoAuth::test_default(), Some(&old))
+        .await
+        .unwrap();
+    let before = std::fs::read(&manager.path).unwrap();
+    let mut refreshed = old;
+    refreshed.refresh_token = Some("old-login-rotation".into());
+    assert!(manager.update(refreshed).await.is_err());
+    assert_eq!(
+        manager.current_or_expired().unwrap().login_generation,
+        newer.login_generation
+    );
+    assert_eq!(std::fs::read(&manager.path).unwrap(), before);
+}
+
+#[tokio::test]
+async fn r8_1_single_window_refresh_updates_disk_and_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(AuthManager::new_at_path(
+        dir.path().join("auth.json"),
+        FuigoComConfig::default(),
+    ));
+    let old = manager
+        .save_new_login_without_enrichment(expired_oidc(), None)
+        .await
+        .unwrap();
+    let calls = Arc::new(AtomicU32::new(0));
+    manager.set_refresher(Arc::new(CountingRefresher {
+        call_count: calls.clone(),
+        delay: StdDuration::ZERO,
+    }));
+    let refreshed = manager.auth().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    for auth in [
+        refreshed,
+        manager.read_exact_auth().unwrap(),
+        manager.current_or_expired().unwrap(),
+    ] {
+        assert_eq!(auth.login_generation, old.login_generation);
+        assert_eq!(auth.key, "fresh-token");
+        assert_eq!(auth.refresh_token.as_deref(), Some("rt-new"));
+    }
+}
+
+// User-visible adoption regressions now exercise the reachable unreadable-store path.
+async fn r9_session_only(manager: &Arc<AuthManager>, buffered: bool) -> FuigoAuth {
+    r10_detached_login(manager, buffered).await.1
+}
+
+fn r9_manager(dir: &tempfile::TempDir) -> Arc<AuthManager> {
+    Arc::new(
+        AuthManager::new_at_path(dir.path().join("auth.json"), FuigoComConfig::default())
+            .with_test_auth_lock_timeout(StdDuration::from_secs(1))
+            .with_proxy_base_url("http://127.0.0.1:1"),
+    )
+}
+
+async fn r9_rotate_disk(manager: &AuthManager, old: &FuigoAuth) -> FuigoAuth {
+    let _lock = manager.lock_for_write().await.unwrap();
+    let mut rotated = old.clone();
+    rotated.key = "rotation-a".into();
+    rotated.refresh_token = Some("rotation-refresh-a".into());
+    rotated.create_time = Utc::now() + Duration::seconds(1);
+    rotated.expires_at = Some(Utc::now() + Duration::hours(1));
+    let mut map = read_auth_json(&manager.path).unwrap();
+    map.insert(manager.scope.clone(), rotated.clone());
+    write_auth_json(&manager.path, &map).unwrap();
+    rotated
+}
+
+#[tokio::test]
+async fn r9_3_proactive_and_reload_keep_session_only_login() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = r9_manager(&dir);
+    let old = manager
+        .save_new_login_without_enrichment(expired_oidc(), None)
+        .await
+        .unwrap();
+    let session = r9_session_only(&manager, false).await;
+    r9_rotate_disk(&manager, &old).await;
+    assert!(!manager.pick_up_sibling_token());
+    assert_eq!(manager.current_or_expired().unwrap().key, session.key);
+    manager.force_reload_from_disk();
+    assert_eq!(manager.current_or_expired().unwrap().key, session.key);
+}
+
+#[tokio::test]
+async fn r9_5_unpinned_refresh_and_sibling_adoption() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = r9_manager(&dir);
+    let old = manager
+        .save_new_login_without_enrichment(expired_oidc(), None)
+        .await
+        .unwrap();
+    manager.set_refresher(Arc::new(CountingRefresher {
+        call_count: Arc::new(AtomicU32::new(0)),
+        delay: StdDuration::ZERO,
+    }));
+    let refreshed = manager.auth().await.unwrap();
+    for auth in [
+        refreshed,
+        manager.read_exact_auth().unwrap(),
+        manager.current_or_expired().unwrap(),
+    ] {
+        assert_eq!(auth.login_generation, old.login_generation);
+        assert_eq!(auth.key, "fresh-token");
+    }
+    let rotated = r9_rotate_disk(&manager, &old).await;
+    assert!(manager.pick_up_sibling_token());
+    assert_eq!(manager.auth().await.unwrap().key, rotated.key);
+}
+
+#[tokio::test]
+async fn r9_3_flow_disk_adoption_returns_session_only_login() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = r9_manager(&dir);
+    let old = manager
+        .save_new_login_without_enrichment(expired_oidc(), None)
+        .await
+        .unwrap();
+    let session = r9_session_only(&manager, true).await;
+    r9_rotate_disk(&manager, &old).await;
+    manager.set_refresher(Arc::new(R10Transient));
+    let (returned, did_login) = crate::auth::flow::run_auth_flow(
+        &manager,
+        &FuigoComConfig::default(),
+        false,
+        None,
+        None,
+        None,
+        crate::auth::LoginTransportOverride::None,
+    )
+    .await
+    .unwrap();
+    assert!(!did_login);
+    assert_eq!(returned.key, session.key);
+    assert_eq!(manager.current_or_expired().unwrap().key, session.key);
+}
+
+#[tokio::test]
+async fn r9_3_profile_returns_session_only_login_without_copying_disk_tokens() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = r9_manager(&dir);
+    let _old = manager
+        .save_new_login_without_enrichment(expired_oidc(), None)
+        .await
+        .unwrap();
+    let session = r9_session_only(&manager, false).await;
+    assert!(
+        manager
+            .update_unless_superseded(session.clone())
+            .await
+            .is_err()
+    );
+    let edited = manager
+        .edit_stored_credential(|auth| auth.first_name = Some("Edited".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(edited.key, session.key);
+    assert_eq!(manager.current_or_expired().unwrap().key, session.key);
+    assert_eq!(
+        read_auth_json(&manager.path).unwrap()[&manager.scope].key,
+        "login-a"
+    );
+}
+
+#[tokio::test]
+async fn r9_3_unauthorized_recovery_returns_session_only_login() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = r9_manager(&dir);
+    let old = manager
+        .save_new_login_without_enrichment(expired_oidc(), None)
+        .await
+        .unwrap();
+    let session = r9_session_only(&manager, false).await;
+    r9_rotate_disk(&manager, &old).await;
+    let mut recovery = crate::auth::recovery::UnauthorizedRecovery::new(
+        manager.clone(),
+        Some(old),
+        crate::auth::recovery::RecoverySource::Background,
+    );
+    let returned = recovery.next().await.unwrap();
+    assert_eq!(returned.key, session.key);
+    assert_eq!(manager.current_or_expired().unwrap().key, session.key);
+}
+
+// A directory at auth.json reliably produces a non-InvalidData read error,
+// including when the tests run as root (chmod alone would not do that).
+async fn r10_detached_login(
+    manager: &Arc<AuthManager>,
+    buffered: bool,
+) -> (FuigoAuth, FuigoAuth, std::io::ErrorKind) {
+    let old = manager
+        .save_new_login_without_enrichment(
+            FuigoAuth {
+                key: "login-a".into(),
+                auth_mode: AuthMode::Oidc,
+                refresh_token: Some("refresh-a".into()),
+                expires_at: Some(Utc::now() + Duration::hours(1)),
+                ..FuigoAuth::test_default()
+            },
+            manager.read_login_auth().as_ref(),
+        )
+        .await
+        .unwrap();
+    std::fs::remove_file(&manager.path).unwrap();
+    std::fs::create_dir(&manager.path).unwrap();
+    let kind = read_auth_json(&manager.path).unwrap_err().kind();
+    let new = manager
+        .complete_login(
+            FuigoAuth {
+                key: "login-b".into(),
+                auth_mode: AuthMode::Oidc,
+                refresh_token: Some("refresh-b".into()),
+                expires_at: Some(
+                    Utc::now()
+                        + if buffered {
+                            Duration::minutes(2)
+                        } else {
+                            Duration::hours(1)
+                        },
+                ),
+                ..FuigoAuth::test_default()
+            },
+            Some(&old),
+        )
+        .await
+        .unwrap();
+    assert_eq!(manager.current_or_expired().unwrap().key, "login-b");
+    std::fs::remove_dir(&manager.path).unwrap();
+    let mut map = AuthStore::new();
+    map.insert(manager.scope.clone(), old.clone());
+    write_auth_json(&manager.path, &map).unwrap();
+    (old, new, kind)
+}
+
+#[tokio::test]
+async fn r10_1_auth_and_reload_never_readopt_a() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = r9_manager(&dir);
+    let (_, new, _) = r10_detached_login(&manager, false).await;
+    assert_eq!(manager.auth().await.unwrap().key, new.key);
+    assert!(!manager.pick_up_sibling_token());
+    manager.force_reload_from_disk();
+    assert_eq!(manager.auth().await.unwrap().key, new.key);
+}
+
+#[tokio::test]
+async fn r10_1_grace_fallback_never_returns_a() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = r9_manager(&dir);
+    let (_, new, _) = r10_detached_login(&manager, true).await;
+    manager.set_refresher(Arc::new(R10Transient));
+    assert_eq!(manager.auth().await.unwrap().key, new.key);
+}
+
+struct R10Refresh {
+    manager: std::sync::Weak<AuthManager>,
+    calls: Arc<AtomicU32>,
+}
+#[async_trait::async_trait]
+impl TokenRefresher for R10Refresh {
+    async fn refresh(&self, reason: RefreshReason) -> crate::auth::refresh::RefreshOutcome {
+        let manager = self.manager.upgrade().unwrap();
+        // Same resolution used by the real OIDC exchange and verdict scoping.
+        let mut auth =
+            resolve_refresh_credential(manager.as_ref(), manager.read_disk_auth(), reason).unwrap();
+        assert_eq!(auth.refresh_token.as_deref(), Some("refresh-b"));
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        auth.key = "rotation-b".into();
+        auth.refresh_token = Some("rotated-refresh-b".into());
+        auth.expires_at = Some(Utc::now() + Duration::hours(1));
+        crate::auth::refresh::RefreshOutcome::success(auth)
+    }
+}
+
+#[tokio::test]
+async fn r10_2_detached_refresh_uses_b_and_never_writes_disk() {
+    for reason in [RefreshReason::PreRequest, RefreshReason::ServerRejected] {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = r9_manager(&dir);
+        let (_, new, _) = r10_detached_login(&manager, true).await;
+        let before = std::fs::read(&manager.path).unwrap();
+        let calls = Arc::new(AtomicU32::new(0));
+        manager.set_refresher(Arc::new(R10Refresh {
+            manager: Arc::downgrade(&manager),
+            calls: calls.clone(),
+        }));
+        let result = manager
+            .refresh_chain(TokenType::OidcSession, reason)
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.key, "rotation-b");
+        assert_eq!(result.login_generation, new.login_generation);
+        assert_eq!(manager.current_or_expired().unwrap().key, result.key);
+        assert_eq!(std::fs::read(&manager.path).unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn r10_3_detached_read_preserves_original_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = r9_manager(&dir);
+    let (_, new, kind) = r10_detached_login(&manager, false).await;
+    let before = std::fs::read(&manager.path).unwrap();
+    for result in [
+        manager.read_store(),
+        manager.read_store_or_empty(),
+        manager.read_store_recovering_corrupt(),
+    ] {
+        assert_eq!(result.unwrap_err().kind(), kind);
+    }
+    assert_eq!(
+        manager.read_disk_auth_with_state().1,
+        DiskAuthState::Unreadable
+    );
+    assert_eq!(manager.clear_async().await.unwrap_err().kind(), kind);
+    assert_eq!(std::fs::read(&manager.path).unwrap(), before);
+    assert_eq!(manager.current_or_expired().unwrap().key, new.key);
+    // A later missing or corrupt file cannot masquerade as a sibling logout,
+    // nor can a local clear reconnect this manager to the old store.
+    std::fs::remove_file(&manager.path).unwrap();
+    assert_eq!(manager.read_store_or_empty().unwrap_err().kind(), kind);
+    manager.clear_in_memory();
+    assert_eq!(
+        manager.read_store_recovering_corrupt().unwrap_err().kind(),
+        kind
+    );
+}
+
+#[tokio::test]
+async fn r10_4_new_signin_lock_failure_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = r9_manager(&dir);
+    let old = manager
+        .save_new_login_without_enrichment(FuigoAuth::test_default(), None)
+        .await
+        .unwrap();
+    let before = std::fs::read(&manager.path).unwrap();
+    let _held = manager.lock_for_write().await.unwrap();
+    let error = manager
+        .save_new_login_without_enrichment(
+            FuigoAuth {
+                key: "login-b".into(),
+                ..FuigoAuth::test_default()
+            },
+            Some(&old),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert_eq!(manager.current_or_expired().unwrap().key, old.key);
+    assert_eq!(
+        manager.current_or_expired().unwrap().login_generation,
+        old.login_generation
+    );
+    assert_eq!(std::fs::read(&manager.path).unwrap(), before);
+}
+
+#[tokio::test]
+async fn r10_1_config_watcher_does_not_deliver_a_or_logout() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = r9_manager(&dir);
+    let (_, new, _) = r10_detached_login(&manager, false).await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut reloader = crate::config::reloader::ConfigReloader::new(
+        dir.path().to_path_buf(),
+        crate::config::reloader::hash_auth_key(&new.key),
+        toml::Value::Table(Default::default()),
+        manager.scope.clone(),
+        None,
+        tx,
+        None,
+    )
+    .with_auth_manager(manager.clone());
+    assert!(reloader.reload_auth().is_err());
+    assert!(rx.try_recv().is_err());
+    assert!(manager.apply_store_reload().is_err());
+    assert_eq!(manager.current_or_expired().unwrap().key, new.key);
+    write_auth_json(&manager.path, &AuthStore::new()).unwrap();
+    assert!(reloader.reload_auth().is_err());
+    assert!(rx.try_recv().is_err());
+    assert!(manager.apply_store_reload().is_err());
+    assert_eq!(manager.current_or_expired().unwrap().key, new.key);
+}
+
+#[tokio::test]
+async fn r10_6_normal_hot_swap_returns_the_installed_credential() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = r9_manager(&dir);
+    let old = manager
+        .save_new_login_without_enrichment(FuigoAuth::test_default(), None)
+        .await
+        .unwrap();
+    let sibling = r9_manager(&dir);
+    let new = sibling
+        .save_new_login_without_enrichment(
+            FuigoAuth {
+                key: "login-b".into(),
+                ..FuigoAuth::test_default()
+            },
+            Some(&old),
+        )
+        .await
+        .unwrap();
+    let returned = manager.hot_swap(new.clone());
+    assert_eq!(returned.key, new.key);
+    assert_eq!(returned.login_generation, new.login_generation);
+    assert_eq!(manager.auth().await.unwrap().key, new.key);
+}
+
+struct R10Transient;
+#[async_trait::async_trait]
+impl TokenRefresher for R10Transient {
+    async fn refresh(&self, _: RefreshReason) -> crate::auth::refresh::RefreshOutcome {
+        crate::auth::refresh::RefreshOutcome::TransientFailure {
+            message: "local test failure".into(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn r10_2_oidc_exchange_sends_b_refresh_token() {
+    let captured = Arc::new(parking_lot::Mutex::new(None::<String>));
+    let capture = captured.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let issuer = format!("http://{}", listener.local_addr().unwrap());
+    let discovery_issuer = issuer.clone();
+    let app = axum::Router::new()
+        .route("/.well-known/openid-configuration", axum::routing::get(move || {
+            let base = discovery_issuer.clone();
+            async move { axum::Json(serde_json::json!({
+                "authorization_endpoint": format!("{base}/authorize"),
+                "token_endpoint": format!("{base}/token")
+            })) }
+        }))
+        .route("/token", axum::routing::post(move |body: axum::extract::Form<Vec<(String, String)>>| {
+            let capture = capture.clone();
+            async move {
+                *capture.lock() = body.iter().find(|(k, _)| k == "refresh_token").map(|(_, v)| v.clone());
+                axum::Json(serde_json::json!({ "access_token": "rotation-b", "refresh_token": "rotated-refresh-b", "expires_in": 3600 }))
+            }
+        }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let manager = r9_manager(&dir);
+    let (_, mut new, _) = r10_detached_login(&manager, true).await;
+    new.oidc_issuer = Some(issuer);
+    new.oidc_client_id = Some("local-test-client".into());
+    manager.hot_swap(new.clone());
+    manager.configure_refresher(None, None);
+    let before = std::fs::read(&manager.path).unwrap();
+    let result = manager
+        .refresh_chain(TokenType::OidcSession, RefreshReason::PreRequest)
+        .await
+        .unwrap();
+    server.abort();
+    assert_eq!(captured.lock().as_deref(), Some("refresh-b"));
+    assert_eq!(result.key, "rotation-b");
+    assert_eq!(result.login_generation, new.login_generation);
+    assert_eq!(
+        manager
+            .current_or_expired()
+            .unwrap()
+            .refresh_token
+            .as_deref(),
+        Some("rotated-refresh-b")
+    );
+    assert_eq!(std::fs::read(&manager.path).unwrap(), before);
+}
+
+fn r11_login(key: &str) -> FuigoAuth {
+    FuigoAuth {
+        key: format!("login-{key}"),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some(format!("refresh-{key}")),
+        expires_at: Some(Utc::now() + Duration::hours(1)),
+        ..FuigoAuth::test_default()
+    }
+}
+
+#[tokio::test]
+async fn r11_1_write_failure_detaches_after_successful_read() {
+    use std::io::ErrorKind;
+    for kind in [
+        ErrorKind::PermissionDenied,
+        ErrorKind::StorageFull,
+        ErrorKind::NotFound,
+        ErrorKind::InvalidData,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = r9_manager(&dir);
+        let old = manager
+            .save_new_login_without_enrichment(r11_login("a"), None)
+            .await
+            .unwrap();
+        let before = std::fs::read(&manager.path).unwrap();
+        *manager.test_store_write_error.write() = Some(kind);
+        let error = manager
+            .complete_login(r11_login("b"), Some(&old))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), kind);
+        *manager.test_store_write_error.write() = None;
+        assert_eq!(manager.current_or_expired().unwrap().key, "login-b");
+        manager.force_reload_from_disk();
+        assert_eq!(manager.auth().await.unwrap().key, "login-b");
+        let detached_kind = manager.read_store().unwrap_err().kind();
+        assert!(!matches!(
+            detached_kind,
+            ErrorKind::NotFound | ErrorKind::InvalidData
+        ));
+        if !matches!(kind, ErrorKind::NotFound | ErrorKind::InvalidData) {
+            assert_eq!(detached_kind, kind);
+        }
+        let calls = Arc::new(AtomicU32::new(0));
+        manager.set_refresher(Arc::new(R10Refresh {
+            manager: Arc::downgrade(&manager),
+            calls: calls.clone(),
+        }));
+        let result = manager
+            .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+            .await
+            .unwrap();
+        assert_eq!(result.key, "rotation-b");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read(&manager.path).unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn r11_1_second_read_failure_detaches() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = r9_manager(&dir);
+    let old = manager
+        .save_new_login_without_enrichment(r11_login("a"), None)
+        .await
+        .unwrap();
+    let before = std::fs::read(&manager.path).unwrap();
+    let path = manager.path.clone();
+    *manager.test_store_read_hook.lock() = Some(Box::new(move || {
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+    }));
+    manager
+        .complete_login(r11_login("b"), Some(&old))
+        .await
+        .unwrap();
+    std::fs::remove_dir(&manager.path).unwrap();
+    std::fs::write(&manager.path, &before).unwrap();
+    manager.force_reload_from_disk();
+    assert_eq!(manager.auth().await.unwrap().key, "login-b");
+    assert!(manager.read_store().is_err());
+    assert_eq!(std::fs::read(&manager.path).unwrap(), before);
+}
+
+async fn r11_2_parked_reader(reload: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = r9_manager(&dir);
+    let old = manager
+        .save_new_login_without_enrichment(r11_login("a"), None)
+        .await
+        .unwrap();
+    let before = std::fs::read(&manager.path).unwrap();
+    let read = Arc::new(std::sync::Barrier::new(2));
+    let resume = Arc::new(std::sync::Barrier::new(2));
+    let read_hook = read.clone();
+    let resume_hook = resume.clone();
+    *manager.test_store_read_hook.lock() = Some(Box::new(move || {
+        read_hook.wait();
+        resume_hook.wait();
+    }));
+    let reader_manager = manager.clone();
+    let reader = std::thread::spawn(move || {
+        if reload {
+            reader_manager.force_reload_from_disk();
+            reader_manager.current_or_expired().unwrap()
+        } else {
+            let candidate = reader_manager.read_disk_auth().unwrap();
+            reader_manager
+                .try_use_disk_token(Some(&candidate), RefreshReason::PreRequest)
+                .unwrap()
+        }
+    });
+    read.wait();
+    std::fs::remove_file(&manager.path).unwrap();
+    std::fs::create_dir(&manager.path).unwrap();
+    let new = manager
+        .complete_login(r11_login("b"), Some(&old))
+        .await
+        .unwrap();
+    std::fs::remove_dir(&manager.path).unwrap();
+    std::fs::write(&manager.path, &before).unwrap();
+    resume.wait();
+    let returned = reader.join().unwrap();
+    assert_eq!(
+        returned.key, new.key,
+        "reader must return the retained login"
+    );
+    assert_eq!(manager.current_or_expired().unwrap().key, new.key);
+    assert_eq!(std::fs::read(&manager.path).unwrap(), before);
+}
+
+#[tokio::test]
+async fn r11_2_disk_adoption_rechecks_detach_after_read() {
+    r11_2_parked_reader(false).await;
+}
+
+#[tokio::test]
+async fn r11_2_reload_rechecks_detach_after_read() {
+    r11_2_parked_reader(true).await;
 }

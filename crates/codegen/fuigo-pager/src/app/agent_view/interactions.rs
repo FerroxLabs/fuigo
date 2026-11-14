@@ -470,6 +470,39 @@ impl AgentView {
         };
         match qv.focus {
             QuestionFocus::InputMode => {
+                if key.code == KeyCode::Up
+                    && key.modifiers.is_empty()
+                    && !qv.is_feedback_report()
+                    && !self.prompt.any_dropdown_open()
+                    && qv
+                        .questions
+                        .get(qv.active_tab)
+                        .is_some_and(|question| !question.options.is_empty())
+                {
+                    let width = match self.prompt.textarea_area().width {
+                        0 => crate::views::question_view::inline_text_width(
+                            self.pane_areas.prompt.width,
+                        )
+                        .max(1),
+                        width => width,
+                    };
+                    let on_first_row = self
+                        .prompt
+                        .textarea
+                        .cursor_pos_with_state(
+                            ratatui::layout::Rect::new(0, 0, width, u16::MAX),
+                            Default::default(),
+                        )
+                        .is_some_and(|(_, row)| row == 0);
+                    if on_first_row {
+                        self.commit_question_freeform();
+                        if let Some(qv) = &mut self.question_view {
+                            qv.move_cursor(CursorMotion::Prev);
+                        }
+                        self.ensure_question_cursor_visible();
+                        return InputOutcome::Changed;
+                    }
+                }
                 if key!('f', CONTROL).matches(key) {
                     qv.fullscreen = !qv.fullscreen;
                     return InputOutcome::Changed;
@@ -2661,6 +2694,84 @@ mod question_answer_focus_tests {
             .map(|hint| hint.label.to_string())
             .collect()
     }
+    #[test]
+    fn r2_3_up_in_file_dropdown_keeps_answer_input() {
+        let mut agent = make_agent();
+        agent.pane_areas.prompt = ratatui::layout::Rect::new(0, 0, 80, 5);
+        open_two_questions(&mut agent);
+        let question = agent.question_view.as_mut().unwrap();
+        question.set_cursor(2);
+        question.activate_freeform_input();
+        agent.prompt.set_text_preserving("@s");
+        agent.prompt.textarea.set_cursor(2);
+        let context = crate::views::file_search::context::detect("@s", 2).unwrap();
+        let results = ["src", "scripts"]
+            .into_iter()
+            .map(|path| fuigo_workspace::file_system::FuzzyMatchResult {
+                path: nucleo::Utf32String::from(path),
+                score: 100,
+                indices: vec![],
+                is_dir: true,
+            })
+            .collect();
+        agent.prompt.file_search.set_test_state(context, results, 1);
+        assert!(agent.prompt.any_dropdown_open());
+        press(&mut agent, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(qv(&agent).focus, QuestionFocus::InputMode);
+        assert!(agent.prompt.file_search_visible());
+        assert_eq!(agent.prompt.file_search.selected(), 0);
+    }
+
+    #[test]
+    fn r2_3_up_with_completion_dropdown_keeps_input() {
+        let mut agent = make_agent();
+        open_two_questions(&mut agent);
+        agent.question_view.as_mut().unwrap().set_cursor(2);
+        agent
+            .question_view
+            .as_mut()
+            .unwrap()
+            .activate_freeform_input();
+        agent.prompt.set_text_preserving("draft");
+        agent.prompt.suggestions.dropdown.open = true;
+        assert!(agent.prompt.any_dropdown_open());
+        press(&mut agent, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(qv(&agent).focus, QuestionFocus::InputMode);
+    }
+
+    #[test]
+    fn r2_3_up_in_free_text_only_question_keeps_input() {
+        let mut agent = make_agent();
+        agent.question_view = Some(QuestionViewState::new(
+            "free".into(),
+            vec![question("Why?", &[])],
+            StashedPrompt::default(),
+        ));
+        agent
+            .question_view
+            .as_mut()
+            .unwrap()
+            .activate_freeform_input();
+        agent.prompt.set_text_preserving("answer");
+        press(&mut agent, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(qv(&agent).focus, QuestionFocus::InputMode);
+    }
+
+    #[test]
+    fn row_82_b10_up_from_first_answer_line_returns_to_option() {
+        let mut agent = crate::app::agent_view::test_fixtures::make_agent();
+        open_two_questions(&mut agent);
+        let question = agent.question_view.as_mut().unwrap();
+        question.set_cursor(2);
+        question.activate_freeform_input();
+        agent.prompt.set_text_preserving("draft answer");
+        press(&mut agent, KeyCode::Home, KeyModifiers::NONE);
+        press(&mut agent, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(qv(&agent).focus, QuestionFocus::Navigation);
+        assert_eq!(qv(&agent).cursor(), 1);
+        assert_eq!(qv(&agent).per_question_freeform[0], "draft answer");
+    }
+
     #[test]
     fn tab_stays_inside_the_current_question() {
         let mut agent = make_agent();

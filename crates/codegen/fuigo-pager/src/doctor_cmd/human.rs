@@ -283,11 +283,7 @@ pub(super) fn format_hooks_section(hooks: &[fuigo_hooks_plugins_types::HookInfo]
             .or(hook.url.as_deref())
             .unwrap_or("(no command)");
         let command = command.lines().next().unwrap_or("");
-        let command = if command.chars().count() > 60 {
-            format!("{}...", command.chars().take(57).collect::<String>())
-        } else {
-            command.to_owned()
-        };
+        let command = crate::render::line_utils::truncate_str(command, 60);
         let source = if hook.health.source.is_empty() {
             "-"
         } else {

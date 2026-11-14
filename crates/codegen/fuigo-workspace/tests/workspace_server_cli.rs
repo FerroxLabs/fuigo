@@ -7,7 +7,11 @@
 use std::process::Command;
 
 fn server() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_fuigo-workspace-server"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fuigo-workspace-server"));
+    // Plain log text: the server colours its log lines unless NO_COLOR is set, and an escape
+    // code inside `profile=minimal` would fail a positive match or pass a negative one.
+    command.env("NO_COLOR", "1");
+    command
 }
 
 /// `--daemonize` with no `--hub-url`: the error must reach the caller's stderr with a non-zero
@@ -90,4 +94,125 @@ fn capabilities_probe_needs_no_hub_url() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     serde_json::from_str::<serde_json::Value>(stdout.trim())
         .expect("capabilities must be JSON on stdout");
+}
+
+#[cfg(all(target_os = "linux", feature = "sandbox-enforce"))]
+#[test]
+fn minimal_server_reexec_enforces_workspace_boundary() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let home = root.path().join("state");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&home).unwrap();
+    let supported = fuigo_sandbox::SandboxManager::support_info().is_supported
+        && Command::new("bwrap")
+            .args(["--bind", "/", "/", "--", "true"])
+            .status()
+            .is_ok_and(|s| s.success());
+    if !supported {
+        assert!(
+            std::env::var_os("SANDBOX_E2E_REQUIRE_ENFORCEMENT").is_none(),
+            "kernel enforcement required"
+        );
+        return;
+    }
+    for missing_bwrap in [false, true] {
+        let mut command = server();
+        command
+            .args(["--hub-url", "ws://127.0.0.1:1"])
+            .arg("--auth-config")
+            .arg(home.join("missing-auth.json"))
+            .arg("--diag-socket")
+            .arg(root.path().join("diag.sock"))
+            .arg("--cwd")
+            .arg(&workspace)
+            .current_dir(&workspace)
+            .env("FUIGO_HOME", &home)
+            .env("FUIGO_SANDBOX_PROFILE", "minimal")
+            .env_remove("__FUIGO_INSIDE_BWRAP")
+            .env("RUST_LOG", "info");
+        if missing_bwrap {
+            command.env("PATH", &home);
+        }
+        let out = command.output().unwrap();
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!logs.contains("continuing unsandboxed"), "{logs}");
+        assert!(
+            !logs.contains("Unrecognized FUIGO_SANDBOX_PROFILE"),
+            "{logs}"
+        );
+        if missing_bwrap {
+            assert!(!out.status.success());
+            assert!(
+                logs.contains("bwrap exec failed") && logs.contains("refusing to start"),
+                "{logs}"
+            );
+        } else {
+            // Daemon stdio opens the log for append after the real bwrap re-exec.
+            // An existing launch-folder file must reject that writable open and
+            // retain its contents. Missing auth makes any regressed daemon exit.
+            let log = workspace.join("denied.log");
+            std::fs::write(&log, "unchanged\n").unwrap();
+            let denied = server()
+                .args(["--daemonize", "--hub-url", "ws://127.0.0.1:1"])
+                .arg("--auth-config")
+                .arg(home.join("missing-auth.json"))
+                .arg("--log-file")
+                .arg(&log)
+                .arg("--pid-file")
+                .arg(home.join("server.pid"))
+                .arg("--cwd")
+                .arg(&workspace)
+                .current_dir(&workspace)
+                .env("FUIGO_HOME", &home)
+                .env("FUIGO_SANDBOX_PROFILE", "minimal")
+                .env_remove("__FUIGO_INSIDE_BWRAP")
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&denied.stderr);
+            assert!(
+                stderr.contains("Read-only file system (os error 30)"),
+                "server's launch-folder log write must be denied: {denied:?}"
+            );
+            assert_eq!(std::fs::read_to_string(&log).unwrap(), "unchanged\n");
+            assert!(
+                !home.join("server.pid").exists(),
+                "must fail opening log before taking pidfile"
+            );
+            assert!(
+                logs.contains("Workspace server sandbox active")
+                    && logs.contains("profile=minimal"),
+                "{logs}"
+            );
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", not(feature = "sandbox-enforce")))]
+#[test]
+fn minimal_without_enforcement_refuses_before_startup() {
+    let root = tempfile::tempdir().unwrap();
+    let output = server()
+        .args(["--hub-url", "ws://127.0.0.1:1"])
+        .arg("--auth-config")
+        .arg(root.path().join("missing-auth.json"))
+        .arg("--cwd")
+        .arg(root.path())
+        .current_dir(root.path())
+        .env("FUIGO_HOME", root.path().join("state"))
+        .env("FUIGO_SANDBOX_PROFILE", "minimal")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        stderr.contains("minimal")
+            && stderr.contains("sandbox-enforce")
+            && stderr.contains("refusing to start"),
+        "{output:?}"
+    );
 }

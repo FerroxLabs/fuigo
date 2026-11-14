@@ -268,7 +268,7 @@ pub fn render_dashboard(
         } else {
             render_empty_state(buf, layout.list, &theme, dashboard_sessions_loading);
         }
-    } else if area.width < MIN_DASHBOARD_WIDTH {
+    } else if layout.list.width < MIN_DASHBOARD_WIDTH {
         render_narrow_rows(buf, layout.list, &theme, &rows, state);
     } else {
         render_rows(buf, layout.list, &theme, &rows, state);
@@ -1870,7 +1870,7 @@ fn render_group_header_narrow(
 }
 
 /// Render the list scrollbar in the right gutter, stuck to the window's rightmost column, in the exact scrollback style.
-/// That style is a `█` thumb in `scrollbar_fg` over a `scrollbar_bg` track (no `│` line).
+/// That style is a full-cell background thumb in `scrollbar_fg` over a `scrollbar_bg` track.
 /// Reuses the shared `render_scrollbar_styled` so the thumb sizing and colour match the scrollback pixel-for-pixel.
 ///
 /// The list content is inset by `LIST_OUTER_HPAD`; the scrollbar lives in that right margin so it never reserves width from the rows.

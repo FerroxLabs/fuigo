@@ -1950,7 +1950,47 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
         for (i, &width) in col_widths.iter().enumerate() {
             let text = cells.get(i).map(|c| c.plain_text()).unwrap_or_default();
             let (lines, joins) = Self::wrap_cell_text_joins(&text, width);
-            cell_copies.push(TableCellCopy { text, joins });
+            let code_text = cells
+                .get(i)
+                .filter(|cell| cell.spans.iter().any(|span| span.code))
+                .map(|cell| {
+                    let mut copy = String::new();
+                    for span in &cell.spans {
+                        if span.code {
+                            // A longer delimiter also preserves code containing literal backticks.
+                            let ticks = span
+                                .text
+                                .split(|c| c != '`')
+                                .map(str::len)
+                                .max()
+                                .unwrap_or(0)
+                                + 1;
+                            let delimiter = "`".repeat(ticks);
+                            let pad = span.text.starts_with('`')
+                                || span.text.ends_with('`')
+                                || (span.text.starts_with(' ')
+                                    && span.text.ends_with(' ')
+                                    && !span.text.trim().is_empty());
+                            copy.push_str(&delimiter);
+                            if pad {
+                                copy.push(' ');
+                            }
+                            copy.push_str(&span.text);
+                            if pad {
+                                copy.push(' ');
+                            }
+                            copy.push_str(&delimiter);
+                        } else {
+                            copy.push_str(&span.text);
+                        }
+                    }
+                    copy
+                });
+            cell_copies.push(TableCellCopy {
+                text,
+                joins,
+                code_text,
+            });
             wrapped_cells.push(lines);
         }
 

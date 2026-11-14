@@ -102,7 +102,11 @@ fn hook_health_lines(hook: &fuigo_hooks_plugins_types::HookInfo) -> Vec<String> 
     };
     let mut lines = Vec::new();
     match health.reason.as_deref().filter(|r| !r.trim().is_empty()) {
-        Some(reason) => lines.push(format!("{who}{} ({})", health.state.label(), reason.lines().next().unwrap_or(reason))),
+        Some(reason) => lines.push(format!(
+            "{who}{} ({})",
+            health.state.label(),
+            reason.lines().next().unwrap_or(reason)
+        )),
         None => lines.push(format!("{who}{}", health.state.label())),
     }
     if let Some(hint) = health.fix_hint.as_deref().filter(|h| !h.trim().is_empty()) {
@@ -2662,19 +2666,22 @@ fn build_plugin_fields(plugin: &fuigo_hooks_plugins_types::PluginInfo) -> Vec<St
     if !plugin.skill_names.is_empty() {
         components.push(format!("skills: {}", plugin.skill_names.join(", ")));
     } else if plugin.skill_count > 0 {
-        components.push(format!("{} skills", plugin.skill_count));
+        components.push(crate::views::count_label(plugin.skill_count, "skill"));
     }
     if !plugin.agent_names.is_empty() {
         components.push(format!("agents: {}", plugin.agent_names.join(", ")));
     } else if plugin.agent_count > 0 {
-        components.push(format!("{} agents", plugin.agent_count));
+        components.push(crate::views::count_label(plugin.agent_count, "agent"));
     }
     if plugin.hook_count > 0 {
-        components.push(format!("{} hooks", plugin.hook_count));
+        components.push(crate::views::count_label(plugin.hook_count, "hook"));
     }
     match plugin.mcp_status {
         McpStatus::Active | McpStatus::ActiveInline => {
-            components.push(format!("{} MCP servers", plugin.mcp_server_count));
+            components.push(crate::views::count_label(
+                plugin.mcp_server_count,
+                "MCP server",
+            ));
         }
         McpStatus::Blocked => {
             components.push(format!("{} MCP: blocked", plugin.mcp_server_count));
@@ -3080,7 +3087,9 @@ pub fn render_extensions_modal(
                     if !data.load_errors.is_empty() {
                         let searching = !state.picker_state.query().is_empty();
                         let collapsed = !searching
-                            && state.hooks_collapsed_groups.contains(HOOK_LOAD_ERRORS_GROUP);
+                            && state
+                                .hooks_collapsed_groups
+                                .contains(HOOK_LOAD_ERRORS_GROUP);
                         let count = data.load_errors.len();
                         let noun = if count == 1 { "error" } else { "errors" };
                         entry_labels.push(format!("Hook load errors ({count} {noun})"));
@@ -3162,7 +3171,9 @@ pub fn render_extensions_modal(
                             } else if hook.disabled {
                                 "[disabled]".into()
                             } else {
-                                hook_health_badge(hook).map(String::from).unwrap_or_default()
+                                hook_health_badge(hook)
+                                    .map(String::from)
+                                    .unwrap_or_default()
                             });
                             entry_badge_color.push(if hook.pinned {
                                 Some(theme.warning)
@@ -3171,8 +3182,12 @@ pub fn render_extensions_modal(
                             } else {
                                 match hook.health.state {
                                     fuigo_hooks_plugins_types::HookState::Ok => None,
-                                    fuigo_hooks_plugins_types::HookState::Skipped => Some(theme.warning),
-                                    fuigo_hooks_plugins_types::HookState::Failing => Some(theme.accent_error),
+                                    fuigo_hooks_plugins_types::HookState::Skipped => {
+                                        Some(theme.warning)
+                                    }
+                                    fuigo_hooks_plugins_types::HookState::Failing => {
+                                        Some(theme.accent_error)
+                                    }
                                 }
                             });
                         }
@@ -5407,6 +5422,25 @@ mod tests {
 
     // ── Plugin fixtures ─────────────────────────────────────────────
 
+    #[test]
+    fn regression_plugin_count_labels() {
+        for (count, suffix) in [(1, ""), (2, "s")] {
+            let mut plugin = make_plugin("counts");
+            plugin.hook_count = count;
+            plugin.skill_count = count;
+            plugin.agent_count = count;
+            plugin.mcp_server_count = count;
+            plugin.mcp_status = fuigo_hooks_plugins_types::McpStatus::Active;
+            let fields = build_plugin_fields(&plugin);
+            for noun in ["hook", "skill", "agent", "MCP server"] {
+                assert!(
+                    fields.contains(&format!("{count} {noun}{suffix}")),
+                    "{fields:?}"
+                );
+            }
+        }
+    }
+
     fn make_plugin(name: &str) -> fuigo_hooks_plugins_types::PluginInfo {
         test_plugin_info(name, None)
     }
@@ -5416,7 +5450,11 @@ mod tests {
     #[test]
     fn m3_plugin_fields_show_skipped_links() {
         let mut plugin = make_plugin("linky");
-        assert!(build_plugin_fields(&plugin).iter().all(|f| !f.contains("skipped")));
+        assert!(
+            build_plugin_fields(&plugin)
+                .iter()
+                .all(|f| !f.contains("skipped"))
+        );
         plugin.skipped_links = 3;
         assert!(
             build_plugin_fields(&plugin)
@@ -6368,7 +6406,10 @@ mod tests {
             reason: Some("exit 2: boom\nsecond line".into()),
             fix_hint: None,
         };
-        assert_eq!(hook_health_lines(&failing), vec!["acme: failing (exit 2: boom)".to_string()]);
+        assert_eq!(
+            hook_health_lines(&failing),
+            vec!["acme: failing (exit 2: boom)".to_string()]
+        );
         assert_eq!(hook_health_badge(&failing), Some("[failing]"));
 
         // The user switched it off: the `[disabled]` badge already says so, so no second explanation.

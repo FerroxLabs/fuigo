@@ -1673,6 +1673,13 @@ pub fn apply_sandbox(
         .and_then(|p| dunce::canonicalize(p).ok())
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let sandbox_profile = if sandbox_profile == fuigo_sandbox::ProfileName::Minimal {
+        sandbox_profile
+            .selected(&fuigo_sandbox::load_sandbox_config(&workspace))
+            .into_owned()
+    } else {
+        sandbox_profile
+    };
     fuigo_sandbox::set_confinement_root(&workspace);
     #[cfg(target_os = "linux")]
     let requires_read_deny = fuigo_sandbox::requires_read_deny(&sandbox_profile, &workspace);
@@ -1683,12 +1690,20 @@ pub fn apply_sandbox(
     let requires_data_write_deny =
         fuigo_sandbox::requires_data_write_deny(&sandbox_profile, &workspace);
     #[cfg(target_os = "linux")]
-    let requires_bwrap = requires_read_deny || requires_hook_write_deny || requires_data_write_deny;
+    let requires_bwrap = requires_read_deny
+        || requires_hook_write_deny
+        || requires_data_write_deny
+        // Landlock cannot subtract the launch folder from a writable parent grant.
+        || (matches!(
+            sandbox_profile,
+            fuigo_sandbox::ProfileName::Minimal | fuigo_sandbox::ProfileName::Custom(_)
+        ) && sandbox_profile
+            .denies_workspace_write(&fuigo_sandbox::load_sandbox_config(&workspace)));
     #[cfg(target_os = "linux")]
     {
         let refuse_unprotected = |cause: &str| {
             fuigo_tty_utils::cli_eprintln!(
-                "error: this sandbox could not enforce its deny list on Linux: \
+                "error: this sandbox could not enforce its deny list or read-only launch folder on Linux: \
                  {} Refusing to start with denied paths unprotected.", fuigo_tty_utils::untrusted(&cause));
         };
         let command = fuigo_sandbox::bwrap_reexec_for_profile(&sandbox_profile, &workspace);

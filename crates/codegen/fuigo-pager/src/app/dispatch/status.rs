@@ -378,6 +378,16 @@ pub(super) fn set_coding_data_sharing_tracked(
 /// Full error stays in tracing logs.
 pub(super) fn scrub_error_for_toast(error: &str) -> String {
     const MAX_TOAST_ERROR_LEN: usize = 120;
+    let logout_error = error.strip_prefix("Internal error: ").unwrap_or(error);
+    if logout_error
+        .starts_with("failed to logout: auth.json.lock still held by another writer (holder pid ")
+        && logout_error.ends_with("); auth.json left unchanged")
+        && !error
+            .chars()
+            .any(crate::render::line_utils::is_unsafe_display_char)
+    {
+        return "Sign-out is busy in another window. Try again shortly.".to_owned();
+    }
     if error.len() > MAX_TOAST_ERROR_LEN
         || error
             .chars()

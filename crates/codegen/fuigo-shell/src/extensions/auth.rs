@@ -170,7 +170,8 @@ async fn handle_logout(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     // Stop any in-flight login so it cannot write credentials back after logout.
     agent.interactive_auth.cancel();
 
-    let result = crate::auth::perform_logout(&agent.auth_manager, params.scope.as_deref())
+    let result = crate::auth::perform_logout_async(&agent.auth_manager, params.scope.as_deref())
+        .await
         .map_err(|e| crate::acp_error::internal_error(format!("failed to logout: {e}")))?;
     // `auth.lifecycle` (not `auth`) avoids colliding with the pre-existing per-request `AuthManager::auth()` `#[instrument]` span
     tracing::info_span!("auth.lifecycle", action = "logout", success = true).in_scope(|| {});

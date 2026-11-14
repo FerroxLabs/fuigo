@@ -56,7 +56,7 @@ pub(crate) use flow::{
 pub use flow::{
     AuthUrlInfo, AuthUrlMode, LoginTransportOverride, LogoutResult, ensure_authenticated,
     ensure_authenticated_or_noninteractive, ensure_authenticated_with_override, perform_logout,
-    run_cli_login, run_cli_logout, try_ensure_fresh_auth,
+    perform_logout_async, run_cli_login, run_cli_logout, try_ensure_fresh_auth,
 };
 pub use jwt::{is_jwt_expired_or_near, parse_jwt_expiration};
 pub use pre_tui::{PreTuiLoginOutcome, maybe_run_pre_tui_external_login};
@@ -65,7 +65,7 @@ pub use error::{AuthError, RefreshTokenError, RefreshTokenFailedReason};
 pub use manager::{AuthManager, shared_api_key_provider};
 pub(crate) use manager::{AuthRemedy, SilentRefresh};
 pub use meta::{AuthMeta, GateInfo};
-pub use model::{AuthMode, FuigoAuth, lookup_auth};
+pub use model::{AuthMode, FuigoAuth, LoginSnapshot, lookup_auth};
 pub(crate) use model::{TOKEN_TTL, UserInfo, default_coding_data_retention_opt_out, is_expired};
 pub(crate) use refresh::DiagnosticUploader;
 pub use storage::{auth_json_path, clear_api_key, read_api_key, read_auth_json, store_api_key};

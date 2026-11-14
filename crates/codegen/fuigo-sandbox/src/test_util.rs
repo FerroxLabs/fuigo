@@ -20,12 +20,14 @@ pub(crate) fn skip_if_host_hook_write_deny_unresolvable() -> bool {
 /// Custom profiles covering every restrict_network inheritance/override shape.
 pub(crate) fn network_inheritance_config() -> SandboxConfig {
     SandboxConfig {
+        sources: HashMap::new(),
         profiles: HashMap::from([
             (
                 "strict-inherited".to_string(),
                 ProfileConfig {
                     extends: Some("strict".to_string()),
                     restrict_network: None,
+                    workspace_write: None,
                     read_only: vec![],
                     read_write: vec![],
                     deny: vec![],
@@ -36,6 +38,7 @@ pub(crate) fn network_inheritance_config() -> SandboxConfig {
                 ProfileConfig {
                     extends: Some("read-only".to_string()),
                     restrict_network: None,
+                    workspace_write: None,
                     read_only: vec![],
                     read_write: vec![],
                     deny: vec![],
@@ -46,6 +49,7 @@ pub(crate) fn network_inheritance_config() -> SandboxConfig {
                 ProfileConfig {
                     extends: Some("strict".to_string()),
                     restrict_network: Some(false),
+                    workspace_write: None,
                     read_only: vec![],
                     read_write: vec![],
                     deny: vec![],
@@ -56,6 +60,7 @@ pub(crate) fn network_inheritance_config() -> SandboxConfig {
                 ProfileConfig {
                     extends: Some("workspace".to_string()),
                     restrict_network: Some(true),
+                    workspace_write: None,
                     read_only: vec![],
                     read_write: vec![],
                     deny: vec![],

@@ -64,8 +64,8 @@ impl WorkflowBlock {
                 .iter()
                 .map(|p| {
                     let mark = match p.state.as_str() {
-                        "done" => "✓",
-                        "active" => "●",
+                        "done" => crate::glyphs::check_mark(),
+                        "active" => crate::glyphs::filled_dot(),
                         _ => "○",
                     };
                     format!("{} {mark}", p.title)
@@ -97,8 +97,9 @@ impl BlockContent for WorkflowBlock {
             }
             WorkflowBlockStatus::Cancelled { elapsed } => {
                 format!(
-                    "{} ◌ cancelled after {}: ",
+                    "{} {} cancelled after {}: ",
                     self.name,
+                    crate::glyphs::cancelled_circle(),
                     format_duration(*elapsed)
                 )
             }
@@ -202,8 +203,8 @@ impl BlockContent for WorkflowBlock {
         ];
         for p in &self.phases {
             let mark = match p.state.as_str() {
-                "done" => "✓",
-                "active" => "●",
+                "done" => crate::glyphs::check_mark(),
+                "active" => crate::glyphs::filled_dot(),
                 _ => "○",
             };
             lines.push(Line::from(Span::styled(
@@ -240,6 +241,27 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn row_80_b9_workflow_scrollback_uses_legacy_glyphs() {
+        let mut block = WorkflowBlock::started("flow", "workflow", "objective");
+        block.phases = vec![
+            WorkflowBlockPhase {
+                title: "Done".into(),
+                state: "done".into(),
+            },
+            WorkflowBlockPhase {
+                title: "Active".into(),
+                state: "active".into(),
+            },
+        ];
+        let text = line_text(&block);
+        assert!(text.contains(crate::glyphs::check_mark()), "{text}");
+        assert!(text.contains(crate::glyphs::filled_dot()), "{text}");
+        let preamble = block.preamble(&test_ctx()).unwrap().to_string();
+        assert!(preamble.contains(crate::glyphs::check_mark()));
+        assert!(preamble.contains(crate::glyphs::filled_dot()));
     }
 
     #[test]
@@ -283,7 +305,13 @@ mod tests {
             elapsed: Duration::from_secs(45),
         };
         let text = line_text(&block);
-        assert!(text.contains("◌ cancelled after"), "got: {text}");
+        assert!(
+            text.contains(&format!(
+                "{} cancelled after",
+                crate::glyphs::cancelled_circle()
+            )),
+            "got: {text}"
+        );
         assert!(!text.contains("failed"), "got: {text}");
         assert!(!text.contains("agents"), "got: {text}");
     }
@@ -307,5 +335,20 @@ mod tests {
         let text = line_text(&block);
         assert!(!text.contains('\n'));
         assert!(text.contains("line1 line2"));
+    }
+
+    #[test]
+    fn row_80_b9_extra_cancelled_workflow_uses_legacy_glyph() {
+        let mut block = WorkflowBlock::started("flow", "workflow", "objective");
+        block.status = WorkflowBlockStatus::Cancelled {
+            elapsed: std::time::Duration::ZERO,
+        };
+        let text = line_text(&block);
+        let marker = if crate::glyphs::is_legacy_windows_console() {
+            "○ cancelled"
+        } else {
+            "◌ cancelled"
+        };
+        assert!(text.contains(marker), "{text}");
     }
 }

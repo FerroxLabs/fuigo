@@ -77,3 +77,13 @@ This directory is only for **in-tree vendored** sources.
 2. Re-apply listed local patches (fmt, hermetic env, unsafe fixes, dropped bins/tests).
 3. Confirm the license file still matches the declared `license =` field.
 4. Refresh [`NOTICE`](./NOTICE) if versions or upstream URLs change.
+
+## crossterm 0.28.1 (modified)
+
+| Path | Version | License | Change |
+|------|---------|---------|--------|
+| [`crossterm`](./crossterm-0.28.1/) | 0.28.1 | [MIT](./crossterm-0.28.1/LICENSE) | Bound keyboard negotiation and preserve buffered Unix input readiness |
+
+This workspace member replaces crates.io through `[patch.crates-io]`.
+[Local changes and test instructions](./crossterm-0.28.1/README.fuigo.md) include
+EOF and read-error handling. The dispatch-policy workflow runs its library tests serially.

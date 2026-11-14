@@ -273,10 +273,10 @@ pub fn render_elicitation_view(
     let scroll = state.scroll;
 
     // The "↑ more" and "↓ more" markers paint into the separator rows the layout already has
-    if scroll > 0 {
+    if scroll > 0 && above_body_y < bottom {
         paint_more_marker(buf, content_x, above_body_y, content_width, "↑ more", theme);
     }
-    if total > scroll + body_h {
+    if total > scroll + body_h && actions_y.saturating_sub(1) < bottom {
         paint_more_marker(
             buf,
             content_x,

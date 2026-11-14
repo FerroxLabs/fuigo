@@ -2120,6 +2120,36 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
+    fn row_80_b3_expanded_thinking_survives_stream_chunks() {
+        for width in [40, 43, 60, 80] {
+            let mut state = ScrollbackState::new();
+            let id = state.push_block(RenderBlock::thinking_streaming());
+            state.set_last_running(true);
+            state.push_chunk_to_thinking(id, "first thought");
+            // Ctrl+E first collapses the streaming preview, then expands it.
+            state.expand_all_thinking();
+            state.expand_all_thinking();
+            assert_eq!(
+                state.get_by_id(id).unwrap().display_mode,
+                DisplayMode::Expanded
+            );
+            for chunk in [" more", "\nnext thought", " 終わり"] {
+                state.push_chunk_to_thinking(id, chunk);
+                state.prepare_layout(width, 3);
+                assert_eq!(
+                    state.get_by_id(id).unwrap().display_mode,
+                    DisplayMode::Expanded
+                );
+            }
+            state.finish_running(id);
+            assert_eq!(
+                state.get_by_id(id).unwrap().display_mode,
+                DisplayMode::Expanded
+            );
+        }
+    }
+
+    #[test]
     fn test_empty_state() {
         let state = ScrollbackState::new();
         assert!(state.is_empty());

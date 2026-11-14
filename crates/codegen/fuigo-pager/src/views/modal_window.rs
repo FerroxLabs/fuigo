@@ -916,7 +916,7 @@ pub fn fold_indicator_span(
     let glyph = if collapsed {
         format!("{} ", crate::glyphs::chevron())
     } else {
-        format!("{} ", crate::glyphs::diamond_filled())
+        format!("{} ", crate::glyphs::chevron_down())
     };
     let fg = if hovered {
         theme.text_primary
@@ -1105,6 +1105,18 @@ mod tests {
             shortcuts: &[],
             sizing: ModalSizing::default(),
             fold_info: None,
+        }
+    }
+
+    #[test]
+    fn row_81_b3_open_fold_indicator_points_down() {
+        let theme = Theme::current();
+        for width in [40, 43, 60, 80] {
+            let mut buf = Buffer::empty(Rect::new(0, 0, width, 1));
+            render_fold_indicator(&mut buf, 1, 0, false, false, None, &theme);
+            assert_eq!(buf[(1, 0)].symbol(), crate::glyphs::chevron_down());
+            render_fold_indicator(&mut buf, 1, 0, true, false, None, &theme);
+            assert_eq!(buf[(1, 0)].symbol(), crate::glyphs::chevron());
         }
     }
 

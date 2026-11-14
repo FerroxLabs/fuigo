@@ -1586,3 +1586,28 @@ fn dock_stop_button_works_under_a_permission_card() {
         "stop under a permission card must stop the run, got {outcome:?}"
     );
 }
+
+#[test]
+fn regression_lost_queued_row_under_question_keeps_composer_draft() {
+    let mut agent = make_agent();
+    agent.prompt.set_text("my composer draft");
+    agent.stashed_prompt = Some(agent.prompt.stash());
+    agent.prompt.set_text("queued edit");
+    agent.prompt_mode = crate::app::queue_edit::PromptMode::EditingQueued {
+        id: 1,
+        original: "queued".into(),
+        server_id: Some("row".into()),
+        kind: crate::app::agent::QueueEntryKind::Prompt,
+    };
+    let stashed = agent.prompt.stash();
+    agent.question_view = Some(QuestionViewState::new(
+        "question".into(),
+        vec![question("Which?")],
+        stashed,
+    ));
+    agent.prompt.set_text("question freeform");
+    agent.cancel_editing_queued_for_lost_row();
+    assert_eq!(agent.prompt.text(), "question freeform");
+    agent.submit_question_answers(true);
+    assert_eq!(agent.prompt.text(), "my composer draft");
+}

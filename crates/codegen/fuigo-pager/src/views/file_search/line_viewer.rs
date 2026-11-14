@@ -1441,6 +1441,16 @@ pub fn render_line_viewer(
     theme: &Theme,
     comment_count: usize,
 ) {
+    // Only this frame's rendered buttons may receive clicks, including after an
+    // early return for a tiny area or a switch out of plan mode.
+    if let Some(plan) = viewer.plan.as_mut() {
+        plan.approve_button_area = None;
+        plan.send_button_area = None;
+        plan.comment_button_area = None;
+        plan.abandon_button_area = None;
+        plan.copy_button_area = None;
+    }
+
     // Compute the popup area
     // In enlarge (fullscreen) mode it nearly fills the overlay, leaving 1 row of top and 2 cols of side padding so it doesn't crowd the edges
     // The caller already excludes the prompt and turn_status from `full_area`
@@ -1496,7 +1506,77 @@ pub fn render_line_viewer(
     // Compute the actual content_area now so `prepare_layout` sees the true viewport height
     // Passing the larger `inner.height` would make `ListPaneState`'s auto-scroll/paging math off by `footer_rows`
     // The selection could hide behind the footer, Ctrl-D/Ctrl-U would jump too far, and initial-scroll-to-range centering would be mis-sized
-    let footer_rows: u16 = if viewer.show_footer() { 2 } else { 0 };
+    // Keep all review actions available when the single-row footer cannot fit.
+    // Use the modal's shared wrapping and hit-test geometry for this narrow case.
+    let badge_width = if comment_count > 0 {
+        comment_count.to_string().len() as u16 + 3
+    } else {
+        0
+    };
+    let required_footer_width = if viewer.feedback_active() {
+        61 + if comment_count > 0 {
+            12 + badge_width
+        } else {
+            0
+        }
+    } else if comment_count > 0 {
+        20 + badge_width
+    } else {
+        9
+    };
+    let wrapped_footer = if viewer.show_footer() && inner.width < required_footer_width {
+        let plan = viewer.plan_ref().expect("plan footer");
+        let mut labels = Vec::new();
+        if viewer.feedback_active() {
+            labels.push((
+                0,
+                if comment_count > 0 {
+                    "a approve w/ comments"
+                } else {
+                    "a approve"
+                }
+                .to_string(),
+                plan.approve_hovered,
+            ));
+            labels.push((1, "s request changes".to_string(), plan.send_hovered));
+        } else if comment_count > 0 {
+            labels.push((0, "s send".to_string(), plan.approve_hovered));
+        }
+        labels.push((
+            2,
+            if comment_count > 0 {
+                format!("c comment {comment_count} {}", crate::glyphs::filled_dot())
+            } else {
+                "c comment".into()
+            },
+            plan.comment_hovered,
+        ));
+        if viewer.feedback_active() {
+            labels.push((3, "q quit plan".into(), plan.abandon_hovered));
+        }
+        labels.push((4, "y copy plan".into(), plan.copy_hovered));
+        Some(labels)
+    } else {
+        None
+    };
+    let wrapped_shortcuts: Vec<_> = wrapped_footer
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .map(|(id, label, _)| crate::views::modal_window::Shortcut {
+            label,
+            clickable: true,
+            id: *id,
+        })
+        .collect();
+    let footer_rows: u16 = if wrapped_footer.is_some() {
+        (1 + crate::views::modal_window::shortcuts_rows_needed(&wrapped_shortcuts, inner.width))
+            .min(inner.height)
+    } else if viewer.show_footer() {
+        2
+    } else {
+        0
+    };
     let content_area = Rect {
         x: inner.x,
         y: inner.y,
@@ -1614,14 +1694,6 @@ pub fn render_line_viewer(
         viewer.fullscreen_button_area = None;
     }
 
-    // The legacy top-border "send" button is gone; both plan-approval and casual modes now render the send action in the modal footer
-    // Clear stale hit-rects so mouse handlers don't act on positions from a previous render
-    if let Some(plan) = viewer.plan.as_mut() {
-        plan.send_button_area = None;
-        plan.approve_button_area = None;
-        plan.abandon_button_area = None;
-    }
-
     // 7. Render ListPane.
     //    Plan modes (review and casual) reserve 2 rows at the bottom of `inner` for a horizontal divider plus the action-button row
     //    The divider sits at `inner.bottom() - 2` and the buttons at `inner.bottom() - 1`, both inside the modal frame
@@ -1680,7 +1752,42 @@ pub fn render_line_viewer(
     //    Buttons use the same bold-key, dim-label treatment as `render_modal_shortcuts`
     //    They sit in a single row separated by `  |  `, centered within the modal frame
     //    Casual preview omits `q` (close via the X button).
-    if viewer.show_footer() && inner.height >= 2 {
+    if let Some(labels) = &wrapped_footer {
+        if footer_rows > 0 {
+            let divider_y = inner.bottom() - footer_rows;
+            buf.set_stringn(
+                inner.x,
+                divider_y,
+                "─".repeat(inner.width as usize),
+                inner.width as usize,
+                Style::default().fg(theme.gray_dim),
+            );
+            let hovered = labels.iter().position(|(_, _, hovered)| *hovered);
+            let hits = crate::views::modal_window::render_modal_shortcuts(
+                buf,
+                Rect::new(
+                    inner.x,
+                    divider_y + 1,
+                    inner.width,
+                    footer_rows.saturating_sub(1),
+                ),
+                &wrapped_shortcuts,
+                hovered,
+                theme,
+            );
+            let plan = viewer.plan_mut();
+            for hit in hits {
+                match hit.id {
+                    0 => plan.approve_button_area = Some(hit.rect),
+                    1 => plan.send_button_area = Some(hit.rect),
+                    2 => plan.comment_button_area = Some(hit.rect),
+                    3 => plan.abandon_button_area = Some(hit.rect),
+                    4 => plan.copy_button_area = Some(hit.rect),
+                    _ => {}
+                }
+            }
+        }
+    } else if viewer.show_footer() && inner.height >= 2 {
         let div_y = inner.y + inner.height - 2;
         let div_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
         let line: String = std::iter::repeat_n('\u{2500}', inner.width as usize).collect();
@@ -1920,6 +2027,127 @@ pub use crate::render::color::dim_area;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r2_5_resize_clears_all_plan_button_hits() {
+        let theme = Theme::current();
+        let mut viewer =
+            LineViewerState::open_markdown_content("plan.md", "# Plan".into(), None).unwrap();
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().show_action_buttons = true;
+        viewer.plan_mut().feedback_active = true;
+        let area = Rect::new(0, 0, 80, 24);
+        render_line_viewer(
+            &mut Buffer::empty(area),
+            area,
+            &mut viewer,
+            Path::new("."),
+            &theme,
+            0,
+        );
+        assert!(viewer.plan_ref().unwrap().comment_button_area.is_some());
+        for height in [3, 2, 1] {
+            let area = Rect::new(0, 0, 40, height);
+            render_line_viewer(
+                &mut Buffer::empty(area),
+                area,
+                &mut viewer,
+                Path::new("."),
+                &theme,
+                0,
+            );
+            let plan = viewer.plan_ref().unwrap();
+            assert_eq!(
+                [
+                    plan.approve_button_area,
+                    plan.send_button_area,
+                    plan.comment_button_area,
+                    plan.abandon_button_area,
+                    plan.copy_button_area
+                ],
+                [None; 5]
+            );
+        }
+    }
+
+    #[test]
+    fn r2_5_mode_change_clears_hidden_copy_button() {
+        let theme = Theme::current();
+        let mut viewer =
+            LineViewerState::open_markdown_content("plan.md", "# Plan".into(), None).unwrap();
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().show_action_buttons = true;
+        let area = Rect::new(0, 0, 80, 24);
+        render_line_viewer(
+            &mut Buffer::empty(area),
+            area,
+            &mut viewer,
+            Path::new("."),
+            &theme,
+            0,
+        );
+        assert!(viewer.plan_ref().unwrap().copy_button_area.is_some());
+        viewer.plan_mut().show_action_buttons = false;
+        let area = Rect::new(0, 0, 40, 24);
+        render_line_viewer(
+            &mut Buffer::empty(area),
+            area,
+            &mut viewer,
+            Path::new("."),
+            &theme,
+            0,
+        );
+        let plan = viewer.plan_ref().unwrap();
+        assert!(plan.copy_button_area.is_none());
+        assert!(plan.approve_button_area.is_none());
+        assert!(plan.send_button_area.is_none());
+        assert!(plan.comment_button_area.is_none());
+        assert!(plan.abandon_button_area.is_none());
+    }
+
+    #[test]
+    fn row_80_b11_plan_review_buttons_fit_narrow_viewer() {
+        let theme = Theme::current();
+        for width in [40, 43, 60, 80] {
+            let area = Rect::new(0, 0, width, 24);
+            let mut viewer =
+                LineViewerState::open_markdown_content("plan.md", "# Plan\nDo work".into(), None)
+                    .unwrap();
+            viewer.kind = LineViewerKind::PlanPreview;
+            viewer.fullscreen = true;
+            viewer.plan_mut().show_action_buttons = true;
+            viewer.plan_mut().feedback_active = true;
+            let mut buf = Buffer::empty(area);
+            render_line_viewer(&mut buf, area, &mut viewer, Path::new("."), &theme, 0);
+            let plan = viewer.plan_ref().unwrap();
+            for button in [
+                plan.approve_button_area,
+                plan.send_button_area,
+                plan.comment_button_area,
+                plan.abandon_button_area,
+            ] {
+                let rect = button.expect("all review actions must remain clickable");
+                assert!(area.contains((rect.x, rect.y).into()) && rect.right() <= area.right());
+                assert!(!row_text(&buf, rect.y).trim().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn row_82_b12_viewer_copy_keeps_inline_code() {
+        for width in [40, 43, 60, 80] {
+            let built = build_markdown_lines("Use `sample()` now.", Some(width));
+            let copy = built
+                .source_lines
+                .iter()
+                .map(|line| line.copy_text())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(copy.contains("`sample()`"), "{copy}");
+        }
+    }
 
     #[test]
     fn open_markdown_content_uses_in_memory_content() {

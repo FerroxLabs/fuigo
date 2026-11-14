@@ -36,12 +36,16 @@ mod paths;
 mod profiles;
 mod read_deny_verify;
 mod runtime_sockets;
+mod startup_warnings;
+pub use startup_warnings::consume_startup_warnings;
 #[cfg(test)]
 mod test_util;
 mod types;
+mod workspace_write;
 pub use git_write_deny::{GitPathKind, GitProtectedPath};
 pub use hook_write_deny::{
-    profile_enforces_hook_write_deny, verify_git_write_deny_enforced, verify_hook_write_deny_enforced,
+    profile_enforces_hook_write_deny, verify_git_write_deny_enforced,
+    verify_hook_write_deny_enforced,
 };
 pub use logging::SandboxLogger;
 pub use network_policy::{
@@ -49,7 +53,8 @@ pub use network_policy::{
     NetworkPolicySnapshotError, WebsiteAction, WebsiteOrigin, WebsiteOriginError, WebsitePolicy,
 };
 pub use profiles::{
-    ProfileName, SandboxConfig, SandboxProfile, load_sandbox_config, sandbox_profile_conflicts,
+    ProfileName, ProfileSource, SandboxConfig, SandboxProfile, load_sandbox_config,
+    sandbox_profile_conflicts,
 };
 pub use read_deny_verify::{verify_data_write_deny_enforced, verify_read_deny_enforced};
 pub use types::{SandboxEvent, SandboxEventType, SandboxMetrics};
@@ -60,7 +65,7 @@ pub fn requires_hook_write_deny(profile: &ProfileName, workspace: &Path) -> bool
         return false;
     }
     let config = profiles::load_sandbox_config(workspace);
-    match profile {
+    match profile.selected(&config).as_ref() {
         ProfileName::Custom(name) => {
             config.profiles.get(name).and_then(|p| p.extends.as_deref()) != Some("devbox")
         }
@@ -256,7 +261,20 @@ impl SandboxManager {
             ));
             return Ok(());
         }
-        let caps = ProfileName::capability_set_from_profile(workspace, &resolved)?;
+        #[cfg(target_os = "linux")]
+        workspace_write::verify_boundary(&self.profile, workspace, &config)?;
+        let mut caps = ProfileName::capability_set_from_profile(
+            workspace,
+            &resolved,
+            self.profile.denies_workspace_write(&config),
+        )?;
+        workspace_write::apply_seatbelt_boundary(
+            &self.profile,
+            workspace,
+            &config,
+            &resolved,
+            &mut caps,
+        )?;
         resolved.deny = deny::effective_deny_paths(workspace, &resolved.deny);
         match Sandbox::apply(&caps) {
             Ok(_) => {
@@ -356,6 +374,23 @@ pub(crate) fn bwrap_reexec_command_ex(
     deny_read: &[&str],
     runtime_socket_denies: &[PathBuf],
 ) -> Option<std::process::Command> {
+    bwrap_reexec_command_with_workspace(
+        deny_write_optional,
+        hook_plan,
+        deny_read,
+        runtime_socket_denies,
+        None,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn bwrap_reexec_command_with_workspace(
+    deny_write_optional: &[&str],
+    hook_plan: Option<&hook_write_deny::HookWriteDenyBwrapPlan>,
+    deny_read: &[&str],
+    runtime_socket_denies: &[PathBuf],
+    readonly_workspace: Option<&Path>,
+) -> Option<std::process::Command> {
     if is_inside_bwrap() {
         return None;
     }
@@ -363,7 +398,9 @@ pub(crate) fn bwrap_reexec_command_ex(
         Ok(exe) => exe,
         Err(e) => {
             fuigo_tty_utils::cli_eprintln!(
-                "error: could not resolve the current executable for the bwrap re-exec: {}", fuigo_tty_utils::untrusted(&e));
+                "error: could not resolve the current executable for the bwrap re-exec: {}",
+                fuigo_tty_utils::untrusted(&e)
+            );
             return None;
         }
     };
@@ -372,6 +409,9 @@ pub(crate) fn bwrap_reexec_command_ex(
     let mut cmd = std::process::Command::new("bwrap");
     cmd.arg("--cap-drop").arg("ALL");
     cmd.arg("--bind").arg("/").arg("/");
+    if let Some(workspace) = readonly_workspace {
+        workspace_write::append_ancestor_binds(&mut cmd, workspace);
+    }
     for path in deny_write_optional {
         if Path::new(path).exists() {
             cmd.arg("--ro-bind").arg(path).arg(path);
@@ -380,25 +420,22 @@ pub(crate) fn bwrap_reexec_command_ex(
     if let Some(plan) = hook_plan
         && let Err(e) = hook_write_deny::append_hook_plan_binds(&mut cmd, plan)
     {
-        fuigo_tty_utils::cli_eprintln!("error: hook write-deny plan materialization failed: {}", fuigo_tty_utils::untrusted(&e));
+        fuigo_tty_utils::cli_eprintln!(
+            "error: hook write-deny plan materialization failed: {}",
+            fuigo_tty_utils::untrusted(&e)
+        );
         return None;
     }
-    if !deny_read.is_empty() {
-        for path in deny_read {
-            let Some(blocked) = bwrap_blocked_source_for_path(Path::new(path)) else {
-                fuigo_tty_utils::cli_eprintln!(
-                    "error: could not create bwrap placeholder for read-deny path {}; \
-                     refusing to start with a partial sandbox", fuigo_tty_utils::untrusted(&path));
-                return None;
-            };
-            cmd.arg("--ro-bind").arg(&blocked).arg(path);
-        }
-    }
+    // Keep the existing preparation pass: bwrap creates missing mask targets
+    // while their parents are writable. The final pass below restores the masks.
+    append_bwrap_read_denies(&mut cmd, deny_read)?;
     let sentinel = match read_deny_verify::ensure_bwrap_sentinel_dir() {
         Ok(path) => path,
         Err(e) => {
             fuigo_tty_utils::cli_eprintln!(
-                "error: could not prepare the bwrap containment sentinel: {}", fuigo_tty_utils::untrusted(&e));
+                "error: could not prepare the bwrap containment sentinel: {}",
+                fuigo_tty_utils::untrusted(&e)
+            );
             return None;
         }
     };
@@ -410,7 +447,9 @@ pub(crate) fn bwrap_reexec_command_ex(
             Ok(encoded) => encoded,
             Err(error) => {
                 fuigo_tty_utils::cli_eprintln!(
-                    "error: runtime-socket deny handoff encoding failed: {}", fuigo_tty_utils::untrusted(&error));
+                    "error: runtime-socket deny handoff encoding failed: {}",
+                    fuigo_tty_utils::untrusted(&error)
+                );
                 return None;
             }
         };
@@ -419,8 +458,33 @@ pub(crate) fn bwrap_reexec_command_ex(
         runtime_sockets::BWRAP_RUNTIME_SOCKET_DENY_ENV_VAR,
         encoded_runtime_socket_denies,
     );
+    if let Some(workspace) = readonly_workspace {
+        workspace_write::append_readonly_bind(&mut cmd, workspace);
+        // A parent bind replaces earlier child mounts. Reapply read masks and the
+        // containment sentinel after the workspace boundary, never expose denied data.
+        append_bwrap_read_denies(&mut cmd, deny_read)?;
+        cmd.arg("--ro-bind").arg(&sentinel).arg(&sentinel);
+    }
+    startup_warnings::handoff(&mut cmd);
     cmd.arg("--").arg(self_exe).args(args);
     Some(cmd)
+}
+#[cfg(target_os = "linux")]
+fn append_bwrap_read_denies(cmd: &mut std::process::Command, deny_read: &[&str]) -> Option<()> {
+    if !deny_read.is_empty() {
+        for path in deny_read {
+            let Some(blocked) = bwrap_blocked_source_for_path(Path::new(path)) else {
+                fuigo_tty_utils::cli_eprintln!(
+                    "error: could not create bwrap placeholder for read-deny path {}; \
+                     refusing to start with a partial sandbox",
+                    fuigo_tty_utils::untrusted(&path)
+                );
+                return None;
+            };
+            cmd.arg("--ro-bind").arg(&blocked).arg(path);
+        }
+    }
+    Some(())
 }
 /// Choose file vs directory placeholder for a deny path (existing dirs need a dir bind).
 #[cfg(all(feature = "enforce", target_os = "linux"))]
@@ -484,7 +548,7 @@ fn bwrap_blocked_placeholder(name: &str, want_dir: bool) -> Option<PathBuf> {
 /// This is a pure mount, so it applies even WITHOUT the `enforce` feature.
 #[cfg(target_os = "linux")]
 fn is_devbox_based(profile: &ProfileName, config: &SandboxConfig) -> bool {
-    match profile {
+    match profile.selected(config).as_ref() {
         ProfileName::Devbox => true,
         ProfileName::Custom(name) => {
             config.profiles.get(name).and_then(|p| p.extends.as_deref()) == Some("devbox")
@@ -500,23 +564,24 @@ fn is_devbox_based(profile: &ProfileName, config: &SandboxConfig) -> bool {
 /// This intrinsic check stays fail-closed.
 #[cfg(all(feature = "enforce", unix))]
 pub fn requires_read_deny(profile: &ProfileName, workspace: &Path) -> bool {
-    match profile {
-        ProfileName::Custom(name) => {
-            let config = profiles::load_sandbox_config(workspace);
-            config.profiles.get(name).is_some_and(|p| {
-                if !p.deny.is_empty() {
-                    return true;
-                }
-                match p.restrict_network {
-                    Some(explicit) => explicit,
-                    None => p
-                        .extends
-                        .as_deref()
-                        .and_then(|base| base.parse::<ProfileName>().ok())
-                        .is_some_and(|base| base.restricts_network()),
-                }
-            })
-        }
+    if !matches!(profile, ProfileName::Custom(_) | ProfileName::Minimal) {
+        return false;
+    }
+    let config = profiles::load_sandbox_config(workspace);
+    match profile.selected(&config).as_ref() {
+        ProfileName::Custom(name) => config.profiles.get(name).is_some_and(|p| {
+            if !p.deny.is_empty() {
+                return true;
+            }
+            match p.restrict_network {
+                Some(explicit) => explicit,
+                None => p
+                    .extends
+                    .as_deref()
+                    .and_then(|base| base.parse::<ProfileName>().ok())
+                    .is_some_and(|base| base.restricts_network()),
+            }
+        }),
         _ => false,
     }
 }
@@ -560,6 +625,7 @@ fn resolve_failure_must_refuse(profile: &ProfileName, workspace: &Path) -> bool 
 }
 #[cfg(target_os = "linux")]
 struct BwrapDenyPlan {
+    readonly_workspace: Option<PathBuf>,
     deny_write_optional: Vec<String>,
     hook_plan: Option<hook_write_deny::HookWriteDenyBwrapPlan>,
     deny_read: Vec<String>,
@@ -582,7 +648,10 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
             Ok(resolved) => Some(resolved),
             Err(e) => {
                 if resolve_failure_must_refuse(profile, workspace) {
-                    fuigo_tty_utils::cli_eprintln!("error: sandbox profile resolve failed: {}", fuigo_tty_utils::untrusted(&e));
+                    fuigo_tty_utils::cli_eprintln!(
+                        "error: sandbox profile resolve failed: {}",
+                        fuigo_tty_utils::untrusted(&e)
+                    );
                     return None;
                 }
                 None
@@ -603,7 +672,10 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
             Ok(hook_write_deny::HookWriteDenyPrepare::NotRequired) => None,
             Ok(hook_write_deny::HookWriteDenyPrepare::Plan(plan)) => Some(plan),
             Err(e) => {
-                fuigo_tty_utils::cli_eprintln!("error: hook write-deny plan failed: {}", fuigo_tty_utils::untrusted(&e));
+                fuigo_tty_utils::cli_eprintln!(
+                    "error: hook write-deny plan failed: {}",
+                    fuigo_tty_utils::untrusted(&e)
+                );
                 return None;
             }
         }
@@ -618,7 +690,10 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
             &resolved_profile.read_write,
         )
     {
-        fuigo_tty_utils::cli_eprintln!("error: git write-deny plan failed: {}", fuigo_tty_utils::untrusted(&e));
+        fuigo_tty_utils::cli_eprintln!(
+            "error: git write-deny plan failed: {}",
+            fuigo_tty_utils::untrusted(&e)
+        );
         return None;
     }
     if needs_hooks && hook_plan.is_none() {
@@ -641,12 +716,15 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
             Err(reason) => {
                 tracing::error!(%reason, "sandbox deny-glob expansion failed; refusing to start");
                 fuigo_tty_utils::cli_eprintln!(
-                    "error: sandbox deny glob could not be enforced on Linux: {}", fuigo_tty_utils::untrusted(&reason));
+                    "error: sandbox deny glob could not be enforced on Linux: {}",
+                    fuigo_tty_utils::untrusted(&reason)
+                );
                 return None;
             }
         }
     }
     Some(BwrapDenyPlan {
+        readonly_workspace: workspace_write::boundary_path(profile, workspace, &config),
         deny_write_optional,
         hook_plan,
         deny_read,
@@ -657,6 +735,7 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
 /// Without kernel enforcement there is no read-deny; the devbox `/data` write-deny and the hook write-deny plan still apply.
 #[cfg(all(not(feature = "enforce"), target_os = "linux"))]
 fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyPlan> {
+    let config = profiles::load_sandbox_config(workspace);
     let deny_write_optional: Vec<String> = if requires_data_write_deny(profile, workspace) {
         vec!["/data".to_string()]
     } else {
@@ -667,7 +746,10 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
             Ok(hook_write_deny::HookWriteDenyPrepare::NotRequired) => None,
             Ok(hook_write_deny::HookWriteDenyPrepare::Plan(plan)) => Some(plan),
             Err(e) => {
-                fuigo_tty_utils::cli_eprintln!("error: hook write-deny plan failed: {}", fuigo_tty_utils::untrusted(&e));
+                fuigo_tty_utils::cli_eprintln!(
+                    "error: hook write-deny plan failed: {}",
+                    fuigo_tty_utils::untrusted(&e)
+                );
                 return None;
             }
         }
@@ -676,7 +758,6 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
     };
     // Without Landlock every path is writable, so every git target is bound
     if let Some(plan) = hook_plan.as_mut() {
-        let config = profiles::load_sandbox_config(workspace);
         let bound = profile
             .resolve_profile(workspace, &config)
             .map_err(|e| e.to_string())
@@ -689,11 +770,15 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
                 .map_err(|e| e.to_string())
             });
         if let Err(e) = bound {
-            fuigo_tty_utils::cli_eprintln!("error: git write-deny plan failed: {}", fuigo_tty_utils::untrusted(&e));
+            fuigo_tty_utils::cli_eprintln!(
+                "error: git write-deny plan failed: {}",
+                fuigo_tty_utils::untrusted(&e)
+            );
             return None;
         }
     }
     Some(BwrapDenyPlan {
+        readonly_workspace: workspace_write::boundary_path(profile, workspace, &config),
         deny_write_optional,
         hook_plan,
         deny_read: Vec::new(),
@@ -713,13 +798,15 @@ pub fn bwrap_reexec_for_profile(
         return None;
     }
     let BwrapDenyPlan {
+        readonly_workspace,
         deny_write_optional,
         hook_plan,
         deny_read,
         runtime_socket_denies,
         requires_read_deny,
     } = bwrap_deny_plan(profile, workspace)?;
-    if deny_write_optional.is_empty()
+    if readonly_workspace.is_none()
+        && deny_write_optional.is_empty()
         && hook_plan.is_none()
         && deny_read.is_empty()
         && !requires_read_deny
@@ -728,11 +815,12 @@ pub fn bwrap_reexec_for_profile(
     }
     let write_opt: Vec<&str> = deny_write_optional.iter().map(String::as_str).collect();
     let read_refs: Vec<&str> = deny_read.iter().map(String::as_str).collect();
-    bwrap_reexec_command_ex(
+    bwrap_reexec_command_with_workspace(
         &write_opt,
         hook_plan.as_ref(),
         &read_refs,
         &runtime_socket_denies,
+        readonly_workspace.as_deref(),
     )
 }
 #[cfg(test)]
@@ -797,7 +885,10 @@ mod tests {
         assert!(!is_confined(), "no sandbox: not confined");
         {
             let _g = EnvGuard::set(CONFINED_ENV_VAR, "1");
-            assert!(is_confined(), "Landlock-only confinement leaves just the confined marker");
+            assert!(
+                is_confined(),
+                "Landlock-only confinement leaves just the confined marker"
+            );
             assert!(!is_inside_bwrap());
         }
         let _g = EnvGuard::set(BWRAP_ENV_VAR, "1");
@@ -1053,11 +1144,7 @@ mod tests {
         let ws = std::env::temp_dir().join(format!("fuigo-{tag}-{}-{nanos}", std::process::id()));
         let fuigo = ws.join(".fuigo");
         std::fs::create_dir_all(&fuigo).unwrap();
-        std::fs::write(
-            fuigo.join(fuigo_config::SANDBOX_CONFIG_FILENAME),
-            toml_body,
-        )
-        .unwrap();
+        std::fs::write(fuigo.join(fuigo_config::SANDBOX_CONFIG_FILENAME), toml_body).unwrap();
         ws
     }
     /// Create a temp workspace defining a `denytest` profile (extends `workspace`) with the given `deny` list.
@@ -1136,6 +1223,7 @@ mod tests {
             profiles::ProfileConfig {
                 extends: Some("devbox".to_string()),
                 restrict_network: None,
+                workspace_write: None,
                 read_only: Vec::new(),
                 read_write: Vec::new(),
                 deny: Vec::new(),
@@ -1146,6 +1234,7 @@ mod tests {
             profiles::ProfileConfig {
                 extends: Some("workspace".to_string()),
                 restrict_network: None,
+                workspace_write: None,
                 read_only: Vec::new(),
                 read_write: Vec::new(),
                 deny: Vec::new(),

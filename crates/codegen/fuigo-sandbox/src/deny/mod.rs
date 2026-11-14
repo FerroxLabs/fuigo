@@ -5,7 +5,6 @@
 
 #[cfg(all(feature = "enforce", unix))]
 use nono::CapabilitySet;
-#[cfg(all(feature = "enforce", unix))]
 use std::path::{Path, PathBuf};
 
 // Glob deny entries (detection, macOS regex translation, Linux launch-time expansion) live in a submodule; re-exported so call sites use `deny::…`
@@ -44,12 +43,14 @@ fn escape_seatbelt_path(path: &Path) -> Option<String> {
 #[cfg(all(feature = "enforce", unix, any(target_os = "macos", test)))]
 fn macos_deny_aliases(path: &Path, canonical: &Path) -> Vec<PathBuf> {
     let mut forms: Vec<PathBuf> = vec![path.to_path_buf()];
-    if canonical != path {
+    // Compare spellings, not `Path` equality: `Path` ignores `.` components, but Seatbelt
+    // matches the literal string, so `<ws>/./x` and `<ws>/x` need a rule each.
+    if canonical.as_os_str() != path.as_os_str() {
         forms.push(canonical.to_path_buf());
     }
     for form in forms.clone() {
         if let Some(alias) = toggle_private_prefix(&form)
-            && !forms.contains(&alias)
+            && !forms.iter().any(|f| f.as_os_str() == alias.as_os_str())
         {
             forms.push(alias);
         }
@@ -153,7 +154,7 @@ pub(crate) struct SeatbeltRules {
 
 #[cfg(all(feature = "enforce", target_os = "macos"))]
 impl SeatbeltRules {
-    fn add_to(self, caps: &mut CapabilitySet) -> anyhow::Result<()> {
+    pub(crate) fn add_to(self, caps: &mut CapabilitySet) -> anyhow::Result<()> {
         for rule in self.rules {
             caps.add_platform_rule(rule)?;
         }
@@ -408,18 +409,38 @@ pub(crate) fn apply_deny_paths_to_capability_set(
 
 /// Resolve deny path strings from a profile against the workspace.
 ///
-/// Relative paths are joined with `workspace`. Absolute paths are used as-is.
+/// Relative paths are joined with `workspace`; absolute paths are kept. Both drop `.` components.
 #[cfg(all(feature = "enforce", unix))]
 pub(crate) fn resolve_deny_paths(workspace: &Path, deny: &[PathBuf]) -> Vec<PathBuf> {
     deny.iter()
         .map(|p| {
             if p.is_absolute() {
-                p.clone()
+                without_cur_dir(p)
             } else {
-                workspace.join(p)
+                without_cur_dir(&workspace.join(p))
             }
         })
         .collect()
+}
+
+/// Drop `.` components (`./.env`, `a/./b`) so a deny path is spelled the way the kernel reports it.
+/// Seatbelt matches literal strings, so `<ws>/./.env` would never match a read of `<ws>/.env`.
+/// `..` is kept: resolving it lexically could change the target through a symlink.
+pub(crate) fn without_cur_dir(path: &Path) -> PathBuf {
+    path.components().collect()
+}
+
+/// Expand a leading `~` (`~` or `~/…`) to `home`, as the per-command policy does, so a
+/// `sandbox.toml` deny entry like `~/.aws` or `~/secrets/**` means the home path and is not
+/// anchored at the workspace. `~user`, entries without a home, and a home whose own path holds
+/// a glob metacharacter (which would turn an exact entry into a pattern) are left as written.
+pub(crate) fn expand_home(entry: &Path, home: Option<&Path>) -> PathBuf {
+    let home = home.filter(|home| !is_glob(&home.to_string_lossy()));
+    match (entry.strip_prefix("~"), home) {
+        (Ok(rest), Some(home)) if rest.as_os_str().is_empty() => home.to_path_buf(),
+        (Ok(rest), Some(home)) => home.join(rest),
+        _ => entry.to_path_buf(),
+    }
 }
 
 /// Resolve, sort, and dedup a profile's deny list into the canonical set of paths to enforce.
@@ -513,6 +534,70 @@ mod tests {
         let resolved = resolve_deny_paths(&ws, &deny);
         assert_eq!(resolved[0], PathBuf::from("/tmp/project/.env"));
         assert_eq!(resolved[1], PathBuf::from("/etc/shadow"));
+    }
+
+    #[test]
+    #[cfg(all(feature = "enforce", unix))]
+    fn resolve_deny_paths_drops_dot_components_in_the_spelling() {
+        let ws = PathBuf::from("/tmp/project");
+        let deny = vec![
+            PathBuf::from("./.env"),
+            PathBuf::from("src/./server.pem"),
+            PathBuf::from("/etc/./shadow"),
+            PathBuf::from("../sibling/.env"),
+        ];
+        let spelled: Vec<String> = resolve_deny_paths(&ws, &deny)
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            spelled,
+            [
+                "/tmp/project/.env",
+                "/tmp/project/src/server.pem",
+                "/etc/shadow",
+                "/tmp/project/../sibling/.env",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "enforce", unix))]
+    fn expand_home_anchors_tilde_entries_at_home_only() {
+        let home = Path::new("/home/u");
+        let spell = |entry: &str, home: Option<&Path>| {
+            expand_home(Path::new(entry), home)
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(spell("~", Some(home)), "/home/u");
+        assert_eq!(spell("~/.aws", Some(home)), "/home/u/.aws");
+        assert_eq!(spell("~/./.aws", Some(home)), "/home/u/.aws");
+        assert_eq!(spell("~/secrets/**", Some(home)), "/home/u/secrets/**");
+        assert_eq!(spell("~user/.aws", Some(home)), "~user/.aws");
+        assert_eq!(spell(".env", Some(home)), ".env");
+        assert_eq!(spell("~/.aws", None), "~/.aws");
+        // A bracketed home would make the exact entry a pattern: keep it as written.
+        assert_eq!(spell("~/.aws", Some(Path::new("/home/u[1]"))), "~/.aws");
+    }
+
+    #[test]
+    #[cfg(all(feature = "enforce", unix))]
+    fn macos_deny_aliases_keep_the_canonical_spelling_of_a_dotted_path() {
+        let dotted = Path::new("/private/tmp/proj/./.env");
+        let canonical = Path::new("/private/tmp/proj/.env");
+        let spelled: Vec<String> = macos_deny_aliases(dotted, canonical)
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            spelled.iter().any(|p| p == "/private/tmp/proj/.env"),
+            "canonical spelling missing from {spelled:?}"
+        );
+        assert!(
+            spelled.iter().any(|p| p == "/tmp/proj/.env"),
+            "alias of the canonical spelling missing from {spelled:?}"
+        );
     }
 
     #[test]

@@ -538,14 +538,6 @@ fn agent_glyph_and_style(state: &str, theme: &Theme) -> (&'static str, Style) {
     }
 }
 
-fn plural(n: usize, noun: &str) -> String {
-    if n == 1 {
-        format!("{n} {noun}")
-    } else {
-        format!("{n} {noun}s")
-    }
-}
-
 fn strip_control(text: &str) -> String {
     strip_control_chars(text, false)
 }
@@ -865,6 +857,7 @@ fn render_detail(
         .unwrap_or_default();
     let all_agents_phase = run.phases.is_empty() && run.current_phase.is_none();
     state.ensure_phase_visible(usize::from(rail_inner.height), rail.len());
+    let number_width = rail.len().max(1).ilog10() as u16 + 1;
     for (idx, (title, phase_state)) in rail.iter().enumerate().skip(state.phase_viewport) {
         let y = rail_inner.y + (idx - state.phase_viewport) as u16;
         if y >= rail_inner.bottom() {
@@ -929,15 +922,18 @@ fn render_detail(
             buf,
             rail_inner.x + 2,
             y,
-            &format!("{} ", idx + 1),
+            &format!("{:>digits$} ", idx + 1, digits = number_width as usize),
             num_style,
             rail_inner.right(),
         );
         span_at(
             buf,
-            rail_inner.x + 4,
+            rail_inner.x + 3 + number_width,
             y,
-            &truncate_to_width(title, count_x.saturating_sub(rail_inner.x + 5) as usize),
+            &truncate_to_width(
+                title,
+                count_x.saturating_sub(rail_inner.x + 4 + number_width) as usize,
+            ),
             title_style,
             count_x,
         );
@@ -977,14 +973,14 @@ fn render_detail(
         format!(
             "{} · {} · ↑{}",
             selected_phase_title,
-            plural(roster_agents.len(), "agent"),
+            crate::views::count_label(roster_agents.len(), "agent"),
             state.roster_scroll,
         )
     } else {
         format!(
             "{} · {}",
             selected_phase_title,
-            plural(roster_agents.len(), "agent")
+            crate::views::count_label(roster_agents.len(), "agent")
         )
     };
     span_at(
@@ -1197,6 +1193,72 @@ mod tests {
     }
 
     #[test]
+    fn row_80_b6_workflow_phase_numbers_remain_separate_from_titles() {
+        for width in [40, 43, 60, 80] {
+            let mut run = make_run("numbered", "flow", "active");
+            run.phases = (1..=12)
+                .map(|i| (format!("Phase{i:02}"), "pending".into()))
+                .collect();
+            run.current_phase = None;
+            run.agents.clear();
+            let mut state = WorkflowsViewState::default();
+            state.detail_run_id = Some(run.run_id.clone());
+            let area = Rect::new(0, 0, width, 40);
+            let mut buf = Buffer::empty(area);
+            render_workflows(
+                &mut buf,
+                area,
+                &[&run],
+                &mut state,
+                0,
+                &WorkflowAgentLiveMap::default(),
+            );
+            let text = buf_text(&buf, area);
+            assert!(text.contains("10 Phase10"), "{width}: {text}");
+        }
+    }
+
+    #[test]
+    fn row_81_b18_workflows_roster_navigation_has_stable_geometry() {
+        for width in [40, 43, 60, 80] {
+            let run = make_run("stable", "flow", "active");
+            let mut state = WorkflowsViewState::default();
+            state.detail_run_id = Some(run.run_id.clone());
+            let area = Rect::new(0, 0, width, 24);
+            let mut buf = Buffer::empty(area);
+            render_workflows(
+                &mut buf,
+                area,
+                &[&run],
+                &mut state,
+                0,
+                &WorkflowAgentLiveMap::default(),
+            );
+            let geometry = (state.rail_area, state.roster_area);
+            state.roster_scroll = 1;
+            render_workflows(
+                &mut buf,
+                area,
+                &[&run],
+                &mut state,
+                0,
+                &WorkflowAgentLiveMap::default(),
+            );
+            assert_eq!(geometry, (state.rail_area, state.roster_area));
+            let mut empty = WorkflowsViewState::default();
+            render_workflows(
+                &mut buf,
+                area,
+                &[],
+                &mut empty,
+                0,
+                &WorkflowAgentLiveMap::default(),
+            );
+            assert!(buf_text(&buf, area).contains("No workflow"));
+        }
+    }
+
+    #[test]
     fn activity_label_uses_phase_while_active_and_status_otherwise() {
         let running = make_run("wf-1", "learn-traces-2", "active");
         assert_eq!(running.activity_label(), "Research \u{b7} 1 agent");
@@ -1240,7 +1302,11 @@ mod tests {
                 duration_ms: 0,
             });
         }
-        assert_eq!(run.done_agents(), 2, "done + failed only; running and queued are not finished");
+        assert_eq!(
+            run.done_agents(),
+            2,
+            "done + failed only; running and queued are not finished"
+        );
         let runs = vec![&run];
         let mut state = WorkflowsViewState::default();
         state.normalize(&runs);

@@ -113,3 +113,7 @@ release-dist = [
 
 [lints]
 workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+crossterm = { workspace = true }
+fuigo-pager-pty-harness = { path = "../fuigo-pager-pty-harness" }

@@ -676,6 +676,23 @@ mod tests {
     }
 
     #[test]
+    fn row_81_b1_list_pane_wraps_wide_unicode_without_losing_text() {
+        for width in [40, 43, 60, 80] {
+            let text = "界🙂 cafe\u{301} ".repeat(20);
+            let items = [ContentTestItem::new(0, &text)];
+            let mut state = ListPaneState::new(WrapMode::Wrap, false);
+            let area = Rect::new(0, 0, width, 30);
+            state.prepare_layout(&items, width, area.height);
+            let mut buf = Buffer::empty(area);
+            StatefulWidget::render(ListPane::new(&items), area, &mut buf, &mut state);
+            assert_eq!(
+                collect_rendered(&buf, width, area.height),
+                text.replace(' ', "")
+            );
+        }
+    }
+
+    #[test]
     fn renders_basic_items() {
         let items = vec![
             RenderTestItem::new(0, "alpha"),

@@ -123,6 +123,8 @@ pub struct WelcomeRenderResult {
     pub post_flush_escapes: Option<crate::terminal::overlay::PostFlush>,
     /// Hit-test rects for each menu item (for click/hover).
     pub menu_rects: Vec<Rect>,
+    /// This frame displayed the folder question and at least one answer row.
+    pub trust_painted: bool,
     /// Hit-test rect for the prompt input area (for click to start session).
     pub prompt_rect: Option<Rect>,
     /// Hit-test rect for the import-claude banner (for click to open import modal).
@@ -876,7 +878,10 @@ pub fn render_welcome(
                     h_margin,
                     params.compact,
                 )
-            } else if let TrustState::Pending { workspace, upgrade } = params.trust_state {
+            } else if let TrustState::Pending {
+                workspace, upgrade, ..
+            } = params.trust_state
+            {
                 render_welcome_trust(
                     content_area,
                     buf,
@@ -1047,25 +1052,62 @@ fn render_welcome_trust(
         ("n", "No: don't load its settings, ask before every command"),
         ("q", "Quit"),
     ];
-    let centered = |text: &str, color| Line::from(Span::styled(text.to_owned(), Style::default().fg(color))).alignment(Alignment::Center);
+    let centered = |text: &str, color| {
+        Line::from(Span::styled(text.to_owned(), Style::default().fg(color)))
+            .alignment(Alignment::Center)
+    };
     let mut lines = Vec::new();
     if upgrade {
         // Two short lines each, so nothing clips at narrow or compact widths.
-        lines.push(centered("Fuigo's folder trust now also covers shell commands.", theme.gray));
-        lines.push(centered("You trusted this folder's settings before; trust now means its", theme.gray));
-        lines.push(centered("settings load AND commands run here without asking each time.", theme.gray));
+        lines.push(centered(
+            "Fuigo's folder trust now also covers shell commands.",
+            theme.gray,
+        ));
+        lines.push(centered(
+            "You trusted this folder's settings before; trust now means its",
+            theme.gray,
+        ));
+        lines.push(centered(
+            "settings load AND commands run here without asking each time.",
+            theme.gray,
+        ));
         lines.push(Line::default());
     }
-    lines.push(centered("Do you trust the files in this folder?", theme.gray_bright));
-    lines.push(centered(&workspace.display().to_string(), theme.accent_user));
-    lines.push(centered("(one question per repository; covers its worktrees and submodules)", theme.gray));
+    let question_row = lines.len() as u16;
+    lines.push(centered(
+        "Do you trust the files in this folder?",
+        theme.gray_bright,
+    ));
+    lines.push(centered(
+        &workspace.display().to_string(),
+        theme.accent_user,
+    ));
+    lines.push(centered(
+        "(one question per repository; covers its worktrees and submodules)",
+        theme.gray,
+    ));
     lines.push(Line::default());
     if !upgrade {
-        lines.push(centered("Trusting it lets Fuigo use this folder's own settings (MCP and LSP", theme.gray));
-        lines.push(centered("servers, hooks, .envrc, permission rules, instructions, skills) and", theme.gray));
-        lines.push(centered("run shell commands here without asking each time. A folder's files", theme.gray));
-        lines.push(centered("can make those run code, so trust only folders whose contents you", theme.gray));
-        lines.push(centered("would run yourself. Reading, searching and editing work either way.", theme.gray));
+        lines.push(centered(
+            "Trusting it lets Fuigo use this folder's own settings (MCP and LSP",
+            theme.gray,
+        ));
+        lines.push(centered(
+            "servers, hooks, .envrc, permission rules, instructions, skills) and",
+            theme.gray,
+        ));
+        lines.push(centered(
+            "run shell commands here without asking each time. A folder's files",
+            theme.gray,
+        ));
+        lines.push(centered(
+            "can make those run code, so trust only folders whose contents you",
+            theme.gray,
+        ));
+        lines.push(centered(
+            "would run yourself. Reading, searching and editing work either way.",
+            theme.gray,
+        ));
     }
     // Spacer between the text and the menu.
     lines.push(Line::default());
@@ -1076,6 +1118,7 @@ fn render_welcome_trust(
         content_area,
         error_height: msg_height,
         menu_height,
+        prompt_height: Some(0),
         compact,
         prompt_compact: compact,
         ..Default::default()
@@ -1098,9 +1141,18 @@ fn render_welcome_trust(
         },
     );
 
-    // Only `menu_rects` are meaningful here; the rest are absent (no prompt, picker, auth/gate links)
-    // `Default` keeps this honest without a 13-field all-`None` literal
+    // Keyboard answers need the question row, even when no menu rows fit. In the
+    // upgrade variant the preamble alone is insufficient. The app stamps this
+    // paint proof only after the writer flushes the frame.
+    let question_y = layout.error.y.saturating_add(question_row);
+    let drawn_area = layout
+        .error
+        .intersection(content_area)
+        .intersection(*buf.area());
     WelcomeRenderResult {
+        trust_painted: drawn_area.width > 0
+            && question_y >= drawn_area.y
+            && question_y < drawn_area.bottom(),
         menu_rects,
         ..Default::default()
     }
@@ -2332,6 +2384,7 @@ fn render_welcome_done(
         refresh_rect: refresh_hit_rect,
         consent_link_rects: Vec::new(),
         consent_legibility: None,
+        trust_painted: false,
         changelog_action_present: show_changelog_action,
         changelog_cta_rect,
         announcement_truncated,
@@ -2966,12 +3019,19 @@ mod tests {
         let text = render_picker_text(&picker_status(&[], false), false);
         eprintln!("--- first run picker ---\n{text}\n------------------------");
         assert!(text.contains("Choose how Fuigo reaches a model."), "{text}");
-        let flux = text.find("Flux Router: one key, every model (recommended)").expect("flux row");
-        let chatgpt = text.find("ChatGPT subscription (Plus/Pro)").expect("chatgpt row");
+        let flux = text
+            .find("Flux Router: one key, every model (recommended)")
+            .expect("flux row");
+        let chatgpt = text
+            .find("ChatGPT subscription (Plus/Pro)")
+            .expect("chatgpt row");
         let grok = text.find("Grok subscription").expect("grok row");
         let keys = text.find("Provider API key...").expect("keys row");
         let quit = text.find("Quit").expect("quit row");
-        assert!(flux < chatgpt && chatgpt < grok && grok < keys && keys < quit, "{text}");
+        assert!(
+            flux < chatgpt && chatgpt < grok && grok < keys && keys < quit,
+            "{text}"
+        );
         assert!(!text.to_lowercase().contains("enterprise"), "{text}");
         assert!(!text.contains("Cancel"), "{text}");
         assert!(!text.contains("Fuigo needs an API key"), "{text}");
@@ -2981,7 +3041,9 @@ mod tests {
     fn a_flux_key_in_the_environment_is_offered_masked_as_the_first_row() {
         let text = render_picker_text(&picker_status(&[("FLUX_API_KEY", FLUX_KEY)], false), false);
         assert!(
-            text.contains("Use FLUX_API_KEY from your environment \u{2022}\u{2022}\u{2022}\u{2022}1234"),
+            text.contains(
+                "Use FLUX_API_KEY from your environment \u{2022}\u{2022}\u{2022}\u{2022}1234"
+            ),
             "{text}"
         );
     }
@@ -2990,7 +3052,10 @@ mod tests {
     #[test]
     fn a_full_secret_never_reaches_the_render_buffer() {
         let text = render_picker_text(&picker_status(&[("FLUX_API_KEY", FLUX_KEY)], false), false);
-        assert!(!text.contains("SUPERSECRETMIDDLE"), "a full key reached the render buffer");
+        assert!(
+            !text.contains("SUPERSECRETMIDDLE"),
+            "a full key reached the render buffer"
+        );
         assert!(!text.contains(FLUX_KEY));
     }
 
@@ -2998,7 +3063,10 @@ mod tests {
     fn the_login_modal_ends_in_cancel_and_the_sso_row_needs_an_issuer() {
         let modal = render_picker_text(&picker_status(&[], false), true);
         eprintln!("--- /login picker ---\n{modal}\n---------------------");
-        assert!(modal.contains("Cancel") && !modal.contains("Quit"), "{modal}");
+        assert!(
+            modal.contains("Cancel") && !modal.contains("Quit"),
+            "{modal}"
+        );
         assert!(!modal.contains("Enterprise SSO"), "{modal}");
         let with_sso = render_picker_text(&picker_status(&[], true), true);
         assert!(with_sso.contains("Enterprise SSO"), "{with_sso}");
@@ -3016,17 +3084,27 @@ mod tests {
             credential,
             VersionBadgeMode::HeroFooter,
         );
-        (0..area.width).map(|x| buf[(x, 0)].symbol()).collect::<String>()
+        (0..area.width)
+            .map(|x| buf[(x, 0)].symbol())
+            .collect::<String>()
     }
 
     /// "Logged in with API key" was printed whatever the credential was, including for a subscription.
     #[test]
     fn the_footer_names_the_credential_in_use() {
         let _theme = crate::theme::cache::pin_theme();
-        assert!(credential_badge_text(Some("Grok subscription")).contains("Logged in with Grok subscription"));
-        assert!(credential_badge_text(Some("Flux Router key")).contains("Logged in with Flux Router key"));
-        assert!(credential_badge_text(Some("OpenAI key from OPENAI_API_KEY"))
-            .contains("Logged in with OpenAI key from OPENAI_API_KEY"));
+        assert!(
+            credential_badge_text(Some("Grok subscription"))
+                .contains("Logged in with Grok subscription")
+        );
+        assert!(
+            credential_badge_text(Some("Flux Router key"))
+                .contains("Logged in with Flux Router key")
+        );
+        assert!(
+            credential_badge_text(Some("OpenAI key from OPENAI_API_KEY"))
+                .contains("Logged in with OpenAI key from OPENAI_API_KEY")
+        );
         assert!(!credential_badge_text(Some("Grok subscription")).contains("API key"));
         assert!(!credential_badge_text(None).contains("Logged in"));
     }
@@ -3137,6 +3215,118 @@ mod tests {
         assert!(!wind_mark_wanted(&picker, true));
     }
 
+    #[test]
+    fn regression_welcome_tiny_areas() {
+        let trust = TrustState::Pending {
+            workspace: "/repo".into(),
+            upgrade: false,
+            painted_at: None,
+        };
+        let upgrade = TrustState::Pending {
+            workspace: "/repo".into(),
+            upgrade: true,
+            painted_at: None,
+        };
+        let entries = crate::app::pending_menu::menu_entries(
+            &picker_status(&[], false),
+            false,
+            crate::app::pending_menu::PickerPage::Main,
+        );
+        for auth in [AuthState::Done, AuthState::Pending { error: None }] {
+            for trust in [&TrustState::Done, &trust, &upgrade] {
+                let mut params = render_params(&auth, trust, None);
+                params.menu_entries = &entries;
+                for (w, h) in (1..=8)
+                    .flat_map(|w| (1..=8).map(move |h| (w, h)))
+                    .chain((1..=3).map(|h| (80, h)))
+                {
+                    let area = Rect::new(0, 0, w, h);
+                    let mut buf = Buffer::empty(area);
+                    render_welcome(
+                        area,
+                        &mut buf,
+                        &params,
+                        &mut PromptWidget::new(),
+                        &mut PickerState::default(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn regression_r3_trust_stamp_matches_visible_question() {
+        assert_trust_stamp_matches_visible_question(false);
+    }
+
+    #[test]
+    fn regression_r3_upgrade_stamp_matches_visible_question() {
+        assert_trust_stamp_matches_visible_question(true);
+    }
+
+    fn assert_trust_stamp_matches_visible_question(upgrade: bool) {
+        let theme = Theme::current();
+        let mut first_visible = None;
+        let mut clipped_preamble = false;
+        for height in 1..=24 {
+            let area = Rect::new(0, 0, 80, height);
+            let mut buf = Buffer::empty(area);
+            let result = render_welcome_trust(
+                area,
+                &mut buf,
+                &theme,
+                std::path::Path::new("project"),
+                upgrade,
+                None,
+                0,
+                false,
+            );
+            let text = buffer_text(&buf);
+            let visible = text.contains("Do you trust the files in this folder?");
+            if visible && first_visible.is_none() {
+                first_visible = Some(height);
+                eprintln!("upgrade={upgrade}: first visible question at 80x{height}");
+            }
+            clipped_preamble |= upgrade && text.contains("Fuigo's folder trust") && !visible;
+            assert_eq!(
+                result.trust_painted, visible,
+                "upgrade={upgrade}, height={height}, rects={:?}, text={text:?}",
+                result.menu_rects
+            );
+        }
+        assert!(first_visible.is_some());
+        if upgrade {
+            assert!(clipped_preamble);
+        }
+    }
+
+    #[test]
+    fn regression_r3_trust_does_not_reserve_composer_rows() {
+        let area = Rect::new(0, 0, 80, 17);
+        let mut buf = Buffer::empty(area);
+        let result = render_welcome_trust(
+            area,
+            &mut buf,
+            &Theme::current(),
+            std::path::Path::new("project"),
+            false,
+            None,
+            0,
+            false,
+        );
+        assert_eq!(
+            result.menu_rects.len(),
+            3,
+            "all answer rows fit without an unused composer"
+        );
+        assert!(
+            buffer_text(&buf)
+                .contains("would run yourself. Reading, searching and editing work either way."),
+            "the warning fits when unused composer rows are released: {:?}",
+            buffer_text(&buf)
+        );
+    }
+
     fn render_done_text(params: &WelcomeRenderParams<'_>) -> String {
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
@@ -3159,7 +3349,10 @@ mod tests {
         let mut params = render_params(&auth, &TrustState::Done, None);
         params.startup_warnings = &warnings;
         let screen = render_done_text(&params);
-        assert!(screen.contains("Sandbox profile workspace is set"), "{screen}");
+        assert!(
+            screen.contains("Sandbox profile workspace is set"),
+            "{screen}"
+        );
         assert!(screen.contains("not available on Windows"), "{screen}");
         assert!(screen.contains("run unsandboxed"), "{screen}");
         assert!(crate::startup::sandbox_unavailable_startup_warning(None).is_none());
@@ -3953,14 +4146,27 @@ mod tests {
             })
             .collect();
         let shown: Vec<&String> = rows.iter().filter(|r| !r.is_empty()).collect();
-        let text = shown.iter().map(|r| r.as_str()).collect::<Vec<_>>().join(" ");
-        assert!(text.contains("Sign-in failed"), "start of the error: {rows:#?}");
-        assert!(text.contains("expired"), "end of the error is not cut off: {rows:#?}");
+        let text = shown
+            .iter()
+            .map(|r| r.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            text.contains("Sign-in failed"),
+            "start of the error: {rows:#?}"
+        );
+        assert!(
+            text.contains("expired"),
+            "end of the error is not cut off: {rows:#?}"
+        );
         let error_rows = rows
             .iter()
             .filter(|r| error.contains(r.as_str()) && !r.is_empty())
             .count();
-        assert!(error_rows >= 3, "the error spans several rows at 30 columns: {rows:#?}");
+        assert!(
+            error_rows >= 3,
+            "the error spans several rows at 30 columns: {rows:#?}"
+        );
     }
 
     #[test]

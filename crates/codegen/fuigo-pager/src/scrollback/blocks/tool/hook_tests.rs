@@ -49,3 +49,18 @@ fn compact_suffix_keeps_blocked_and_failure_formatting() {
         "stop  [hooks: 1/1]"
     );
 }
+
+#[test]
+fn row_80_b9_extra_blocked_hook_uses_legacy_glyph() {
+    let lines = super::render_hooks_expanded_inner(&[run(HookRunStatus::Blocked {
+        detail: "denied".into(),
+        elapsed: Duration::ZERO,
+    })]);
+    let rendered = text(lines[0].content.spans.clone());
+    let marker = if crate::glyphs::is_legacy_windows_console() {
+        "< hook"
+    } else {
+        "\u{21a9} hook"
+    };
+    assert!(rendered.contains(marker), "{rendered}");
+}

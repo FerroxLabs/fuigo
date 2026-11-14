@@ -1111,3 +1111,22 @@ fn doctor_lists_each_hook_with_state_reason_and_fix_hint() {
     );
     assert_eq!(human::format_hooks_section(&[]), "", "no hooks: the report is unchanged");
 }
+
+#[test]
+fn row_81_b23_doctor_hook_commands_truncate_by_display_width() {
+    use unicode_width::UnicodeWidthStr;
+    let command = "界🙂".repeat(40);
+    let hooks = [hook_info_for_doctor(
+        "wide",
+        &command,
+        fuigo_hooks_plugins_types::HookState::Ok,
+        "local",
+        None,
+        None,
+    )];
+    let text = human::format_hooks_section(&hooks);
+    let row = text.lines().find(|line| line.contains("界")).unwrap();
+    let command = &row[row.find('界').unwrap()..];
+    assert!(command.width() <= 60, "{command}");
+    assert!(command.ends_with('…'), "{command}");
+}

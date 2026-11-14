@@ -387,6 +387,39 @@ async fn u35_g10_prepared_call_carries_the_permission_flag() {
 /// proves which call asked (and what about) instead of reading a timeout; both calls are bounded.
 #[tokio::test(flavor = "current_thread")]
 async fn u35_g11_opencode_workdir_is_judged_where_the_command_runs() {
+    // The session-directory half needs an environment that steers no git: an agent harness that runs the suite
+    // often exports GIT_PAGER, which (by design) makes every git call ask. Judge in a process of its own with the
+    // git-steering variables unset, so the test proves the workdir rule whatever the caller's environment.
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _clean_env: Vec<fuigo_test_support::env::EnvGuard> = [
+        "LD_PRELOAD",
+        "LD_AUDIT",
+        "GCONV_PATH",
+        "BASH_ENV",
+        "ENV",
+        "GIT_EXTERNAL_DIFF",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_PAGER",
+        "GIT_EDITOR",
+        "GIT_SEQUENCE_EDITOR",
+        "GIT_ASKPASS",
+        "SSH_ASKPASS",
+        "GIT_PROXY_COMMAND",
+        "GIT_EXEC_PATH",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_TEMPLATE_DIR",
+        "LESSCLOSE",
+        "PAGER",
+    ]
+    .into_iter()
+    .map(fuigo_test_support::env::EnvGuard::unset)
+    .collect();
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {

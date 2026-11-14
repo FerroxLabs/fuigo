@@ -1658,3 +1658,48 @@ async fn redirecting_token_endpoint_receives_the_refresh_token_once_per_verdict(
     let advice = remedy.advice().expect("the refusal is the advice");
     assert!(advice.contains("issuer's https origin") && advice.contains("stored sign-in is kept"), "{advice}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r4_1_refresh_and_enrichment_preserve_generation() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "auth::refresh::oidc_refresher::tests::r4_1_refresh_and_enrichment_preserve_generation",
+    ) else {
+        return;
+    };
+    let (base, server) = start_mock_oidc_and_proxy().await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(
+        AuthManager::new(dir.path(), FuigoComConfig::default())
+            .with_proxy_base_url(&front.front(&base)),
+    );
+    let auth = FuigoAuth {
+        key: "old-token".into(),
+        refresh_token: Some("old-refresh".into()),
+        oidc_issuer: Some(base),
+        oidc_client_id: Some("client".into()),
+        user_id: String::new(),
+        ..FuigoAuth::test_default()
+    };
+    let mut json = serde_json::to_value(auth).unwrap();
+    json["login_generation"] = "persisted-generation".into();
+    let auth = serde_json::from_value(json).unwrap();
+    manager.save_without_enrichment(auth).await.unwrap();
+    let refresher = OidcRefresher::new(manager.clone());
+    let RefreshOutcome::Success(auth) = refresher.refresh(RefreshReason::ServerRejected).await
+    else {
+        panic!("mock refresh must succeed");
+    };
+    assert_eq!(auth.key, "oidc-refreshed-token");
+    assert_eq!(
+        serde_json::to_value(&auth).unwrap()["login_generation"],
+        "persisted-generation"
+    );
+    let mut auth = *auth;
+    manager.enrich_auth_inline(&mut auth).await;
+    assert_eq!(auth.user_id, "user-42");
+    assert_eq!(
+        serde_json::to_value(&auth).unwrap()["login_generation"],
+        "persisted-generation"
+    );
+    server.abort();
+}

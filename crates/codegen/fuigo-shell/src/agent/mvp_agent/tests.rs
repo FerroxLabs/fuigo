@@ -63,6 +63,9 @@ fn auth_with_mode(mode: crate::auth::AuthMode, key: &str) -> crate::auth::FuigoA
         team_blocked_reasons: vec![],
         coding_data_retention_opt_out: false,
         has_fuigo_code_access: None,
+        login_generation: None,
+        external_provider_id: None,
+        login_snapshot: None,
         refresh_token: None,
         expires_at: None,
         oidc_issuer: None,
@@ -9649,4 +9652,65 @@ async fn the_flux_key_lists_the_same_live_catalogue_from_the_environment_and_fro
     assert_eq!(from_env, ["mock-opus-5", "mock-gpt-5", "mock-gemini-3"], "the live catalogue, not the bundled one");
     assert_eq!(from_saved, from_env, "the saved key lists the same models (it used to keep the bundled four)");
     assert!(saved_keyed, "the saved key fetched the catalogue with the key");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn r5_acp_4_reauth_clear_yields_to_runtime() {
+    r5_acp_clear_yields(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn r5_acp_5_legacy_scope_removal_yields_to_runtime() {
+    r5_acp_clear_yields(true).await;
+}
+
+async fn r5_acp_clear_yields(legacy: bool) {
+    use crate::agent::auth_method::{CACHED_TOKEN_AUTH_METHOD_ID, OIDC_METHOD_ID};
+    use crate::auth::{AuthManager, FuigoAuth, FuigoComConfig};
+    use acp::Agent as _;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("auth.json");
+    let config = FuigoComConfig::default();
+    let manager = std::sync::Arc::new(
+        AuthManager::new_at_path(path.clone(), config.clone())
+            .with_test_auth_lock_timeout(std::time::Duration::from_secs(1)),
+    );
+    if legacy {
+        manager.hot_swap(FuigoAuth {
+            auth_mode: crate::auth::AuthMode::WebLogin,
+            ..FuigoAuth::test_default()
+        });
+    }
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut cfg = crate::agent::config::Config::default();
+    cfg.fuigo_com_config = config;
+    let agent = MvpAgent::new(GatewaySender::new(tx), &cfg, manager, None).unwrap();
+    use fs2::FileExt as _;
+    let lock = std::fs::File::create(dir.path().join("auth.json.lock")).unwrap();
+    lock.lock_exclusive().unwrap();
+    let request = acp::AuthenticateRequest::new(if legacy {
+        CACHED_TOKEN_AUTH_METHOD_ID
+    } else {
+        OIDC_METHOD_ID
+    })
+    .meta(
+        serde_json::json!({"reauth": !legacy, "headless": true})
+            .as_object()
+            .cloned(),
+    );
+    let mut flow = Box::pin(agent.authenticate(request));
+    let started = std::time::Instant::now();
+    let poll = futures::poll!(&mut flow);
+    let elapsed = started.elapsed();
+    drop(lock);
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(5), &mut flow).await;
+    assert!(
+        completed.is_ok(),
+        "ACP must finish after the auth-file lock is released"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "ACP blocked the runtime for {elapsed:?}"
+    );
+    assert!(poll.is_pending(), "ACP must await the held auth-file lock");
 }

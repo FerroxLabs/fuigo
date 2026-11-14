@@ -194,6 +194,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-sampler/tests/test_actor.rs", 2),
     ("crates/codegen/fuigo-sampling-types/src/messages.rs", 1),
     ("crates/codegen/fuigo-sandbox/src/network_policy.rs", 1), // P77: `hostname` of a network-policy rule (a destination host, not this machine)
+    ("crates/codegen/fuigo-shell/src/agent/app.rs", 2), // R7: empty user_id/email in an inline-auth headless-start fixture; no production request body.
     ("crates/codegen/fuigo-shell/src/agent/auth_method.rs", 2),
     ("crates/codegen/fuigo-shell/src/agent/chat_modes.rs", 1),
     ("crates/codegen/fuigo-shell/src/agent/config.rs", 4),
@@ -218,7 +219,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-shell/src/auth/external_auth.rs", 5),
     ("crates/codegen/fuigo-shell/src/auth/flow.rs", 10),
     ("crates/codegen/fuigo-shell/src/auth/manager.rs", 1),
-    ("crates/codegen/fuigo-shell/src/auth/manager_tests.rs", 44),
+    ("crates/codegen/fuigo-shell/src/auth/manager_tests.rs", 46), // R6: +2 test-only identity sites: a local FuigoAuth fixture and the mock /user response. No production request body.
     ("crates/codegen/fuigo-shell/src/auth/meta.rs", 4),
     ("crates/codegen/fuigo-shell/src/auth/model.rs", 23),
     ("crates/codegen/fuigo-shell/src/auth/oidc/login.rs", 1),
@@ -227,11 +228,27 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-shell/src/auth/oidc/test_helpers.rs", 2),
     ("crates/codegen/fuigo-shell/src/auth/p47_service_wire_tests.rs", 1), // P47: FuigoAuth test fixture
     ("crates/codegen/fuigo-shell/src/auth/recovery.rs", 4),
-    ("crates/codegen/fuigo-shell/src/auth/refresh/auth_backend_contract_tests.rs", 3),
-    ("crates/codegen/fuigo-shell/src/auth/refresh/oidc_refresher.rs", 1),
-    ("crates/codegen/fuigo-shell/src/auth/refresh/oidc_refresher_tests.rs", 37),
-    ("crates/codegen/fuigo-shell/src/auth/subscription/flow.rs", 1), // SIGNINCOPY: reads the `email` claim of the ID token in the inbound token response, shown once after sign-in and never stored or sent
-    ("crates/codegen/fuigo-shell/src/auth/subscription/tests.rs", 4), // SIGNINCOPY: inbound ID-token fixtures for that display name; test only
+    (
+        "crates/codegen/fuigo-shell/src/auth/refresh/auth_backend_contract_tests.rs",
+        3,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/auth/refresh/oidc_refresher.rs",
+        1,
+    ),
+    // R4-1: +1 empty user_id in the local refresh/enrichment fixture; not a request body.
+    (
+        "crates/codegen/fuigo-shell/src/auth/refresh/oidc_refresher_tests.rs",
+        38,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/auth/subscription/flow.rs",
+        1,
+    ), // SIGNINCOPY: reads the `email` claim of the ID token in the inbound token response, shown once after sign-in and never stored or sent
+    (
+        "crates/codegen/fuigo-shell/src/auth/subscription/tests.rs",
+        4,
+    ), // SIGNINCOPY: inbound ID-token fixtures for that display name; test only
     ("crates/codegen/fuigo-shell/src/config/reloader.rs", 1),
     ("crates/codegen/fuigo-shell/src/extensions/auth.rs", 7), // P81 (R086): the `fuigo/auth/info` response (`email:`, `team_id:`, `organization_id:` of `AuthInfoResponse`, declared and filled) and the `"email"` of `fuigo/auth/logout`: the local ACP client keeps them; over a bridged relay that is not FluxRouter-operated they are withheld by `relay_outbound_frame` (agent/relay.rs)
     ("crates/codegen/fuigo-shell/src/extensions/bundle.rs", 8),

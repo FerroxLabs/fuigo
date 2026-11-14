@@ -107,12 +107,19 @@ fn temp_runtime_root(tag: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "fuigo-runtime-sockets-{tag}-{}-{nanos}",
-        std::process::id()
+    // macOS: the temp dir is a long `/var` alias, and socket paths are capped at 104 bytes.
+    let base = if cfg!(target_os = "macos") {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let root = base.join(format!(
+        "frs-{tag}-{}-{}",
+        std::process::id(),
+        nanos % 1_000_000_000
     ));
     std::fs::create_dir_all(&root).unwrap();
-    root
+    dunce::canonicalize(&root).unwrap()
 }
 
 #[test]
@@ -434,11 +441,13 @@ fn custom_restrict_network_override_controls_auto_socket_denies() {
         .resolve_profile(
             &workspace,
             &SandboxConfig {
+                sources: HashMap::new(),
                 profiles: HashMap::from([(
                     "devbox-net".to_string(),
                     ProfileConfig {
                         extends: Some("devbox".to_string()),
                         restrict_network: Some(true),
+                        workspace_write: None,
                         read_only: vec![],
                         read_write: vec![],
                         deny: vec![],
@@ -462,11 +471,13 @@ fn custom_user_socket_deny_kept_when_restrict_network_false() {
     }
     let workspace = std::env::temp_dir();
     let config = SandboxConfig {
+        sources: HashMap::new(),
         profiles: HashMap::from([(
             "keep-sock".to_string(),
             ProfileConfig {
                 extends: Some("workspace".to_string()),
                 restrict_network: Some(false),
+                workspace_write: None,
                 read_only: vec![],
                 read_write: vec![],
                 deny: vec!["/var/run/docker.sock".to_string()],

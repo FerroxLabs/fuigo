@@ -228,6 +228,7 @@ pub(crate) async fn complete_device_code_login(
     device_code: DeviceCode,
     auth_manager: &Arc<AuthManager>,
     surface: ClientSurface,
+    login_at_start: Option<FuigoAuth>,
 ) -> anyhow::Result<(FuigoAuth, bool)> {
     let client = crate::http::shared_client();
     let token_url = format!("{}/oauth2/token", issuer.trim_end_matches('/'));
@@ -268,7 +269,14 @@ pub(crate) async fn complete_device_code_login(
 
         if resp.status().is_success() {
             let tokens: TokenOk = resp.json().await?;
-            let auth = build_auth(&tokens, issuer, client_id, auth_manager).await?;
+            let auth = build_auth(
+                &tokens,
+                issuer,
+                client_id,
+                auth_manager,
+                login_at_start.as_ref(),
+            )
+            .await?;
             return Ok((auth, true));
         }
 
@@ -326,11 +334,20 @@ pub(crate) async fn run_device_code_login_channels(
         detect_cli_surface()
     };
 
+    let login_at_start = auth_manager.read_login_auth();
     let device_code = request_device_code(issuer, client_id, scopes, surface).await?;
 
     let Some(channels) = channels.take() else {
         // CLI: print the URL and code to stderr
-        return prompt_and_poll(issuer, client_id, device_code, auth_manager, surface).await;
+        return prompt_and_poll(
+            issuer,
+            client_id,
+            device_code,
+            auth_manager,
+            surface,
+            login_at_start,
+        )
+        .await;
     };
 
     // TUI: push the URL through the channel BEFORE opening the browser
@@ -357,7 +374,15 @@ pub(crate) async fn run_device_code_login_channels(
         });
     }
     open_browser_detached(&display_uri).await;
-    complete_device_code_login(issuer, client_id, device_code, auth_manager, surface).await
+    complete_device_code_login(
+        issuer,
+        client_id,
+        device_code,
+        auth_manager,
+        surface,
+        login_at_start,
+    )
+    .await
 }
 
 /// Display the device code to stderr and poll until approved.
@@ -367,6 +392,7 @@ async fn prompt_and_poll(
     device_code: DeviceCode,
     auth_manager: &Arc<AuthManager>,
     surface: ClientSurface,
+    login_at_start: Option<FuigoAuth>,
 ) -> anyhow::Result<(FuigoAuth, bool)> {
     let display_uri = device_code
         .verification_uri_complete
@@ -401,7 +427,15 @@ async fn prompt_and_poll(
     fuigo_tty_utils::cli_eprintln!("Waiting for authorization...");
 
     // The caller prints the `✓ Signed in` confirmation (it also owns the external-provider and devbox early-return paths that never reach here)
-    complete_device_code_login(issuer, client_id, device_code, auth_manager, surface).await
+    complete_device_code_login(
+        issuer,
+        client_id,
+        device_code,
+        auth_manager,
+        surface,
+        login_at_start,
+    )
+    .await
 }
 
 /// Open `url` in the browser off-thread: `webbrowser::open` is synchronous and would stall the single-threaded TUI loop.
@@ -431,6 +465,7 @@ async fn build_auth(
     issuer: &str,
     client_id: &str,
     auth_manager: &Arc<AuthManager>,
+    login_at_start: Option<&FuigoAuth>,
 ) -> anyhow::Result<FuigoAuth> {
     let (user_id, email) = if let Some(ref id_token) = tokens.id_token {
         decode_jwt_claims(id_token)
@@ -472,6 +507,9 @@ async fn build_auth(
 
     let now = Utc::now();
     let mut auth = FuigoAuth {
+        login_generation: None,
+        external_provider_id: None,
+        login_snapshot: None,
         key: tokens.access_token.clone(),
         auth_mode: AuthMode::Oidc,
         create_time: now,
@@ -501,7 +539,7 @@ async fn build_auth(
     auth_manager.enrich_auth_inline(&mut auth).await;
 
     auth_manager
-        .update(auth)
+        .complete_login(auth, login_at_start)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to save credentials: {e}"))
 }
@@ -540,9 +578,184 @@ fn validate_verification_uri(uri: &str) -> anyhow::Result<()> {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 pub(crate) mod tests {
+    pub(crate) async fn r4_seed(
+        manager: &Arc<AuthManager>,
+        change: &str,
+    ) -> crate::auth::FuigoAuth {
+        let mut auth = crate::auth::FuigoAuth::test_default();
+        if change == "enriched" {
+            auth.user_id.clear();
+            auth.principal_id = None;
+            auth.principal_type = None;
+        }
+        if matches!(change, "legacy" | "external_replacement") {
+            manager.save_without_enrichment(auth).await.unwrap();
+        } else {
+            manager.complete_login(auth, None).await.unwrap();
+        }
+        manager.read_disk_auth().unwrap()
+    }
+
+    pub(crate) async fn r4_change(
+        manager: &Arc<AuthManager>,
+        before: &crate::auth::FuigoAuth,
+        change: &str,
+    ) {
+        if matches!(change, "removed" | "same_account" | "replaced") {
+            manager.clear().unwrap();
+            if change != "removed" {
+                let mut auth = before.clone();
+                auth.key = "sibling-token".into();
+                if change == "replaced" {
+                    auth.user_id = "different-account".into();
+                }
+                manager.complete_login(auth, None).await.unwrap();
+            }
+        } else if change == "external_replacement" {
+            crate::auth::flow::run_external_auth_provider(
+                "printf '%s' sibling-token",
+                manager,
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        } else if change == "refreshed" {
+            let mut auth = before.clone();
+            auth.key = "sibling-token".into();
+            auth.refresh_token = Some("sibling-refresh".into());
+            auth.create_time += chrono::Duration::seconds(1);
+            manager.save_without_enrichment(auth).await.unwrap();
+        } else if change == "enriched" {
+            manager
+                .edit_stored_credential(|auth| {
+                    auth.user_id = "enriched-user".into();
+                    auth.principal_id = Some("enriched-principal".into());
+                    auth.principal_type = Some("User".into());
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn r4_1_device_same_account() {
+        device_completion_after_change("same_account").await;
+    }
+
+    #[tokio::test]
+    async fn r4_1_device_refreshed() {
+        device_completion_after_change("refreshed").await;
+    }
+
+    #[tokio::test]
+    async fn r4_1_device_enriched() {
+        device_completion_after_change("enriched").await;
+    }
+
+    #[tokio::test]
+    async fn r4_1_device_replaced() {
+        device_completion_after_change("replaced").await;
+    }
+
+    #[tokio::test]
+    async fn r4_1_device_legacy() {
+        device_completion_after_change("legacy").await;
+    }
+
+    pub(crate) async fn device_completion_after_change(change: &str) {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = auth_manager_with_fuigo_home(temp.path(), "http://127.0.0.1:1");
+        let before = r4_seed(&manager, change).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        let requested = Arc::new(tokio::sync::Notify::new());
+        let approved = Arc::new(tokio::sync::Notify::new());
+        let app = axum::Router::new().route("/oauth2/token", axum::routing::post({
+            let requested = requested.clone();
+            let approved = approved.clone();
+            move || {
+                let requested = requested.clone();
+                let approved = approved.clone();
+                async move {
+                    requested.notify_one();
+                    approved.notified().await;
+                    axum::Json(serde_json::json!({"access_token": "approved-login", "expires_in": 900}))
+                }
+            }
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let code = super::DeviceCode {
+            verification_uri: format!("{issuer}/device"),
+            verification_uri_complete: None,
+            user_code: "ABCD".into(),
+            device_code: "device-code".into(),
+            interval: 1,
+            expires_in: 60,
+        };
+        let sibling = auth_manager_with_fuigo_home(temp.path(), "http://127.0.0.1:1");
+        let (result, ()) = tokio::join!(
+            super::complete_device_code_login(
+                &issuer,
+                "client",
+                code,
+                &manager,
+                super::ClientSurface::Cli,
+                Some(before.clone())
+            ),
+            async {
+                requested.notified().await;
+                r4_change(&sibling, &before, change).await;
+                approved.notify_one();
+            }
+        );
+        server.abort();
+        if matches!(change, "refreshed" | "enriched" | "legacy") {
+            result.unwrap();
+            let stored = manager.read_disk_auth().unwrap();
+            assert!(stored.login_generation.is_some());
+            assert_ne!(stored.login_generation, before.login_generation);
+            assert_eq!(stored.key, "approved-login");
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("sign-in cancelled: the login changed in another window")
+            );
+            assert_eq!(
+                manager.read_disk_auth().map(|auth| auth.key),
+                matches!(change, "replaced" | "same_account").then(|| "sibling-token".into())
+            );
+            assert_eq!(
+                manager.current_or_expired().unwrap().key,
+                before.key,
+                "completion must not install the new login in memory"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn r2_6_device_login_removed_before_approval() {
+        device_completion_after_change("removed").await;
+    }
+
+    #[tokio::test]
+    async fn r2_6_device_login_replaced_before_approval() {
+        device_completion_after_change("replaced").await;
+    }
+
+    #[tokio::test]
+    async fn r2_6_device_login_refreshed_before_approval() {
+        device_completion_after_change("refreshed").await;
+    }
+
     /// P43 hostile: the device-token poll (`complete_device_code_login`, its own gate) sends a
     /// non-FluxRouter issuer no client version. The mock answers the first poll, which ends it.
     #[tokio::test(flavor = "current_thread")]
@@ -558,8 +771,15 @@ pub(crate) mod tests {
             interval: 1,
             expires_in: 60,
         };
-        let _ = super::complete_device_code_login(&base, "client", code, &am, super::ClientSurface::Cli)
-            .await;
+        let _ = super::complete_device_code_login(
+            &base,
+            "client",
+            code,
+            &am,
+            super::ClientSurface::Cli,
+            None,
+        )
+        .await;
         handle.abort();
         let seen = seen.lock().unwrap().clone();
         assert!(!seen.is_empty(), "the poll made no request, so this proves nothing");
@@ -626,6 +846,7 @@ pub(crate) mod tests {
                 "http://localhost:22255",
                 "client-id",
                 &auth_manager,
+                None,
             ))
             .unwrap();
 
@@ -684,6 +905,7 @@ pub(crate) mod tests {
                 "http://localhost:22255",
                 "client-id",
                 &auth_manager,
+                None,
             ))
             .unwrap();
 
@@ -734,6 +956,7 @@ pub(crate) mod tests {
                 "http://localhost:22255",
                 "client-id",
                 &auth_manager,
+                None,
             ))
             .unwrap_err();
 
@@ -777,6 +1000,7 @@ pub(crate) mod tests {
                 "http://localhost:22255",
                 "client-id",
                 &auth_manager,
+                None,
             ))
             .expect("legacy oauth2.principal_id must not enforce a pin");
         assert_eq!(
@@ -865,6 +1089,7 @@ pub(crate) mod tests {
             device_code,
             &auth_manager,
             super::ClientSurface::Cli,
+            None,
         )
         .await;
         server.abort();

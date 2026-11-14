@@ -21,9 +21,6 @@ use crate::theme::ThemeKind;
 /// Fence info string identifying a Mermaid diagram.
 pub const MERMAID_INFO: &str = "mermaid";
 
-/// Subtle `◇ mermaid` marker: the leading (dim, non-clickable) label on the affordance row.
-const MERMAID_LABEL: &str = "\u{25c7} mermaid";
-
 /// Status hint shown in the affordance row while an on-click diagram render is in flight.
 const MERMAID_RENDERING: &str = "rendering diagram\u{2026}";
 
@@ -323,7 +320,8 @@ fn affordance_buttons(start_col: u16) -> [AffordanceButton; 3] {
 /// The leading `◇ mermaid` label, the three (always-clickable) buttons shifted past it, and the trailing `rendering…` hint when `rendering` is true.
 /// One source of truth shared by the painter and hit-testing, so the painted columns and click hit-rects align.
 pub(crate) fn affordance_row(rendering: bool) -> AffordanceRow {
-    let buttons_start = UnicodeWidthStr::width(MERMAID_LABEL) as u16 + AFFORDANCE_GAP;
+    let buttons_start =
+        UnicodeWidthStr::width(crate::glyphs::mermaid_marker()) as u16 + AFFORDANCE_GAP;
     let buttons = affordance_buttons(buttons_start);
     let status = rendering.then(|| {
         let last = &buttons[buttons.len() - 1];
@@ -331,7 +329,7 @@ pub(crate) fn affordance_row(rendering: bool) -> AffordanceRow {
         (after, MERMAID_RENDERING)
     });
     AffordanceRow {
-        label: (0, MERMAID_LABEL),
+        label: (0, crate::glyphs::mermaid_marker()),
         buttons,
         status,
     }
@@ -766,7 +764,7 @@ mod tests {
     fn affordance_buttons_start_after_the_label_with_a_fixed_gap() {
         // Buttons are laid out from `start_col` (which leaves room for the leading `◇ mermaid` label) with a fixed inter-button gap
         // Every button is clickable (no per-button enable flag)
-        let start = UnicodeWidthStr::width(MERMAID_LABEL) as u16 + AFFORDANCE_GAP;
+        let start = UnicodeWidthStr::width(crate::glyphs::mermaid_marker()) as u16 + AFFORDANCE_GAP;
         let buttons = affordance_buttons(start);
         assert_eq!(
             buttons.map(|b| (b.label, b.kind)),
@@ -787,9 +785,9 @@ mod tests {
     fn affordance_row_has_label_and_shows_status_only_while_rendering() {
         // Display widths: `◇ mermaid` (9) + gap (3), so buttons start at col 12
         // [Open Image] (12), [Copy Image Path] (17), [Copy Source] (13) with a 3-col gap between
-        let start = UnicodeWidthStr::width(MERMAID_LABEL) as u16 + AFFORDANCE_GAP;
+        let start = UnicodeWidthStr::width(crate::glyphs::mermaid_marker()) as u16 + AFFORDANCE_GAP;
         let idle = affordance_row(false);
-        assert_eq!(idle.label, (0, MERMAID_LABEL));
+        assert_eq!(idle.label, (0, crate::glyphs::mermaid_marker()));
         assert_eq!(idle.buttons.map(|b| b.col), [start, start + 15, start + 35]);
         assert_eq!(
             idle.buttons.map(|b| b.label),
@@ -941,5 +939,19 @@ mod tests {
         assert!(matches!(out.lines[3].selectable, Selectable::None));
         // The trailing pre2 row is pushed down, not overwritten.
         assert_eq!(caption_text(&out.lines[4]), "pre2-row0");
+    }
+
+    #[test]
+    fn row_80_b9_extra_diagram_marker_uses_legacy_glyph() {
+        let row = affordance_row(false);
+        assert!(
+            row.label.1.starts_with(crate::glyphs::diamond_hollow()),
+            "{}",
+            row.label.1
+        );
+        assert_eq!(
+            row.buttons[0].col as usize,
+            unicode_width::UnicodeWidthStr::width(row.label.1) + AFFORDANCE_GAP as usize
+        );
     }
 }

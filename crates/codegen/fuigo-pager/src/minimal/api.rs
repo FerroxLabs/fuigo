@@ -839,6 +839,20 @@ pub fn record_committed_for_expand(sb: &mut ScrollbackState, id: EntryId) {
 
 // ── Test-only surface (minimal's unit tests, via the test-only helpers) ──
 
+/// A welcome view for exercising the minimal renderer without a live connection.
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_welcome_app() -> AppView {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = AppView::new(
+        tx,
+        crate::acp::model_state::ModelState::default(),
+        Vec::new(),
+        crate::render::draw::EscapeWriter::disconnected(),
+    );
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    app
+}
+
 /// [`crate::app::agent_view::test_agent_view`].
 #[cfg(any(test, feature = "test-support"))]
 pub fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf) -> AgentView {

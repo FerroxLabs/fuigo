@@ -707,7 +707,8 @@ pub struct PagerArgs {
         value_name = "PROMPT"
     )]
     pub system_prompt_override: Option<String>,
-    /// Resume a session by ID or title, or the most recent if omitted.
+    /// Resume a session by ID or title. Headless mode requires an ID or title; use --continue for the most recent session.
+    /// In interactive mode, omitting the value resumes the most recent session.
     /// Non-ID values match session titles for the current directory, ignoring letter case; UUID-shaped values always mean IDs.
     /// Among duplicate titles a sole renamed match wins; otherwise the resume fails as ambiguous.
     #[arg(
@@ -1157,6 +1158,18 @@ impl PagerArgs {
     }
     /// Same as [`Self::pin_local_resume_target`] with an explicit cwd, so tests never mutate the process cwd.
     pub fn pin_local_resume_target_for_cwd(&mut self, cwd: Option<&str>) -> anyhow::Result<()> {
+        if self.command.is_none()
+            && (self.single.is_some()
+                || self.prompt_json.is_some()
+                || self.prompt_file.is_some()
+                || self.memory_flush)
+        {
+            crate::headless::validate_resume_target(
+                self.resume_session
+                    .as_deref()
+                    .or(self.load_session.as_deref()),
+            )?;
+        }
         if self.chat() {
             return Ok(());
         }

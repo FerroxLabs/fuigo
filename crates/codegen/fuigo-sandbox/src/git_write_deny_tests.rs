@@ -656,7 +656,20 @@ fn the_host_env_is_read_variable_for_variable() {
         GIT_CONFIG_GLOBAL_ENV => Some(OsString::from("/g")),
         _ => None,
     });
-    assert_eq!(env(Some("/g"), None), got);
+    // The system configs are the host's installed git files (macOS ships them with Xcode).
+    assert!(
+        got.system_configs
+            .iter()
+            .all(|p| p.is_absolute() && p.is_file()),
+        "{got:?}"
+    );
+    assert_eq!(
+        GitConfigEnv {
+            system_configs: got.system_configs.clone(),
+            ..env(Some("/g"), None)
+        },
+        got
+    );
 }
 
 /// The Linux bwrap plan binds every target inside a writable root read-only, creating git's own

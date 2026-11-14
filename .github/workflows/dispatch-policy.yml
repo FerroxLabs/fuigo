@@ -64,6 +64,11 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked -p fuigo-extra-ca -p ptyctl-cli -- --test-threads=1 2>&1 | tee dispatch-receipts/compatibility.log
+      - name: Confirm vendored terminal readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p crossterm --lib -- --test-threads=1 2>&1 | tee dispatch-receipts/crossterm.log
       - name: Confirm GCS auth and metadata transport
         shell: bash
         run: |

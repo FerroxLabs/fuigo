@@ -1,9 +1,9 @@
 //! Top-level action router: maps actions and action results to handlers.
 use super::auth::{
     dispatch_cancel_login, dispatch_cancel_picker, dispatch_cancel_sign_in, dispatch_enter_api_key,
-    dispatch_login, dispatch_logout, dispatch_open_sign_in_picker, dispatch_pick_welcome_model, dispatch_provider_key_info,
-    dispatch_sign_in_subscription, dispatch_submit_api_key, dispatch_submit_auth_code,
-    dispatch_switch_account, dispatch_use_detected_key,
+    dispatch_login, dispatch_logout, dispatch_open_sign_in_picker, dispatch_pick_welcome_model,
+    dispatch_provider_key_info, dispatch_sign_in_subscription, dispatch_submit_api_key,
+    dispatch_submit_auth_code, dispatch_switch_account, dispatch_use_detected_key,
 };
 use super::ctx::{
     active_agent_session_id, get_active_agent_mut, navigate_clearing_selection, open_url_or_show,
@@ -51,8 +51,9 @@ use super::queue;
 use super::queue::dispatch_drain_queue;
 use super::rewind::{
     dispatch_rewind, dispatch_rewind_cancel_offer, dispatch_rewind_confirm,
-    dispatch_rewind_confirm_never_ask, dispatch_rewind_confirm_scoped, dispatch_rewind_conflict, dispatch_rewind_dismiss, dispatch_rewind_dismiss_error,
-    dispatch_rewind_picker_select, dispatch_rewind_show_picker,
+    dispatch_rewind_confirm_never_ask, dispatch_rewind_confirm_scoped, dispatch_rewind_conflict,
+    dispatch_rewind_dismiss, dispatch_rewind_dismiss_error, dispatch_rewind_picker_select,
+    dispatch_rewind_show_picker,
 };
 use super::session::foreign::dispatch_fetch_session_list;
 use super::session::fork::{
@@ -61,10 +62,10 @@ use super::session::fork::{
 };
 use super::session::lifecycle::{
     clear_startup_actions, dispatch_accept_consent, dispatch_agent_type_mismatch_answered,
-    dispatch_delete_current_session_answered, dispatch_exit_session, dispatch_new_session,
-    dispatch_new_session_inner, dispatch_new_session_with_id, dispatch_new_worktree_session,
-    dispatch_decline_trust_folder, dispatch_trust_folder, leave_welcome_for_session, open_delete_current_session_question,
-    open_new_session_question,
+    dispatch_decline_trust_folder, dispatch_delete_current_session_answered, dispatch_exit_session,
+    dispatch_new_session, dispatch_new_session_inner, dispatch_new_session_with_id,
+    dispatch_new_worktree_session, dispatch_trust_folder, leave_welcome_for_session,
+    open_delete_current_session_question, open_new_session_question,
 };
 use super::session::load::{
     dispatch_cycle_session_source_filter, dispatch_load_session, dispatch_pick_content_session,
@@ -77,7 +78,6 @@ use super::session::modal::{dispatch_rename_session, dispatch_reset_session_titl
 use super::settings::setters::{
     clear_default_model, clear_fork_secondary_model, preview_auto_dark_theme,
     preview_auto_light_theme, preview_theme, set_ask_user_question_timeout_enabled,
-    set_subagent_model_inheritance,
     set_auto_dark_theme, set_auto_light_theme, set_auto_update, set_collapsed_edit_blocks,
     set_combine_queued_prompts, set_compact_mode, set_confirm_before_rewind,
     set_contextual_hint_export_copy, set_contextual_hint_image_input,
@@ -87,23 +87,23 @@ use super::settings::setters::{
     set_follow_up_behavior, set_fork_secondary_model, set_group_tool_verbs, set_hunk_tracker_mode,
     set_invert_scroll, set_keep_text_selection, set_max_thoughts_width, set_multiline_mode,
     set_page_flip_on_send, set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,
-    set_respect_manual_folds, set_screen_mode, set_tool_density_default, set_scroll_lines, set_scroll_mode, set_scroll_speed,
-    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_theme, set_timeline,
-    set_timestamps, set_vim_mode, set_voice_capture_mode, set_voice_keybind_enabled,
-    set_voice_stt_language,
+    set_respect_manual_folds, set_screen_mode, set_scroll_lines, set_scroll_mode, set_scroll_speed,
+    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_subagent_model_inheritance,
+    set_theme, set_timeline, set_timestamps, set_tool_density_default, set_vim_mode,
+    set_voice_capture_mode, set_voice_keybind_enabled, set_voice_stt_language,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
     dispatch_open_reset_confirm, dispatch_open_settings, dispatch_set_vim_level,
-    dispatch_toggle_compact_mode, dispatch_toggle_mouse_capture, dispatch_toggle_multiline, dispatch_toggle_timestamps,
-    dispatch_toggle_vim_mode,
+    dispatch_toggle_compact_mode, dispatch_toggle_mouse_capture, dispatch_toggle_multiline,
+    dispatch_toggle_timestamps, dispatch_toggle_vim_mode,
 };
 use super::status::{
-    dispatch_copy_session_id, dispatch_manage_billing, dispatch_open_gboom, dispatch_open_stoke,
-    dispatch_open_tutorial, dispatch_privacy_banner_opt_in, dispatch_privacy_banner_opt_out,
-    dispatch_share_session, dispatch_show_context_info, dispatch_show_queue,
-    dispatch_decline_folder_trust, dispatch_open_folder_trust, dispatch_show_release_notes, dispatch_show_session_info, dispatch_show_tasks,
-    dispatch_show_usage, set_coding_data_sharing,
+    dispatch_copy_session_id, dispatch_decline_folder_trust, dispatch_manage_billing,
+    dispatch_open_folder_trust, dispatch_open_gboom, dispatch_open_stoke, dispatch_open_tutorial,
+    dispatch_privacy_banner_opt_in, dispatch_privacy_banner_opt_out, dispatch_share_session,
+    dispatch_show_context_info, dispatch_show_queue, dispatch_show_release_notes,
+    dispatch_show_session_info, dispatch_show_tasks, dispatch_show_usage, set_coding_data_sharing,
 };
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
@@ -1128,7 +1128,8 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetToolDensity(compact) => {
             with_active_agent(app, |agent| {
                 let compact = compact.unwrap_or_else(|| {
-                    agent.scrollback.tool_density() != Some(crate::scrollback::DisplayMode::Collapsed)
+                    agent.scrollback.tool_density()
+                        != Some(crate::scrollback::DisplayMode::Collapsed)
                 });
                 agent.scrollback.set_tool_density(compact);
                 agent.show_toast(if compact {
@@ -1268,11 +1269,13 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![Effect::SubscriptionSignOut { provider }]
         }
         Action::ProviderKeysPage => {
+            app.invalidate_welcome_input();
             app.picker_page = crate::app::pending_menu::PickerPage::ProviderKeys;
             app.welcome_menu_index = None;
             vec![]
         }
         Action::PickerBack => {
+            app.invalidate_welcome_input();
             app.picker_page = crate::app::pending_menu::PickerPage::Main;
             app.welcome_menu_index = None;
             vec![]
@@ -1617,7 +1620,9 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::RewindConfirm(target) => dispatch_rewind_confirm(app, target),
         Action::RewindConfirmNeverAsk(target) => dispatch_rewind_confirm_never_ask(app, target),
-        Action::RewindConfirmScoped(target, scope) => dispatch_rewind_confirm_scoped(app, target, scope),
+        Action::RewindConfirmScoped(target, scope) => {
+            dispatch_rewind_confirm_scoped(app, target, scope)
+        }
         Action::RewindConflict(choice) => dispatch_rewind_conflict(app, choice),
         Action::RewindCancelOffer => dispatch_rewind_cancel_offer(app),
         Action::RewindDismiss => dispatch_rewind_dismiss(app),

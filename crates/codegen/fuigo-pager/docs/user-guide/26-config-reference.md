@@ -475,7 +475,11 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | Key | Type / Values | Requirements | Managed | Details |
 | --- | --- | --- | --- | --- |
 | `sandbox.auto_allow_bash` | `boolean` | `pin` | `user` | Skip bash permission prompts when a sandbox profile is active. Also FUIGO_SANDBOX_AUTO_ALLOW_BASH. |
-| `sandbox.profile` | `off / workspace / read-only / strict / string` | `pin` | `user` | Filesystem sandbox profile. Also `--sandbox` and FUIGO_SANDBOX. |
+| `sandbox.profile` | `off / workspace / devbox / read-only / strict / minimal / string` | `pin` | `user` | Filesystem sandbox profile. Also `--sandbox` and FUIGO_SANDBOX. |
+
+A user-global `[profiles.minimal]` in `$FUIGO_HOME/sandbox.toml` wins over the built-in `minimal` when selecting a profile (reported once as a stderr WARNING naming the shadowed built-in); without that definition, selection uses the built-in. Project definitions using built-in names (including aliases) are ignored with a stderr WARNING naming the file and asking you to rename the profile. Other project names and other built-in names retain their precedence. `extends` requires a built-in base, so a shadowed custom `minimal` cannot be inherited.
+
+Custom profile definitions live separately in `sandbox.toml`, under `[profiles.<name>]`. Their typed fields are `extends` (built-in name; default `workspace`), `restrict_network` (boolean), `workspace_write` (boolean), and `read_only`, `read_write`, `deny` (string arrays). `workspace_write = true` grants launch-folder writes; `false` makes the launch tree read-only, including beneath writable temp/parent grants. Omission preserves the base unchanged: `workspace`, `devbox`, and `strict` grant launch writes; `read-only` omits that grant; `minimal` explicitly denies them. Keep state and scratch outside a read-only launch folder. Fuigo warns at startup if its sessions directory resolves inside that folder, and continues starting. Wrong boolean types produce a parse warning; unknown custom profile keys are ignored with a stderr warning naming each key. See [Sandbox Mode](18-sandbox.md#custom-profiles) for inheritance, path precedence, and platform details.
 
 ### `session`
 

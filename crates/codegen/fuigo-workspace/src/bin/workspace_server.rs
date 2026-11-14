@@ -262,7 +262,55 @@ where
     Args::try_parse_from(argv).map_err(|e| (fuigo_tty_utils::render_clap_error(&e), e.use_stderr(), e.exit_code()))
 }
 
+fn server_sandbox_profile(cwd: &std::path::Path) -> fuigo_sandbox::ProfileName {
+    use fuigo_sandbox::ProfileName;
+    match std::env::var("FUIGO_SANDBOX_PROFILE").ok() {
+        Some(val) => {
+            let parsed = val
+                .parse::<ProfileName>()
+                .expect("ProfileName::from_str is infallible");
+            let selected = if parsed == ProfileName::Minimal {
+                parsed
+                    .selected(&fuigo_sandbox::load_sandbox_config(cwd))
+                    .into_owned()
+            } else {
+                parsed
+            };
+            if matches!(selected, ProfileName::Custom(_)) {
+                tracing::warn!(value = %val,
+                        "Unrecognized FUIGO_SANDBOX_PROFILE, defaulting to workspace");
+                ProfileName::Workspace
+            } else {
+                selected
+            }
+        }
+        None if fuigo_sandbox::trust_bwrap_marker_for_devbox() => ProfileName::Devbox,
+        None => ProfileName::Workspace,
+    }
+}
+
+/// Prepare the subtractive boundary before daemonization and the async runtime.
+#[cfg(all(target_os = "linux", feature = "sandbox-enforce"))]
+fn prepare_workspace_boundary(cwd: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let profile = server_sandbox_profile(cwd);
+    if profile != fuigo_sandbox::ProfileName::Minimal {
+        return Ok(());
+    }
+    if !fuigo_sandbox::is_inside_bwrap() {
+        let mut command = fuigo_sandbox::bwrap_reexec_for_profile(&profile, cwd)
+            .ok_or_else(|| anyhow::anyhow!("required bwrap plan could not be prepared; refusing to start with sandbox protections missing"))?;
+        let error = command.exec();
+        anyhow::bail!(
+            "bwrap exec failed: {error}; refusing to start with sandbox protections missing"
+        );
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
+    // SAFETY: first operation at process entry, before any worker threads exist.
+    unsafe { fuigo_sandbox::consume_startup_warnings() };
     // u35 t1: folder trust gates every git, jj and direnv this hub starts; installed before anything can spawn.
     fuigo_workspace::folder_trust::install_process_judges();
     // P149 (S14/K16): every storage upload this server makes sends its text through the upload scrub.
@@ -298,6 +346,13 @@ fn main() -> anyhow::Result<()> {
     // Before daemonize(): a bad or missing --hub-url must reach the user's terminal, not the
     // daemon's log file, and must not leave a forked process holding the pidfile.
     let hub_url = validate_before_daemonize(&args)?;
+    #[cfg(all(target_os = "linux", feature = "sandbox-enforce"))]
+    prepare_workspace_boundary(&cwd)?;
+    #[cfg(all(target_os = "linux", not(feature = "sandbox-enforce")))]
+    anyhow::ensure!(
+        server_sandbox_profile(&cwd) != fuigo_sandbox::ProfileName::Minimal,
+        "the 'minimal' sandbox requires a build with sandbox-enforce; refusing to start with its protections missing"
+    );
     let oom_protection = fuigo_tty_utils::protect_from_oom_kill();
     let _pidfile_guard = if args.daemonize {
         let anchor = |p: PathBuf| if p.is_absolute() { p } else { cwd.join(p) };
@@ -388,32 +443,39 @@ async fn run(
     };
     {
         use fuigo_sandbox::{ProfileName, SandboxManager};
-        let profile = match std::env::var("FUIGO_SANDBOX_PROFILE").ok() {
-            Some(val) => {
-                let parsed = val
-                    .parse::<ProfileName>()
-                    .expect("ProfileName::from_str is infallible");
-                if matches!(parsed, ProfileName::Custom(_)) {
-                    tracing::warn!(value = %val,
-                        "Unrecognized FUIGO_SANDBOX_PROFILE, defaulting to workspace");
-                    ProfileName::Workspace
-                } else {
-                    parsed
-                }
-            }
-            None if fuigo_sandbox::trust_bwrap_marker_for_devbox() => ProfileName::Devbox,
-            None => ProfileName::Workspace,
-        };
+        let profile = server_sandbox_profile(&cwd);
         let profile_name = profile.to_string();
         if profile == ProfileName::Off {
             tracing::info!(profile = %profile_name, "Sandbox explicitly disabled via FUIGO_SANDBOX_PROFILE=off");
         } else {
+            #[cfg(all(
+                feature = "sandbox-enforce",
+                any(target_os = "linux", target_os = "macos")
+            ))]
+            let requires_boundary = profile == ProfileName::Minimal;
             let mut sandbox = SandboxManager::new(profile, &cwd);
             if let Err(e) = sandbox.apply(&cwd) {
+                #[cfg(all(
+                    feature = "sandbox-enforce",
+                    any(target_os = "linux", target_os = "macos")
+                ))]
+                if requires_boundary {
+                    anyhow::bail!(
+                        "could not apply the '{profile_name}' sandbox: {e}; refusing to start with its protections missing"
+                    );
+                }
                 tracing::warn!(error = %e, "Sandbox apply returned error, continuing unsandboxed");
             } else if !sandbox.is_applied() {
                 tracing::warn!("Sandbox could not be applied (unsupported platform)");
             }
+            #[cfg(all(
+                feature = "sandbox-enforce",
+                any(target_os = "linux", target_os = "macos")
+            ))]
+            anyhow::ensure!(
+                !requires_boundary || sandbox.is_applied(),
+                "could not apply the '{profile_name}' sandbox; refusing to start with its protections missing"
+            );
             sandbox.install();
             let active = fuigo_sandbox::is_active();
             let status_msg = if active {
@@ -614,6 +676,70 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_server_profile_child() {
+        let Ok(expected) = std::env::var("FUIGO_SERVER_PROFILE_TEST") else {
+            return;
+        };
+        assert_eq!(
+            server_sandbox_profile(&std::env::current_dir().unwrap()).to_string(),
+            expected
+        );
+        println!("SERVER_PROFILE_CHECKED");
+    }
+
+    #[test]
+    fn custom_server_profiles_keep_workspace_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("state");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir_all(workspace.join(".fuigo")).unwrap();
+        for (profile, global, project, expected) in [
+            (
+                "mine",
+                "",
+                "[profiles.mine]\nextends = \"strict\"\n",
+                "workspace",
+            ),
+            (
+                "minimal",
+                "[profiles.minimal]\nextends = \"strict\"\nworkspace_write = false\n",
+                "",
+                "workspace",
+            ),
+            (
+                "minimal",
+                "",
+                "[profiles.minimal]\nextends = \"devbox\"\n",
+                "minimal",
+            ),
+            ("minimal", "", "", "minimal"),
+        ] {
+            std::fs::write(home.join("sandbox.toml"), global).unwrap();
+            std::fs::write(workspace.join(".fuigo/sandbox.toml"), project).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::custom_server_profile_child",
+                    "--nocapture",
+                ])
+                .current_dir(&workspace)
+                .env("FUIGO_HOME", &home)
+                .env("FUIGO_SANDBOX_PROFILE", profile)
+                .env("FUIGO_SERVER_PROFILE_TEST", expected)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line == "SERVER_PROFILE_CHECKED"),
+                "{output:?}"
+            );
+        }
+    }
 
     /// Hostile env and argv values must not reach the terminal through clap's help or error text (round S6, M2).
     #[test]

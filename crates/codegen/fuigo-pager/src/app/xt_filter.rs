@@ -55,7 +55,7 @@ impl XtversionFilter {
         Self::with_armed(crate::terminal::xtversion::reply_pending())
     }
 
-    fn with_armed(armed: bool) -> Self {
+    pub(super) fn with_armed(armed: bool) -> Self {
         Self {
             armed,
             deadline: None,

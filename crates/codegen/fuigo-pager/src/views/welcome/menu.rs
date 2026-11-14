@@ -62,7 +62,7 @@ pub fn render_menu(
         }
 
         let is_selected = selected == Some(i);
-        let key_width = cols(key);
+        let key_width = cols(key).min(menu_centered.width);
         // The key sits at the right edge, so the label is cut to leave room for it.
         let label = crate::render::line_utils::truncate_str(
             label,

@@ -1176,6 +1176,7 @@ fn session_startup_allowed_requires_auth_and_trust() {
     app.trust_state = TrustState::Pending {
         workspace: PathBuf::from("/x"),
         upgrade: false,
+        painted_at: None,
     };
     assert!(
         !app.session_startup_allowed(),
@@ -1190,6 +1191,7 @@ fn session_startup_allowed_requires_auth_and_trust() {
     app.trust_state = TrustState::Pending {
         workspace: PathBuf::from("/x"),
         upgrade: false,
+        painted_at: None,
     };
     assert!(
         !app.session_startup_allowed(),
@@ -1367,6 +1369,7 @@ fn finish_trust_resolves_and_replays_startup() {
     app.trust_state = TrustState::Pending {
         workspace: PathBuf::from("/x"),
         upgrade: false,
+        painted_at: None,
     };
     app.deferred_startup.session =
         Some(crate::app::session_startup::DeferredSessionStartup::Load {
@@ -1405,6 +1408,7 @@ fn trust_folder_grants_and_resolves() {
     app.trust_state = TrustState::Pending {
         workspace: workspace.clone(),
         upgrade: false,
+        painted_at: None,
     };
     let _ = dispatch(Action::TrustFolder, &mut app);
     assert!(matches!(app.trust_state, TrustState::Done));
@@ -1419,8 +1423,14 @@ fn trust_folder_grants_and_resolves() {
 fn p167_trust_gate_outcome_maps_each_resolution() {
     use crate::app::dispatch::session::lifecycle::{TrustGateOutcome, trust_gate_outcome};
     use fuigo_workspace::folder_trust::GrantResolution;
-    assert_eq!(trust_gate_outcome(GrantResolution::Trusted), TrustGateOutcome::Finish);
-    assert_eq!(trust_gate_outcome(GrantResolution::Unrecorded), TrustGateOutcome::StayPending);
+    assert_eq!(
+        trust_gate_outcome(GrantResolution::Trusted),
+        TrustGateOutcome::Finish
+    );
+    assert_eq!(
+        trust_gate_outcome(GrantResolution::Unrecorded),
+        TrustGateOutcome::StayPending
+    );
 }
 fn p167_welcome_toast(app: &AppView) -> String {
     app.welcome_toast
@@ -1451,6 +1461,7 @@ fn p167_trust_folder_over_unreadable_store_reports_and_stays_pending() {
     app.trust_state = TrustState::Pending {
         workspace: workspace.clone(),
         upgrade: false,
+        painted_at: None,
     };
     let _ = dispatch(Action::TrustFolder, &mut app);
     assert!(
@@ -1500,10 +1511,17 @@ fn p167_trust_folder_with_denied_store_write_stays_pending() {
         app.trust_state = TrustState::Pending {
             workspace: workspace.clone(),
             upgrade: false,
+            painted_at: None,
         };
         let _ = dispatch(Action::TrustFolder, &mut app);
-        assert!(matches!(app.trust_state, TrustState::Pending { .. }), "leader_mode={leader_mode}");
-        assert!(!TrustStore::load().is_trusted(&workspace), "nothing durable was written");
+        assert!(
+            matches!(app.trust_state, TrustState::Pending { .. }),
+            "leader_mode={leader_mode}"
+        );
+        assert!(
+            !TrustStore::load().is_trusted(&workspace),
+            "nothing durable was written"
+        );
         assert!(
             !fuigo_workspace::folder_trust::decide(repo.path(), false).is_trusted(),
             "the folder stays untrusted"
@@ -1527,6 +1545,7 @@ fn auth_complete_defers_startup_until_trust_resolved() {
     app.trust_state = TrustState::Pending {
         workspace: PathBuf::from("/x"),
         upgrade: false,
+        painted_at: None,
     };
     app.deferred_startup.session =
         Some(crate::app::session_startup::DeferredSessionStartup::Load {
@@ -1579,6 +1598,7 @@ fn trust_answered_first_defers_startup_until_auth_completes() {
     app.trust_state = TrustState::Pending {
         workspace: PathBuf::from("/x"),
         upgrade: false,
+        painted_at: None,
     };
     app.deferred_startup.session =
         Some(crate::app::session_startup::DeferredSessionStartup::Load {
@@ -1622,6 +1642,7 @@ fn new_session_is_gated_while_trust_pending() {
     app.trust_state = TrustState::Pending {
         workspace: PathBuf::from("/x"),
         upgrade: false,
+        painted_at: None,
     };
     assert!(app.agents.is_empty());
     let effects = dispatch(Action::NewSession, &mut app);
@@ -1709,6 +1730,7 @@ fn deferred_worktree_ref_replays_through_gate() {
     app.trust_state = TrustState::Pending {
         workspace: PathBuf::from("/x"),
         upgrade: false,
+        painted_at: None,
     };
     let effects = dispatch(
         Action::NewWorktreeSession {
@@ -1753,6 +1775,7 @@ fn gated_worktree_without_load_id_preserves_stashed_resume() {
     app.trust_state = TrustState::Pending {
         workspace: PathBuf::from("/x"),
         upgrade: false,
+        painted_at: None,
     };
     let effects = dispatch(
         Action::LoadSession("resume-me".into(), None, false),
@@ -1813,6 +1836,7 @@ fn gated_worktree_with_none_companions_preserves_stashed_label_and_ref() {
     app.trust_state = TrustState::Pending {
         workspace: PathBuf::from("/x"),
         upgrade: false,
+        painted_at: None,
     };
     let effects = dispatch(
         Action::NewWorktreeSession {
@@ -2467,7 +2491,11 @@ fn delete_current_session_confirmation_starts_on_cancel() {
     let qv = app.agents[&AgentId(0)].question_view.as_ref().unwrap();
     let options = &qv.questions[0].options;
     assert_eq!(options[0].label, "Delete", "press 1 to delete");
-    assert_eq!(options[qv.cursor()].label, "Cancel", "Enter must not delete");
+    assert_eq!(
+        options[qv.cursor()].label,
+        "Cancel",
+        "Enter must not delete"
+    );
 }
 
 #[test]
@@ -3248,7 +3276,10 @@ fn launch_plan_mode_flag_puts_the_first_session_in_plan_mode() {
         "SessionCreated must push plan mode when launched with --permission-mode plan, got {effects:?}"
     );
     assert_eq!(app.agents[&id].plan_mode_pending, Some(true));
-    assert!(!app.launch_plan_mode, "the launch flag applies to the first session only");
+    assert!(
+        !app.launch_plan_mode,
+        "the launch flag applies to the first session only"
+    );
 }
 
 /// Without the flag a new session is not pushed into plan mode.

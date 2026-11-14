@@ -542,3 +542,16 @@ fn integer_field_submits_lossless_i64() {
     set_draft(&mut state, 0, "1e20");
     assert!(state.try_accept().is_none(), "1e20 is not an integer");
 }
+
+#[test]
+fn regression_elicitation_tiny_areas() {
+    for req in [form_req(), url_req("https://example.com/login")] {
+        for (w, h) in (1..=8)
+            .flat_map(|w| (1..=8).map(move |h| (w, h)))
+            .chain((1..=3).map(|h| (80, h)))
+        {
+            let mut state = ElicitationViewState::from_request(req.clone(), None, None);
+            render_to_text(&mut state, w, h);
+        }
+    }
+}

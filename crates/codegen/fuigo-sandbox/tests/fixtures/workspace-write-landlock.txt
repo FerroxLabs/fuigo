@@ -1,0 +1,15 @@
+workspace omitted: launch_grant=true boundary=false default_read=true restrict_network=false
+workspace true: launch_grant=true boundary=false default_read=true restrict_network=false
+workspace false: launch_grant=false boundary=true default_read=true restrict_network=false
+devbox omitted: launch_grant=true boundary=false default_read=true restrict_network=false
+devbox true: launch_grant=true boundary=false default_read=true restrict_network=false
+devbox false: launch_grant=false boundary=true default_read=true restrict_network=false
+read-only omitted: launch_grant=false boundary=false default_read=true restrict_network=true
+read-only true: launch_grant=true boundary=false default_read=true restrict_network=true
+read-only false: launch_grant=false boundary=true default_read=true restrict_network=true
+strict omitted: launch_grant=true boundary=false default_read=false restrict_network=true
+strict true: launch_grant=true boundary=false default_read=false restrict_network=true
+strict false: launch_grant=false boundary=true default_read=false restrict_network=true
+minimal omitted: launch_grant=false boundary=true default_read=false restrict_network=true
+minimal true: launch_grant=true boundary=false default_read=false restrict_network=true
+minimal false: launch_grant=false boundary=true default_read=false restrict_network=true

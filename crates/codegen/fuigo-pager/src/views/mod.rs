@@ -24,7 +24,6 @@ pub mod memory_modal;
 pub mod modal;
 pub mod modal_window;
 pub mod model_notice_banner;
-pub mod trust_modal;
 pub mod new_worktree_dialog;
 pub mod overlay;
 pub mod overlay_list;
@@ -55,8 +54,18 @@ pub mod suggestion_controller;
 pub mod tasks_pane;
 pub mod timeline;
 pub mod todo_pane;
+pub mod trust_modal;
 pub mod turn_status;
 pub mod tutorial;
 pub mod usage_modal;
 pub mod welcome;
 pub mod workflows;
+
+/// Format a count with a singular noun, adding the regular plural suffix when needed.
+pub(crate) fn count_label(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("{n} {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}

@@ -140,8 +140,10 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    send_logout(&tx).await;
-                    TaskResult::LogoutComplete
+                    match send_logout(&tx).await {
+                        Ok(()) => TaskResult::LogoutComplete,
+                        Err(error) => TaskResult::LogoutFailed { error },
+                    }
                 });
         }
         Effect::CancelAuth { request_seq } => {
@@ -177,7 +179,9 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             let abort_handle = tasks
                 .spawn(async move {
-                    send_logout(&tx).await;
+                    if let Err(error) = send_logout(&tx).await {
+                        return TaskResult::AuthFailed { request_seq, error };
+                    }
                     send_authenticate(&tx, request_seq, method_id, use_oauth, false)
                         .await
                 });

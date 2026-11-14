@@ -36,12 +36,11 @@ use fuigo_telemetry::events::ManualAuthSurface;
 #[cfg(test)]
 use super::model::UserInfo;
 use super::model::{
-    AuthMode, FuigoAuth, early_invalidation, is_expired, is_expired_with_buffer, lookup_auth,
+    AuthMode, FuigoAuth, LoginSnapshot, early_invalidation, is_expired, is_expired_with_buffer,
+    lookup_auth,
 };
 use super::refresh::{RefreshOutcome, TokenRefresher, resolve_refresh_credential};
-use super::storage::{
-    AuthFileLock, read_auth_json, read_auth_json_or_empty_recovering_corrupt, write_auth_json,
-};
+use super::storage::{AuthFileLock, read_auth_json, write_auth_json};
 
 #[cfg(test)]
 use super::storage::read_auth_json_or_empty;
@@ -166,6 +165,18 @@ struct ScopedRefreshFailure {
 /// It therefore means "5 real minutes", not "5 awake minutes" (a suspend doesn't extend it).
 const PERMANENT_FAILURE_TTL: StdDuration = StdDuration::from_secs(300);
 
+/// Whether a credential operation installs a new in-memory value.
+enum CredentialChange {
+    /// Check a snapshot or fallback before handing it to a consumer.
+    Return,
+    /// Refresh, reload or adoption without a successful write acknowledgement.
+    Install,
+    /// Install the result of a successful credential write.
+    Persisted,
+    /// A metadata-only write: acknowledge persistence without copying disk tokens into memory.
+    Saved,
+}
+
 /// Redacted `Debug` so `AuthManager` (held via `Arc` inside `Debug`-derived types like `PersistenceMsg`) never leaks credentials into logs or panics.
 impl std::fmt::Debug for AuthManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -240,6 +251,12 @@ pub struct AuthManager {
     /// The closure helpers' sync return type enforces "no `.await` while holding the lock".
     /// `Arc` so the spawned `/user` enrichment task can write back.
     inner: Arc<RwLock<Option<FuigoAuth>>>,
+    /// Error that detached the store after a session-only sign-in; retained until exit.
+    detached_store: RwLock<Option<std::io::ErrorKind>>,
+    #[cfg(test)]
+    test_store_read_hook: parking_lot::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    test_store_write_error: RwLock<Option<std::io::ErrorKind>>,
     path: PathBuf,
     scope: String,
     fuigo_com_config: FuigoComConfig,
@@ -258,6 +275,8 @@ pub struct AuthManager {
     /// Test-only: writes that had to wait for the `auth.json` file lock while an enrichment was parked.
     #[cfg(test)]
     update_lock_waits: std::sync::atomic::AtomicU32,
+    #[cfg(test)]
+    test_auth_lock_timeout: Option<StdDuration>,
     /// Test-only: an enrichment of this manager is parked at an `EnrichmentGate`.
     #[cfg(test)]
     pub(super) enrichment_parked: std::sync::atomic::AtomicBool,
@@ -350,10 +369,6 @@ enum ScopeRemoval {
     EntryRemoved,
     /// Last scope dropped; auth.json deleted.
     FileDeleted,
-    /// Lock unavailable (held by another process); disk left untouched.
-    SkippedLockUnavailable,
-    /// Lock held but auth.json was unreadable; disk left untouched.
-    SkippedUnreadable,
 }
 
 impl ScopeRemoval {
@@ -362,8 +377,6 @@ impl ScopeRemoval {
         match self {
             Self::EntryRemoved => "entry removed",
             Self::FileDeleted => "file deleted (no scopes left)",
-            Self::SkippedLockUnavailable => "skipped (lock unavailable)",
-            Self::SkippedUnreadable => "skipped (auth.json unreadable)",
         }
     }
 }
@@ -551,6 +564,11 @@ impl AuthManager {
             .map(|a| a.key.clone());
         Self {
             inner: Arc::new(RwLock::new(inner)),
+            detached_store: RwLock::new(None),
+            #[cfg(test)]
+            test_store_read_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            test_store_write_error: RwLock::new(None),
             path,
             scope,
             fuigo_com_config,
@@ -566,6 +584,8 @@ impl AuthManager {
             update_lock_waits: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
             enrichment_parked: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            test_auth_lock_timeout: None,
             #[cfg(test)]
             enrichment_gate: parking_lot::Mutex::new(None),
             #[cfg(test)]
@@ -586,7 +606,9 @@ impl AuthManager {
             manual_auth: Default::default(),
             first_party_env_api_key_ok: std::sync::atomic::AtomicBool::new(true),
             dark_wake_defer_since: parking_lot::RwLock::new(None),
-            held_session_bearers: parking_lot::Mutex::new(HeldSessionBearers::seeded(inner_key.as_deref())),
+            held_session_bearers: parking_lot::Mutex::new(HeldSessionBearers::seeded(
+                inner_key.as_deref(),
+            )),
             #[cfg(test)]
             dark_wake_override: parking_lot::Mutex::new(None),
             #[cfg(test)]
@@ -624,6 +646,44 @@ impl AuthManager {
 
     // ── State mutation (clear, hot_swap, update) ──────────────────────
 
+    fn auth_lock_timeout(&self) -> StdDuration {
+        #[cfg(test)]
+        if let Some(timeout) = self.test_auth_lock_timeout {
+            return timeout;
+        }
+        AUTH_LOCK_TIMEOUT
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_auth_lock_timeout(mut self, timeout: StdDuration) -> Self {
+        self.test_auth_lock_timeout = Some(timeout);
+        self
+    }
+
+    /// Re-login can proceed in memory when storage cannot be read. Lock and write
+    /// failures still abort; logout itself always requires successful disk removal.
+    pub(crate) async fn clear_for_login(&self) -> std::io::Result<()> {
+        let flock = self.lock_for_write().await?;
+        let _state = super::storage::auth_state_lock();
+        if let Err(error) = self.read_store_or_empty()
+            && error.kind() != std::io::ErrorKind::InvalidData
+        {
+            self.clear_in_memory();
+            tracing::warn!(%error, "auth: could not read stored login; continuing re-login in memory");
+            return Ok(());
+        }
+        self.remove_scope_holding_lock(&self.scope, &flock)
+    }
+
+    pub(crate) async fn clear_async(&self) -> std::io::Result<()> {
+        self.remove_scope_async(&self.scope).await
+    }
+
+    pub(crate) async fn remove_scope_async(&self, scope: &str) -> std::io::Result<()> {
+        let flock = self.lock_for_write().await?;
+        self.remove_scope_holding_lock(scope, &flock)
+    }
+
     pub(crate) fn clear(&self) -> std::io::Result<()> {
         self.remove_scope(&self.scope)
     }
@@ -633,7 +693,8 @@ impl AuthManager {
     /// (The scoped verdict reads inert with no credential.)
     /// When the last scope goes, the file is deleted.
     ///
-    /// Best-effort: takes a non-blocking lock and skips the disk write if another process holds it (the stale entry is cleaned up on next launch).
+    /// Waits for the auth-file lock up to `AUTH_LOCK_TIMEOUT`, as login completion does.
+    /// Lock failure is reported to the caller; logout must never silently skip deletion.
     pub(crate) fn remove_scope(&self, scope: &str) -> std::io::Result<()> {
         self.remove_scope_impl(scope)
     }
@@ -641,13 +702,17 @@ impl AuthManager {
     fn remove_scope_impl(&self, scope: &str) -> std::io::Result<()> {
         // Disk removal and the in-memory drop happen together under the auth-state lock (after the file lock, per its order),
         // so an enrichment merge can neither interleave with the removal nor resurrect the dropped credential.
-        let _flock = lock::try_lock_auth_file_nonblocking(&self.path);
-        let _state = super::storage::auth_state_lock();
-        let disk_mutation = if _flock.is_some() {
-            self.write_scope_removal(scope)?
-        } else {
-            ScopeRemoval::SkippedLockUnavailable
+        let _flock = match lock::try_lock_auth_file_nonblocking(&self.path) {
+            Some(flock) => flock,
+            None => lock::lock_auth_file_blocking(&self.path, self.auth_lock_timeout())
+                .into_io_result()?,
         };
+        self.remove_scope_holding_lock(scope, &_flock)
+    }
+
+    fn remove_scope_holding_lock(&self, scope: &str, _flock: &AuthFileLock) -> std::io::Result<()> {
+        let _state = super::storage::auth_state_lock();
+        let disk_mutation = self.write_scope_removal(scope)?;
         // Intentional removal must be attributable from unified.jsonl
         // Downstream, a deliberately deleted auth.json is indistinguishable from accidental loss (corruption, external deletion)
         fuigo_telemetry::unified_log::warn(
@@ -670,14 +735,19 @@ impl AuthManager {
 
     /// Drop `scope` from auth.json and persist, deleting the file when the last scope is gone.
     /// Caller holds the `auth.json` lock (taken by [`Self::remove_scope_impl`]).
-    #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder"
+    )]
     fn write_scope_removal(&self, scope: &str) -> std::io::Result<ScopeRemoval> {
-        let Ok(mut auth_store) = read_auth_json(&self.path) else {
-            return Ok(ScopeRemoval::SkippedUnreadable);
-        };
+        let mut auth_store = self.read_store_recovering_corrupt()?;
         auth_store.remove(scope);
         if auth_store.is_empty() {
-            let _ = std::fs::remove_file(&self.path);
+            match std::fs::remove_file(&self.path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
             Ok(ScopeRemoval::FileDeleted)
         } else {
             write_auth_json(&self.path, &auth_store)?;
@@ -717,6 +787,9 @@ impl AuthManager {
                 std::thread::sleep(backoff);
             }
             let (auth, state) = self.read_disk_auth_with_state();
+            let Some(_state) = self.lock_attached_store() else {
+                return;
+            };
             last_state = state;
             match state {
                 // Healthy entry on disk: regular swap
@@ -724,12 +797,14 @@ impl AuthManager {
                 DiskAuthState::Ok => {
                     self.with_inner_write(|inner| *inner = auth);
                     // A re-read (e.g. relay reconnect) can adopt a wrong-team token a sibling wrote; clear it here, mirroring `new()`.
+                    drop(_state);
                     self.enforce_pin_on_loaded_token();
                     return;
                 }
                 // File readable, our scope genuinely absent: the trustworthy logout / scope-removed signal
                 DiskAuthState::EntryMissing => {
                     self.drop_in_memory_credentials("scope absent on readable auth.json");
+                    drop(_state);
                     self.enforce_pin_on_loaded_token();
                     return;
                 }
@@ -738,6 +813,9 @@ impl AuthManager {
             }
         }
 
+        let Some(_state) = self.lock_attached_store() else {
+            return;
+        };
         // Persistent disk anomaly
         // Discarding a live refresh token turns a transient disk blip into irreversible credential loss (the RT may exist nowhere else)
         // Retain it unless it is already known-dead or there is nothing to protect
@@ -767,6 +845,7 @@ impl AuthManager {
                 "disk anomaly; no live refresh token to retain (missing RT or permanent failure)",
             );
         }
+        drop(_state);
         self.enforce_pin_on_loaded_token();
     }
 
@@ -884,16 +963,29 @@ impl AuthManager {
         self.vet_cached(auth)
     }
 
-    /// Closure-scoped write. Sync return type prevents `.await` while the lock is held.
-    /// Prefer this over `self.inner.write()`.
-    #[inline]
-    pub(crate) fn with_inner_write<R>(&self, f: impl FnOnce(&mut Option<FuigoAuth>) -> R) -> R {
-        // Every in-memory credential write is ordered against the enrichment merge (see `auth_state_lock`).
+    /// Install credentials and register session bearers in one place.
+    fn reconcile_credential(&self, candidate: FuigoAuth, change: CredentialChange) -> FuigoAuth {
+        if matches!(change, CredentialChange::Return) {
+            return candidate;
+        }
         let _state = super::storage::auth_state_lock();
-        let mut guard = self.inner.write();
-        let out = f(&mut guard);
-        // P42: whatever the closure stored is now a session bearer of this manager.
-        self.note_session_bearer(guard.as_ref());
+        if !matches!(change, CredentialChange::Saved) {
+            *self.inner.write() = Some(candidate.clone());
+        }
+        self.note_session_bearer(Some(&candidate));
+        candidate
+    }
+
+    /// Closure-scoped edits register the resulting session bearer.
+    pub(crate) fn with_inner_write<R>(&self, f: impl FnOnce(&mut Option<FuigoAuth>) -> R) -> R {
+        let _state = super::storage::auth_state_lock();
+        let mut candidate = self.inner.read().clone();
+        let out = f(&mut candidate);
+        if let Some(candidate) = candidate {
+            self.reconcile_credential(candidate, CredentialChange::Install);
+        } else {
+            self.clear_inner();
+        }
         out
     }
 
@@ -1014,13 +1106,185 @@ impl AuthManager {
     /// - **Never writes unlocked.** If the lock cannot be had, memory still takes the credential (as when the disk write
     ///   fails), disk is left alone, no enrichment is spawned, and the error is returned.
     ///
-    /// Returns the input `FuigoAuth` BEFORE enrichment lands; callers needing the post-enrichment view re-read `current()`.
-    pub(crate) async fn update(self: &Arc<Self>, auth: FuigoAuth) -> std::io::Result<FuigoAuth> {
+    /// Returns the credential before enrichment lands.
+    /// Callers needing the post-enrichment view re-read `current()`.
+    pub(crate) async fn update(
+        self: &Arc<Self>,
+        mut auth: FuigoAuth,
+    ) -> std::io::Result<FuigoAuth> {
+        if auth.login_snapshot.is_none() {
+            auth.login_snapshot = Some(self.login_snapshot(self.read_exact_auth().as_ref()));
+        }
         let flock = match self.lock_for_write().await {
             Ok(flock) => flock,
-            Err(e) => return Err(self.keep_in_memory_after_lock_failure(auth, e, "update")),
+            Err(e) => {
+                return Err(self.keep_in_memory_after_lock_failure(
+                    auth,
+                    e,
+                    "update",
+                    CredentialChange::Install,
+                ));
+            }
         };
         self.update_holding_lock(auth, &flock)
+    }
+
+    /// Snapshot the destination of an unpersisted process credential.
+    fn read_exact_auth(&self) -> Option<FuigoAuth> {
+        let mut auth = self.read_store().ok()?.get(&self.scope)?.clone();
+        auth.login_snapshot = Some(LoginSnapshot {
+            destination: None,
+            scope: self.scope.clone(),
+            generation: Some(auth.login_generation.clone()),
+        });
+        Some(auth)
+    }
+
+    /// Retain the exact source of an inherited login. Completion never repeats lookup.
+    pub(crate) fn read_login_auth(&self) -> Option<FuigoAuth> {
+        let map = self.read_store().ok()?;
+        let mut auth = lookup_auth(&map, &self.scope).or_else(|| {
+            // Unsupported legacy modes still have a generation/presence to protect.
+            let mut auth = map.get(&self.scope)?.clone();
+            auth.login_snapshot = Some(LoginSnapshot {
+                destination: None,
+                scope: self.scope.clone(),
+                generation: Some(auth.login_generation.clone()),
+            });
+            Some(auth)
+        })?;
+        if let Some(snapshot) = auth.login_snapshot.as_mut()
+            && snapshot.scope != self.scope
+        {
+            snapshot.destination = Some(Box::new(LoginSnapshot {
+                destination: None,
+                scope: self.scope.clone(),
+                generation: map
+                    .get(&self.scope)
+                    .map(|entry| entry.login_generation.clone()),
+            }));
+        }
+        Some(auth)
+    }
+
+    /// Cleanup must not remove the source in which this sign-in just completed.
+    pub(crate) async fn remove_legacy_scope_after_login(
+        &self,
+        auth: &FuigoAuth,
+    ) -> std::io::Result<()> {
+        if auth
+            .login_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.scope == super::LEGACY_AUTH_SCOPE)
+        {
+            return Ok(());
+        }
+        self.remove_scope_async(super::LEGACY_AUTH_SCOPE).await
+    }
+
+    fn login_snapshot(&self, auth: Option<&FuigoAuth>) -> LoginSnapshot {
+        auth.and_then(|auth| auth.login_snapshot.clone())
+            .unwrap_or_else(|| LoginSnapshot {
+                destination: None,
+                scope: self.scope.clone(),
+                generation: auth.map(|auth| auth.login_generation.clone()),
+            })
+    }
+
+    fn login_changed() -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "sign-in cancelled: the login changed in another window",
+        )
+    }
+
+    /// A concurrent external sign-in may already have obtained this exact account.
+    /// Only a valid credential with an identified account and provider can be adopted.
+    fn same_external_account(&self, stored: &FuigoAuth, completed: &FuigoAuth) -> bool {
+        let same_provider = match (
+            &stored.external_provider_id,
+            &completed.external_provider_id,
+        ) {
+            (Some(stored), Some(completed)) => stored == completed,
+            // Older entries can identify their provider by issuer instead.
+            _ => {
+                stored
+                    .oidc_issuer
+                    .as_ref()
+                    .is_some_and(|issuer| !issuer.is_empty())
+                    && stored.oidc_issuer == completed.oidc_issuer
+            }
+        };
+        same_provider
+            && stored.auth_mode == AuthMode::External
+            && completed.auth_mode == AuthMode::External
+            && !stored.key.is_empty()
+            && !self.is_token_hard_expired(stored)
+            && !stored.user_id.trim().is_empty()
+            && !stored.user_id.eq_ignore_ascii_case("unknown")
+            && stored.user_id == completed.user_id
+            && stored.oidc_issuer == completed.oidc_issuer
+            && stored.oidc_client_id == completed.oidc_client_id
+            && stored.principal_type == completed.principal_type
+            && stored.principal_id == completed.principal_id
+            && stored.team_id == completed.team_id
+            && stored.organization_id == completed.organization_id
+    }
+
+    /// Check the exact snapshotted scope under the file lock, then complete a sign-in.
+    pub(crate) async fn complete_login(
+        self: &Arc<Self>,
+        auth: FuigoAuth,
+        started_with: Option<&FuigoAuth>,
+    ) -> std::io::Result<FuigoAuth> {
+        let (auth, written) = self.finish_login(auth, started_with, false).await?;
+        if written {
+            self.spawn_user_info_enrichment(auth.clone());
+        }
+        Ok(auth)
+    }
+
+    async fn finish_login(
+        &self,
+        auth: FuigoAuth,
+        started_with: Option<&FuigoAuth>,
+        purge: bool,
+    ) -> std::io::Result<(FuigoAuth, bool)> {
+        let snapshot = self.login_snapshot(started_with);
+        let destination = snapshot.destination.as_deref().unwrap_or(&snapshot);
+        let flock = self.lock_for_write().await?;
+        let _state = super::storage::auth_state_lock();
+        let map = match self.read_store_or_empty() {
+            Ok(map) => map,
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Default::default(),
+            Err(error) => {
+                self.detach_store(error.kind());
+                let auth = self.save_new_login_holding_lock(auth, &flock, &snapshot, false)?;
+                return Ok((auth, false));
+            }
+        };
+        if !snapshot.matches(&map) {
+            if let Some((scope, stored)) = map
+                .get_key_value(&destination.scope)
+                .or_else(|| map.get_key_value(&snapshot.scope))
+                && self.same_external_account(stored, &auth)
+            {
+                let mut stored = stored.clone();
+                stored.login_snapshot = Some(LoginSnapshot {
+                    destination: None,
+                    scope: scope.clone(),
+                    generation: Some(stored.login_generation.clone()),
+                });
+                let stored = self.hot_swap(stored);
+                return Ok((stored, false));
+            }
+            return Err(Self::login_changed());
+        }
+        if purge {
+            self.purge_holding_lock(&flock);
+        }
+        let auth = self.save_new_login_holding_lock(auth, &flock, &snapshot, true)?;
+        Ok((auth, true))
     }
 
     /// [`Self::update`] for a caller re-persisting a credential it read earlier (to have its profile enriched).
@@ -1031,14 +1295,41 @@ impl AuthManager {
     /// as by `update`.
     pub(crate) async fn update_unless_superseded(
         self: &Arc<Self>,
-        auth: FuigoAuth,
+        mut auth: FuigoAuth,
     ) -> std::io::Result<FuigoAuth> {
         let flock = self.lock_for_write().await?;
         // One auth-state section from the decision through the write, so memory cannot move in between.
         let _state = super::storage::auth_state_lock();
-        let stored = read_auth_json(&self.path)
+        let snapshot = self.login_snapshot(Some(&auth));
+        let stored = self
+            .read_store()
             .ok()
-            .and_then(|map| map.get(&self.scope).cloned());
+            .and_then(|map| map.get(&snapshot.scope).cloned())
+            .map(|mut stored| {
+                stored.login_snapshot = Some(LoginSnapshot {
+                    destination: None,
+                    scope: snapshot.scope.clone(),
+                    generation: Some(stored.login_generation.clone()),
+                });
+                stored
+            });
+        // Inline and other never-stored credentials have no disk generation to
+        // supersede. Keep them usable without creating a stored login.
+        if stored.is_none() && auth.login_snapshot.is_none() {
+            return Ok(self.reconcile_credential(auth, CredentialChange::Return));
+        }
+        if stored.as_ref().map(|entry| &entry.login_generation) != snapshot.generation.as_ref() {
+            if let Some(mut stored) = stored {
+                stored.login_snapshot = Some(LoginSnapshot {
+                    destination: None,
+                    scope: snapshot.scope,
+                    generation: Some(stored.login_generation.clone()),
+                });
+                self.note_session_bearer(Some(&stored));
+                return Ok(self.reconcile_credential(stored, CredentialChange::Return));
+            }
+            return Err(Self::login_changed());
+        }
         // Either copy can be ahead of the caller's: disk after a sibling's rotation, memory after this process's own
         // refresh whose persist failed. A copy that differs counts as newer unless it was minted before the caller's
         // (then it lags it), by minting time with `try_use_disk_token`'s skew tolerance.
@@ -1046,8 +1337,9 @@ impl AuthManager {
             .into_iter()
             .flatten()
             .find(|c| {
-                (c.key != auth.key || c.refresh_token != auth.refresh_token)
-                    && c.create_time + DISK_MINT_SKEW_TOLERANCE >= auth.create_time
+                c.login_generation != auth.login_generation
+                    || ((c.key != auth.key || c.refresh_token != auth.refresh_token)
+                        && c.create_time + DISK_MINT_SKEW_TOLERANCE >= auth.create_time)
             });
         if let Some(newer) = newer {
             fuigo_telemetry::unified_log::info(
@@ -1061,8 +1353,9 @@ impl AuthManager {
             // P42: a credential handed to the caller is a session bearer of this manager, even one only on disk
             // (a sibling's). Recorded only; memory keeps its own (possibly fresher) credential.
             self.note_session_bearer(Some(&newer));
-            return Ok(newer);
+            return Ok(self.reconcile_credential(newer, CredentialChange::Return));
         }
+        auth.login_snapshot = Some(snapshot);
         self.update_holding_lock(auth, &flock)
     }
 
@@ -1076,33 +1369,51 @@ impl AuthManager {
         &self,
         edit: impl Fn(&mut FuigoAuth),
     ) -> std::io::Result<Option<FuigoAuth>> {
+        let snapshot_auth = self.read_disk_auth();
+        let snapshot = self.login_snapshot(snapshot_auth.as_ref());
         let flock = self.lock_for_write().await;
         let _state = super::storage::auth_state_lock();
         // Memory first and unconditionally: the change is already acknowledged (e.g. by the server), so this process
         // must act on it even when the lock or the disk write fails below.
         let in_memory = self.with_inner_write(|inner| {
             inner.as_mut().map(|auth| {
+                let generation = auth.login_generation.clone();
+                let source = auth.login_snapshot.clone();
                 edit(auth);
+                auth.login_generation = generation;
+                auth.login_snapshot = source;
                 auth.clone()
             })
         });
         let _flock = flock?;
         let mut on_disk = None;
-        if let Ok(mut map) = read_auth_json(&self.path)
-            && let Some(entry) = map.get_mut(&self.scope)
-        {
+        if let Ok(mut map) = self.read_store() {
+            if !snapshot.matches(&map) {
+                return Err(Self::login_changed());
+            }
+            let Some(entry) = map.get_mut(&snapshot.scope) else {
+                return Ok(in_memory);
+            };
+            let generation = entry.login_generation.clone();
             edit(entry);
+            entry.login_generation = generation;
+            entry.login_snapshot = Some(snapshot);
             let edited = entry.clone();
             write_auth_json(&self.path, &map)?;
             // P42: the disk entry (possibly a sibling's) is returned below; record its bearer without touching memory.
             self.note_session_bearer(Some(&edited));
-            on_disk = Some(edited);
+            on_disk = Some(self.reconcile_credential(edited, CredentialChange::Saved));
         }
-        Ok(on_disk.or(in_memory))
+        Ok(on_disk
+            .or(in_memory)
+            .map(|auth| self.reconcile_credential(auth, CredentialChange::Return)))
     }
 
     /// Takes the cross-process `auth.json` lock for one of this manager's read-modify-writes.
-    #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder"
+    )]
     async fn lock_for_write(&self) -> std::io::Result<AuthFileLock> {
         // A custom `FUIGO_AUTH_PATH` may point into a directory that does not exist yet; the lock file lives beside it.
         if let Some(parent) = self.path.parent() {
@@ -1120,17 +1431,18 @@ impl AuthManager {
             self.update_lock_waits
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        try_lock_auth_file_async(&self.path, AUTH_LOCK_TIMEOUT, lock::Heartbeat::Skip)
+        try_lock_auth_file_async(&self.path, self.auth_lock_timeout(), lock::Heartbeat::Skip)
             .await
             .into_io_result()
     }
 
-    /// A writer that could not get the lock: the credential still serves this process from memory, disk is untouched.
+    /// A writer that could not get the lock retains the selected credential in memory; disk is untouched.
     fn keep_in_memory_after_lock_failure(
         &self,
         auth: FuigoAuth,
         error: std::io::Error,
         writer: &'static str,
+        change: CredentialChange,
     ) -> std::io::Error {
         fuigo_telemetry::unified_log::error(
             "auth disk write skipped (auth.json lock unavailable)",
@@ -1143,20 +1455,20 @@ impl AuthManager {
         );
         let _state = super::storage::auth_state_lock();
         *self.permanent_failure.write() = None;
-        self.with_inner_write(|inner| *inner = Some(auth));
+        self.reconcile_credential(auth, change);
         error
     }
 
     /// [`Self::update`] for a caller that already holds the cross-process `auth.json` lock; `_flock` proves it.
     pub(crate) fn update_holding_lock(
         self: &Arc<Self>,
-        auth: FuigoAuth,
+        mut auth: FuigoAuth,
         _flock: &AuthFileLock,
     ) -> std::io::Result<FuigoAuth> {
         let update_started = std::time::Instant::now();
         // Held from the read to the in-memory write; see `auth_state_lock`. No `.await` below until it drops.
         let rmw = super::storage::auth_state_lock();
-        let map = match read_auth_json_or_empty_recovering_corrupt(&self.path) {
+        let map = match self.read_store_recovering_corrupt() {
             Ok(map) => map,
             Err(e) => {
                 // Non-recoverable error (PermissionDenied, etc.); keep conservative
@@ -1166,16 +1478,49 @@ impl AuthManager {
                     None,
                     Some(serde_json::json!({ "error": e.to_string() })),
                 );
-                self.with_inner_write(|inner| *inner = Some(auth.clone()));
+                let auth = self.reconcile_credential(auth, CredentialChange::Install);
                 drop(rmw);
                 self.spawn_user_info_enrichment(auth.clone());
                 return Ok(auth);
             }
         };
         let mut map = map;
+        // Every production caller retains its source before waiting or doing I/O.
+        let snapshot = auth
+            .login_snapshot
+            .clone()
+            .ok_or_else(Self::login_changed)?;
+        if snapshot.generation.clone().flatten() != auth.login_generation {
+            return Err(Self::login_changed());
+        }
+        let memory_matches = self.current_or_expired().map(|current| {
+            current.login_generation == auth.login_generation
+                && self.login_snapshot(Some(&current)).scope == snapshot.scope
+        });
+        if !snapshot.matches(&map) {
+            // A memory-only login can rotate successfully even though its generation
+            // was never saved, or was replaced on disk. Preserve that rotation only
+            // for the same login still held here; never revive it on disk or replace
+            // a newer in-process login.
+            if memory_matches == Some(true) {
+                *self.permanent_failure.write() = None;
+                let auth = self.reconcile_credential(auth, CredentialChange::Install);
+                tracing::debug!(
+                    "auth: login changed on disk; keeping refreshed token in memory only"
+                );
+                return Ok(auth);
+            }
+            return Err(Self::login_changed());
+        }
+        auth.login_generation = snapshot.generation.clone().flatten();
+        auth.login_snapshot = Some(LoginSnapshot {
+            destination: None,
+            scope: snapshot.scope.clone(),
+            generation: Some(auth.login_generation.clone()),
+        });
         // One entry per scope (personal and team share the scope key).
         tracing::debug!(scope = %self.scope, "auth: storing token");
-        map.insert(self.scope.clone(), auth.clone());
+        map.insert(snapshot.scope, auth.clone());
         let write_result = write_auth_json(&self.path, &map);
         let elapsed_ms = update_started.elapsed().as_millis() as u64;
         match &write_result {
@@ -1197,11 +1542,18 @@ impl AuthManager {
                 })),
             ),
         }
-        // Always update in-memory, even if disk write failed
+        // Update the same login (or empty memory) even if the disk write failed.
         // The current session then works with fresh credentials while the user fixes the filesystem (e.g. read-only disk).
         // Keeping the stale/dead token in memory would leave the user completely stuck
         *self.permanent_failure.write() = None;
-        self.with_inner_write(|inner| *inner = Some(auth.clone()));
+        let auth = self.reconcile_credential(
+            auth,
+            if write_result.is_ok() {
+                CredentialChange::Persisted
+            } else {
+                CredentialChange::Install
+            },
+        );
         drop(rmw);
 
         // Fire-and-forget enrichment, off the critical path
@@ -1212,9 +1564,48 @@ impl AuthManager {
         Ok(auth)
     }
 
+    /// Store a newly minted noninteractive sign-in without repeating its enrichment.
+    pub(crate) async fn save_new_login_without_enrichment(
+        &self,
+        auth: FuigoAuth,
+        started_with: Option<&FuigoAuth>,
+    ) -> std::io::Result<FuigoAuth> {
+        self.finish_login(auth, started_with, false)
+            .await
+            .map(|(auth, _)| auth)
+    }
+
+    /// The single writer for a new sign-in. Callers never mint generations; refresh
+    /// and enrichment use the preserving storage paths instead.
+    fn save_new_login_holding_lock(
+        &self,
+        mut auth: FuigoAuth,
+        flock: &AuthFileLock,
+        snapshot: &LoginSnapshot,
+        persist: bool,
+    ) -> std::io::Result<FuigoAuth> {
+        let destination = snapshot.destination.as_deref().unwrap_or(snapshot);
+        auth.login_generation = Some(uuid::Uuid::new_v4().to_string());
+        auth.login_snapshot = Some(LoginSnapshot {
+            destination: None,
+            scope: destination.scope.clone(),
+            generation: Some(auth.login_generation.clone()),
+        });
+        *self.permanent_failure.write() = None;
+        let auth = self.reconcile_credential(auth, CredentialChange::Install);
+        if !persist {
+            // A failed completion read cannot become an unchecked write if storage
+            // becomes readable again. No enrichment is spawned on this path.
+            let auth = self.reconcile_credential(auth, CredentialChange::Install);
+            return Ok(auth);
+        }
+        self.save_holding_lock(auth, flock, true)
+    }
+
     /// Persist to disk and cache without spawning the background `/user` task (already merged inline, or a stale fetch must not race a fresh write).
     /// Takes the cross-process `auth.json` lock for the read-modify-write, with [`Self::update`]'s rules: bounded, never
     /// writes unlocked, and on a lock failure memory still takes the credential and the error is returned.
+    #[cfg(test)]
     pub(crate) async fn save_without_enrichment(
         &self,
         auth: FuigoAuth,
@@ -1226,24 +1617,38 @@ impl AuthManager {
                     auth,
                     e,
                     "save_without_enrichment",
+                    CredentialChange::Install,
                 ));
             }
         };
         self.save_without_enrichment_holding_lock(auth, &flock)
     }
 
-    /// [`Self::save_without_enrichment`] for a caller that already holds the cross-process `auth.json` lock.
+    /// Persist an existing credential unchanged while holding the cross-process `auth.json` lock.
+    #[cfg(test)]
     fn save_without_enrichment_holding_lock(
         &self,
         auth: FuigoAuth,
+        flock: &AuthFileLock,
+    ) -> std::io::Result<FuigoAuth> {
+        self.save_holding_lock(auth, flock, false)
+    }
+
+    fn save_holding_lock(
+        &self,
+        mut auth: FuigoAuth,
         _flock: &AuthFileLock,
+        new_login: bool,
     ) -> std::io::Result<FuigoAuth> {
         let started = std::time::Instant::now();
         // See `auth_state_lock`; held to the end of this function, which has no `.await`.
         let _rmw = super::storage::auth_state_lock();
-        let map = match read_auth_json_or_empty_recovering_corrupt(&self.path) {
+        let map = match self.read_store_recovering_corrupt() {
             Ok(map) => map,
             Err(e) => {
+                if new_login {
+                    self.detach_store(e.kind());
+                }
                 // Non-recoverable error; keep conservative
                 tracing::warn!(error = %e, "auth: read failed, updating in-memory only (no enrichment)");
                 fuigo_telemetry::unified_log::warn(
@@ -1251,14 +1656,33 @@ impl AuthManager {
                     None,
                     Some(serde_json::json!({ "error": e.to_string() })),
                 );
-                self.with_inner_write(|inner| *inner = Some(auth.clone()));
+                let auth = self.reconcile_credential(auth, CredentialChange::Install);
                 return Ok(auth);
             }
         };
         let mut map = map;
+        let scope = auth
+            .login_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.scope.clone())
+            .unwrap_or_else(|| self.scope.clone());
+        auth.login_snapshot = Some(LoginSnapshot {
+            destination: None,
+            scope: scope.clone(),
+            generation: Some(auth.login_generation.clone()),
+        });
         tracing::debug!(scope = %self.scope, "auth: storing token (no enrichment)");
-        map.insert(self.scope.clone(), auth.clone());
+        map.insert(scope, auth.clone());
+        #[cfg(test)]
+        let write_result = match *self.test_store_write_error.read() {
+            Some(kind) => Err(std::io::Error::from(kind)),
+            None => write_auth_json(&self.path, &map),
+        };
+        #[cfg(not(test))]
         let write_result = write_auth_json(&self.path, &map);
+        if new_login && let Err(error) = &write_result {
+            self.detach_store(error.kind());
+        }
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match &write_result {
             Ok(()) => fuigo_telemetry::unified_log::info(
@@ -1281,19 +1705,37 @@ impl AuthManager {
         }
         // Always update in-memory, even if disk write failed (see update()).
         *self.permanent_failure.write() = None;
-        self.with_inner_write(|inner| *inner = Some(auth.clone()));
+        let auth = self.reconcile_credential(
+            auth,
+            if write_result.is_ok() {
+                CredentialChange::Persisted
+            } else {
+                CredentialChange::Install
+            },
+        );
         write_result?;
         Ok(auth)
     }
 
     /// Devbox recovery's purge: delete auth.json and save `auth` as its only entry, all under the cross-process lock.
     /// Never purges unlocked; a lock it cannot get is an error and leaves both disk and memory untouched.
-    #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
-    pub(super) async fn purge_and_save(&self, auth: FuigoAuth) -> std::io::Result<FuigoAuth> {
-        let flock = self.lock_for_write().await?;
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder"
+    )]
+    fn purge_holding_lock(&self, _flock: &AuthFileLock) {
         let _ = std::fs::remove_file(&self.path);
         self.clear_inner();
-        self.save_without_enrichment_holding_lock(auth, &flock)
+    }
+
+    pub(super) async fn purge_and_save(
+        &self,
+        auth: FuigoAuth,
+        started_with: Option<&FuigoAuth>,
+    ) -> std::io::Result<FuigoAuth> {
+        self.finish_login(auth, started_with, true)
+            .await
+            .map(|(auth, _)| auth)
     }
 
     /// Spawn the `/user` enrichment task; body in the `enrichment` submodule.
@@ -1309,6 +1751,83 @@ impl AuthManager {
     /// Blocking `/user` enrichment for login flows that exit before the background task lands.
     pub(crate) async fn enrich_auth_inline(&self, auth: &mut FuigoAuth) {
         enrichment::enrich_inline(self, auth).await;
+    }
+
+    /// The sole reader for this manager's store. A session-only sign-in must
+    /// never reconnect to an older login when the file becomes readable again.
+    pub(crate) fn read_store(&self) -> std::io::Result<AuthStore> {
+        if let Some(kind) = *self.detached_store.read() {
+            return Err(std::io::Error::new(
+                kind,
+                "auth.json is not used until restart",
+            ));
+        }
+        let result = read_auth_json(&self.path);
+        #[cfg(test)]
+        if result.is_ok() {
+            let hook = self.test_store_read_hook.lock().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        result
+    }
+
+    fn read_store_or_empty(&self) -> std::io::Result<AuthStore> {
+        match self.read_store() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AuthStore::new()),
+            result => result,
+        }
+    }
+
+    fn read_store_recovering_corrupt(&self) -> std::io::Result<AuthStore> {
+        let _state = super::storage::auth_state_lock();
+        match self.read_store_or_empty() {
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                let _ = super::storage::backup_corrupt_auth_file(&self.path);
+                Ok(AuthStore::new())
+            }
+            result => result,
+        }
+    }
+
+    fn detach_store(&self, kind: std::io::ErrorKind) {
+        let _state = super::storage::auth_state_lock();
+        // Detached errors must never trigger missing-file or corrupt-file recovery.
+        let kind = match kind {
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData => {
+                std::io::ErrorKind::Other
+            }
+            kind => kind,
+        };
+        let mut detached = self.detached_store.write();
+        if detached.is_none() {
+            *detached = Some(kind);
+            tracing::warn!(
+                "Sign-in is for this session only and is not saved; auth.json is not used until restart."
+            );
+        }
+    }
+
+    /// Serialize disk-candidate installation with session-only sign-in. A read
+    /// may have started before detachment, so checking only in read_store is insufficient.
+    fn lock_attached_store(&self) -> Option<parking_lot::ReentrantMutexGuard<'static, ()>> {
+        let state = super::storage::auth_state_lock();
+        self.detached_store.read().is_none().then_some(state)
+    }
+
+    /// Revalidate a queued config-watcher notification at the store boundary.
+    /// A notification read before a session-only sign-in cannot reinstall the old login.
+    pub(crate) fn apply_store_reload(&self) -> std::io::Result<Option<FuigoAuth>> {
+        let _state = super::storage::auth_state_lock();
+        let map = self.read_store()?;
+        match lookup_auth(&map, &self.scope) {
+            Some(auth) => Ok(Some(self.hot_swap(auth))),
+            None => {
+                self.clear_in_memory();
+                Ok(None)
+            }
+        }
     }
 
     /// Path to the `auth.json` this manager reads/writes (respects `FUIGO_AUTH_PATH` / constructor home).
@@ -1361,11 +1880,12 @@ impl AuthManager {
     /// Hot-swap credentials (called by config watcher). Does NOT write to disk.
     /// Clears a sticky permanent verdict only when the new bearer is wire-valid (login / sibling adopt).
     /// Hard-expired swaps keep the sticky short-circuit so a dead RT is not re-tried until a real login.
-    pub(crate) fn hot_swap(&self, new_auth: FuigoAuth) {
+    /// Returns the credential actually retained; callers must not return a rejected input instead.
+    pub(crate) fn hot_swap(&self, new_auth: FuigoAuth) -> FuigoAuth {
         if !self.is_token_hard_expired(&new_auth) {
             *self.permanent_failure.write() = None;
         }
-        self.with_inner_write(|inner| *inner = Some(new_auth));
+        self.reconcile_credential(new_auth, CredentialChange::Install)
     }
 
     /// Clear in-memory credentials. Does NOT touch disk.
@@ -1389,6 +1909,9 @@ impl AuthManager {
     ) -> Result<FuigoAuth, DiskTokenDecline> {
         let Some(disk_auth) = disk_auth else {
             return Err(DiskTokenDecline::Missing);
+        };
+        let Some(_state) = self.lock_attached_store() else {
+            return self.owned_inner().ok_or(DiskTokenDecline::Missing);
         };
         if self.is_token_expired(disk_auth) {
             return Err(DiskTokenDecline::Expired);
@@ -1416,8 +1939,7 @@ impl AuthManager {
             }
         }
         tracing::info!("auth: another process already refreshed, using disk token");
-        self.hot_swap(disk_auth.clone());
-        Ok(disk_auth.clone())
+        Ok(self.hot_swap(disk_auth.clone()))
     }
 
     /// Re-read disk and try to adopt a sibling-written token, emitting telemetry on success.
@@ -1479,18 +2001,22 @@ impl AuthManager {
     #[cfg(test)]
     fn persist_and_swap(&self, auth: FuigoAuth) -> Option<FuigoAuth> {
         self.hot_swap(auth.clone());
-        let mut map = match read_auth_json_or_empty(&self.path) {
+        let mut map = match self.read_store_or_empty() {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(error = %e, "auth: read failed in persist_and_swap, skipping disk write");
-                return Some(auth);
+                return Some(self.reconcile_credential(auth, CredentialChange::Return));
             }
         };
         map.insert(self.scope.clone(), auth.clone());
-        if let Err(e) = write_auth_json(&self.path, &map) {
-            tracing::warn!(error = %e, "auth: failed to persist refreshed token to disk");
-        }
-        Some(auth)
+        let change = match write_auth_json(&self.path, &map) {
+            Ok(()) => CredentialChange::Saved,
+            Err(e) => {
+                tracing::warn!(error = %e, "auth: failed to persist refreshed token to disk");
+                CredentialChange::Return
+            }
+        };
+        Some(self.reconcile_credential(auth, change))
     }
 
     /// `true` when the refresh token on disk is present and differs from the one we actually spent.
@@ -1538,7 +2064,7 @@ impl AuthManager {
     /// For side-effect-free getters like [`Self::attempted_verdict_key`].
     /// Prefer [`Self::read_disk_auth`] when the read should drive transition logging.
     fn read_disk_auth_silent(&self) -> Option<FuigoAuth> {
-        read_auth_json(&self.path)
+        self.read_store()
             .ok()
             .and_then(|map| lookup_auth(&map, &self.scope))
     }
@@ -1563,7 +2089,7 @@ impl AuthManager {
     /// Callers can then tell a transient disk anomaly (`FileMissing`/`Unreadable`) apart from a genuine logout (`EntryMissing`).
     /// Observes the state for transition logging, exactly like `read_disk_auth`.
     pub(crate) fn read_disk_auth_with_state(&self) -> (Option<FuigoAuth>, DiskAuthState) {
-        let (auth, state, err_detail) = match read_auth_json(&self.path) {
+        let (auth, state, err_detail) = match self.read_store() {
             Ok(map) => {
                 let found = lookup_auth(&map, &self.scope);
                 let state = if found.is_some() {
@@ -1725,7 +2251,7 @@ impl AuthManager {
     /// Also the team-pin gate: a cached/refreshed wrong-team session is cleared and rejected here, never handed to a consumer.
     #[tracing::instrument(skip(self), fields(token_type = tracing::field::Empty))]
     pub async fn auth(self: &Arc<Self>) -> Result<FuigoAuth, AuthError> {
-        let auth = self.auth_dispatch().await?;
+        let auth = self.reconcile_credential(self.auth_dispatch().await?, CredentialChange::Return);
         if let Some(e) = self.cached_token_policy_error(&auth) {
             self.reject_and_clear(&e);
             return Err(e);
@@ -1812,13 +2338,13 @@ impl AuthManager {
                                     == crate::auth::error::RefreshTokenFailedReason::RefreshTokenRejected
                         );
                         if !deny_grace
-                            && let Some(auth) = snapshot
-                            && !self.is_token_hard_expired(&auth)
+                            && let Some(ref auth) = snapshot
+                            && !self.is_token_hard_expired(auth)
                         {
                             tracing::debug!(
                                 "auth: refresh failed but token still valid (grace), using cached"
                             );
-                            Ok(auth)
+                            Ok(auth.clone())
                         } else {
                             Err(e)
                         }
@@ -1903,6 +2429,7 @@ impl AuthManager {
         tracing::info!("auth: attempting devbox recovery (purge + re-mint)");
         fuigo_telemetry::unified_log::info("auth: devbox recovery starting", None, None);
 
+        let login_at_start = self.read_login_auth();
         // Raw mint: the `/user` merge would block up to 10s under refresh_lock.
         let new_auth = super::devbox_login::mint_devbox_auth_raw()
             .await
@@ -1914,10 +2441,13 @@ impl AuthManager {
         // Purge auth.json so we start clean; removes any corrupted, revoked, or legacy entries that caused the failure
         // The purge and the save are one write under the cross-process lock: unlocked, the purge could delete a sibling's
         // just-rotated tokens mid-write, or land between a sibling's read and its write.
-        let auth = self.purge_and_save(new_auth).await.map_err(|e| {
-            tracing::warn!(error = %e, "auth: devbox recovery save failed");
-            AuthError::transient_source(e)
-        })?;
+        let auth = self
+            .purge_and_save(new_auth, login_at_start.as_ref())
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "auth: devbox recovery save failed");
+                AuthError::transient_source(e)
+            })?;
 
         // ZDR flags arrive via the background `/user` merge, off the lock.
         self.spawn_user_info_enrichment(auth.clone());
@@ -2113,7 +2643,7 @@ impl AuthManager {
     /// That inference is also true when our own token was fine all along.
     /// It made the proactive-refresh log actively misleading when reconstructing a rotation chain after an incident.
     pub(crate) fn pick_up_sibling_token(&self) -> bool {
-        let auth = match read_auth_json(&self.path) {
+        let auth = match self.read_store() {
             Ok(map) => lookup_auth(&map, &self.scope),
             _ => None,
         };
@@ -2125,7 +2655,7 @@ impl AuthManager {
         // Shared enforcement point: expiry, the lagging-mint guard, and the `hot_swap` all live in `try_use_disk_token`
         // This path cannot replace a newer in-memory mint with an older disk token or bypass the sticky-verdict handling in the shared swap
         match self.try_use_disk_token(Some(&auth), RefreshReason::PreRequest) {
-            Ok(adopted) => {
+            Ok(adopted) if adopted.key == auth.key => {
                 fuigo_telemetry::unified_log::info(
                     "auth: pick_up_sibling_token adopted",
                     None,
@@ -2137,6 +2667,7 @@ impl AuthManager {
                 );
                 true
             }
+            Ok(_) => false,
             Err(decline) => {
                 // `auth()` calls this per-request: a persistently lagging or expired disk token would spam unified_log from here
                 // Declines therefore carry their name at trace level only
@@ -2689,11 +3220,6 @@ fn resolve_static_api_key(am: &AuthManager) -> Option<String> {
         .or_else(|| am.cached_disk_api_key())
 }
 
-fn api_key_from_auth_file(path: &Path) -> Option<String> {
-    let map = read_auth_json(path).ok()?;
-    non_empty_key(map.get(super::model::API_KEY_SCOPE).map(|a| a.key.clone()))
-}
-
 /// Memo for [`AuthManager::cached_disk_api_key`]. `stamp == None` means the file is absent.
 struct StaticKeyCacheEntry {
     stamp: Option<AuthFileStamp>,
@@ -2718,6 +3244,9 @@ impl AuthManager {
     /// `fuigo::api_key` from this manager's auth file, memoized on [`AuthFileStamp`].
     /// Bearer resolution runs per tool call, so this costs a `stat` instead of a read and parse on the hot path.
     fn cached_disk_api_key(&self) -> Option<String> {
+        if self.detached_store.read().is_some() {
+            return None;
+        }
         let stamp = auth_file_stamp(&self.path);
         let mut cache = self.static_key_cache.lock();
         match cache.as_ref() {
@@ -2725,7 +3254,13 @@ impl AuthManager {
             _ => {
                 let key = stamp
                     .is_some()
-                    .then(|| api_key_from_auth_file(&self.path))
+                    .then(|| {
+                        self.read_store().ok().and_then(|map| {
+                            non_empty_key(
+                                map.get(super::model::API_KEY_SCOPE).map(|a| a.key.clone()),
+                            )
+                        })
+                    })
                     .flatten();
                 *cache = Some(StaticKeyCacheEntry {
                     stamp,
@@ -2881,10 +3416,12 @@ impl AuthManager {
                 drop(cfg);
                 // P42: `credential_recipient_matches` admits a configured https LOOPBACK origin; the session
                 // token additionally needs the one delivery predicate.
-                self.live_destination_key(crate::auth::session_delivery::session_may_reach(recipient))
-                    .await
-                    .map(CredentialResolution::Resolved)
-                    .unwrap_or(CredentialResolution::Denied)
+                self.live_destination_key(crate::auth::session_delivery::session_may_reach(
+                    recipient,
+                ))
+                .await
+                .map(CredentialResolution::Resolved)
+                .unwrap_or(CredentialResolution::Denied)
             }
         }
     }
@@ -2951,7 +3488,10 @@ const _: fn() = || {
     assert_send_sync::<AuthManager>();
 };
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "manager_tests.rs"]
 mod tests;

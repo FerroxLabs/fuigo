@@ -230,7 +230,10 @@ fn spawn_stdin_reader(tx: tokio::sync::mpsc::Sender<CallbackResult>) {
                 }
                 Err(OidcError::InvalidPastedInput(msg)) => {
                     tracing::debug!(input = %msg, "OIDC: invalid stdin paste, retrying");
-                    fuigo_tty_utils::cli_eprintln!("  Invalid input: {}. Try again:", fuigo_tty_utils::untrusted(&msg));
+                    fuigo_tty_utils::cli_eprintln!(
+                        "  Invalid input: {}. Try again:",
+                        fuigo_tty_utils::untrusted(&msg)
+                    );
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "OIDC: stdin paste returned auth error");
@@ -372,6 +375,7 @@ pub async fn run_login_flow_with_config(
     channels: Option<super::super::flow::AuthChannels>,
 ) -> anyhow::Result<(FuigoAuth, bool)> {
     tracing::info!(issuer = %oidc.issuer, client_id = %oidc.client_id, "OIDC: starting login flow");
+    let login_at_start = auth_manager.read_login_auth();
 
     // Ensure jsonwebtoken CryptoProvider is installed (required for JWT validation).
     jsonwebtoken::crypto::CryptoProvider::install_default(
@@ -431,7 +435,10 @@ pub async fn run_login_flow_with_config(
         } else {
             oidc.issuer.clone()
         };
-        fuigo_tty_utils::cli_eprintln!("Signing in with {}...", fuigo_tty_utils::untrusted(&provider_label));
+        fuigo_tty_utils::cli_eprintln!(
+            "Signing in with {}...",
+            fuigo_tty_utils::untrusted(&provider_label)
+        );
         fuigo_tty_utils::cli_eprintln!();
         if let Err(e) = open_browser(&auth_url) {
             tracing::debug!(error = %e, "OIDC: failed to open browser");
@@ -534,7 +541,7 @@ pub async fn run_login_flow_with_config(
     let mut auth = build_fuigo_auth(tokens, user_info, &oidc.issuer, &oidc.client_id);
     auth_manager.enrich_auth_inline(&mut auth).await;
     let auth = auth_manager
-        .update(auth)
+        .complete_login(auth, login_at_start.as_ref())
         .await
         .map_err(|e| anyhow::Error::new(OidcError::SaveAuth(e.to_string())))?;
     tracing::info!(user_id = %auth.user_id, "OIDC: login complete, credentials saved");
@@ -571,6 +578,514 @@ type CallbackResult = Result<Callback, String>;
 mod tests {
     use super::super::test_helpers::*;
     use super::*;
+
+    #[tokio::test]
+    async fn r5_1_every_signin_writer_mints_a_generation() {
+        r4_browser_change("legacy").await;
+        crate::auth::device_code::tests::device_completion_after_change("legacy").await;
+        let temp = tempfile::tempdir().unwrap();
+        let manager = Arc::new(
+            AuthManager::new(temp.path(), FuigoComConfig::default())
+                .with_proxy_base_url("http://127.0.0.1:1"),
+        );
+        let mut previous = None;
+        for _ in 0..2 {
+            let (auth, _) = crate::auth::flow::run_external_auth_provider(
+                "printf '%s' external-token",
+                &manager,
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(
+                auth.login_generation.is_some(),
+                "external sign-in needs a generation"
+            );
+            assert_ne!(
+                auth.login_generation, previous,
+                "every new sign-in needs a fresh generation"
+            );
+            assert_eq!(
+                manager.read_disk_auth().unwrap().login_generation,
+                auth.login_generation
+            );
+            previous = auth.login_generation;
+        }
+    }
+
+    #[tokio::test]
+    async fn r5_1_legacy_browser_refuses_external_replacement() {
+        r4_browser_change("external_replacement").await;
+    }
+
+    #[tokio::test]
+    async fn r5_2_browser_reauth_unreadable_store_continues_in_memory() {
+        r5_browser_reauth(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn r5_2_browser_reauth_lock_timeout_aborts() {
+        r5_browser_reauth(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn r5_4_acp_bridge_reauth_propagates_lock_timeout() {
+        r5_browser_reauth(true, true).await;
+    }
+
+    async fn r5_browser_reauth(locked: bool, bridge: bool) {
+        ensure_crypto_provider();
+        let nonce = Arc::new(parking_lot::Mutex::new(String::new()));
+        let (issuer, server) = start_mock_idp_with_nonce(nonce.clone()).await;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("auth.json");
+        let cfg = FuigoComConfig {
+            oidc: Some(OidcAuthConfig {
+                issuer,
+                client_id: TEST_CLIENT_ID.into(),
+                scopes: vec!["openid".into()],
+                audience: None,
+            }),
+            ..FuigoComConfig::default()
+        };
+        let manager = Arc::new(
+            AuthManager::new_at_path(path.clone(), cfg.clone())
+                .with_proxy_base_url("http://127.0.0.1:1")
+                .with_test_auth_lock_timeout(std::time::Duration::from_millis(25)),
+        );
+        manager.hot_swap(FuigoAuth::test_default());
+        // Deterministic read failure even when the suite runs as root.
+        std::fs::create_dir(&path).unwrap();
+        let lock = locked
+            .then(|| crate::auth::manager::lock::try_lock_auth_file_nonblocking(&path).unwrap());
+        let (url_tx, url_rx) = tokio::sync::oneshot::channel();
+        let (code_tx, code_rx) = tokio::sync::mpsc::channel(1);
+        // The actual CLI/browser flow entry, including the preliminary reauth clear.
+        let flow = async {
+            if bridge {
+                crate::auth::flow::run_auth_flow_with_stderr_bridge(
+                    &manager,
+                    &cfg,
+                    crate::auth::flow::AuthChannels {
+                        url_tx: Some(url_tx),
+                        code_rx,
+                    },
+                    true,
+                    true,
+                    crate::auth::flow::LoginTransportOverride::ForceLoopback,
+                )
+                .await
+            } else {
+                crate::auth::flow::run_auth_flow(
+                    &manager,
+                    &cfg,
+                    true,
+                    None,
+                    Some(std::rc::Rc::new(std::cell::RefCell::new(Some(url_tx)))),
+                    Some(code_rx),
+                    crate::auth::flow::LoginTransportOverride::ForceLoopback,
+                )
+                .await
+            }
+        };
+        let (result, ()) = tokio::join!(flow, async {
+            if let Ok(info) = url_rx.await {
+                assert!(
+                    !locked,
+                    "lock timeout must abort before opening the browser"
+                );
+                assert!(
+                    manager.current_or_expired().is_none(),
+                    "reauth must clear stale memory"
+                );
+                let url = url::Url::parse(&info.url).unwrap();
+                *nonce.lock() = url
+                    .query_pairs()
+                    .find(|(key, _)| key == "nonce")
+                    .unwrap()
+                    .1
+                    .into_owned();
+                code_tx.send("mock-auth-code".into()).await.unwrap();
+            }
+        });
+        server.abort();
+        drop(lock);
+        if locked {
+            assert_eq!(
+                result
+                    .unwrap_err()
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .kind(),
+                std::io::ErrorKind::TimedOut
+            );
+            assert!(
+                manager.current_or_expired().is_some(),
+                "failed lock acquisition keeps the old session"
+            );
+        } else {
+            let (auth, did_auth) = result.expect("read failure must permit browser completion");
+            assert!(did_auth);
+            assert_eq!(manager.current_or_expired().unwrap().key, auth.key);
+            assert!(auth.login_generation.is_some());
+        }
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read_dir(path).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn r5_6_memory_only_warning_uses_tracing() {
+        #[derive(Clone)]
+        struct Capture(Arc<parking_lot::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let bytes = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let writer = Capture(bytes.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("auth.json");
+        std::fs::create_dir(&path).unwrap();
+        let manager = Arc::new(AuthManager::new_at_path(path, FuigoComConfig::default()));
+        manager
+            .complete_login(FuigoAuth::test_default(), None)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8(bytes.lock().clone())
+                .unwrap()
+                .contains("Sign-in is for this session only and is not saved; auth.json is not used until restart.")
+        );
+    }
+    #[tokio::test]
+    async fn r2_8_lock_timeout_does_not_install_unchecked_login() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("auth.json");
+        let manager = Arc::new(
+            AuthManager::new_at_path(path.clone(), FuigoComConfig::default())
+                .with_test_auth_lock_timeout(std::time::Duration::from_millis(25)),
+        );
+        let before = FuigoAuth::test_default();
+        manager
+            .save_without_enrichment(before.clone())
+            .await
+            .unwrap();
+        let sibling = AuthManager::new_at_path(path.clone(), FuigoComConfig::default());
+        sibling.clear().unwrap();
+        let _lock = crate::auth::manager::lock::try_lock_auth_file_nonblocking(&path).unwrap();
+        let mut completed = before.clone();
+        completed.key = "unchecked-login".into();
+        assert!(
+            manager
+                .complete_login(completed, Some(&before))
+                .await
+                .is_err()
+        );
+        assert!(manager.read_disk_auth().is_none());
+        assert_eq!(manager.current_or_expired().unwrap().key, before.key);
+    }
+
+    #[tokio::test]
+    async fn r2_1_refresh_during_login_preserves_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = Arc::new(
+            AuthManager::new_at_path(temp.path().join("auth.json"), FuigoComConfig::default())
+                .with_proxy_base_url("http://127.0.0.1:1"),
+        );
+        let before = FuigoAuth::test_default();
+        manager
+            .save_without_enrichment(before.clone())
+            .await
+            .unwrap();
+        let mut refreshed = before.clone();
+        refreshed.key = "rotated-access".into();
+        refreshed.refresh_token = Some("rotated-refresh".into());
+        refreshed.create_time += chrono::Duration::seconds(1);
+        manager.save_without_enrichment(refreshed).await.unwrap();
+        let mut completed = before.clone();
+        completed.key = "completed-login".into();
+        manager
+            .complete_login(completed.clone(), Some(&before))
+            .await
+            .unwrap();
+        assert_eq!(manager.read_disk_auth().unwrap().key, completed.key);
+    }
+
+    #[tokio::test]
+    async fn r2_1_changed_account_or_principal_refuses_completion() {
+        for change in 0..4 {
+            let temp = tempfile::tempdir().unwrap();
+            let manager = Arc::new(AuthManager::new_at_path(
+                temp.path().join("auth.json"),
+                FuigoComConfig::default(),
+            ));
+            let before = manager
+                .complete_login(FuigoAuth::test_default(), None)
+                .await
+                .unwrap();
+            let mut replacement = before.clone();
+            match change {
+                0 => replacement.user_id = "another-user".into(),
+                1 => replacement.principal_id = Some("another-principal".into()),
+                2 => replacement.principal_type = Some("Team".into()),
+                _ => replacement.auth_mode = crate::auth::AuthMode::External,
+            }
+            manager
+                .complete_login(replacement.clone(), Some(&before))
+                .await
+                .unwrap();
+            let mut completed = before.clone();
+            completed.key = "must-not-write".into();
+            assert!(
+                manager
+                    .complete_login(completed, Some(&before))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(manager.read_disk_auth().unwrap().key, replacement.key);
+        }
+    }
+
+    #[tokio::test]
+    async fn r2_2_corrupt_auth_is_recovered_on_login() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("auth.json");
+        let manager = Arc::new(
+            AuthManager::new_at_path(path.clone(), FuigoComConfig::default())
+                .with_proxy_base_url("http://127.0.0.1:1"),
+        );
+        std::fs::write(&path, "{broken").unwrap();
+        manager
+            .complete_login(FuigoAuth::test_default(), None)
+            .await
+            .unwrap();
+        assert!(manager.read_disk_auth().is_some());
+        let backup = std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("auth.json.corrupt.")
+            })
+            .expect("original corrupt bytes must be backed up");
+        assert_eq!(std::fs::read_to_string(backup.path()).unwrap(), "{broken");
+    }
+
+    #[tokio::test]
+    async fn row_82_b13_first_login_and_unchanged_login_complete() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = Arc::new(
+            AuthManager::new_at_path(temp.path().join("auth.json"), FuigoComConfig::default())
+                .with_proxy_base_url("http://127.0.0.1:1"),
+        );
+        let first = FuigoAuth::test_default();
+        let first = manager.complete_login(first, None).await.unwrap();
+        assert_eq!(manager.read_disk_auth().unwrap().key, first.key);
+        let mut second = first.clone();
+        second.key = "second-login-token".into();
+        manager
+            .complete_login(second.clone(), Some(&first))
+            .await
+            .unwrap();
+        assert_eq!(manager.read_disk_auth().unwrap().key, second.key);
+    }
+
+    async fn r4_browser_change(change: &str) {
+        ensure_crypto_provider();
+        {
+            let nonce = Arc::new(parking_lot::Mutex::new(String::new()));
+            let (issuer, server) = start_mock_idp_with_nonce(nonce.clone()).await;
+            let temp = tempfile::tempdir().unwrap();
+            let cfg = FuigoComConfig::default();
+            let path = temp.path().join("auth.json");
+            let manager = Arc::new(
+                AuthManager::new_at_path(path.clone(), cfg.clone())
+                    .with_proxy_base_url("http://127.0.0.1:1"),
+            );
+            let before = crate::auth::device_code::tests::r4_seed(&manager, change).await;
+            let sibling = Arc::new(
+                AuthManager::new_at_path(path, cfg).with_proxy_base_url("http://127.0.0.1:1"),
+            );
+            let oidc = OidcAuthConfig {
+                issuer,
+                client_id: TEST_CLIENT_ID.into(),
+                scopes: vec!["openid".into()],
+                audience: None,
+            };
+            let (url_tx, url_rx) = tokio::sync::oneshot::channel();
+            let (code_tx, code_rx) = tokio::sync::mpsc::channel(1);
+            let flow = run_login_flow_with_config(
+                &oidc,
+                &manager,
+                Some(crate::auth::flow::AuthChannels {
+                    url_tx: Some(url_tx),
+                    code_rx,
+                }),
+            );
+            let (result, ()) = tokio::join!(flow, async {
+                let url = url::Url::parse(&url_rx.await.unwrap().url).unwrap();
+                *nonce.lock() = url
+                    .query_pairs()
+                    .find(|(key, _)| key == "nonce")
+                    .unwrap()
+                    .1
+                    .into_owned();
+                crate::auth::device_code::tests::r4_change(&sibling, &before, change).await;
+                code_tx.send("mock-auth-code".into()).await.unwrap();
+            });
+            server.abort();
+            if matches!(change, "refreshed" | "enriched" | "legacy") {
+                let (auth, _) = result.unwrap();
+                assert_ne!(auth.key, before.key);
+                assert!(auth.login_generation.is_some());
+                assert_ne!(auth.login_generation, before.login_generation);
+                assert_eq!(manager.read_disk_auth().unwrap().key, auth.key);
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("sign-in cancelled: the login changed in another window")
+                );
+                assert_eq!(
+                    manager.read_disk_auth().map(|auth| auth.key),
+                    (change != "removed").then(|| "sibling-token".into())
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn r4_1_browser_same_account() {
+        r4_browser_change("same_account").await;
+    }
+
+    #[tokio::test]
+    async fn r4_1_browser_refreshed() {
+        r4_browser_change("refreshed").await;
+    }
+
+    #[tokio::test]
+    async fn r4_1_browser_enriched() {
+        r4_browser_change("enriched").await;
+    }
+
+    #[tokio::test]
+    async fn r4_1_browser_replaced() {
+        r4_browser_change("replaced").await;
+    }
+
+    #[tokio::test]
+    async fn r4_1_browser_legacy() {
+        r4_browser_change("legacy").await;
+    }
+
+    #[tokio::test]
+    async fn row_82_b13_login_removed_or_replaced_during_browser_flow() {
+        r4_browser_change("removed").await;
+        r4_browser_change("replaced").await;
+    }
+
+    #[tokio::test]
+    async fn r4_1_identical_signins_get_distinct_persisted_generations() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = Arc::new(
+            AuthManager::new_at_path(temp.path().join("auth.json"), FuigoComConfig::default())
+                .with_proxy_base_url("http://127.0.0.1:1"),
+        );
+        let auth = FuigoAuth::test_default();
+        let first = manager.complete_login(auth.clone(), None).await.unwrap();
+        let first_generation = serde_json::to_value(&first).unwrap()["login_generation"].clone();
+        assert!(
+            first_generation
+                .as_str()
+                .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok())
+        );
+        assert_eq!(
+            serde_json::to_value(manager.read_disk_auth().unwrap()).unwrap()["login_generation"],
+            first_generation
+        );
+        manager.clear().unwrap();
+        let second = manager.complete_login(auth, None).await.unwrap();
+        let second_generation = serde_json::to_value(&second).unwrap()["login_generation"].clone();
+        assert_ne!(first_generation, second_generation);
+        assert_eq!(
+            serde_json::to_value(manager.read_disk_auth().unwrap()).unwrap()["login_generation"],
+            second_generation
+        );
+        assert!(
+            manager
+                .complete_login(first.clone(), Some(&first))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn r4_2_relogin_recovers_corrupt_store_after_clear() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("auth.json");
+        let manager = Arc::new(
+            AuthManager::new_at_path(path.clone(), FuigoComConfig::default())
+                .with_proxy_base_url("http://127.0.0.1:1"),
+        );
+        std::fs::write(&path, "{broken").unwrap();
+        // Re-login clears the previous scope before starting its sign-in flow.
+        manager.clear_async().await.unwrap();
+        let auth = manager
+            .complete_login(FuigoAuth::test_default(), None)
+            .await
+            .unwrap();
+        assert_eq!(manager.read_disk_auth().unwrap().key, auth.key);
+        let backup = std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("auth.json.corrupt.")
+            })
+            .expect("re-login must retain the corrupt bytes");
+        assert_eq!(std::fs::read_to_string(backup.path()).unwrap(), "{broken");
+    }
+
+    #[tokio::test]
+    async fn r4_2_unreadable_store_login_is_memory_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("auth.json");
+        // A directory produces a deterministic non-corrupt read error even as root.
+        std::fs::create_dir(&path).unwrap();
+        let manager = Arc::new(
+            AuthManager::new_at_path(path.clone(), FuigoComConfig::default())
+                .with_proxy_base_url("http://127.0.0.1:1"),
+        );
+        let auth = FuigoAuth::test_default();
+        manager.complete_login(auth.clone(), None).await.unwrap();
+        assert_eq!(manager.current_or_expired().unwrap().key, auth.key);
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(temp.path()).unwrap().count(),
+            2,
+            "only auth directory and lock file"
+        );
+    }
 
     /// End-to-end test: a mock IdP and the full login flow, with the code arriving via loopback.
     /// Exercises discovery, PKCE, race_callback_and_stdin, token exchange, user info, and persistence.

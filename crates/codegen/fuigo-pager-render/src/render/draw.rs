@@ -39,6 +39,7 @@
 use crate::terminal::{TerminalContext, should_emit_synchronized_output};
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use crossterm::{QueueableCommand, cursor};
+use fuigo_ratatui_inline::LinkSpan;
 use ratatui::Frame;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Position;
@@ -46,13 +47,12 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
-use fuigo_ratatui_inline::LinkSpan;
 /// Defined here (beside [`TermWriter`]) so the `render` module does not depend on `app`.
 /// Re-exported from `app` as `crate::app::PagerTerminal` for existing call sites.
 pub type PagerTerminal = fuigo_ratatui_inline::Terminal<CrosstermBackend<TermWriter>>;
 #[derive(Debug)]
 pub enum WriterEvent {
-    Written(u64),
+    Written { sequence: u64, flushed_at: Instant },
     Failed(std::io::Error),
 }
 /// Outcome of a bounded writer drain attempt.
@@ -104,8 +104,8 @@ impl WriterSync {
             event_tx: Some(event_tx),
         }
     }
-    #[cfg(test)]
-    fn new_for_test() -> (Self, tokio::sync::mpsc::UnboundedReceiver<WriterEvent>) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test() -> (Self, tokio::sync::mpsc::UnboundedReceiver<WriterEvent>) {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         (Self::with_event_sender(event_tx), event_rx)
     }
@@ -113,9 +113,13 @@ impl WriterSync {
         self.queued.fetch_add(1, Ordering::Release) + 1
     }
     fn mark_written(&self, sequence: u64) {
+        let flushed_at = Instant::now();
         self.written.store(sequence, Ordering::Release);
         if let Some(event_tx) = &self.event_tx {
-            let _ = event_tx.send(WriterEvent::Written(sequence));
+            let _ = event_tx.send(WriterEvent::Written {
+                sequence,
+                flushed_at,
+            });
         }
     }
     fn mark_failed(&self, error: std::io::Error) {
@@ -216,6 +220,10 @@ impl TermWriter {
             tx,
             sync,
         })
+    }
+    /// Queue a flush receipt even when the next frame has no changed cells.
+    pub fn queue_barrier(&self) -> std::io::Result<()> {
+        send_payload(&self.tx, &self.sync, Vec::new())
     }
     /// Drop the current frame's buffered bytes without sending them.
     pub fn discard(&mut self) {
@@ -368,6 +376,11 @@ impl Drop for WriterThread {
             let _ = h.join();
         }
     }
+}
+/// Exercise the production write/flush/receipt path against a sink in sibling tests.
+#[cfg(any(test, feature = "test-support"))]
+pub fn flush_payload_for_test(payload: &WriterPayload, sync: &WriterSync) -> std::io::Result<()> {
+    write_payload(&mut std::io::sink(), payload, sync)
 }
 fn write_payload(
     writer: &mut impl Write,
@@ -710,6 +723,58 @@ mod tests {
         }
     }
     #[test]
+    fn writer_receipt_waits_for_flush_and_carries_completion_time() {
+        struct HeldFlush {
+            entered: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+        }
+        impl Write for HeldFlush {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.entered.send(()).unwrap();
+                self.release.recv_timeout(Duration::from_secs(5)).unwrap();
+                Ok(())
+            }
+        }
+        let (sync, mut events) = WriterSync::new_for_test();
+        let sequence = sync.reserve_sequence();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let writer_sync = sync.clone();
+        let thread = std::thread::spawn(move || {
+            write_payload(
+                &mut HeldFlush {
+                    entered: entered_tx,
+                    release: release_rx,
+                },
+                &WriterPayload {
+                    sequence,
+                    data: b"question".to_vec(),
+                },
+                &writer_sync,
+            )
+            .unwrap();
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(sync.written(), 0);
+        assert!(events.try_recv().is_err());
+        let released_at = Instant::now();
+        release_tx.send(()).unwrap();
+        thread.join().unwrap();
+        let WriterEvent::Written {
+            sequence: written,
+            flushed_at,
+        } = events.try_recv().unwrap()
+        else {
+            panic!("expected completed frame");
+        };
+        assert_eq!(written, sequence);
+        assert!(flushed_at >= released_at);
+    }
+
+    #[test]
     fn writer_success_is_acknowledged_after_flush() {
         let (sync, mut events) = WriterSync::new_for_test();
         let sequence = sync.reserve_sequence();
@@ -723,7 +788,7 @@ mod tests {
         assert_eq!(sync.written(), sequence);
         assert!(matches!(
             events.try_recv(),
-            Ok(WriterEvent::Written(written)) if written == sequence
+            Ok(WriterEvent::Written { sequence: written, .. }) if written == sequence
         ));
         assert_eq!(
             sync.wait_drained(Duration::from_secs(1)).unwrap(),

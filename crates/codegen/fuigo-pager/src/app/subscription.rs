@@ -277,7 +277,7 @@ mod tests {
         );
         app.team_name = None;
 
-        app.auth_state = AuthState::Pending { error: None };
+        app.set_auth_state(AuthState::Pending { error: None });
         assert!(!app.subscription_watch_wanted(), "pre-auth never watches");
     }
 

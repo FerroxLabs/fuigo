@@ -623,6 +623,11 @@ impl AgentView {
         // Store the pointer at arming too, or an arm-then-hold-still drag would stay invisible to the post-render reclamp
         // Content can scroll or stream underneath a held pointer
         self.last_drag_mouse = Some((mouse.column, mouse.row));
+        self.drag_autoscroll = if anchor.entry_idx == BTW_OVERLAY_ENTRY_IDX {
+            None
+        } else {
+            self.drag_autoscroll_for(mouse.row)
+        };
     }
 
     /// One-way deferred-anchor conversion.
@@ -1695,6 +1700,26 @@ mod tests {
 
     fn table_geometry() -> TableGeometry {
         TableGeometry::detect(|i| TABLE.get(i).map(|s| s.to_string()), 1).expect("grid detected")
+    }
+
+    #[test]
+    fn row_82_b7_drag_at_edge_scrolls_on_first_tick() {
+        let mut agent = agent_with_tall_scrollback();
+        agent.scrollback.scroll_up(10_000);
+        render_agent_scrollback(&mut agent, 80, 10);
+        let range = &agent.last_scrollback_selection_model.ranges[0];
+        let line = &range.lines[0];
+        let start = (line.screen_x + line.selectable_cols.start, line.screen_y);
+        let reg = ActionRegistry::defaults();
+        agent.handle_input(&Event::Mouse(mouse_down(start.0, start.1)), &reg);
+        agent.handle_input(&Event::Mouse(mouse_drag(start.0, 9)), &reg);
+        assert!(agent.has_drag_autoscroll());
+        let before = agent.scrollback.scroll_info().0;
+        agent.tick_drag_autoscroll();
+        assert!(
+            agent.scrollback.scroll_info().0 > before,
+            "first edge tick must scroll"
+        );
     }
 
     /// Three nearby scrollback drag-copies inside the window arm the `/copy` · `/export` tip; it shows once the

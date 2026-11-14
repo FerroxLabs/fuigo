@@ -84,6 +84,15 @@ Modified:   src/text/colr.rs — two `println!("Warning: ...")` replaced with `l
             Replaces the crates.io package through [patch.crates-io] in the root Cargo.toml.
 
 --------------------------------------------------------------------------------
+crossterm 0.28.1 (modified)
+--------------------------------------------------------------------------------
+Path:       third_party/crossterm-0.28.1/
+License:    MIT
+License file: third_party/crossterm-0.28.1/LICENSE
+Version:    0.28.1
+Modified:   Bound keyboard negotiation and preserve buffered Unix input readiness; see README.fuigo.md.
+
+--------------------------------------------------------------------------------
 End of notices for vendored third_party/ crates.
 
 Full product notices (all crates.io / git dependencies shipped with the Grok

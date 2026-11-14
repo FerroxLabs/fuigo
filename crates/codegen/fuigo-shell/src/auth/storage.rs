@@ -85,14 +85,6 @@ pub fn read_auth_json(auth_file: &Path) -> std::io::Result<AuthStore> {
 /// Non-empty corrupt JSON, permission errors, etc. are returned as errors.
 /// The caller can then decide whether to skip the write (to avoid clobbering sibling scopes).
 ///
-/// Kept for the test-only `persist_and_swap` and as a strict reader.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used from tests only; remove expect when wired in production"
-    )
-)]
 pub(crate) fn read_auth_json_or_empty(auth_file: &Path) -> std::io::Result<AuthStore> {
     match read_auth_json(auth_file) {
         Ok(map) => Ok(map),
@@ -470,6 +462,10 @@ fn store_api_key_locked(path: &Path, api_key: &str, _flock: &AuthFileLock) -> st
         FuigoAuth {
             key: api_key.to_owned(),
             auth_mode: AuthMode::ApiKey,
+            // This synchronous edit observes the exact API-key scope under the lock.
+            login_generation: map
+                .get(API_KEY_SCOPE)
+                .and_then(|auth| auth.login_generation.clone()),
             ..Default::default()
         },
     );

@@ -1088,6 +1088,23 @@ fn a_deny_glob_below_a_bracketed_workspace_still_matches() {
     assert!(!entry.covers(Path::new("/opt/ws-fixture/appv/.env")));
 }
 
+/// A dotted relative deny entry (`./.env`) is spelled without its `.` components: the Seatbelt
+/// profile matches literal strings, so `<ws>/./.env` would never meet a read of `<ws>/.env`.
+#[test]
+fn a_dotted_deny_entry_is_spelled_without_dot_components() {
+    let ws = Path::new("/opt/ws-fixture/app");
+    for written in ["./.env", "./src/./server.pem"] {
+        let DenyEntry::Path(path) =
+            absolute_deny_entry(Path::new(written), &ServedRoot::pin(ws), None).unwrap()
+        else {
+            panic!("{written} must stay an exact path");
+        };
+        let spelled = path.to_string_lossy().into_owned();
+        assert!(!spelled.contains("/./"), "{written} spelled as {spelled}");
+        assert!(spelled.starts_with("/opt/ws-fixture/app/"), "{spelled}");
+    }
+}
+
 /// Deny entries compare as APFS does: `AUTH.json` meets `auth*`, `.SSH` meets `.ssh`.
 #[cfg(target_os = "macos")]
 #[test]
