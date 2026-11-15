@@ -237,6 +237,8 @@ fuigo-bundle = { workspace = true, features = ["test-support"] }
 fuigo-memory = { workspace = true, features = ["test-support"] }
 # sandbox-enforce: keep tests running against the enforcing sandbox build.
 fuigo-workspace = { workspace = true, features = ["test-support", "sandbox-enforce"] }
+# Test seam: lets a test make bwrap unavailable (dev-dependency ONLY, resolver 2 keeps it out of shipped builds).
+fuigo-sandbox = { path = "../fuigo-sandbox", default-features = false, features = ["test-bwrap-dirs"] }
 fuigo-config = { workspace = true, features = ["test-seams"] }
 ring = { workspace = true }
 tar = { workspace = true }

@@ -513,6 +513,7 @@ async fn http_upstream(mut peer: DuplexStream, expected_header_absent: &[&str]) 
     })
 }
 
+mod availability;
 mod connect;
 mod decider;
 mod hold_budget;

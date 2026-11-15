@@ -28,6 +28,12 @@ mod key_naming_tests;
 pub(crate) mod test_support;
 #[cfg(test)]
 mod p147_tests;
+#[cfg(test)]
+mod campaign_literal_tests;
+#[cfg(test)]
+mod campaign_strip_tests;
+#[cfg(test)]
+mod campaign_model_route_tests;
 mod loader;
 mod macos_managed;
 mod managed_cache;
@@ -88,7 +94,7 @@ pub use managed_cache::{
     fail_closed_policy_armed_at, is_managed_config_hard_stale_for, is_managed_config_stale_for,
     managed_config_identity_changed_at, managed_config_synced_at, managed_deployment_id,
     managed_policy_compromise_for, managed_policy_compromised_for, mark_managed_config_synced, mark_managed_config_synced_at,
-    normalize_identity,
+    normalize_identity, persist_legacy_revision_floor_at,
 };
 pub use paths::{
     claude_managed_settings_path, claude_managed_settings_probe_path, create_dir_all_owner_only,

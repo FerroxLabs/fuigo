@@ -460,6 +460,115 @@ fn purge_keeps_marker_when_an_artifact_removal_fails() {
     );
 }
 
+/// Audit R07: the revision floor is checked again under the apply lock. Two processes can both verify revisions 6
+/// and 5 before either applies; once 6 is applied, the late 5 must not replace it (that would leave the installed
+/// policy below the recorded floor, read as rolled back, and block session start).
+#[test]
+fn an_older_revision_verified_before_a_newer_apply_is_skipped_under_the_lock() {
+    use fuigo_config::signed_policy::{SignatureEnvelope, SignedPayload};
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    // The other process already applied revision 6 for this team.
+    let marker = serde_json::json!({ "synced_at": 1u64, "principal": "team-007", "highest_revision": 6u64 });
+    std::fs::write(home.join(fuigo_config::MANAGED_CONFIG_CACHE_FILE), marker.to_string()).unwrap();
+    let body = ManagedConfigResponse {
+        managed_config: Some("[cli]\ntheme = \"dark\"\n".into()),
+        requirements: Some("[features]\nweb_fetch = false\n".into()),
+        ..Default::default()
+    };
+    let payload = SignedPayload {
+        typ: fuigo_config::signed_policy::MANAGED_POLICY_TYP.into(),
+        version: 1,
+        deployment_id: None,
+        team_id: Some("team-007".into()),
+        managed_config: body.managed_config.clone(),
+        requirements: body.requirements.clone(),
+        fail_closed: false,
+        expires_at: 4_000_000_000,
+        nonce: String::new(),
+        revision: 5,
+        key_id: "v1".into(),
+    };
+    let verified = super::response::VerifiedEnvelope {
+        sidecar: SignatureEnvelope {
+            signed_payload: serde_json::to_string(&payload).unwrap(),
+            signature: "c2ln".into(),
+            key_id: "v1".into(),
+        },
+        payload,
+    };
+    let outcome = apply_under_lock(
+        home,
+        &body,
+        Some(verified),
+        super::response::ManagedConfigSource::TeamOauth,
+        Some("team-007"),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(matches!(outcome, super::response::ApplyOutcome::Skipped), "the late older revision must be skipped");
+    assert!(!home.join("managed_config.toml").exists(), "no policy file may change");
+    assert!(
+        !home.join(fuigo_config::signed_policy::SIGNATURE_SIDECAR_FILE).exists(),
+        "the newer sidecar must stay in place"
+    );
+}
+
+/// Review dfix5-3: the apply path itself writes a pre-upgrade marker's floor down before it replaces the sidecar. An old
+/// team marker records team-007 at 20 for deployment A on disk; applying deployment B at revision 1 switches identity,
+/// and deployment A's revision 19 must still be refused afterwards. Without the `persist_legacy_revision_floor_at` call
+/// in `apply_under_lock`, A's floor went with its sidecar.
+#[test]
+fn apply_under_lock_keeps_an_old_marker_floor_across_an_identity_switch() {
+    use fuigo_config::signed_policy::{SignatureEnvelope, SignedPayload};
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let payload = |deployment: &str, revision: u64| SignedPayload {
+        typ: fuigo_config::signed_policy::MANAGED_POLICY_TYP.into(),
+        version: 1,
+        deployment_id: Some(deployment.into()),
+        team_id: Some("team-007".into()),
+        managed_config: Some("[cli]\ntheme = \"dark\"\n".into()),
+        requirements: None,
+        fail_closed: false,
+        expires_at: 4_000_000_000,
+        nonce: String::new(),
+        revision,
+        key_id: "v1".into(),
+    };
+    let envelope = |payload: &SignedPayload| SignatureEnvelope {
+        signed_payload: serde_json::to_string(payload).unwrap(),
+        signature: "c2ln".into(),
+        key_id: "v1".into(),
+    };
+    // Deployment A's policy (revision 20) is on disk, with the pre-upgrade marker that has one floor for the team.
+    fuigo_config::signed_policy::write_sidecar(home, &envelope(&payload("dep-A", 20))).unwrap();
+    let marker = serde_json::json!({ "synced_at": 1u64, "principal": "team-007", "fail_closed": true, "highest_revision": 20u64 });
+    std::fs::write(home.join(fuigo_config::MANAGED_CONFIG_CACHE_FILE), marker.to_string()).unwrap();
+
+    let b1 = payload("dep-B", 1);
+    let body = ManagedConfigResponse { managed_config: b1.managed_config.clone(), ..Default::default() };
+    let verified = super::response::VerifiedEnvelope { sidecar: envelope(&b1), payload: b1 };
+    let outcome = apply_under_lock(
+        home,
+        &body,
+        Some(verified),
+        super::response::ManagedConfigSource::TeamOauth,
+        Some("team-007"),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(matches!(outcome, super::response::ApplyOutcome::Applied { .. }), "B1 applies");
+    let err = fuigo_config::signed_policy::check_revision_floor_at(home, &payload("dep-A", 19))
+        .expect_err("deployment A's revision 19 is below the floor the first apply wrote down");
+    assert!(
+        matches!(err, fuigo_config::signed_policy::SigError::RolledBack { got: 19, highest: 20 }),
+        "A19 after A20 then B1: {err:?}"
+    );
+}
+
 #[test]
 fn served_principal_prefers_deployment_id() {
     use fuigo_config::signed_policy::SignedPayload;
@@ -473,6 +582,7 @@ fn served_principal_prefers_deployment_id() {
         fail_closed: false,
         expires_at: 0,
         nonce: String::new(),
+        revision: 0,
         key_id: "v1".into(),
     };
     assert_eq!(

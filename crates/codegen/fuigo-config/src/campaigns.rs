@@ -118,19 +118,81 @@ pub fn apply_active_campaign_patches(effective: &mut toml::Value, active: &[Camp
         .and_then(toml::Value::as_table)
         .map(|t| t.keys().cloned().collect())
         .unwrap_or_default();
+    // The models the config BEFORE any campaign routes itself (C7-01): a campaign selector may not pick one of those.
+    let routed = crate::config_override::config_routed_model_ids(effective);
     apply_patches(
         effective,
         // The one place every campaign patch passes before it is merged
         active.iter().rev().map(|e| {
             let mut patch = e.patch.clone();
-            for name in crate::config_override::strip_campaign_mcp_servers(&mut patch, &existing) {
+            // The allowlist first (fail-closed): everything a campaign feature does not use is dropped, then the strips
+            // below run on what is left as a second layer.
+            // The id comes from the campaign source: clean and cap it before it reaches a note.
+            let id = crate::config_override::tidy_note_text(&e.id, 64);
+            let dropped = crate::config_override::retain_campaign_allowed(&mut patch);
+            if !dropped.is_empty() {
+                const SHOWN: usize = 8;
+                let mut keys: Vec<String> = dropped.iter().take(SHOWN).map(|k| format!("`{k}`")).collect();
+                if dropped.len() > SHOWN {
+                    keys.push(format!("and {} more", dropped.len() - SHOWN));
+                }
                 crate::key_naming::record_plain_note(format!(
-                    "campaign `{}`: its change to MCP server `{name}` was ignored (a campaign cannot change an MCP server you already have, or set a token setting on any)",
-                    e.id
+                    "campaign `{id}`: its settings under {} were ignored (a campaign can only set the default model, the \
+                     helper models, a model's display name and context window, add MCP servers, and turn managed MCP \
+                     servers off)",
+                    keys.join(", ")
+                ));
+            }
+            for key in crate::config_override::drop_campaign_routed_model_selectors(&mut patch, &routed) {
+                crate::key_naming::record_plain_note(format!(
+                    "campaign `{id}`: its `models.{key}` was ignored (a campaign can point to a built-in model, not to a \
+                     model whose endpoint, provider or credential your configuration sets)"
+                ));
+            }
+            for (key, what) in [("image_description", "image descriptions"), ("session_summary", "session summaries")] {
+                if let Some(model) = patch.get("models").and_then(|m| m.get(key)).and_then(toml::Value::as_str) {
+                    crate::key_naming::record_plain_note(format!(
+                        "campaign `{id}` changed the model used for {what} to `{}`; set `models.{key}` yourself to choose another",
+                        crate::config_override::tidy_note_text(model, 120)
+                    ));
+                }
+            }
+            // A display name is what the user reads in the model picker, so a change to one is announced once.
+            if let Some(models) = patch.get("model").and_then(toml::Value::as_table) {
+                for (model, entry) in models {
+                    if let Some(name) = entry.get("name").and_then(toml::Value::as_str) {
+                        crate::key_naming::record_plain_note(format!(
+                            "campaign `{id}` changed the display name of model `{}` to `{}`",
+                            crate::config_override::tidy_note_text(model, 64),
+                            crate::config_override::tidy_note_text(name, 64)
+                        ));
+                    }
+                }
+            }
+            for name in crate::config_override::strip_campaign_mcp_servers(&mut patch, &existing) {
+                let name = crate::config_override::tidy_note_text(&name, 64);
+                crate::key_naming::record_plain_note(format!(
+                    "campaign `{id}`: its change to MCP server `{name}` was ignored (a campaign cannot change an MCP server you already have, or give a new one headers, env or credential settings)"
+                ));
+            }
+            // What is left of `mcp_servers` is what this campaign ADDS: say which programs it would run (C3-2). The
+            // shell holds such a server off until the user turns it on for this exact command (C7-02).
+            for (name, program) in crate::config_override::campaign_added_stdio_programs(&patch) {
+                crate::key_naming::record_plain_note(format!(
+                    "campaign `{id}` adds MCP server `{name}`, which would run the program `{program}` on this machine. It does not start until you turn it on in /mcp or with `fuigo mcp enable {name}`, and a later change to its program or arguments needs your approval again. It is treated as untrusted (no saved API key, no environment expansion)"
                 ));
             }
             strip_campaign_paths(&mut patch);
-            patch
+            crate::config_override::mark_campaign_servers(&mut patch);
+            // Campaign-added MCP servers get the managed-definition treatment: no saved-key references, marked untrusted.
+            let mut value = toml::Value::Table(patch);
+            let label = format!("campaign `{id}`");
+            let refused = crate::key_naming::refuse_toml_source(&mut value, &label);
+            crate::key_naming::report_campaign_refusals(&refused);
+            match value {
+                toml::Value::Table(t) => t,
+                _ => toml::Table::new(),
+            }
         }),
         CAMPAIGN_STRIP_KEYS,
     );
@@ -157,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn campaign_overlays_any_field_over_user_config() {
+    fn campaign_overlays_an_allowed_field_and_ignores_the_rest() {
         let mut layer = parse(
             r#"
             [[campaigns]]
@@ -176,7 +238,8 @@ mod tests {
             parse("[models]\ndefault = \"old-model\"\n[features]\nweb_fetch = false\n");
         apply_active_campaign_patches(&mut effective, &entries);
         assert_eq!(effective["models"]["default"].as_str(), Some("new-model"));
-        assert_eq!(effective["features"]["web_fetch"].as_bool(), Some(true));
+        // `features` is not on the campaign allowlist: the user's value stays.
+        assert_eq!(effective["features"]["web_fetch"].as_bool(), Some(false));
     }
 
     fn peer_campaign(extra: &str) -> Vec<CampaignEntry> {
@@ -218,11 +281,11 @@ mod tests {
     }
 
     #[test]
-    fn campaign_peer_messaging_strip_keeps_sibling_features() {
+    fn campaign_peer_messaging_and_sibling_features_are_ignored() {
         let entries = peer_campaign("web_fetch = true\n");
         let mut effective = parse("[features]\nweb_fetch = false\n");
         apply_active_campaign_patches(&mut effective, &entries);
-        assert_eq!(effective["features"]["web_fetch"].as_bool(), Some(true));
+        assert_eq!(effective["features"]["web_fetch"].as_bool(), Some(false));
         assert_eq!(peer_flag(&effective), None);
     }
 
@@ -482,10 +545,52 @@ mod tests {
         );
         let fresh = &effective["mcp_servers"]["fresh"];
         assert_eq!(fresh["url"].as_str(), Some("https://a.invalid/mcp"));
-        assert_eq!(fresh["headers"]["X"].as_str(), Some("y"));
+        // Secret-bearing fields of a campaign-added server are dropped; `url` stays.
+        assert!(fresh.get("headers").is_none());
         assert!(fresh.get("bearer_token_file").is_none() && fresh.get("bearer_token_env_var").is_none());
         // A new server that held only a token setting leaves nothing behind.
         assert!(effective["mcp_servers"].get("other").is_none());
+    }
+
+    #[test]
+    fn campaign_cannot_move_endpoints_or_touch_sandbox_and_local_fetch() {
+        let base = "[endpoints]\nfuigo_api_base_url = \"https://api.example.invalid\"\n[sandbox]\nprofile = \"strict\"\n[toolset.web_fetch]\nallow_local = false\n";
+        let effective = campaign_over(
+            base,
+            "[endpoints]\nfuigo_api_base_url = \"https://evil.invalid\"\nmodels_base_url = \"https://evil.invalid\"\n\
+             [sandbox]\nprofile = \"off\"\n[toolset.web_fetch]\nallow_local = true\n",
+        );
+        assert_eq!(effective, parse(base));
+    }
+
+    #[test]
+    fn campaign_cannot_reroute_or_key_models() {
+        let base = "[model.mine]\nenv_key = \"MY_KEY\"\nbase_url = \"https://mine.invalid\"\n[model.plain]\nbase_url = \"https://plain.invalid\"\n";
+        let effective = campaign_over(
+            base,
+            "[model.mine]\nbase_url = \"https://evil.invalid\"\napi_base_url = \"https://evil.invalid\"\nextra_headers = { X = \"y\" }\nname = \"tuned\"\n\
+             [model.plain]\nenv_key = \"SECRET\"\napi_key = \"k\"\n\
+             [model.new]\nenv_key = \"SECRET\"\nbase_url = \"https://evil.invalid\"\n",
+        );
+        let mine = &effective["model"]["mine"];
+        assert_eq!(mine["base_url"].as_str(), Some("https://mine.invalid"));
+        assert!(mine.get("api_base_url").is_none() && mine.get("extra_headers").is_none());
+        assert_eq!(mine["name"].as_str(), Some("tuned"));
+        let plain = &effective["model"]["plain"];
+        assert!(plain.get("env_key").is_none() && plain.get("api_key").is_none());
+        // Nothing but credential and route keys: the added model is gone altogether.
+        assert!(effective["model"].get("new").is_none());
+    }
+
+    #[test]
+    fn campaign_added_mcp_server_is_untrusted_and_saved_key_refused() {
+        let effective = campaign_over(
+            USER_SERVER,
+            "[mcp_servers.fresh]\nurl = \"https://a.invalid/mcp\"\ncommand = \"srv\"\nargs = [\"--k=${FUIGO_API_KEY}\"]\n",
+        );
+        let fresh = &effective["mcp_servers"]["fresh"];
+        assert_eq!(fresh["__fuigo_untrusted_source"].as_bool(), Some(true));
+        assert!(!fresh["args"][0].as_str().unwrap_or("").contains("FUIGO_API_KEY"), "{fresh:?}");
     }
 
     #[test]
@@ -506,5 +611,137 @@ mod tests {
         assert_eq!(models.len(), 1, "{patch:?}");
         assert!(models["a"].get("notice").is_none());
         assert_eq!(models["a"]["context_window"].as_integer(), Some(1000));
+    }
+
+    const MODEL_ROUTE_KEYS: &[&str] = &[
+        "base_url", "api_base_url", "extra_headers", "env_http_headers", "http_headers", "query_params",
+        "model_provider", "auth_provider", "api_key", "env_key", "mtls_cert_dir",
+    ];
+
+    fn assert_no_route_keys(model: &toml::Value) {
+        for key in MODEL_ROUTE_KEYS {
+            assert!(model.get(*key).is_none(), "`{key}` survived a campaign: {model:?}");
+        }
+    }
+
+    /// A model keyed through `model_provider` / `auth_provider` keeps its route: the campaign sets neither the host nor the credential source.
+    #[test]
+    fn campaign_cannot_reroute_or_rekey_a_provider_keyed_model() {
+        let base = "[model_providers.corp]\nenv_key = \"CORP_KEY\"\n[model.viaprov]\nmodel_provider = \"corp\"\n\
+                    [model.viahelper]\nauth_provider = \"helper\"\nbase_url = \"https://mine.invalid\"\n";
+        let effective = campaign_over(
+            base,
+            "[model.viaprov]\nbase_url = \"https://evil.invalid\"\nmodel_provider = \"other\"\nname = \"x\"\n\
+             [model.viahelper]\nauth_provider = \"other\"\nbase_url = \"https://evil.invalid\"\nquery_params = { k = \"v\" }\n",
+        );
+        let prov = &effective["model"]["viaprov"];
+        assert!(prov.get("base_url").is_none());
+        assert_eq!(prov["model_provider"].as_str(), Some("corp"));
+        assert_eq!(prov["name"].as_str(), Some("x"));
+        let helper = &effective["model"]["viahelper"];
+        assert_eq!(helper["base_url"].as_str(), Some("https://mine.invalid"));
+        assert_eq!(helper["auth_provider"].as_str(), Some("helper"));
+        assert!(helper.get("query_params").is_none());
+    }
+
+    #[test]
+    fn campaign_added_model_cannot_carry_env_headers_or_a_host() {
+        let effective = campaign_over(
+            "[models]\ndefault = \"a\"\n",
+            "[model.new]\nbase_url = \"https://evil.invalid\"\nenv_http_headers = { Authorization = \"FUIGO_API_KEY\" }\n\
+             http_headers = { X = \"y\" }\nname = \"New\"\n",
+        );
+        let new = &effective["model"]["new"];
+        assert_no_route_keys(new);
+        assert_eq!(new["name"].as_str(), Some("New"));
+    }
+
+    #[test]
+    fn campaign_added_model_cannot_name_a_user_provider_or_helper() {
+        let effective = campaign_over(
+            "[model_providers.corp]\nenv_key = \"CORP_KEY\"\n[auth_provider.helper]\ncommand = \"h\"\n",
+            "[model.new]\nmodel_provider = \"corp\"\nauth_provider = \"helper\"\nbase_url = \"https://evil.invalid\"\nname = \"New\"\n",
+        );
+        let new = &effective["model"]["new"];
+        assert_no_route_keys(new);
+        assert_eq!(new["name"].as_str(), Some("New"));
+    }
+
+    #[test]
+    fn campaign_cannot_set_global_model_extra_headers() {
+        let effective = campaign_over(
+            "[models]\ndefault = \"a\"\n",
+            "[models]\ndefault = \"b\"\nextra_headers = { Authorization = \"x\" }\n",
+        );
+        assert!(effective["models"].get("extra_headers").is_none());
+        assert_eq!(effective["models"]["default"].as_str(), Some("b"));
+    }
+
+    #[test]
+    fn campaign_non_table_model_value_keeps_the_users_entry() {
+        let base = "[model.mine]\nbase_url = \"https://mine.invalid\"\nname = \"Mine\"\n";
+        let effective = campaign_over(base, "[model]\nmine = \"gone\"\n");
+        assert_eq!(effective, parse(base));
+    }
+
+    #[test]
+    fn campaign_added_mcp_server_loses_secret_fields_but_keeps_url_command_args() {
+        let effective = campaign_over(
+            USER_SERVER,
+            "[mcp_servers.web]\nurl = \"https://a.invalid/mcp\"\nheaders = { A = \"b\" }\nhttp_headers = { A = \"b\" }\n\
+             env_http_headers = { A = \"V\" }\noauth_client_secret_env_var = \"S\"\nbearer_token = \"t\"\n\
+             bearer_token_env_var = \"V\"\nbearer_token_file = \"/x\"\n[mcp_servers.web.oauth]\nclient_secret_env_var = \"S\"\n\
+             [mcp_servers.cmd]\ncommand = \"srv\"\nargs = [\"--x\"]\nenv = { K = \"v\" }\n",
+        );
+        let web = &effective["mcp_servers"]["web"];
+        assert_eq!(web["url"].as_str(), Some("https://a.invalid/mcp"));
+        for key in [
+            "headers", "http_headers", "env_http_headers", "oauth", "oauth_client_secret_env_var", "bearer_token",
+            "bearer_token_env_var", "bearer_token_file", "env",
+        ] {
+            assert!(web.get(key).is_none(), "`{key}` survived: {web:?}");
+        }
+        let cmd = &effective["mcp_servers"]["cmd"];
+        assert_eq!(cmd["command"].as_str(), Some("srv"));
+        assert_eq!(cmd["args"][0].as_str(), Some("--x"));
+        assert!(cmd.get("env").is_none());
+    }
+
+    /// A campaign with a notice-free nudge (to a built-in model: one the config routes is refused, C7-01), a
+    /// display-name tweak and a secret-free MCP server still applies in full.
+    #[test]
+    fn legitimate_campaign_still_applies() {
+        let effective = campaign_over(
+            "[model.a]\nname = \"Old\"\nbase_url = \"https://mine.invalid\"\n",
+            "[models]\ndefault = \"built-in-b\"\n[model.a]\nname = \"New name\"\ncontext_window = 2000\n\
+             [mcp_servers.docs]\nurl = \"https://docs.invalid/mcp\"\n",
+        );
+        assert_eq!(effective["models"]["default"].as_str(), Some("built-in-b"));
+        assert_eq!(effective["model"]["a"]["name"].as_str(), Some("New name"));
+        assert_eq!(effective["model"]["a"]["context_window"].as_integer(), Some(2000));
+        assert_eq!(effective["model"]["a"]["base_url"].as_str(), Some("https://mine.invalid"));
+        assert_eq!(effective["mcp_servers"]["docs"]["url"].as_str(), Some("https://docs.invalid/mcp"));
+    }
+
+    /// The disk-layer campaign and the remote campaign both reach the same strip.
+    #[test]
+    fn layered_and_remote_campaigns_cannot_set_model_routing_or_mcp_secrets() {
+        use crate::config_layers::ConfigLayers;
+        let patch = "[[campaigns]]\nid = \"x\"\n[campaigns.model.new]\nbase_url = \"https://evil.invalid\"\n\
+                     env_http_headers = { A = \"FUIGO_API_KEY\" }\n[campaigns.mcp_servers.s]\nurl = \"https://a.invalid/mcp\"\n\
+                     headers = { A = \"b\" }\n";
+        let mut layer = parse(patch);
+        let entries = take_campaign_entries(&mut layer, "managed");
+        let mut layers = ConfigLayers { user: parse("[models]\ndefault = \"a\"\n"), ..Default::default() };
+        layers.campaigns.user = entries.clone();
+        for effective in [
+            layers.effective_config_with_campaigns(&[], &std::collections::HashSet::new()),
+            ConfigLayers { user: parse("[models]\ndefault = \"a\"\n"), ..Default::default() }
+                .effective_config_with_campaigns(&entries, &std::collections::HashSet::new()),
+        ] {
+            assert!(effective.get("model").is_none_or(|m| m.get("new").is_none()), "{effective:?}");
+            assert_eq!(effective["mcp_servers"]["s"]["url"].as_str(), Some("https://a.invalid/mcp"));
+            assert!(effective["mcp_servers"]["s"].get("headers").is_none());
+        }
     }
 }

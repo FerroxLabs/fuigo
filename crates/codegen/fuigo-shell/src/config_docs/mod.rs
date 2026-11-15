@@ -24,6 +24,8 @@ const USER_ONLY_KEYS: &[&str] = &[
     "relay.trusted_origins",
     // u35: `permission::resolution::user_config_lock` reads it from the user config file alone.
     "ui.disable_bypass_permissions_mode",
+    // C7-02: `util::config::mcp::user_campaign_mcp_approvals` reads it from the user config file alone.
+    "approved_campaign_mcp_servers",
 ];
 
 /// The nested FuigoComConfig, OAuth2, and OIDC leaf keys that enterprise deployments write today.

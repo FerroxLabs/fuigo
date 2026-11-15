@@ -2258,3 +2258,34 @@ fn resume_and_a_new_goal_reset_the_idle_streak() {
     t.create_goal("g2".into(), "obj2".into(), None, 0, "2026-01-01T00:00:00Z".into(), None);
     assert_eq!(t.note_idle_continuation(), 1, "a replacement goal starts the count over");
 }
+
+/// Audit S12-F3: a report-named symlink or FIFO is skipped, never followed or waited on; a regular report is inlined.
+#[cfg(unix)]
+#[test]
+fn inlining_reports_skips_symlinks_and_fifos() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = dir.path().join("secret.txt");
+    std::fs::write(&secret, "TOP-SECRET-CONTENT").unwrap();
+    let link = dir.path().join("goal-classifier-x-1-skeptic-0.md");
+    std::os::unix::fs::symlink(&secret, &link).unwrap();
+    let fifo = dir.path().join("goal-classifier-x-1-skeptic-1.md");
+    let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let plain = dir.path().join("goal-classifier-x-1-skeptic-2.md");
+    std::fs::write(&plain, "REGULAR-REPORT").unwrap();
+    let out_path = dir.path().join("details.md");
+    let reports = vec![((1, 0), link), ((1, 1), fifo), ((1, 2), plain)];
+    let (tx, rx) = std::sync::mpsc::channel();
+    let out_for_thread = out_path.clone();
+    std::thread::spawn(move || {
+        let mut out = std::fs::File::create(&out_for_thread).unwrap();
+        append_reports(&mut out, reports);
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("inlining must not block on a FIFO");
+    let text = std::fs::read_to_string(&out_path).unwrap();
+    assert!(!text.contains("TOP-SECRET-CONTENT"), "a symlinked report was followed: {text}");
+    assert!(text.contains("REGULAR-REPORT"), "{text}");
+}

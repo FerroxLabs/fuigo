@@ -2236,6 +2236,36 @@ pub(super) mod paste_key_tests {
             "a successful load must drop the stale failure marker"
         );
     }
+    /// Audit S9-F2: an image file at or above the byte-cache limit is never read into memory on the draw thread. It is
+    /// negative-cached, so it is not read again on every frame while it stays unchanged. The file is a real PNG
+    /// followed by padding, so it decodes if it is read: only the size cap makes the load fail.
+    #[cfg(unix)]
+    #[test]
+    fn tool_media_oversized_file_is_not_read_and_is_negative_cached() {
+        use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
+        let _g = set_protocol_for_test(GraphicsProtocol::Kitty);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.png");
+        std::fs::write(&path, make_test_png(40, 20)).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
+        let mut agent = make_agent();
+        let placement = tool_media_placement(path.clone());
+        assert!(
+            agent.build_inline_media_escapes(&placement).is_none(),
+            "a file at the cache limit must not be loaded"
+        );
+        assert!(agent.inline_media_load_failed.contains_key(&path), "negative-cached");
+        assert!(!agent.inline_media_cache.contains_key(&path));
+        assert!(
+            agent.build_inline_media_escapes(&placement).is_none(),
+            "an unchanged oversized file stays refused on the next frame"
+        );
+    }
     /// A same-length in-place rewrite must still retry a negative-cached failure when NOTHING in the
     /// file's metadata moved.
     ///

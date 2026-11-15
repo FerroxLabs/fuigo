@@ -323,6 +323,8 @@ pub enum DiagListener {
 struct DiagContext {
     handle: DiagHandle,
     log_file: Option<Arc<PathBuf>>,
+    /// Set on the TCP listener: `/logs` then requires a loopback `Host` header (audit S10-F3).
+    require_loopback_host: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -330,7 +332,17 @@ struct LogsQuery {
     tail_bytes: Option<u64>,
 }
 
-async fn logs(State(ctx): State<DiagContext>, Query(query): Query<LogsQuery>) -> Response {
+async fn logs(
+    State(ctx): State<DiagContext>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<LogsQuery>,
+) -> Response {
+    if ctx.require_loopback_host
+        && let Some(host) = headers.get(header::HOST)
+        && !host.to_str().is_ok_and(host_is_loopback)
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let Some(path) = ctx.log_file else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -366,6 +378,27 @@ fn tail_file(path: &Path, max: u64) -> io::Result<Vec<u8>> {
     // `take` bounds the read even if the file grows underneath us.
     file.take(max).read_to_end(&mut buf)?;
     Ok(buf)
+}
+
+/// Whether a `Host` header names this machine's loopback (`localhost`, `127.0.0.1`, `[::1]`, with an optional port).
+/// A web page that reaches the loopback port by DNS rebinding sends its own host name here (audit S10-F3).
+fn host_is_loopback(host: &str) -> bool {
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((inner, "")) => format!("[{inner}]"),
+            Some((inner, port)) if port.strip_prefix(':').is_some_and(|p| p.bytes().all(|b| b.is_ascii_digit())) => {
+                format!("[{inner}]")
+            }
+            _ => return false,
+        }
+    } else {
+        match host.rsplit_once(':') {
+            Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name.to_owned(),
+            Some(_) => return false,
+            None => host.to_owned(),
+        }
+    };
+    name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1" || name == "[::1]"
 }
 
 fn router(ctx: DiagContext) -> Router {
@@ -498,6 +531,7 @@ pub async fn serve(
     let ctx = DiagContext {
         handle,
         log_file: log_file.map(Arc::new),
+        require_loopback_host: matches!(listener, DiagListener::Tcp(_)),
     };
     match listener {
         #[cfg(unix)]
@@ -1169,6 +1203,43 @@ mod tests {
         let (status, _, body) = get_text(port, "/logs?tail_bytes=1000").await;
         assert_eq!(status, 200);
         assert_eq!(body, "0123456789");
+    }
+
+    /// Audit S10-F3: on the loopback TCP listener `/logs` refuses a request whose `Host` is not a loopback name (a web
+    /// page reaching the port by DNS rebinding sends its own host name). The other endpoints are unaffected.
+    #[tokio::test]
+    async fn logs_over_tcp_refuses_a_non_loopback_host() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("ws.log");
+        fs::write(&log, "secret-ish log line").expect("write log");
+        let port = serve_with_log(Some(log)).await;
+        let client = reqwest::Client::new();
+        let get = |path: &'static str, host: Option<&'static str>| {
+            let mut request = client.get(format!("http://127.0.0.1:{port}{path}"));
+            if let Some(host) = host {
+                request = request.header(reqwest::header::HOST, host);
+            }
+            async move { request.send().await.expect("request") }
+        };
+        for host in ["evil.example", "evil.example:6016", "127.0.0.1.evil.example", "localhost.evil.example"] {
+            let response = get("/logs", Some(host)).await;
+            assert_eq!(response.status().as_u16(), 403, "{host}");
+            assert!(!response.text().await.unwrap().contains("secret-ish"));
+        }
+        for host in [None, Some("localhost"), Some("localhost:6016"), Some("127.0.0.1"), Some("[::1]:6016")] {
+            assert_eq!(get("/logs", host).await.status().as_u16(), 200, "{host:?}");
+        }
+        assert_ne!(get("/ready", Some("evil.example")).await.status().as_u16(), 403);
+    }
+
+    #[test]
+    fn host_header_loopback_names() {
+        for ok in ["localhost", "LOCALHOST:80", "127.0.0.1", "127.0.0.1:6016", "[::1]", "[::1]:6016"] {
+            assert!(host_is_loopback(ok), "{ok}");
+        }
+        for bad in ["", "evil.example", "127.0.0.1.evil.example", "localhost.evil.example:80", "::1", "10.0.0.1", "0.0.0.0"] {
+            assert!(!host_is_loopback(bad), "{bad}");
+        }
     }
 
     #[tokio::test]

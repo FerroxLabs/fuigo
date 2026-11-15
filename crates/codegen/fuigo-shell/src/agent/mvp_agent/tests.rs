@@ -8880,8 +8880,9 @@ fn a_failed_config_read_does_not_resurrect_a_withdrawn_remote_campaign() {
     ));
     let layers = p17r_layers(user);
     let campaign: crate::util::config::RemoteSettings = serde_json::from_value(serde_json::json!({
-        "managed_mcps_enabled": false,
-        "campaigns": [{ "id": "p17r-managed-mcps-on", "managed_mcps": { "enabled": true } }],
+        "managed_mcps_enabled": true,
+        // A campaign may only turn managed MCP servers off (the campaign allowlist keeps `enabled = false` only).
+        "campaigns": [{ "id": "p17r-managed-mcps-off", "managed_mcps": { "enabled": false } }],
     }))
     .expect("remote settings fixture parses");
 
@@ -8891,18 +8892,18 @@ fn a_failed_config_read_does_not_resurrect_a_withdrawn_remote_campaign() {
         then.get("managed_mcps")
             .and_then(|m| m.get("enabled"))
             .and_then(toml::Value::as_bool),
-        Some(true),
+        Some(false),
         "precondition: the campaign patch is in the effective table"
     );
     let mut cfg = p17r_live_config(&then, Some(campaign));
     assert!(
-        cfg.managed_mcps_enabled,
-        "precondition: the campaign's TOML value outranks the remote `false`"
+        !cfg.managed_mcps_enabled,
+        "precondition: the campaign's TOML value outranks the remote `true`"
     );
 
-    // Fresh settings: the campaign is withdrawn, the remote value still says off.
+    // Fresh settings: the campaign is withdrawn, the remote value still says on.
     cfg.remote_settings = Some(crate::util::config::RemoteSettings {
-        managed_mcps_enabled: Some(false),
+        managed_mcps_enabled: Some(true),
         ..Default::default()
     });
 
@@ -8914,7 +8915,7 @@ fn a_failed_config_read_does_not_resurrect_a_withdrawn_remote_campaign() {
     );
 
     assert!(
-        !cfg.managed_mcps_enabled,
+        cfg.managed_mcps_enabled,
         "a withdrawn remote campaign must not be replayed over the fresh settings"
     );
     assert!(

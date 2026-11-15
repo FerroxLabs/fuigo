@@ -54,7 +54,7 @@ pub use network_policy::{
 };
 pub use profiles::{
     ProfileName, ProfileSource, SandboxConfig, SandboxProfile, load_sandbox_config,
-    sandbox_profile_conflicts,
+    install_project_profile_judge, sandbox_profile_conflicts,
 };
 pub use read_deny_verify::{verify_data_write_deny_enforced, verify_read_deny_enforced};
 pub use types::{SandboxEvent, SandboxEventType, SandboxMetrics};
@@ -406,7 +406,7 @@ fn bwrap_reexec_command_with_workspace(
     };
     // OsString: an argument that is not UTF-8 is handed to the re-exec as the bytes it is, never a panic.
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    let mut cmd = std::process::Command::new("bwrap");
+    let mut cmd = std::process::Command::new(resolve_bwrap_program());
     cmd.arg("--cap-drop").arg("ALL");
     cmd.arg("--bind").arg("/").arg("/");
     if let Some(workspace) = readonly_workspace {
@@ -441,6 +441,10 @@ fn bwrap_reexec_command_with_workspace(
     };
     cmd.arg("--ro-bind").arg(&sentinel).arg(&sentinel);
     cmd.arg("--dev-bind").arg("/dev").arg("/dev");
+    // Deliberately NO --unshare-pid (audit S5-F20): this re-exec wraps the whole fuigo process, and
+    // fuigo records its own pid for other processes to test (leader pid files, auth lock holder
+    // stamps checked with kill(pid, 0) and /proc/<pid>). In a private PID namespace those pids
+    // would name a different process to every reader outside it.
     cmd.arg("--proc").arg("/proc");
     let encoded_runtime_socket_denies =
         match runtime_sockets::encode_bwrap_runtime_socket_denies(runtime_socket_denies) {
@@ -469,6 +473,45 @@ fn bwrap_reexec_command_with_workspace(
     cmd.arg("--").arg(self_exe).args(args);
     Some(cmd)
 }
+/// Fixed system directories searched for `bwrap`, in order. `PATH` is not consulted first: a
+/// user-writable `PATH` entry ahead of the system directories must not pick the sandbox launcher.
+#[cfg(target_os = "linux")]
+const BWRAP_SYSTEM_DIRS: &[&str] = &["/usr/bin", "/bin", "/usr/local/bin"];
+
+#[cfg(target_os = "linux")]
+fn find_bwrap_in(dirs: &[&str]) -> Option<PathBuf> {
+    dirs.iter()
+        .map(|dir| Path::new(dir).join("bwrap"))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Test-only override of [`BWRAP_SYSTEM_DIRS`]: a `:`-separated list (empty = no directory) that replaces the fixed
+/// system directories so a test can make `bwrap` genuinely unavailable on a host that has it installed in `/usr/bin`.
+/// Compiled in only with the `test-bwrap-dirs` feature, which only dev-dependencies enable; a release build does not
+/// contain the lookup at all.
+#[cfg(all(target_os = "linux", feature = "test-bwrap-dirs"))]
+pub const TEST_BWRAP_DIRS_ENV: &str = "FUIGO_TEST_BWRAP_DIRS";
+
+#[cfg(all(target_os = "linux", feature = "test-bwrap-dirs"))]
+fn bwrap_dirs_override() -> Option<Vec<String>> {
+    let raw = std::env::var(TEST_BWRAP_DIRS_ENV).ok()?;
+    Some(raw.split(':').filter(|d| !d.is_empty()).map(str::to_owned).collect())
+}
+
+/// The `bwrap` to launch: the first one in the fixed system directories. When none is installed
+/// there, fall back to a `PATH` lookup (warn, don't refuse) so a custom install still works.
+/// This is the only place a `bwrap` is chosen: the re-exec runs exactly this program, and a missing one makes
+/// the exec fail, which a required boundary turns into a refusal to start.
+#[cfg(target_os = "linux")]
+fn resolve_bwrap_program() -> PathBuf {
+    #[cfg(feature = "test-bwrap-dirs")]
+    if let Some(dirs) = bwrap_dirs_override() {
+        let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+        return find_bwrap_in(&dirs).unwrap_or_else(|| PathBuf::from("bwrap"));
+    }
+    find_bwrap_in(BWRAP_SYSTEM_DIRS).unwrap_or_else(|| PathBuf::from("bwrap"))
+}
+
 #[cfg(target_os = "linux")]
 fn append_bwrap_read_denies(cmd: &mut std::process::Command, deny_read: &[&str]) -> Option<()> {
     if !deny_read.is_empty() {
@@ -880,6 +923,11 @@ mod tests {
     #[test]
     #[serial(bwrap_env)]
     fn is_confined_sees_the_bwrap_and_the_kernel_confinement_markers() {
+        // Sets the inside-bwrap/confined marker: in its own process, or a parallel test resolving a profile
+        // would take the inside-bwrap path and see no socket hand-off.
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _b = EnvGuard::remove(BWRAP_ENV_VAR);
         let _c = EnvGuard::remove(CONFINED_ENV_VAR);
         assert!(!is_confined(), "no sandbox: not confined");
@@ -897,6 +945,11 @@ mod tests {
     #[test]
     #[serial(bwrap_env)]
     fn bwrap_reexec_returns_none_inside_bwrap() {
+        // Sets the inside-bwrap/confined marker: in its own process, or a parallel test resolving a profile
+        // would take the inside-bwrap path and see no socket hand-off.
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _g = EnvGuard::set(BWRAP_ENV_VAR, "1");
         let result = bwrap_reexec_command(&["/data"], &[]);
         assert!(
@@ -912,7 +965,50 @@ mod tests {
         let result = bwrap_reexec_command(&["/tmp"], &[]);
         assert!(result.is_some(), "should return Some when not inside bwrap");
         let cmd = result.unwrap();
-        assert_eq!(cmd.get_program(), "bwrap", "program should be bwrap");
+        let program = Path::new(cmd.get_program());
+        assert_eq!(
+            program.file_name().and_then(|n| n.to_str()),
+            Some("bwrap"),
+            "program should be bwrap"
+        );
+    }
+    #[test]
+    #[serial(bwrap_env)]
+    #[cfg(target_os = "linux")]
+    fn bwrap_reexec_keeps_the_host_pid_namespace() {
+        let _g = EnvGuard::remove(BWRAP_ENV_VAR);
+        let cmd = bwrap_reexec_command(&["/tmp"], &[]).expect("bwrap command");
+        assert!(
+            cmd.get_args().all(|a| a != "--unshare-pid"),
+            "pids fuigo records for other processes must stay valid outside the sandbox"
+        );
+    }
+    #[test]
+    #[serial(bwrap_env)]
+    #[cfg(target_os = "linux")]
+    fn bwrap_reexec_ignores_a_fake_bwrap_first_on_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(system) = find_bwrap_in(BWRAP_SYSTEM_DIRS) else {
+            return;
+        };
+        let _g = EnvGuard::remove(BWRAP_ENV_VAR);
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("bwrap");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let old_path = std::env::var_os("PATH");
+        let mut joined = std::ffi::OsString::from(dir.path());
+        joined.push(":");
+        joined.push(old_path.clone().unwrap_or_default());
+        unsafe { std::env::set_var("PATH", &joined) };
+        let cmd = bwrap_reexec_command(&["/tmp"], &[]);
+        match old_path {
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        let cmd = cmd.expect("bwrap command");
+        assert_eq!(Path::new(cmd.get_program()), system.as_path());
+        assert_ne!(Path::new(cmd.get_program()), fake.as_path());
     }
     #[test]
     #[serial(bwrap_env)]
@@ -940,6 +1036,11 @@ mod tests {
     #[test]
     #[serial(bwrap_env)]
     fn trust_bwrap_marker_for_devbox_requires_sentinel_mount() {
+        // Sets the inside-bwrap/confined marker: in its own process, or a parallel test resolving a profile
+        // would take the inside-bwrap path and see no socket hand-off.
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _g = EnvGuard::set(BWRAP_ENV_VAR, "1");
         assert!(
             !trust_bwrap_marker_for_devbox(),
@@ -1360,6 +1461,11 @@ mod tests {
     #[serial(bwrap_env)]
     #[cfg(all(feature = "enforce", target_os = "linux"))]
     fn bwrap_reexec_for_profile_skips_plan_inside_bwrap() {
+        // Sets the inside-bwrap/confined marker: in its own process, or a parallel test resolving a profile
+        // would take the inside-bwrap path and see no socket hand-off.
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _g = EnvGuard::set(BWRAP_ENV_VAR, "1");
         let workspace = temp_workspace_with_sandbox_toml(
             "inside-bwrap-skip",

@@ -31,6 +31,18 @@ impl Gate {
     }
 }
 
+static SYNCS: LazyLock<Mutex<HashMap<std::path::PathBuf, usize>>> = LazyLock::new(Mutex::default);
+
+/// Record that `path` was flushed to stable storage by [`crate::SessionWriter::sync_existing_sync`].
+pub(crate) fn note_sync(path: &std::path::Path) {
+    *SYNCS.lock().unwrap_or_else(PoisonError::into_inner).entry(path.to_path_buf()).or_default() += 1;
+}
+
+/// How many durable flushes the writer has made of `path` (tests: a durability barrier was requested).
+pub fn sync_count(path: &std::path::Path) -> usize {
+    SYNCS.lock().unwrap_or_else(PoisonError::into_inner).get(path).copied().unwrap_or(0)
+}
+
 static GATES: LazyLock<Mutex<HashMap<String, Arc<Gate>>>> = LazyLock::new(Mutex::default);
 
 /// Arm a one-shot gate at `key`.

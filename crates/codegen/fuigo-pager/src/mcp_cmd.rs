@@ -303,6 +303,7 @@ async fn run_add(args: AddArgs) -> Result<()> {
         tool_timeouts: None,
         expose_image_base64: None,
         untrusted_source: false,
+        campaign_source: false,
     };
 
     // P169 (Grok 4.7 #3): managed MCP policy refuses before anything is written.

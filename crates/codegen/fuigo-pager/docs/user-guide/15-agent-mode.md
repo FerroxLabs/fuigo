@@ -240,10 +240,13 @@ Some failures add more structured fields next to these, for example the executio
 | `not_found`            | The named resource, for example a session, does not exist.                                       |
 | `session_storage`      | Reading or writing the session's files failed (session directory, history, durable execution state). |
 | `compaction`           | Context compaction failed.                                                                       |
+| `busy`                 | The leader's queue to the agent is full, so the request was not processed (`-32003`).            |
 | `execution_incomplete` | A budgeted execution (a workflow child, a goal) stopped before its work finished.                |
 | `internal`             | Any other failure inside the agent.                                                              |
 
 New values can be added in later releases, so treat an unknown `error_kind` as a generic failure.
+
+`busy` comes from the leader, not the agent. When its queue to the agent holds 4096 messages, a new request gets `-32003` with `message` `Rate limited` and `data` `{"error_kind": "busy", "message": "The agent has too many queued messages. Retry shortly."}` (one such reply per request in a batch), and the request is not processed. It is safe to retry after a short backoff; no retry-after value is sent. Responses to the agent's own requests, `session/cancel`, `$/cancel_request`, `fuigo/subagent/cancel`, `fuigo/btw/cancel` (as notifications or as requests with an id) and mode changes still pass; mode changes keep their order and are never merged, and an identical cancel notification is queued only once while one waits. The agent does not accept JSON-RPC batches (send each message on its own, cancels included); over the cap the leader still answers the requests in a batch with `busy` replies. Past four times the cap only cancels pass, from a reserve of one more cap of them; once the reserve is full, further cancels are dropped (a request gets `busy`) until the agent catches up.
 
 `code` stays the JSON-RPC class: `-32603` internal error, `-32000` authentication required, `-32602` invalid params, `-32600` invalid request, `-32601` method not found, `-32002` resource not found, `-32003` rate limited, `-32800` request cancelled.
 

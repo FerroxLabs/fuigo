@@ -599,6 +599,11 @@ fn physical_key(c: &Path, depth: u8) -> PathBuf {
     if !c.starts_with(&top) {
         return c.to_path_buf();
     }
+    // Audit 1.0.44 S2-F1: `top` is only a key when the discovered repository's git directory lives there; a work tree
+    // named by the repository's own `core.worktree` is repository-supplied topology, so the folder keys itself.
+    if !fuigo_agent::repo::git_dir_lives_at(&top, &repo) {
+        return c.to_path_buf();
+    }
     if depth < 4 {
         if let Some(source) = crate::worktree::managed_worktree_source_exact(&top)
             && let Ok(source) = dunce::canonicalize(&source)
@@ -1102,6 +1107,36 @@ mod tests {
             !store.is_trusted(&prefix_sibling),
             "string-prefix sibling must NOT be trusted (cascade is component-wise)"
         );
+    }
+
+    /// Audit 1.0.44 S2-F1: a nested repository whose own config names a trusted ancestor as its work tree must not
+    /// take that ancestor's trust key. Plain-folder and repository ancestors both.
+    #[test]
+    fn a45_nested_repo_core_worktree_does_not_borrow_parent_trust() {
+        for parent_is_repo in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let parent = tmp.path().join("work");
+            let nested = parent.join("evil");
+            std::fs::create_dir_all(&nested).unwrap();
+            if parent_is_repo {
+                git2::Repository::init(&parent).unwrap();
+            }
+            let repo = git2::Repository::init(&nested).unwrap();
+            repo.config()
+                .unwrap()
+                .set_str("core.worktree", parent.to_str().unwrap())
+                .unwrap();
+            let parent_key = canonicalize_or_owned(&parent);
+            let nested_key = canonicalize_or_owned(&nested);
+
+            let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
+            store.grant(&parent_key).unwrap();
+            assert!(store.is_trusted(&parent_key), "the granted folder stays trusted");
+            assert!(
+                !store.is_trusted(&nested_key),
+                "parent_is_repo={parent_is_repo}: a nested repo naming the parent as core.worktree borrowed its trust"
+            );
+        }
     }
 
     #[test]

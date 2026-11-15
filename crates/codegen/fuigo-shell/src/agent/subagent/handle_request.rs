@@ -625,6 +625,8 @@ pub(crate) async fn run_shell_child(
     if let Some(raw_cwd) = request.cwd.as_deref() {
         match sanitize_cwd_value(raw_cwd) {
             Some(cwd_path) => {
+                // Audit X2-F4: a relative `cwd` names a folder under the parent's, not under the process's.
+                let cwd_path = resolve_task_cwd(&cwd_path, &ctx.parent_cwd);
                 if worktree_path.is_none() && resume_source.is_none() {
                     let p = Path::new(&cwd_path);
                     if !p.is_dir() {
@@ -1128,6 +1130,14 @@ pub(crate) async fn run_shell_child(
                 agent = %definition.name,
                 "ignoring subagent permissionMode=bypassPermissions: always-approve is locked off"
             );
+        }
+    }
+    if let Some(notice) =
+        subagent_bypass_notice(&definition.name, &agent_permission_mode, ctx.yolo_mode)
+    {
+        tracing::warn!(agent = %definition.name, "subagent runs with always-approve while the parent session asks");
+        if let Some(parent_cmd_tx) = ctx.parent_cmd_tx.as_ref() {
+            let _ = parent_cmd_tx.send(SessionCommand::NotifyConfigNoticeIfNew { notice });
         }
     }
     if let Some(scope) = agent_memory_scope {

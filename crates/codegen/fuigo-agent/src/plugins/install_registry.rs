@@ -491,20 +491,47 @@ impl InstallRegistry {
         Some(expanded)
     }
 
-    /// Format: `<basename>-<hash8>` where hash8 is the first 8 hex chars of SHA-256(normalized source).
+    /// Format: `<basename>-<hash12>` where hash12 is the first 12 hex chars of SHA-256(source).
+    ///
+    /// SHA-256 is specified, so the key is the same on every toolchain (audit S7-F5). Installs made before
+    /// 1.0.45 carry a [`legacy_repo_key`](Self::legacy_repo_key); those stay registered under that key and are
+    /// still recognised by [`find_installed_key`](Self::find_installed_key).
     ///
     /// Examples:
-    /// - `https://github.com/org-a/tools` → `tools-a1b2c3d4`
-    /// - `/Users/me/projects/my-plugin` → `my-plugin-e5f6g7h8`
+    /// - `https://github.com/org-a/tools` → `tools-d6b7eb8d244a`
+    /// - `/Users/me/projects/my-tools` → `my-tools-bcc3afa741c2`
     pub fn repo_key(source: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(source.as_bytes());
+        let hash12: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+        format!("{}-{hash12}", Self::key_basename(source))
+    }
+
+    /// The key 1.0.44 and earlier derived: the same basename with 8 hex digits of `DefaultHasher`, whose
+    /// algorithm Rust does not promise to keep. Only used to recognise existing installs.
+    pub fn legacy_repo_key(source: &str) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        source.hash(&mut hasher);
+        let hash8 = format!("{:08x}", hasher.finish() & 0xFFFFFFFF);
+        format!("{}-{hash8}", Self::key_basename(source))
+    }
+
+    /// The key under which `source` is already installed, new scheme first, then the legacy one.
+    pub fn find_installed_key(&self, source: &str) -> Option<String> {
+        [Self::repo_key(source), Self::legacy_repo_key(source)]
+            .into_iter()
+            .find(|key| self.repos.contains_key(key))
+    }
+
+    /// The sanitised, kebab-case last path segment of `source`.
+    fn key_basename(source: &str) -> String {
         let basename = source
             .trim_end_matches('/')
             .trim_end_matches(".git")
             .rsplit('/')
             .next()
             .unwrap_or("plugin");
-
-        // Sanitize basename to kebab-case
         let sanitized: String = basename
             .to_ascii_lowercase()
             .chars()
@@ -516,16 +543,7 @@ impl InstallRegistry {
                 }
             })
             .collect();
-        let trimmed = sanitized.trim_matches('-');
-
-        // Hash the full source for uniqueness
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        source.hash(&mut hasher);
-        let hash = hasher.finish();
-        let hash8 = format!("{:08x}", hash & 0xFFFFFFFF);
-
-        format!("{trimmed}-{hash8}")
+        sanitized.trim_matches('-').to_string()
     }
 }
 
@@ -716,7 +734,36 @@ mod tests {
     fn repo_key_from_https_url() {
         let key = InstallRegistry::repo_key("https://github.com/user/my-linter");
         assert!(key.starts_with("my-linter-"));
-        assert_eq!(key.len(), "my-linter-".len() + 8);
+        assert_eq!(key.len(), "my-linter-".len() + 12);
+    }
+
+    /// audit S7-F5: pinned literals, so a change of hash algorithm fails loudly instead of orphaning installs.
+    #[test]
+    fn repo_key_golden_values() {
+        assert_eq!(
+            InstallRegistry::repo_key("https://github.com/org-a/tools"),
+            "tools-d6b7eb8d244a"
+        );
+        assert_eq!(
+            InstallRegistry::repo_key("git@github.com:user/my-plugin.git"),
+            "my-plugin-a907b029cefb"
+        );
+        assert_eq!(
+            InstallRegistry::repo_key("/Users/me/projects/my-tools"),
+            "my-tools-bcc3afa741c2"
+        );
+    }
+
+    #[test]
+    fn find_installed_key_recognises_a_legacy_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = InstallRegistry::load_from(dir.path().to_path_buf());
+        let source = "https://github.com/org-a/tools";
+        assert_eq!(reg.find_installed_key(source), None);
+        let legacy = InstallRegistry::legacy_repo_key(source);
+        assert!(legacy.starts_with("tools-") && legacy.len() == "tools-".len() + 8);
+        reg.insert(legacy.clone(), local_repo(dir.path(), "tools"));
+        assert_eq!(reg.find_installed_key(source), Some(legacy));
     }
 
     #[test]

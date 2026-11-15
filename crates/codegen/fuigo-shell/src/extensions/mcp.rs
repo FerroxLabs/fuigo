@@ -899,6 +899,18 @@ fn drop_policy_blocked(
         .collect()
 }
 
+/// The servers of `configs` the agent pool (sessionless ACP `mcp/call`, `mcp/read_resource`) may spawn.
+/// P169 (Astra r1 #3): only what managed policy allows, the same verdict as the session merge; review M-1: nor a
+/// server the session merge drops as disabled, an unapproved campaign stdio server included (C7-02).
+pub(crate) fn agent_pool_spawnable(configs: Vec<acp::McpServer>, cwd: &std::path::Path) -> Vec<acp::McpServer> {
+    let disabled = crate::util::config::disabled_mcp_server_names(cwd);
+    let configs = configs
+        .into_iter()
+        .filter(|server| !disabled.contains(crate::session::mcp_servers::mcp_server_name(server)))
+        .collect();
+    drop_policy_blocked(configs, fuigo_workspace::permission::resolution::managed_settings(), cwd)
+}
+
 /// Spawn config.toml MCP clients into the agent pool. Handshakes happen lazily on first `CallMcpTool`.
 pub(crate) async fn init_agent_mcp_pool(
     mcp_state: &Arc<TokioMutex<McpState>>,
@@ -914,13 +926,7 @@ pub(crate) async fn init_agent_mcp_pool(
         state.configs.clone()
     };
 
-    // P169 (Astra r1 #3): the agent pool (sessionless ACP `mcp/call`) spawns only what managed policy allows, the same
-    // verdict as the session merge.
-    let configs = drop_policy_blocked(
-        configs,
-        fuigo_workspace::permission::resolution::managed_settings(),
-        cwd,
-    );
+    let configs = agent_pool_spawnable(configs, cwd);
 
     if configs.is_empty() {
         let mut state = mcp_state.lock().await;
@@ -1823,6 +1829,8 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     // Clear disable only after resolve succeeds, then merge for a spawnable transport
     let was_disabled =
         crate::util::config::disabled_mcp_server_names(&cwd).contains(&req.server_name);
+    // Review C7-02: enabling here approves a campaign stdio server's command; name the program (a notice, no prompt).
+    let approval_notice = crate::util::config::campaign_approval_notice(&req.server_name, &cwd);
     let enable_paths = if was_disabled {
         match crate::util::config::save_mcp_server_enabled_in(&req.server_name, true, &cwd).await {
             Ok(paths) => paths,
@@ -1896,6 +1904,12 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         return Err(crate::acp_error::internal_error(
             crate::sampling::error::acp_error_text(&e),
         ));
+    }
+    if let Some(notice) = approval_notice {
+        tracing::warn!(server = req.server_name.as_str(), "{notice}");
+        let _ = handle
+            .cmd_tx
+            .send(crate::session::SessionCommand::NotifyConfigNotice { notice });
     }
 
     to_ext_response(Ok(McpSetupResponse { ok: true }))

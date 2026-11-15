@@ -1402,6 +1402,18 @@ async fn bootstrap_initial_context(
         verbatim_fork: false,
     })
 }
+/// Audit X2-F4: a Task `cwd` as an absolute path. A relative one is resolved against the parent session's directory
+/// (never the process's, which differs in a multi-session server) and canonicalised when it exists; an absolute one is
+/// returned unchanged.
+fn resolve_task_cwd(cwd: &str, parent_cwd: &Path) -> String {
+    let path = Path::new(cwd);
+    if path.is_absolute() {
+        return cwd.to_owned();
+    }
+    let joined = parent_cwd.join(path);
+    dunce::canonicalize(&joined).unwrap_or(joined).to_string_lossy().into_owned()
+}
+
 /// Resolve the effective working directory for a child session.
 ///
 /// Precedence: worktree path > `override_cwd` (non-empty) > parent cwd.
@@ -1833,6 +1845,21 @@ fn resolve_subagent_permission_mode(
         return PermissionMode::Default;
     }
     requested
+}
+/// The notice shown when a subagent definition runs with always-approve while the parent session still asks
+/// (audit S7-F8). The definition's `permissionMode: bypassPermissions` is honoured, as agent files of this format
+/// expect, so this only tells the user; `None` when the parent already approves everything or the child does not
+/// bypass.
+fn subagent_bypass_notice(
+    agent: &str,
+    effective: &fuigo_agent::config::PermissionMode,
+    parent_yolo: bool,
+) -> Option<String> {
+    (!parent_yolo && *effective == PermissionMode::BypassPermissions).then(|| {
+        format!(
+            "Agent \"{agent}\" runs with permissionMode bypassPermissions: its tool calls are approved automatically, although this session asks for approval."
+        )
+    })
 }
 /// Main repo root for a subagent's source: the durable repo a completion snapshot is transferred into and the repo a resume rehydrates from.
 /// Both arms MUST resolve this identically.

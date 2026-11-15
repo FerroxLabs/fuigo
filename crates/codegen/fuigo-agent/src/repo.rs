@@ -41,6 +41,11 @@ impl RepoDirChain {
             // Drop it so cwd is handled as no-repo (probe cwd only)
             // Home is compared canonically to match the symlink handling in the walk below
             .filter(|root| !is_home_dir(root));
+        // Audit 1.0.44 S2-F1: a work tree is this folder's repository root only when that repository's git directory
+        // lives there; a nested repository whose own config names an ancestor as `core.worktree` is its own root.
+        let git_root = git_root.filter(|root| {
+            git2::Repository::discover(cwd).is_ok_and(|repo| git_dir_lives_at(root, &repo))
+        });
 
         // A cwd reached through a link checked into a repo can canonicalize outside the discovered worktree: it is then
         // its own root (no reads of the outer repo's files through the link).
@@ -155,6 +160,35 @@ pub(crate) fn existing_subdirs_along(chain_dirs: &[PathBuf], subdirs: &[&str]) -
         }
     }
     found
+}
+
+/// Whether `repo`'s git directory physically belongs to the work tree `top`: `top/.git` is that directory, or `top/.git`
+/// is a `gitdir:` file that resolves to it (linked worktrees and submodules). A work tree that only the repository's own
+/// configuration (`core.worktree`) points at is repository-supplied topology and does not count (audit 1.0.44 S2-F1).
+pub fn git_dir_lives_at(top: &Path, repo: &git2::Repository) -> bool {
+    let Ok(git_dir) = dunce::canonicalize(repo.path()) else {
+        return false;
+    };
+    let dot_git = top.join(".git");
+    // Follows a symlinked `.git` directory; the canonical comparison below still requires it to be this repo's git dir.
+    let Ok(meta) = std::fs::metadata(&dot_git) else {
+        return false;
+    };
+    if meta.is_dir() {
+        return dunce::canonicalize(&dot_git).is_ok_and(|d| d == git_dir);
+    }
+    if !meta.is_file() {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(&dot_git) else {
+        return false;
+    };
+    let Some(target) = text.lines().next().and_then(|l| l.strip_prefix("gitdir:")).map(str::trim) else {
+        return false;
+    };
+    let target = Path::new(target);
+    let target = if target.is_absolute() { target.to_path_buf() } else { top.join(target) };
+    dunce::canonicalize(&target).is_ok_and(|d| d == git_dir)
 }
 
 #[cfg(test)]
@@ -282,4 +316,36 @@ mod tests {
             dunce::canonicalize(repo.path()).unwrap()
         );
     }
+
+    /// Audit 1.0.44 S2-F1: a nested repository naming its parent as `core.worktree` is its own root.
+    #[test]
+    #[cfg(unix)]
+    fn a45_symlinked_git_dir_keeps_its_repo_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        git2::Repository::init(&work).unwrap();
+        let store = tmp.path().join("store");
+        std::fs::rename(work.join(".git"), &store).unwrap();
+        std::os::unix::fs::symlink(&store, work.join(".git")).unwrap();
+        let repo = git2::Repository::discover(&work).unwrap();
+        assert!(git_dir_lives_at(&work, &repo));
+    }
+
+    #[test]
+    fn a45_core_worktree_ancestor_is_not_the_repo_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("work");
+        let nested = parent.join("evil");
+        std::fs::create_dir_all(&nested).unwrap();
+        let repo = git2::Repository::init(&nested).unwrap();
+        repo.config().unwrap().set_str("core.worktree", parent.to_str().unwrap()).unwrap();
+        let chain = RepoDirChain::resolve(&nested);
+        let parent_c = dunce::canonicalize(&parent).unwrap();
+        assert!(
+            chain.git_root.as_deref().map(|r| dunce::canonicalize(r).unwrap()) != Some(parent_c),
+            "a nested repository's own core.worktree must not make the parent its repo root: {chain:?}"
+        );
+    }
+
 }

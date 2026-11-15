@@ -29,6 +29,48 @@ const LAUNCHABLE: &[&str] = &[".com", ".exe", ".bat", ".cmd"];
 /// `PATHEXT` when the variable is unset or empty (the Windows default, launchable part).
 const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
 
+/// The first executable called `name` in an absolute `PATH` entry (audit S8-F11). Relative and empty entries
+/// are skipped, so a repository cannot plant `gh` or `node` in a `PATH` entry like `.` and have the updater
+/// run it. `None` when no such file exists.
+pub(crate) fn find_on_absolute_path(name: &str, path_var: &std::ffi::OsStr) -> Option<PathBuf> {
+    for dir in std::env::split_paths(path_var) {
+        if !dir.is_absolute() {
+            continue;
+        }
+        for candidate in [dir.join(name), dir.join(format!("{name}.exe"))] {
+            if !candidate.is_file() {
+                continue;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if candidate
+                    .metadata()
+                    .is_ok_and(|m| m.permissions().mode() & 0o111 == 0)
+                {
+                    continue;
+                }
+            }
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// `name` resolved through the absolute `PATH` entries only.
+/// When nothing is found it is an error that says what is missing, so the caller reports the missing dependency and
+/// no other `PATH` search runs.
+pub(crate) fn trusted_program(name: &str) -> anyhow::Result<PathBuf> {
+    trusted_program_in(name, std::env::var_os("PATH").as_deref())
+}
+
+/// [`trusted_program`] over an explicit `PATH` value.
+pub(crate) fn trusted_program_in(name: &str, path: Option<&std::ffi::OsStr>) -> anyhow::Result<PathBuf> {
+    path.and_then(|path| find_on_absolute_path(name, path)).ok_or_else(|| {
+        anyhow::anyhow!("`{name}` was not found in any absolute directory on PATH; install it and make sure it is on PATH")
+    })
+}
+
 /// The program and leading arguments that start npm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NpmInvocation {
@@ -568,5 +610,49 @@ mod tests {
     #[test]
     fn p145_unix_keeps_bare_npm() {
         assert_eq!(npm_invocation().unwrap(), NpmInvocation::bare());
+    }
+
+    /// audit S8-F11: a relative PATH entry is never searched, an absolute one is.
+    /// Review R01: with no helper on an absolute `PATH` entry the lookup is an error naming the helper, never the
+    /// bare name (which would run the normal search again, relative entries included).
+    #[cfg(unix)]
+    #[test]
+    fn r01_a_missing_helper_is_an_error_not_a_bare_name() {
+        let planted = format!("r01-planted-{}", std::process::id());
+        let rel = std::env::join_paths([Path::new(&planted)]).unwrap();
+        let err = trusted_program_in("gh", Some(rel.as_os_str())).expect_err("bare name returned");
+        assert!(err.to_string().contains("`gh`"), "{err}");
+        assert!(trusted_program_in("gh", None).is_err());
+        let abs = std::env::temp_dir().join(format!("r01-abs-{}", std::process::id()));
+        let abs_gh = abs.join("gh");
+        touch(&abs_gh);
+        std::fs::set_permissions(&abs_gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let both = std::env::join_paths([Path::new(&planted), abs.as_path()]).unwrap();
+        let found = trusted_program_in("gh", Some(both.as_os_str()));
+        let _ = std::fs::remove_dir_all(&abs);
+        assert_eq!(found.unwrap(), abs_gh);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn s8_f11_relative_path_entries_are_skipped_when_resolving_helpers() {
+        use std::os::unix::fs::PermissionsExt;
+        let planted = format!("s8f11-planted-{}", std::process::id());
+        let planted_gh = Path::new(&planted).join("gh");
+        touch(&planted_gh);
+        std::fs::set_permissions(&planted_gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let abs = std::env::temp_dir().join(format!("s8f11-abs-{}", std::process::id()));
+        let abs_gh = abs.join("gh");
+        touch(&abs_gh);
+        std::fs::set_permissions(&abs_gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let only_relative = std::env::join_paths([Path::new(&planted)]).unwrap();
+        let both = std::env::join_paths([Path::new(&planted), abs.as_path()]).unwrap();
+        let none = find_on_absolute_path("gh", &only_relative);
+        let found = find_on_absolute_path("gh", &both);
+        let _ = std::fs::remove_dir_all(&planted);
+        let _ = std::fs::remove_dir_all(&abs);
+        assert_eq!(none, None, "a relative entry must not be searched");
+        assert_eq!(found, Some(abs_gh));
     }
 }

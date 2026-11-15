@@ -505,6 +505,8 @@ fn relay_destination_gate(
 /// Build an HTTP request with the relay authentication headers.
 fn build_relay_request(config: &RelayConfig) -> anyhow::Result<axum::http::Request<()>> {
     relay_destination_gate(config)?;
+    // The bearer is about to be sent to the relay: record it so an echo in a log or error is scrubbed (audit X1-F5).
+    fuigo_telemetry::sent_credentials::record(&config.auth.key);
     let mut req = config.ws_url.clone().into_client_request()?;
     req.headers_mut().insert(
         "Origin",
@@ -1158,6 +1160,31 @@ mod tests {
         assert!(r.is_err());
         assert!(!crate::peer_inbox::driver::remote_attached());
     }
+    /// Audit X1-F5: the session bearer the relay handshake sends is recorded as a sent credential.
+    #[test]
+    fn relay_handshake_bearer_is_recorded_as_sent() {
+        const BEARER: &str = "x1f5-relay-bearer-FAKE-0001";
+        let echoed = format!("relay said bad token {BEARER}");
+        assert_eq!(fuigo_telemetry::sent_credentials::scrub(&echoed).as_ref(), echoed);
+        let config = RelayConfig {
+            ws_url: "wss://api.fluxrouter.ai/ws/relay".to_string(),
+            ws_origin: "https://origin.example".to_string(),
+            token_header: "xai-grok-cli".to_string(),
+            auth: FuigoAuth {
+                key: BEARER.into(),
+                user_id: "acct-1".into(),
+                ..Default::default()
+            },
+            auth_manager: None,
+        };
+        build_relay_request(&config).unwrap();
+        assert_ne!(
+            fuigo_telemetry::sent_credentials::scrub(&echoed).as_ref(),
+            echoed,
+            "the relay bearer was not recorded"
+        );
+    }
+
     /// P43 hostile: a relay that is not FluxRouter-operated gets neither the account id nor the
     /// client version on the handshake; `wss` to FluxRouter still does.
     #[test]

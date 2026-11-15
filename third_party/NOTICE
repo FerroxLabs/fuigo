@@ -93,6 +93,19 @@ Version:    0.28.1
 Modified:   Bound keyboard negotiation and preserve buffered Unix input readiness; see README.fuigo.md.
 
 --------------------------------------------------------------------------------
+htmd (modified)
+--------------------------------------------------------------------------------
+Path:       third_party/htmd-0.5.4/
+License:    Apache-2.0
+License file: third_party/htmd-0.5.4/LICENSE
+Upstream:   https://github.com/letmutex/htmd
+Version:    0.5.4
+crates.io:  https://crates.io/crates/htmd/0.5.4
+Modified:   src/dom_walker.rs — sibling combining in one pass; trailing-newline count capped at two;
+            src/element_handler/code.rs — inline-code backticks scanned by byte (all marked `fuigo:`).
+            Replaces the crates.io package through [patch.crates-io].
+
+--------------------------------------------------------------------------------
 End of notices for vendored third_party/ crates.
 
 Full product notices (all crates.io / git dependencies shipped with the Grok

@@ -2,6 +2,7 @@
 
 use crate::permission::types::EditPolicy;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::collections::HashSet;
 use fuigo_paths::AbsPathBuf;
 use fuigo_sandbox::command::protected::{FileOwner, HeldDir};
@@ -59,6 +60,10 @@ pub struct PermissionState {
         deserialize_with = "deserialize_mcp_server_grants_version"
     )]
     pub(crate) validated_mcp_server_grants_version: i64,
+    /// Audit S6-F4: per MCP server name, the fingerprint of the definition it had when an "always allow" grant for it
+    /// (or one of its tools) was given or last used. A later, different definition under the same name is warned about.
+    /// Missing in older files: it is recorded the next time a grant is used or given.
+    pub mcp_server_definitions: HashMap<String, String>,
 }
 
 fn legacy_mcp_server_grants_version() -> i64 {
@@ -90,6 +95,7 @@ impl Default for PermissionState {
             disallowed_mcp_tools: HashSet::new(),
             disallowed_web_fetch_domains: HashSet::new(),
             validated_mcp_server_grants_version: VALIDATED_MCP_SERVER_GRANTS_VERSION,
+            mcp_server_definitions: HashMap::new(),
         }
     }
 }
@@ -116,6 +122,7 @@ impl PermissionState {
             disallowed_mcp_tools,
             disallowed_web_fetch_domains,
             validated_mcp_server_grants_version: _,
+            mcp_server_definitions,
         } = other;
         self.allow_bash_execute |= allow_bash_execute;
         self.allowed_bash_commands.extend(allowed_bash_commands);
@@ -129,6 +136,10 @@ impl PermissionState {
         self.disallowed_mcp_tools.extend(disallowed_mcp_tools);
         self.disallowed_web_fetch_domains
             .extend(disallowed_web_fetch_domains);
+        // This session's record of a definition is the newer one.
+        for (server, fingerprint) in mcp_server_definitions {
+            self.mcp_server_definitions.entry(server).or_insert(fingerprint);
+        }
     }
 }
 
@@ -693,6 +704,19 @@ mod tests {
         assert!(denied.contains("rm -rf"));
         assert!(denied.contains("git push --force"));
         assert_eq!(denied.len(), 2);
+    }
+
+    /// Audit S6-F4: a store written before definitions were recorded loads with its grants and no definitions; a
+    /// recorded definition round-trips.
+    #[test]
+    fn s6_f4_grant_store_without_definitions_loads_and_definitions_roundtrip() {
+        let old: PermissionState = toml::from_str("allowed_mcp_servers = [\"linear\"]\n").unwrap();
+        assert!(old.allowed_mcp_servers.contains("linear") && old.mcp_server_definitions.is_empty());
+        let mut state = PermissionState::default();
+        state.allowed_mcp_servers.insert("linear".to_owned());
+        state.mcp_server_definitions.insert("linear".to_owned(), "abc".to_owned());
+        let restored: PermissionState = toml::from_str(&toml::to_string_pretty(&state).unwrap()).unwrap();
+        assert_eq!(restored.mcp_server_definitions.get("linear").map(String::as_str), Some("abc"));
     }
 
     /// Pre-deny stores (no `disallowed_mcp_tools` / `disallowed_web_fetch_domains` keys on disk) must load with empty deny sets.

@@ -76,17 +76,23 @@ function installVersionedBinary(vendoredBinPath, version, canonicalDir) {
     return { canonicalPath, versionedPath, versionedName };
 }
 
-/** Cleanup old versioned binaries (same as fuigo-install.js). */
-function cleanupOldVersions(canonicalDir, currentVersionedName) {
-    const entries = fs.readdirSync(canonicalDir);
-    const versionedBinaries = entries
-        .filter(e => e.startsWith('fuigo-') && !e.includes('.tmp.') && !e.includes('.link.') && e !== currentVersionedName)
-        .sort(byVersionDescending('fuigo-'));
-    // Keep the most recent old version, remove anything older.
-    for (const old of versionedBinaries.slice(1)) {
-        try { fs.unlinkSync(path.join(canonicalDir, old)); } catch {}
+// audit S8-F8: these tests run the SHIPPED cleanup (bin/fuigo-install.js), not a copy. The shipped
+// function spares fresh files, symlinks and binaries in use, so the helpers below age every file in
+// the directory first; the dedicated tests further down cover the sparing rules.
+const shippedInstall = require('../bin/fuigo-install.js');
+const AN_HOUR_AND_MORE = 3 * 60 * 60 * 1000;
+function ageFiles(dir) {
+    const old = new Date(Date.now() - AN_HOUR_AND_MORE);
+    for (const e of fs.readdirSync(dir)) {
+        try { fs.lutimesSync(path.join(dir, e), old, old); } catch {}
     }
-    return versionedBinaries;
+}
+const notInUse = { isInUse: () => false };
+
+/** Cleanup old versioned binaries through the shipped function. */
+function cleanupOldVersions(canonicalDir, currentVersionedName) {
+    ageFiles(canonicalDir);
+    shippedInstall.cleanupOldVersions(canonicalDir, 'fuigo', currentVersionedName.slice('fuigo-'.length), notInUse);
 }
 
 /** Fuigo bin dir resolution (mirrors bin/fuigo-install.js and bin/fuigo-bootstrap.js). */
@@ -515,6 +521,33 @@ test('semver sort: minor version boundary (0.1.x vs 0.2.x)', () => {
     }
 });
 
+test('shipped cleanup spares a just-written older binary, a symlink and a binary in use', () => {
+    const dir = makeTmpDir();
+    try {
+        const binDir = path.join(dir, 'bin');
+        fs.mkdirSync(binDir, { recursive: true });
+        for (const v of ['0.1.137', '0.1.138', '0.1.139', '0.1.140', '0.1.141']) {
+            fs.writeFileSync(path.join(binDir, `fuigo-${v}`), `v${v}`);
+        }
+        // 0.1.140 is N-1 (kept by rank). 0.1.139 is fresh, 0.1.138 is in use, 0.1.137 is a symlink.
+        fs.rmSync(path.join(binDir, 'fuigo-0.1.137'));
+        fs.symlinkSync('fuigo-0.1.141', path.join(binDir, 'fuigo-0.1.137'));
+        const old = new Date(Date.now() - AN_HOUR_AND_MORE);
+        fs.utimesSync(path.join(binDir, 'fuigo-0.1.138'), old, old);
+        const inUse = (f) => path.basename(f) === 'fuigo-0.1.138';
+        shippedInstall.cleanupOldVersions(binDir, 'fuigo', '0.1.141', { isInUse: inUse });
+        assert.ok(fs.existsSync(path.join(binDir, 'fuigo-0.1.139')), 'a fresh older binary must survive');
+        assert.ok(fs.existsSync(path.join(binDir, 'fuigo-0.1.138')), 'a binary in use must survive');
+        assert.ok(fs.lstatSync(path.join(binDir, 'fuigo-0.1.137')).isSymbolicLink(), 'a symlink must survive');
+        // Once old and idle, the same binary is removed.
+        fs.utimesSync(path.join(binDir, 'fuigo-0.1.139'), old, old);
+        shippedInstall.cleanupOldVersions(binDir, 'fuigo', '0.1.141', { isInUse: () => false });
+        assert.ok(!fs.existsSync(path.join(binDir, 'fuigo-0.1.138')), 'an idle old binary is pruned');
+    } finally {
+        cleanup(dir);
+    }
+});
+
 test('byVersionDescending: unit test comparator directly', () => {
     const input = ['fuigo-0.1.9', 'fuigo-0.1.10', 'fuigo-0.1.2', 'fuigo-1.0.0', 'fuigo-0.2.0'];
     const sorted = [...input].sort(byVersionDescending('fuigo-'));
@@ -715,27 +748,10 @@ test('non-fuigo files in bin dir are not touched by cleanup', () => {
 
 console.log('\nfuigo vs fuigo-pager isolation tests\n');
 
-/**
- * Cleanup for a named binary (mirrors fuigo-install.js cleanupOldVersions).
- * Uses prefix + leading digit to avoid fuigo-* matching fuigo-pager-*.
- */
+/** Cleanup for a named binary through the shipped function. */
 function cleanupOldVersionsNamed(canonicalDir, binName, version) {
-    const prefix = `${binName}-`;
-    const currentVersioned = `${binName}-${version}`;
-    const entries = fs.readdirSync(canonicalDir);
-    const versionedBinaries = entries
-        .filter(e => {
-            if (!e.startsWith(prefix)) return false;
-            if (e.includes('.tmp.') || e.includes('.link.')) return false;
-            if (e === currentVersioned) return false;
-            const suffix = e.slice(prefix.length);
-            return /^\d/.test(suffix);
-        })
-        .sort(byVersionDescending(prefix));
-    for (const old of versionedBinaries.slice(1)) {
-        try { fs.unlinkSync(path.join(canonicalDir, old)); } catch {}
-    }
-    return versionedBinaries;
+    ageFiles(canonicalDir);
+    shippedInstall.cleanupOldVersions(canonicalDir, binName, version, notInUse);
 }
 
 /** Install a named binary (mirrors fuigo-install.js installBinary). */
@@ -1150,7 +1166,16 @@ if (process.platform !== 'win32') {
         }
     });
 
-    test('mirrored link matches fuigo-install.js and the shipped entry wires the bootstrap', () => {
+    test('installer: no args array with a shell (DEP0190), one lsof call for all old binaries (audit L2/L7)', () => {
+    const installer = fs.readFileSync(path.join(__dirname, '..', 'bin', 'fuigo-install.js'), 'utf8');
+    assert.ok(!/shell:\s*IS_WINDOWS/.test(installer), 'a shell must come with a command string, not an args array');
+    assert.ok(installer.includes("spawnSync('npm config get registry'"), 'Windows path uses one command string');
+    assert.strictEqual((installer.match(/spawnSync\('lsof'/g) || []).length, 1, 'exactly one lsof call site');
+    assert.ok(installer.includes("['-Fn', '--', ...files]"), 'lsof is given all files at once');
+    assert.ok(/timeout: 2000/.test(installer), 'lsof timeout shortened');
+});
+
+test('mirrored link matches fuigo-install.js and the shipped entry wires the bootstrap', () => {
         const pkgRoot = path.join(__dirname, '..');
         const installer = fs.readFileSync(path.join(pkgRoot, 'bin', 'fuigo-install.js'), 'utf8');
         for (const line of [

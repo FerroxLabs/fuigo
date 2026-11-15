@@ -156,7 +156,7 @@ fn remote_campaign_to_entry(c: CampaignOverride) -> Option<CampaignEntry> {
         return None;
     }
     let id = id.to_owned();
-    // The patch may set any field except `CAMPAIGN_STRIP_KEYS` and `CAMPAIGN_STRIP_PATHS` (`features.peer_messaging`), removed in `apply_active_campaign_patches`; `ConfigLayers::apply_campaign_overrides` restores requirements precedence
+    // The patch is kept whole here; `apply_active_campaign_patches` confines it to `CAMPAIGN_ALLOW_PATHS` (then the strip lists) before the merge, and `ConfigLayers::apply_campaign_overrides` restores requirements precedence
     let patch = match toml::Value::try_from(serde_json::Value::Object(c.patch)) {
         Ok(toml::Value::Table(t)) => t,
         Ok(_) => return None,
@@ -550,6 +550,33 @@ mod tests {
         );
     }
 
+    /// The `FUIGO_CAMPAIGNS_OVERRIDE` and remote sources reach the allowlist through the real apply path.
+    #[test]
+    #[serial]
+    fn override_and_remote_sources_go_through_the_allowlist() {
+        let layers = ConfigLayers::default();
+        {
+            let _env = EnvGuard::set(
+                "FUIGO_CAMPAIGNS_OVERRIDE",
+                r#"[{"id":"ov","models":{"default":"m"},"features":{"web_fetch":true},"ui":{"yolo":true},"model":{"x":{"context_window":5,"name":"X"}}}]"#,
+            );
+            let effective = effective_config_with_remote(&layers, &[]);
+            assert_eq!(effective["models"]["default"].as_str(), Some("m"));
+            assert_eq!(effective["model"]["x"]["name"].as_str(), Some("X"));
+            assert!(effective["model"]["x"].get("context_window").is_none());
+            assert!(effective.get("features").is_none() && effective.get("ui").is_none(), "{effective}");
+        }
+        let _env = EnvGuard::unset("FUIGO_CAMPAIGNS_OVERRIDE");
+        let mut patch = serde_json::Map::new();
+        patch.insert("models".into(), serde_json::json!({ "default": "rm" }));
+        patch.insert("features".into(), serde_json::json!({ "web_fetch": true }));
+        patch.insert("mcpServers".into(), serde_json::json!({ "d": { "url": "https://d.invalid/mcp" } }));
+        let entry = remote_campaign_to_entry(CampaignOverride { id: Some("rm1".into()), patch }).unwrap();
+        let effective = effective_config_with_remote(&layers, &[entry]);
+        assert_eq!(effective["models"]["default"].as_str(), Some("rm"));
+        assert!(effective.get("features").is_none() && effective.get("mcpServers").is_none(), "{effective}");
+    }
+
     /// Invalid `FUIGO_CAMPAIGNS_OVERRIDE` JSON fails toward *no campaigns*.
     /// The var's intent is "replace campaigns with exactly this".
     /// A typo must not silently re-enable the layer/remote campaigns it was meant to replace.
@@ -789,7 +816,7 @@ mod tests {
         assert!(!set.contains("new-id"), "oldest ids evicted past the cap");
     }
 
-    /// A remote campaign's flattened JSON patch becomes a full TOML patch (any field), and an id-less entry is dropped.
+    /// A remote campaign's flattened JSON patch becomes a full TOML patch (narrowed only at apply), and an id-less entry is dropped.
     #[test]
     fn remote_campaign_to_entry_builds_full_patch() {
         let mut patch = serde_json::Map::new();

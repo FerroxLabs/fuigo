@@ -50,6 +50,12 @@ type RelayDest = Rc<RefCell<Option<mpsc::UnboundedSender<AcpClientMessage>>>>;
 
 const MAX_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 const KEEPALIVE_INTERVAL_SECS: u64 = 15;
+/// Frames read from one WebSocket and not yet handed to the agent. When the agent falls behind, the socket read waits
+/// here (back-pressure to the peer) instead of queueing without limit (audit S10-F5), like the stdin reader's depth 64.
+const INBOUND_QUEUE_DEPTH: usize = 64;
+/// How long a failed handshake is held before its 401 goes out, so guessing the secret costs the caller time (audit
+/// S10-F2). A legitimate client authenticates once and never sees it.
+const FAILED_AUTH_DELAY: Duration = Duration::from_millis(250);
 
 /// Configuration for the agent WebSocket server.
 #[derive(Clone)]
@@ -104,7 +110,7 @@ fn is_boot_gen(slot: &AgentSlot, boot_id: u64) -> bool {
 
 /// Channels bridging a single WebSocket connection to the agent thread.
 struct NewConnectionChannels {
-    from_ws_rx: mpsc::UnboundedReceiver<String>,
+    from_ws_rx: mpsc::Receiver<String>,
     to_ws_tx: mpsc::UnboundedSender<String>,
 }
 
@@ -159,6 +165,17 @@ fn secret_matches(presented: &str, expected_secret: &str) -> bool {
     presented.iter().zip(expected.iter()).fold(0u8, |differ, (a, b)| differ | (a ^ b)) == 0
 }
 
+/// The 401 for a failed handshake, sent after [`FAILED_AUTH_DELAY`].
+async fn reject_unauthorized(addr: SocketAddr) -> Response {
+    warn!("Unauthorized connection attempt from {}", addr);
+    tokio::time::sleep(FAILED_AUTH_DELAY).await;
+    (
+        StatusCode::UNAUTHORIZED,
+        "Invalid or missing authorization token",
+    )
+        .into_response()
+}
+
 /// WebSocket upgrade handler with authentication.
 async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -168,12 +185,7 @@ async fn ws_handler(
     Query(query): Query<WsQueryParams>,
 ) -> Response {
     if !validate_auth(&headers, &query, &state.secret) {
-        warn!("Unauthorized connection attempt from {}", addr);
-        return (
-            StatusCode::UNAUTHORIZED,
-            "Invalid or missing authorization token",
-        )
-            .into_response();
+        return reject_unauthorized(addr).await;
     }
 
     info!("Authenticated WebSocket connection from {}", addr);
@@ -380,7 +392,7 @@ async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: So
 
     let (mut ws_write, mut ws_read) = ws.split();
 
-    let (to_agent_tx, to_agent_rx) = mpsc::unbounded_channel::<String>();
+    let (to_agent_tx, to_agent_rx) = mpsc::channel::<String>(INBOUND_QUEUE_DEPTH);
     let (from_agent_tx, mut from_agent_rx) = mpsc::unbounded_channel::<String>();
 
     let attached = match ensure_persistent_agent(&state).await {
@@ -428,7 +440,7 @@ async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: So
                     if trimmed == "ping" || trimmed.is_empty() {
                         continue;
                     }
-                    if to_agent_tx.send(trimmed.to_string()).is_err() {
+                    if to_agent_tx.send(trimmed.to_string()).await.is_err() {
                         break;
                     }
                 }
@@ -438,7 +450,7 @@ async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: So
                         if trimmed == "ping" || trimmed.is_empty() {
                             continue;
                         }
-                        if to_agent_tx.send(trimmed.to_string()).is_err() {
+                        if to_agent_tx.send(trimmed.to_string()).await.is_err() {
                             break;
                         }
                     }

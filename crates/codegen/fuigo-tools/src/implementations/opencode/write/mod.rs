@@ -116,6 +116,8 @@ impl fuigo_tool_runtime::Tool for WriteTool {
 
         // Resolve the model-provided path.
         let path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+        // Serialised with `apply_patch` on the same file (audit S4-F9).
+        let _edit_lock = crate::util::lock_path::lock_edit_paths(&[&path], &cwd).await;
 
         // P166 Grok r5 MEDIUM 3 sweep: like the edit tools, refuse a gitignored path (logical or physical) before reading
         // the old content or writing.
@@ -131,10 +133,21 @@ impl fuigo_tool_runtime::Tool for WriteTool {
         }
 
         // ── Check if file exists and read old content ────────────
-        let (existed, old_content) = match fs.read_file(&path).await {
-            Ok(bytes) => (true, Some(String::from_utf8_lossy(&bytes).into_owned())),
-            Err(_) => (false, None),
-        };
+        // Only NotFound means "did not exist"; non-UTF-8 or unreadable content is reported without a snapshot so a
+        // rewind never deletes the file or writes lossy text back (audit S4-F3).
+        let read =
+            crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), &path).await;
+        // A file over the source cap is overwritten all the same, but its old content cannot be held for a rewind: warn
+        // instead of refusing (review L16; the read was the only reason for the refusal).
+        let over_cap = read.as_ref().err().and_then(|e| {
+            crate::implementations::fuigo_build::read_file::source_too_large_message(e, &input.file_path, "write")
+        });
+        if over_cap.is_some() {
+            tracing::warn!(path = %path.display(), "write: overwriting a file larger than 256 MB; no rewind snapshot is kept");
+        }
+        let prior = crate::notification::types::PriorContent::from_read(read);
+        let existed = prior.existed();
+        let old_content = prior.previous_content();
 
         // ── Create parent directories if needed ──────────────────
         if let Some(parent) = path.parent()
@@ -165,7 +178,7 @@ impl fuigo_tool_runtime::Tool for WriteTool {
             absolute_path: path.clone(),
             content: input.content.clone(),
             previous_content: old_content.clone(),
-            is_new_file: !existed,
+            is_new_file: prior.is_new_file(),
         });
 
         let old_string = old_content.unwrap_or_default();
@@ -181,11 +194,17 @@ impl fuigo_tool_runtime::Tool for WriteTool {
             line_prefix: String::new(),
         }];
 
-        let tool_output_for_prompt = if existed {
+        let mut tool_output_for_prompt = if existed {
             format!("Wrote file successfully to {}.", path.display())
         } else {
             format!("The file {} has been created.", path.display())
         };
+        if over_cap.is_some() {
+            tool_output_for_prompt.push_str(
+                " Warning: the file it replaced was larger than 256 MB, so no snapshot of it was kept and a rewind \
+                 cannot restore it.",
+            );
+        }
 
         // Counter span: lines written (diffed against prior content so an
         // overwrite only counts the lines that actually changed).
@@ -237,6 +256,32 @@ mod tests {
     }
 
     // ── Write new file ──────────────────────────────────────────
+
+    /// Review L16 (was audit S4-F7's refusal): a file over the source cap cannot be pre-read for a rewind snapshot, but
+    /// the write is not refused; the model is told the overwrite has no snapshot.
+    #[tokio::test]
+    async fn write_overwrites_a_file_over_the_source_cap_with_a_warning() {
+        let tmp = TempDir::new().unwrap();
+        let big = tmp.path().join("big.log");
+        let len = (crate::implementations::fuigo_build::read_file::MAX_READ_SOURCE_BYTES + 1) as u64;
+        std::fs::File::create(&big).unwrap().set_len(len).unwrap();
+        let resources = test_resources(tmp.path());
+        let input = WriteInput {
+            file_path: big.to_string_lossy().into_owned(),
+            content: "x".to_string(),
+        };
+        let result = fuigo_tool_runtime::Tool::run(&WriteTool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            SearchReplaceOutput::EditsApplied(applied) => {
+                assert!(applied.tool_output_for_prompt.contains("256 MB"), "{}", applied.tool_output_for_prompt);
+                assert!(applied.tool_output_for_prompt.contains("rewind"), "{}", applied.tool_output_for_prompt);
+            }
+            other => panic!("expected the write to go ahead, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&big).unwrap(), b"x");
+    }
 
     #[tokio::test]
     async fn write_new_file_creates_with_correct_content() {
@@ -513,5 +558,30 @@ mod tests {
             other => panic!("expected the gitignore refusal, got {other:?}"),
         }
         assert_eq!(std::fs::read_to_string(outside.path().join("key.txt")).unwrap(), "TOP SECRET\n");
+    }
+
+    #[tokio::test]
+    async fn overwrite_of_non_utf8_file_is_not_reported_as_new_or_lossy() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("l.txt"), b"a\xff\n").unwrap();
+        let (handle, mut rx) = ToolNotificationHandle::channel();
+        let mut resources = test_resources(tmp.path());
+        resources.insert(NotificationHandle(handle));
+        let input = WriteInput {
+            file_path: tmp.path().join("l.txt").to_string_lossy().into_owned(),
+            content: "new\n".to_string(),
+        };
+        fuigo_tool_runtime::Tool::run(&WriteTool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        let mut seen = 0;
+        while let Ok(n) = rx.try_recv() {
+            if let crate::notification::types::ToolNotification::FileWritten(w) = n {
+                seen += 1;
+                assert_eq!(w.previous_content, None);
+                assert!(!w.is_new_file);
+            }
+        }
+        assert_eq!(seen, 1);
     }
 }

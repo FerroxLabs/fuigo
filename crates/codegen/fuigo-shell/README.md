@@ -8,7 +8,7 @@ Use it interactively as a TUI, or integrate it into your own apps via headless m
 
 ```bash
 # Install
-curl -fsSL https://x.ai/cli/install.sh | bash
+npm i -g fuigo
 
 # Interactive TUI
 fuigo
@@ -59,10 +59,10 @@ fuigo agent stdio
 
 ```bash
 # Install latest stable
-curl -fsSL https://x.ai/cli/install.sh | bash
+npm i -g fuigo
 
 # Install a specific version
-curl -fsSL https://x.ai/cli/install.sh | bash -s 0.1.42
+npm i -g fuigo@1.0.45
 ```
 
 Verify installation:

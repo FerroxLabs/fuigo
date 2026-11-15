@@ -52,6 +52,22 @@ pub fn open_secure_file(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
+/// Opens a file that must not exist yet, for secret material: `create_new` (`O_EXCL`), so an existing file, or a
+/// symlink planted at the path, is never written through, and on Unix also `O_NOFOLLOW`. Mode `0o600` on create.
+/// On Windows the caller applies the owner-only ACL to the still-empty file before writing.
+pub fn open_secure_file_new(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+
+    options.open(path)
+}
+
 /// Ensure `path` is owner-read/write only (Unix `0o600` / Windows user ACL).
 ///
 /// Best-effort on missing files (`NotFound` is ignored).

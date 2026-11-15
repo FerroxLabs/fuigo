@@ -2030,6 +2030,32 @@ fn test_create_temp_npmrc_file_perms_are_0600() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Audit S8-F3: the token file never goes to a predictable temp-dir path, so a symlink planted there is not followed,
+/// and the file lives in an owner-only directory.
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn s8_f3_temp_npmrc_does_not_follow_a_planted_symlink() {
+    use std::os::unix::fs::PermissionsExt;
+    let _g = InstallerEnvGuard::isolate();
+    unsafe { std::env::set_var("NPM_TOKEN", "s8f3-secret") };
+    let victim_dir = tempfile::tempdir().unwrap();
+    let victim = victim_dir.path().join("victim");
+    std::fs::write(&victim, "untouched\n").unwrap();
+    let planted = std::env::temp_dir().join(format!(".npmrc-{}-install", std::process::id()));
+    let _ = std::fs::remove_file(&planted);
+    std::os::unix::fs::symlink(&victim, &planted).unwrap();
+    let result = create_temp_npmrc(None);
+    let guard = result.unwrap().expect("file written");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched\n", "token written through a planted symlink");
+    assert_ne!(guard.0, planted);
+    let parent = guard.0.parent().unwrap();
+    assert_eq!(std::fs::metadata(parent).unwrap().permissions().mode() & 0o777, 0o700);
+    assert!(std::fs::read_to_string(&guard.0).unwrap().contains("s8f3-secret"));
+    drop(guard);
+    let _ = std::fs::remove_file(&planted);
+}
+
 #[test]
 #[serial_test::serial]
 fn test_create_temp_npmrc_unique_path_per_pid() {
@@ -2587,4 +2613,109 @@ async fn smoke_test_of_a_missing_binary_is_a_latching_spawn_failure() {
         .expect_err("missing binary cannot start");
     assert!(matches!(err, SmokeTestFailure::Spawn(_)), "{err:?}");
     assert!(err.latches_start_failure());
+}
+
+/// audit S8-F12: two builds of equal size are not "the same file".
+#[test]
+fn s8_f12_same_file_content_compares_bytes_not_just_length() {
+    let dir = std::env::temp_dir().join(format!("s8f12-same-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (a, b, c) = (dir.join("a"), dir.join("b"), dir.join("c"));
+    std::fs::write(&a, vec![1u8; 100_000]).unwrap();
+    std::fs::write(&b, vec![1u8; 100_000]).unwrap();
+    let mut other = vec![1u8; 100_000];
+    other[99_999] = 2;
+    std::fs::write(&c, other).unwrap();
+    let (same, different, missing) = (
+        same_file_content(&a, &b),
+        same_file_content(&a, &c),
+        same_file_content(&a, &dir.join("nope")),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(same, "identical bytes are the same");
+    assert!(!different, "equal length with different content is not the same");
+    assert!(!missing);
+}
+
+/// audit S8-F12: a completions destination that is a symlink is not written through.
+#[cfg(unix)]
+#[tokio::test]
+async fn s8_f12_completion_write_does_not_follow_a_symlink() {
+    let dir = std::env::temp_dir().join(format!("s8f12-comp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let victim = dir.join("victim");
+    std::fs::write(&victim, b"keep me").unwrap();
+    let link = dir.join("fuigo.fish");
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+    let fresh = dir.join("fresh.fish");
+    write_completion_file(&link, b"completions").await;
+    write_completion_file(&fresh, b"completions").await;
+    let (victim_after, fresh_after, leftovers) = (
+        std::fs::read(&victim).unwrap(),
+        std::fs::read(&fresh).unwrap(),
+        std::fs::read_dir(&dir).unwrap().count(),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(victim_after, b"keep me", "the symlink target must be untouched");
+    assert_eq!(fresh_after, b"completions");
+    assert_eq!(leftovers, 3, "no temp file may be left behind");
+}
+
+/// Review L26: a completions symlink that points at a file inside the user's home is written through (the link stays),
+/// as dotfile managers need.
+#[cfg(unix)]
+#[tokio::test]
+async fn l26_a_symlink_into_the_home_folder_is_written_through() {
+    let home = tempfile::tempdir().unwrap();
+    let dotfiles = home.path().join("dotfiles");
+    std::fs::create_dir_all(&dotfiles).unwrap();
+    let real = dotfiles.join("fuigo.fish");
+    std::fs::write(&real, b"old").unwrap();
+    let link = home.path().join("fuigo.fish");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let marker = home.path().join("warned");
+    write_completion_file_in(&link, b"new completions", home.path(), &marker).await;
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link stays a link");
+    assert_eq!(std::fs::read(&real).unwrap(), b"new completions");
+    assert!(!marker.exists(), "nothing to warn about");
+    assert_eq!(std::fs::read_dir(&dotfiles).unwrap().count(), 1, "no temp file left behind");
+}
+
+/// Review L26: a symlink to a file outside the home folder is left alone, and the user is told once, not on every update.
+#[cfg(unix)]
+#[tokio::test]
+async fn l26_a_symlink_outside_the_home_folder_warns_once() {
+    let home = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let victim = elsewhere.path().join("victim");
+    std::fs::write(&victim, b"keep me").unwrap();
+    let link = home.path().join("fuigo.fish");
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+    let marker = home.path().join("warned");
+    write_completion_file_in(&link, b"new", home.path(), &marker).await;
+    let after_first = std::fs::read_to_string(&marker).unwrap_or_default();
+    write_completion_file_in(&link, b"new", home.path(), &marker).await;
+    let after_second = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep me", "the target outside home is untouched");
+    assert_eq!(after_first.lines().count(), 1, "the first update records the warning");
+    assert_eq!(after_second, after_first, "the second update does not warn again");
+    let other = home.path().join("other.fish");
+    std::os::unix::fs::symlink(&victim, &other).unwrap();
+    write_completion_file_in(&other, b"new", home.path(), &marker).await;
+    assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 2, "each file is told about once");
+}
+
+/// Review L24: a base that does not publish the per-binary digest is refused with an error that names the file to
+/// publish.
+#[tokio::test]
+async fn l24_a_missing_digest_error_names_the_file_to_publish() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("fuigo-9.9.9-test");
+    std::fs::write(&binary, b"binary").unwrap();
+    let err = verify_internal_download("https://digest-test.invalid/base", "fuigo-9.9.9-test", &binary)
+        .await
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("must publish `fuigo-9.9.9-test.sha256`"), "{msg}");
+    assert!(msg.contains("RELEASE.md"), "{msg}");
 }

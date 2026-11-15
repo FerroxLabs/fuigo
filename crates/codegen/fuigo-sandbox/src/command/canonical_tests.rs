@@ -248,3 +248,18 @@ fn a_glob_is_compiled_once_however_often_it_is_asked() {
         });
     }
 }
+
+/// The case-folding regex body for a floor entry the kernel matches byte for byte: a two-letter
+/// class per cased letter, metacharacters escaped, digits and separators as they are.
+#[test]
+fn case_insensitive_regex_body_folds_each_letter_and_escapes_the_rest() {
+    assert_eq!(
+        Some("/[wW][sS]/\\.[fF][uU][iI][gG][oO]/[hH][oO][oO][kK][sS]2".to_owned()),
+        case_insensitive_regex_body("/ws/.fuigo/hooks2")
+    );
+    assert_eq!(
+        Some("/[aA]\\+\\([bB]\\)".to_owned()),
+        case_insensitive_regex_body("/a+(b)")
+    );
+    assert_eq!(None, case_insensitive_regex_body("/ws/a\nb"));
+}

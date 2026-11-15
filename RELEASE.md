@@ -135,7 +135,9 @@ its own `directory`; `sync-version.js` stamps it and `--check` fails on drift, a
 the published manifest, and, under Actions, equal to `GITHUB_REPOSITORY`, because npm refuses a
 provenance publish whose `repository.url` does not match the repository that built it),
 `id-token: write` on the publish job only, and `--provenance` on both publish commands.
-Nothing proves the attestation itself until a real tagged run publishes.
+Nothing proves the attestation itself until a real tagged run publishes, and no step verifies
+it afterwards: the `github-release` job trusts the registry tarballs after the `dist.integrity`
+match and the signature identity check, not after an attestation check.
 
 The post-publish verifier downloads through the same pinned public npm as
 `scripts/release/registry-release-inputs.sh` (empty environment, no npmrc, both registries
@@ -177,7 +179,7 @@ lays out 15 assets:
 
 | asset | source |
 |---|---|
-| `fuigo-<version>-<os>-<arch>` (6) | the build job's binary, checked byte-identical to the executable inside the matching npm tarball |
+| `fuigo-<version>-<os>-<arch>` (6) | the executable decompressed from the matching npm tarball that the registry serves (never this run's own build; a build that differs is only reported as drift). `registry-release-inputs.sh` checks the macOS and Windows ones for the release signing identity with `check-signed-binary.py` |
 | `fuigo-<version>.tgz`, `fuigo-<platform>-<version>.tgz` (7) | the npm tarballs, exactly what npm received |
 | `release-manifest.json` | `verify-package-archives.js`: name, version, integrity, shasum, size per tarball |
 | `SHA256SUMS` | sha256 of the other 14 assets, the v1.0.11 format |
@@ -237,17 +239,18 @@ they are what proves the release carries the bytes that executed.
 The client and the script agree on asset names through
 `gh_release_asset_names_match_release_layout_script` in
 `crates/codegen/fuigo-update/src/auto_update_tests.rs`; change both together.
-The gh-release installer itself does not check SHA256SUMS today. It relies on
-`gh` over HTTPS.
+The gh-release installer checks the downloaded asset against `SHA256SUMS` before it
+installs it (`verify_gh_asset` in `crates/codegen/fuigo-update/src/auto_update.rs`).
+`SHA256SUMS` comes from the same release as the binary, so it proves the download is intact,
+not who published it; the signature checks in the sign job and above cover origin.
 
 ---
 
 ## Code signing
 
-**npx needs none.** The linker already applies an ad-hoc signature, which is
-what the arm64 kernel requires, and npm never sets `com.apple.quarantine` or
-Windows' Mark-of-the-Web — so neither Gatekeeper nor SmartScreen assesses the
-file.
+**npx needs none.** npm never sets `com.apple.quarantine` or Windows'
+Mark-of-the-Web, so neither Gatekeeper nor SmartScreen assesses the file. The
+release binaries are signed anyway (below).
 
 Two places that *do* need real signing:
 
@@ -256,13 +259,26 @@ Two places that *do* need real signing:
   `codesign --verify` fails on the app and notarization is rejected.
 - **GitHub Releases direct download**: browser-downloaded files are quarantined,
   so macOS needs Developer ID + notarization and Windows wants Authenticode.
-  The release's raw binaries carry only the linker's ad-hoc signature; they are
-  meant for the gh-release installer, which fetches them with `gh`, not a browser.
+  The release workflow's `sign` job signs the macOS binaries with a Developer ID
+  and notarizes them, and Authenticode-signs the Windows binaries (Azure Artifact
+  Signing); tag pushes always sign macOS. The raw binaries on the GitHub Release
+  are those signed bytes. The gh-release installer fetches them with `gh`, not a browser.
 
 If you strip to save size, note the trade: 166 MB → 141 MB raw, 42 MB → 43 MB
 brotli, so roughly 10% compressed for the loss of symbols in crash reports.
 Xcode's `strip` re-signs automatically; `llvm-strip` and GNU binutils do not,
 and an invalidated signature on arm64 is `Killed: 9` with no diagnostic.
+
+## Internal installer base (per-binary digest)
+
+The built-in internal CLI base URLs (`CLI_BASE_URL_PRIMARY` and `CLI_BASE_URL_FALLBACK` in
+`crates/codegen/fuigo-update/src/version.rs`) are empty in the public tree, so the internal updater downloads nothing
+and this section changes no behaviour today. Once a base is set, the updater requires `<binary>.sha256` (for example
+`fuigo-1.2.3-linux-x86_64.sha256`, a bare 64-digit hex digest or `<digest>  <binary>`) next to every binary it
+downloads from a non-loopback base, and refuses the update, before running the file, when that digest is missing or
+malformed. The error names the file. Publish the digest in the same step as the binary so a base never serves one
+without the other. The digest is read from the same base as the binary, so it catches a corrupt or half-published
+upload, not a compromised base: signing or pinning the digest is a separate step and is not done yet.
 
 ---
 
@@ -274,7 +290,7 @@ and an invalidated signature on arm64 is `Killed: 9` with no diagnostic.
       just the debug one
 - [ ] `fuigo --version` prints the intended version with no channel suffix
       (a `[alpha]` suffix means `derive_channel` found a stable pointer ahead of
-      you — check the update CDN config)
+      you — check the update channel pointers)
 - [ ] `npm run check-version` clean
 - [ ] all six binaries built for their own triple
 - [ ] `npm pack --dry-run` in the meta package shows `bin/` and nothing unexpected

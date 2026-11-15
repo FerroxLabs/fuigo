@@ -1035,7 +1035,7 @@ pub async fn run_leader(
     lock.cleanup_socket()?;
     crate::peer_inbox::driver::arm_peer_host_leader();
     info!("Leader server starting");
-    let (ipc_to_agent_tx, mut ipc_to_agent_rx) = mpsc::unbounded_channel::<String>();
+    let (ipc_to_agent_tx, mut ipc_to_agent_rx) = crate::leader::server::acp_channel();
     let (agent_to_ipc_tx, agent_to_ipc_rx) = mpsc::unbounded_channel::<String>();
     let (ws_to_agent_tx, mut ws_to_agent_rx) = mpsc::unbounded_channel::<String>();
     let (acp_incoming_rx, acp_incoming_tx) = simplex(MAX_BUFFER_SIZE);

@@ -13,6 +13,7 @@ rustc-hash = { workspace = true }
 gix = { workspace = true, features = ["status", "index", "parallel"] }
 serde = { workspace = true, features = ["derive", "rc"] }
 fuigo-gix-status = { workspace = true }
+fuigo-tty-utils = { workspace = true }
 serde_json = { workspace = true }
 similar = { workspace = true }
 thiserror = { workspace = true }
@@ -24,6 +25,7 @@ uuid = { workspace = true, features = ["v4"] }
 [dev-dependencies]
 tempfile = { workspace = true }
 fuigo-test-utils = { workspace = true }
+fuigo-tty-utils = { workspace = true, features = ["unjudged-repo-exec"] }
 
 [lints]
 workspace = true

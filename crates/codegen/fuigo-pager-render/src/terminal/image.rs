@@ -314,8 +314,12 @@ fn convert_via_sips(image_data: &[u8]) -> Option<Vec<u8>> {
     let src = tmp_dir.join(format!("fuigo-sips-{id}-{ts}.dat"));
     let dst = tmp_dir.join(format!("fuigo-sips-{id}-{ts}.png"));
 
-    // Write source bytes to temp file.
-    let mut f = std::fs::File::create(&src).ok()?;
+    // Write source bytes to temp file; exclusive create, so a planted file or symlink at the name is never followed.
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&src)
+        .ok()?;
     f.write_all(image_data).ok()?;
     f.sync_all().ok()?;
     drop(f);
@@ -330,11 +334,12 @@ fn convert_via_sips(image_data: &[u8]) -> Option<Vec<u8>> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     fuigo_tty_utils::detach_std_command(&mut sips_cmd);
-    let status = sips_cmd.status().ok()?;
+    // Bounded: this runs on the draw path (audit S9-F2)
+    let status = crate::bounded_command::run_bounded(sips_cmd, std::time::Duration::from_secs(15), 0).ok();
 
     let _ = std::fs::remove_file(&src);
 
-    if !status.success() || !dst.is_file() {
+    if !status.is_some_and(|o| o.status.success()) || !dst.is_file() {
         let _ = std::fs::remove_file(&dst);
         return None;
     }

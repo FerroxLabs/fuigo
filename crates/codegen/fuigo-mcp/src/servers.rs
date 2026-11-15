@@ -1150,6 +1150,30 @@ pub(crate) fn mcp_servers_equal(a: &[acp::McpServer], b: &[acp::McpServer]) -> b
 /// Default timeout for an MCP server's `initialize` handshake and initial tool listing, used when no override is supplied.
 /// 30s is generous enough that cold-start `uvx` / `uv run --with` stdio servers that download deps on first launch aren't killed mid-handshake.
 /// The shell resolves env / config / requirements / remote overrides and injects them via `McpClientTimeoutOverrides`.
+/// Page cap for one `tools/list` walk (audit S6-F2). A server that keeps returning cursors is cut off here.
+const MAX_TOOL_LIST_PAGES: usize = 100;
+/// Tool cap for one server; further tools are dropped with a warning.
+const MAX_TOOLS_PER_SERVER: usize = 10_000;
+
+/// Decides whether a `tools/list` walk must stop after a page that returned `next`. `pages` counts pages fetched so
+/// far, `collected` the tools kept so far. Returns the reason to stop, or `None` to follow the cursor.
+fn tool_list_stop_reason(
+    pages: usize,
+    collected: usize,
+    next: &str,
+    seen: &mut std::collections::HashSet<String>,
+) -> Option<&'static str> {
+    if pages >= MAX_TOOL_LIST_PAGES {
+        Some("page cap reached")
+    } else if collected >= MAX_TOOLS_PER_SERVER {
+        Some("tool cap reached")
+    } else if !seen.insert(next.to_string()) {
+        Some("cursor repeated")
+    } else {
+        None
+    }
+}
+
 const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 30;
 
 /// Default timeout for individual tool calls.
@@ -5369,13 +5393,16 @@ impl McpClient {
         // The executor is then never blocked on `std::fs` (this runs on every MCP tool-set change, not just startup)
         let mut files: Vec<(String, Vec<u8>)> = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut pages = 0usize;
+        let mut seen_cursors = std::collections::HashSet::new();
         loop {
             let result = mcp_service
                 .list_tools(Some(
                     PaginatedRequestParams::default().with_cursor(cursor.clone()),
                 ))
                 .await?;
-            for tool in result.tools {
+            pages += 1;
+            for tool in result.tools.into_iter().take(MAX_TOOLS_PER_SERVER.saturating_sub(files.len())) {
                 let descriptor = serde_json::json!({
                     "name": tool.name.as_ref(),
                     "description": tool.description.as_deref(),
@@ -5394,7 +5421,20 @@ impl McpClient {
                 }
             }
             match result.next_cursor {
-                Some(next) => cursor = Some(next),
+                Some(next) => {
+                    if let Some(reason) =
+                        tool_list_stop_reason(pages, files.len(), &next, &mut seen_cursors)
+                    {
+                        tracing::warn!(
+                            server = %self.server_name,
+                            pages,
+                            tools = files.len(),
+                            "MCP tools/list pagination stopped early ({reason}); remaining tools are ignored",
+                        );
+                        break;
+                    }
+                    cursor = Some(next);
+                }
                 None => break,
             }
         }
@@ -5499,6 +5539,8 @@ impl McpClient {
         let mut cursor: Option<String> = None;
 
         let _list_tools_timer = fuigo_telemetry::instrumentation::timer("mcp_list_tools");
+        let mut pages = 0usize;
+        let mut seen_cursors = std::collections::HashSet::new();
         loop {
             let list_tools_result = mcp_service
                 .list_tools(Some(
@@ -5506,10 +5548,25 @@ impl McpClient {
                 ))
                 .await?;
 
+            pages += 1;
             all_tools.extend(list_tools_result.tools);
+            all_tools.truncate(MAX_TOOLS_PER_SERVER);
 
             match list_tools_result.next_cursor {
-                Some(next) => cursor = Some(next),
+                Some(next) => {
+                    if let Some(reason) =
+                        tool_list_stop_reason(pages, all_tools.len(), &next, &mut seen_cursors)
+                    {
+                        tracing::warn!(
+                            server = %self.server_name,
+                            pages,
+                            tools = all_tools.len(),
+                            "MCP tools/list pagination stopped early ({reason}); remaining tools are ignored",
+                        );
+                        break;
+                    }
+                    cursor = Some(next);
+                }
                 None => break,
             }
         }
@@ -5799,6 +5856,12 @@ fn apply_user_agent_policy(headers: &mut reqwest::header::HeaderMap, server_name
     ensure_default_user_agent(headers);
 }
 
+fn is_descriptive_header(name: &reqwest::header::HeaderName) -> bool {
+    use reqwest::header::{ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT};
+    [ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT]
+        .contains(name)
+}
+
 /// Convert configured header pairs to a `HeaderMap` for every MCP streamable-HTTP request path.
 /// Invalid pairs are warned and skipped; for duplicate names the last valid value wins (`HeaderMap::insert`).
 /// `stage` disambiguates the warning.
@@ -5815,6 +5878,12 @@ fn parse_config_headers<'a>(
             value.parse::<reqwest::header::HeaderValue>(),
         ) {
             (Ok(name), Ok(val)) => {
+                // A configured header value is a credential actually sent (audit S11-F4): record it, so a server
+                // that echoes it back has it replaced at the display, log and telemetry sinks. Standard descriptive
+                // headers are not credentials and would only rewrite ordinary words.
+                if !is_descriptive_header(&name) {
+                    fuigo_telemetry::sent_credentials::record_header_value(value);
+                }
                 headers.insert(name, val);
             }
             _ => {

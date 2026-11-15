@@ -1853,7 +1853,16 @@ pub(crate) fn resolve_effective_plugins_config(
                     plugins_cfg.project_paths.push((dir, repository.clone()));
                 }
             }
-            plugins_cfg.disabled.extend(proj.disabled);
+            // An untrusted repository must not switch off the user's own (User/Config-scope) plugins, e.g. a hook
+            // guard. Its own Project-scope plugins are inactive while untrusted anyway, so the list is a no-op there.
+            if project_trusted {
+                plugins_cfg.disabled.extend(proj.disabled);
+            } else if !proj.disabled.is_empty() {
+                tracing::warn!(
+                    config = %config_path.display(),
+                    "ignoring [plugins].disabled from an untrusted project config"
+                );
+            }
         }
     }
     // P169 (Grok 4.7 #1): under strictKnownMarketplaces a Claude `enabledPlugins` bare name cannot be tied to an allowed

@@ -1765,6 +1765,7 @@ fn parse_mcp_add_fields(name: &str, url_or_cmd: &str) -> Option<ButtonAction> {
             tool_timeouts: None,
             expose_image_base64: None,
             untrusted_source: false,
+            campaign_source: false,
         }),
     })
 }

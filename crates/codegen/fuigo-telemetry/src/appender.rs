@@ -19,16 +19,46 @@ pub(crate) fn scrubbed_non_blocking<W: std::io::Write + Send + 'static>(
     tracing_appender::non_blocking(fuigo_secrets::sent_credentials::ScrubWriter::new(writer))
 }
 
+/// Create `dir` and any missing parents, each with mode 0700 on Unix (audit S11-F3). A directory that already exists
+/// is left as it is. Elsewhere this is `create_dir_all`.
+pub(crate) fn create_private_dir_all(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
+/// Open `path` for append, creating it owner-only (0600 on Unix, an owner-only ACL on Windows) and tightening a file
+/// that already exists with a looser mode (audit S11-F3). The tightening is best effort: a filesystem without Unix
+/// modes must not stop logging.
+pub(crate) fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    let _ = fuigo_secrets::owner_only::restrict_to_owner(path);
+    Ok(file)
+}
+
 /// Opens `path` in append mode and parks the worker guard for the process lifetime so buffered logs aren't lost.
 pub(crate) fn non_blocking_file_writer(path: &Path) -> std::io::Result<NonBlocking> {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = create_private_dir_all(parent);
     }
 
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let file = open_private_append(path)?;
 
     let (non_blocking, guard) = scrubbed_non_blocking(file);
     let guards = FILE_LOG_GUARDS.get_or_init(|| Mutex::new(Vec::new()));

@@ -697,3 +697,110 @@ async fn install_internal_from_bases_does_not_redownload_on_local_swap_failure()
         fallback_requests.len()
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Audit S8-F9, F10, F12: digest before execution, guidance without a source, unique cache temp file
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// A download whose digest differs from the published one is never executed: the binary would leave a marker file.
+#[tokio::test]
+#[serial]
+async fn s8_f9_digest_mismatch_is_refused_before_the_binary_runs() {
+    let _ = test_home();
+    reset_home();
+    let platform = host_platform();
+    let marker = test_home().join("s8f9-ran");
+    let script = format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display());
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/fuigo-0.1.181-{platform}")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(script.clone().into_bytes()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/fuigo-0.1.181-{platform}.sha256")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(sha256_hex(b"something else")))
+        .mount(&server)
+        .await;
+
+    let err = install_internal_from_base(Some("0.1.181"), &make_config("stable"), &server.uri())
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("does not match"),
+        "expected a digest mismatch, got: {err:#}"
+    );
+    assert!(!marker.exists(), "the unverified binary must never be executed");
+    assert!(
+        !test_home()
+            .join("downloads")
+            .join(format!("fuigo-0.1.181-{platform}"))
+            .exists(),
+        "the rejected download must be removed"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn s8_f9_matching_digest_installs() {
+    let _ = test_home();
+    reset_home();
+    let platform = host_platform();
+    let body = b"#!/bin/sh\nexit 0\n".to_vec();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/fuigo-0.1.181-{platform}")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/fuigo-0.1.181-{platform}.sha256")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(format!("{}  fuigo-0.1.181-{platform}\n", sha256_hex(&body))),
+        )
+        .mount(&server)
+        .await;
+    install_internal_from_base(Some("0.1.181"), &make_config("stable"), &server.uri())
+        .await
+        .unwrap();
+}
+
+/// With no base URL at all the error tells the user how to move forward.
+#[tokio::test]
+#[serial]
+async fn s8_f10_no_update_source_gives_guidance_not_a_base_url_error() {
+    let _ = test_home();
+    reset_home();
+    let err = install_internal_from_bases(Some("0.1.181"), &make_config("stable"), &[])
+        .await
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("npm i -g fuigo@latest"), "msg: {msg}");
+    assert!(!msg.contains("base URL"), "msg: {msg}");
+}
+
+/// A planted `version.json.tmp` symlink is not written through, and the cache still lands.
+#[tokio::test]
+#[serial]
+async fn s8_f12_version_cache_does_not_use_a_fixed_temp_name() {
+    let _ = test_home();
+    reset_home();
+    let home = test_home();
+    std::fs::create_dir_all(&home).unwrap();
+    let victim = home.join("s8f12-victim");
+    std::fs::write(&victim, b"keep me").unwrap();
+    std::os::unix::fs::symlink(&victim, home.join("version.json.tmp")).unwrap();
+
+    fuigo_update::version::write_version_cache("0.1.181", None).await;
+
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
+    let cache = std::fs::read_to_string(home.join("version.json")).unwrap();
+    assert!(cache.contains("0.1.181"), "cache: {cache}");
+}

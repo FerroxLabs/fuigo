@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::computer::types::AsyncFileSystem;
-use crate::notification::types::FileWritten;
+use crate::implementations::fuigo_build::read_file::read_tool_source;
+use crate::notification::types::{FileWritten, PriorContent};
 
 use crate::types::output::{ApplyPatchFileResult, ApplyPatchOutput};
 use crate::types::requirements::Expr;
@@ -165,10 +166,13 @@ enum FileChange {
     Add {
         path: PathBuf,
         content: String,
+        /// What the path held before (an Add over an existing file overwrites it).
+        prior: PriorContent,
     },
     Delete {
         path: PathBuf,
-        original_content: String,
+        /// `None` when the file is not valid UTF-8: it is still deleted, but cannot be snapshotted for rewind.
+        original_content: Option<String>,
     },
     Update {
         path: PathBuf,
@@ -180,6 +184,8 @@ enum FileChange {
         dest_path: PathBuf,
         original_content: String,
         new_content: String,
+        /// What the destination held before (a Move onto an existing file overwrites it).
+        dest_prior: PriorContent,
     },
 }
 
@@ -210,12 +216,35 @@ fn first_unjudged_path<'a>(changes: &'a [FileChange], judged: &[PathBuf]) -> Opt
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 /// Create parent directories for a file path if they don't exist.
-#[allow(clippy::disallowed_methods, reason = "file tool write of a model/user-chosen path (user content); not inside a session folder")]
 async fn ensure_parent_dirs(path: &std::path::Path) -> Result<(), fuigo_tool_runtime::ToolError> {
+    ensure_parent_dirs_tracked(path, &mut Vec::new()).await
+}
+
+/// [`ensure_parent_dirs`] that also records, top-down, every directory this call had to create (audit review L14), so a
+/// patch that then fails can take them away again.
+#[allow(clippy::disallowed_methods, reason = "file tool write of a model/user-chosen path (user content); not inside a session folder")]
+async fn ensure_parent_dirs_tracked(
+    path: &std::path::Path,
+    created: &mut Vec<PathBuf>,
+) -> Result<(), fuigo_tool_runtime::ToolError> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+        let mut missing: Vec<PathBuf> = Vec::new();
+        for dir in parent.ancestors() {
+            if dir.as_os_str().is_empty() || tokio::fs::symlink_metadata(dir).await.is_ok() {
+                break;
+            }
+            missing.push(dir.to_path_buf());
+        }
+        let result = tokio::fs::create_dir_all(parent).await;
+        // Record what exists now even when the create stopped part way: those were made by this call.
+        for dir in missing.into_iter().rev() {
+            if tokio::fs::symlink_metadata(&dir).await.is_ok() {
+                created.push(dir);
+            }
+        }
+        result.map_err(|e| {
             fuigo_tool_runtime::ToolError::execution(
                 fuigo_tool_protocol::ToolId::new("apply_patch").expect("valid"),
                 e.to_string(),
@@ -223,6 +252,15 @@ async fn ensure_parent_dirs(path: &std::path::Path) -> Result<(), fuigo_tool_run
         })?;
     }
     Ok(())
+}
+
+/// Remove the directories a failed patch created, deepest first. `remove_dir` only removes an empty directory, so one
+/// that holds a file the patch already wrote stays.
+#[allow(clippy::disallowed_methods, reason = "file tool cleanup of directories this call created; not inside a session folder")]
+async fn remove_created_dirs(created: &[PathBuf]) {
+    for dir in created.iter().rev() {
+        let _ = tokio::fs::remove_dir(dir).await;
+    }
 }
 
 /// The files a parsed patch writes, as the model spelled them, in patch order without repeats: every Add, Update and
@@ -280,16 +318,24 @@ async fn compute_all_changes(
         match hunk {
             Hunk::AddFile { path, contents } => {
                 let resolved = resolve(path);
+                let prior = PriorContent::from_read(read_tool_source(fs.as_ref(), &resolved).await);
                 changes.push(FileChange::Add {
                     path: resolved,
                     content: contents.clone(),
+                    prior,
                 });
             }
             Hunk::DeleteFile { path } => {
                 let resolved = resolve(path);
-                let original_content = read_file_as_string(fs, &resolved)
-                    .await
-                    .map_err(|e| format!("Failed to read file: {}, {e}", resolved.display()))?;
+                // Deleting needs no decode: a non-UTF-8 file is still deleted, reported without a snapshot.
+                // A file over the source cap is still deleted, reported without a snapshot (audit S4-F7).
+                let original_content = match read_tool_source(fs.as_ref(), &resolved).await {
+                    Ok(bytes) => String::from_utf8(bytes).ok(),
+                    Err(e) if e.io_error_kind() == Some(std::io::ErrorKind::FileTooLarge) => None,
+                    Err(e) => {
+                        return Err(format!("Failed to read file: {}, {e}", resolved.display()));
+                    }
+                };
                 changes.push(FileChange::Delete {
                     path: resolved,
                     original_content,
@@ -313,12 +359,25 @@ async fn compute_all_changes(
 
                 if let Some(dest) = move_path {
                     let resolved_dest = resolve(dest);
-                    changes.push(FileChange::Move {
-                        source_path: resolved,
-                        dest_path: resolved_dest,
-                        original_content,
-                        new_content,
-                    });
+                    if same_file(&resolved, &resolved_dest).await {
+                        // A Move onto the file itself (same spelling, or a case-only rename on a case-insensitive
+                        // volume) is an in-place update: writing the destination and then deleting the source would
+                        // delete the file just written (audit S4-F4).
+                        changes.push(FileChange::Update {
+                            path: resolved,
+                            original_content,
+                            new_content,
+                        });
+                    } else {
+                        let dest_prior = PriorContent::from_read(read_tool_source(fs.as_ref(), &resolved_dest).await);
+                        changes.push(FileChange::Move {
+                            source_path: resolved,
+                            dest_path: resolved_dest,
+                            original_content,
+                            new_content,
+                            dest_prior,
+                        });
+                    }
                 } else {
                     changes.push(FileChange::Update {
                         path: resolved,
@@ -333,13 +392,79 @@ async fn compute_all_changes(
     Ok(changes)
 }
 
+/// The path a change is reported under (a move by its source).
+fn change_path(change: &FileChange) -> &std::path::Path {
+    match change {
+        FileChange::Add { path, .. }
+        | FileChange::Delete { path, .. }
+        | FileChange::Update { path, .. } => path,
+        FileChange::Move { source_path, .. } => source_path,
+    }
+}
+
+/// What the model reads when a write fails part way through a patch: the files already applied and the ones not,
+/// so it can repair the tree instead of guessing (audit S4-F9).
+fn partial_failure_message(
+    changes: &[FileChange],
+    failed: usize,
+    error: &str,
+    applied: &[ApplyPatchFileResult],
+) -> String {
+    let mut msg = format!(
+        "apply_patch stopped at {}: {error}\n",
+        change_path(&changes[failed]).display()
+    );
+    if applied.is_empty() {
+        msg.push_str("Applied: none.\n");
+    } else {
+        msg.push_str("Applied (already written, not rolled back):\n");
+        for r in applied {
+            let _ = writeln!(msg, "  {} ({})", r.path.display(), r.action);
+        }
+    }
+    msg.push_str("Not applied:\n");
+    for change in &changes[failed..] {
+        let _ = writeln!(msg, "  {}", change_path(change).display());
+    }
+    if matches!(changes[failed], FileChange::Move { .. }) {
+        msg.push_str("The failed move may have written its destination before it stopped.\n");
+    }
+    msg
+}
+
 /// Read a file via AsyncFileSystem and convert to String.
 async fn read_file_as_string(
     fs: &Arc<dyn AsyncFileSystem>,
     path: &std::path::Path,
 ) -> Result<String, String> {
-    let bytes = fs.read_file(path).await.map_err(|e| format!("{e}"))?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    let bytes = read_tool_source(fs.as_ref(), path)
+        .await
+        .map_err(|e| format!("{e}"))?;
+    // Refuse non-UTF-8 content: a lossy decode plus a whole-file rewrite (or a lossy rewind snapshot) would replace
+    // every invalid byte in the file (audit S4-F5).
+    String::from_utf8(bytes).map_err(|_| {
+        "the file is not valid UTF-8, so apply_patch cannot change it without corrupting the other bytes; \
+         edit it with a shell command (sed, patch) instead"
+            .to_string()
+    })
+}
+
+/// Whether two paths name the same file: the same path once `.` components are dropped, or, when both exist, the
+/// same device and inode (which also catches a case-only rename on a case-insensitive volume and a symlink).
+async fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    use std::path::Component;
+    let norm = |p: &std::path::Path| -> PathBuf { p.components().filter(|c| *c != Component::CurDir).collect() };
+    if norm(a) == norm(b) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(ma), Ok(mb)) = (tokio::fs::metadata(a).await, tokio::fs::metadata(b).await) {
+            return ma.dev() == mb.dev() && ma.ino() == mb.ino();
+        }
+    }
+    false
 }
 
 /// Build the codex-style summary string.
@@ -440,6 +565,13 @@ impl fuigo_tool_runtime::Tool for ApplyPatchTool {
         // ── Phase 2: Compute all changes in memory (no writes yet) ───
         // Every path is the cwd join of the patch's spelling, which is the path the permission check judges (P184).
         let resolve = |path: &std::path::Path| cwd.join(path);
+        // Hold every target's edit lock from the read to the last write, so a single-file edit of one of these files
+        // in the same parallel batch cannot interleave with the patch (audit S4-F9).
+        let target_paths: Vec<PathBuf> = patch_target_paths(&parsed.hunks)
+            .iter()
+            .map(|p| resolve(std::path::Path::new(p)))
+            .collect();
+        let _edit_locks = crate::util::lock_path::lock_edit_paths(&target_paths, &cwd).await;
         let changes = match compute_all_changes(&resolve, &fs, &parsed.hunks).await {
             Ok(c) => c,
             Err(msg) => return Ok(ApplyPatchOutput::ApplicationError(msg)),
@@ -457,27 +589,45 @@ impl fuigo_tool_runtime::Tool for ApplyPatchTool {
             )));
         }
 
+        // Make every destination directory before writing any file: a path component that is a file (the usual reason a
+        // later write cannot succeed) is found while nothing has changed yet (audit S4-F9).
+        let mut created_dirs: Vec<PathBuf> = Vec::new();
+        for change in &changes {
+            let dest = match change {
+                FileChange::Add { path, .. } => path,
+                FileChange::Move { dest_path, .. } => dest_path,
+                FileChange::Delete { .. } | FileChange::Update { .. } => continue,
+            };
+            if let Err(e) = ensure_parent_dirs_tracked(dest, &mut created_dirs).await {
+                remove_created_dirs(&created_dirs).await;
+                return Ok(ApplyPatchOutput::ApplicationError(format!(
+                    "apply_patch changed nothing: cannot create the directory for {}: {e}",
+                    dest.display()
+                )));
+            }
+        }
+
         // ── Phase 3: Apply all changes (write to filesystem) ─────
         let mut file_results = Vec::new();
 
-        for change in &changes {
+        let applied: Result<(), (usize, String)> = async {
+            for (idx, change) in changes.iter().enumerate() {
             match change {
-                FileChange::Add { path, content } => {
+                FileChange::Add {
+                    path,
+                    content,
+                    prior,
+                } => {
                     // Create parent directories if needed.
-                    ensure_parent_dirs(path).await?;
-                    fs.write_file(path, content.as_bytes()).await.map_err(|e| {
-                        fuigo_tool_runtime::ToolError::execution(
-                            fuigo_tool_protocol::ToolId::new("apply_patch").expect("valid"),
-                            e.to_string(),
-                        )
-                    })?;
+                    ensure_parent_dirs(path).await.map_err(|e| (idx, e.to_string()))?;
+                    fs.write_file(path, content.as_bytes()).await.map_err(|e| (idx, e.to_string()))?;
 
                     notification_handle.send_file_written(FileWritten {
                         tool_call_id: tool_call_id.clone(),
                         absolute_path: path.clone(),
                         content: content.clone(),
-                        previous_content: None,
-                        is_new_file: true,
+                        previous_content: prior.previous_content(),
+                        is_new_file: prior.is_new_file(),
                     });
 
                     file_results.push(ApplyPatchFileResult {
@@ -492,25 +642,20 @@ impl fuigo_tool_runtime::Tool for ApplyPatchTool {
                     path,
                     original_content,
                 } => {
-                    fs.delete_file(path).await.map_err(|e| {
-                        fuigo_tool_runtime::ToolError::execution(
-                            fuigo_tool_protocol::ToolId::new("apply_patch").expect("valid"),
-                            e.to_string(),
-                        )
-                    })?;
+                    fs.delete_file(path).await.map_err(|e| (idx, e.to_string()))?;
 
                     notification_handle.send_file_written(FileWritten {
                         tool_call_id: tool_call_id.clone(),
                         absolute_path: path.clone(),
                         content: String::new(),
-                        previous_content: Some(original_content.clone()),
+                        previous_content: original_content.clone(),
                         is_new_file: false,
                     });
 
                     file_results.push(ApplyPatchFileResult {
                         path: path.clone(),
                         action: "deleted".to_string(),
-                        old_text: Some(original_content.clone()),
+                        old_text: original_content.clone(),
                         new_text: String::new(),
                         move_to: None,
                     });
@@ -522,12 +667,7 @@ impl fuigo_tool_runtime::Tool for ApplyPatchTool {
                 } => {
                     fs.write_file(path, new_content.as_bytes())
                         .await
-                        .map_err(|e| {
-                            fuigo_tool_runtime::ToolError::execution(
-                                fuigo_tool_protocol::ToolId::new("apply_patch").expect("valid"),
-                                e.to_string(),
-                            )
-                        })?;
+                        .map_err(|e| (idx, e.to_string()))?;
 
                     notification_handle.send_file_written(FileWritten {
                         tool_call_id: tool_call_id.clone(),
@@ -550,31 +690,22 @@ impl fuigo_tool_runtime::Tool for ApplyPatchTool {
                     dest_path,
                     original_content,
                     new_content,
+                    dest_prior,
                 } => {
                     // Create parent dirs for destination.
-                    ensure_parent_dirs(dest_path).await?;
+                    ensure_parent_dirs(dest_path).await.map_err(|e| (idx, e.to_string()))?;
                     fs.write_file(dest_path, new_content.as_bytes())
                         .await
-                        .map_err(|e| {
-                            fuigo_tool_runtime::ToolError::execution(
-                                fuigo_tool_protocol::ToolId::new("apply_patch").expect("valid"),
-                                e.to_string(),
-                            )
-                        })?;
-                    fs.delete_file(source_path).await.map_err(|e| {
-                        fuigo_tool_runtime::ToolError::execution(
-                            fuigo_tool_protocol::ToolId::new("apply_patch").expect("valid"),
-                            e.to_string(),
-                        )
-                    })?;
+                        .map_err(|e| (idx, e.to_string()))?;
+                    fs.delete_file(source_path).await.map_err(|e| (idx, e.to_string()))?;
 
                     // Notify destination (new file at new location).
                     notification_handle.send_file_written(FileWritten {
                         tool_call_id: tool_call_id.clone(),
                         absolute_path: dest_path.clone(),
                         content: new_content.clone(),
-                        previous_content: None,
-                        is_new_file: true,
+                        previous_content: dest_prior.previous_content(),
+                        is_new_file: dest_prior.is_new_file(),
                     });
                     // Notify source (deleted).
                     notification_handle.send_file_written(FileWritten {
@@ -594,6 +725,18 @@ impl fuigo_tool_runtime::Tool for ApplyPatchTool {
                     });
                 }
             }
+            }
+            Ok(())
+        }
+        .await;
+        if let Err((idx, error)) = applied {
+            remove_created_dirs(&created_dirs).await;
+            return Ok(ApplyPatchOutput::ApplicationError(partial_failure_message(
+                &changes,
+                idx,
+                &error,
+                &file_results,
+            )));
         }
 
         // ── Phase 4: Build summary ───────────────────────────────
@@ -857,10 +1000,12 @@ mod tests {
                 dest_path: PathBuf::from(dest),
                 original_content: String::new(),
                 new_content: String::new(),
+                dest_prior: PriorContent::Absent,
             },
             None => FileChange::Add {
                 path: PathBuf::from(src),
                 content: String::new(),
+                prior: PriorContent::Absent,
             },
         };
         let judged = vec![PathBuf::from("/w/a"), PathBuf::from("/w/b")];
@@ -963,5 +1108,230 @@ mod tests {
             }
             other => panic!("Expected EmptyPatch, got: {other:?}"),
         }
+    }
+
+    // ── Audit S4-F3 / F4 / F5 ────────────────────────────────────
+
+    fn resources_with_channel(
+        cwd: &std::path::Path,
+    ) -> (
+        SharedResources,
+        tokio::sync::mpsc::UnboundedReceiver<crate::notification::types::ToolNotification>,
+    ) {
+        let (handle, rx) = ToolNotificationHandle::channel();
+        let mut resources = test_resources(cwd);
+        resources.insert(NotificationHandle(handle));
+        (resources.into_shared(), rx)
+    }
+
+    fn written(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::notification::types::ToolNotification>,
+    ) -> Vec<FileWritten> {
+        let mut out = Vec::new();
+        while let Ok(n) = rx.try_recv() {
+            if let crate::notification::types::ToolNotification::FileWritten(w) = n {
+                out.push(w);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn move_onto_same_file_keeps_the_file() {
+        for dest in ["a.txt", "./a.txt"] {
+            let tmp = TempDir::new().unwrap();
+            std::fs::write(tmp.path().join("a.txt"), "old\n").unwrap();
+            let shared = test_resources(tmp.path()).into_shared();
+            let patch = wrap_patch(&format!(
+                "*** Update File: a.txt\n*** Move to: {dest}\n@@\n-old\n+new"
+            ));
+            let result =
+                fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
+                    .await
+                    .unwrap();
+            assert!(matches!(result, ApplyPatchOutput::Success { .. }), "{dest}: {result:?}");
+            assert_eq!(std::fs::read_to_string(tmp.path().join("a.txt")).unwrap(), "new\n", "{dest}");
+        }
+    }
+
+    #[tokio::test]
+    async fn add_over_existing_file_reports_previous_content() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "orig\n").unwrap();
+        let (shared, mut rx) = resources_with_channel(tmp.path());
+        let patch = wrap_patch("*** Add File: a.txt\n+fresh");
+        let result = fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
+            .await
+            .unwrap();
+        assert!(matches!(result, ApplyPatchOutput::Success { .. }), "{result:?}");
+        let w = written(&mut rx);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].previous_content.as_deref(), Some("orig\n"));
+        assert!(!w[0].is_new_file);
+    }
+
+    #[tokio::test]
+    async fn move_onto_existing_file_reports_previous_content() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "old\n").unwrap();
+        std::fs::write(tmp.path().join("b.txt"), "theirs\n").unwrap();
+        let (shared, mut rx) = resources_with_channel(tmp.path());
+        let patch = wrap_patch("*** Update File: a.txt\n*** Move to: b.txt\n@@\n-old\n+new");
+        let result = fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
+            .await
+            .unwrap();
+        assert!(matches!(result, ApplyPatchOutput::Success { .. }), "{result:?}");
+        let dest = written(&mut rx)
+            .into_iter()
+            .find(|w| w.absolute_path.ends_with("b.txt"))
+            .unwrap();
+        assert_eq!(dest.previous_content.as_deref(), Some("theirs\n"));
+        assert!(!dest.is_new_file);
+    }
+
+    #[tokio::test]
+    async fn add_over_non_utf8_file_is_not_reported_as_new_or_lossy() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.bin"), b"x\xff\n").unwrap();
+        let (shared, mut rx) = resources_with_channel(tmp.path());
+        let patch = wrap_patch("*** Add File: a.bin\n+fresh");
+        let _ = fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
+            .await
+            .unwrap();
+        let w = written(&mut rx);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].previous_content, None);
+        assert!(!w[0].is_new_file);
+    }
+
+    #[tokio::test]
+    async fn update_of_non_utf8_file_is_refused_and_leaves_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let original: &[u8] = b"one\n\xff\xfe\nthree\n";
+        std::fs::write(tmp.path().join("l.txt"), original).unwrap();
+        let shared = test_resources(tmp.path()).into_shared();
+        let patch = wrap_patch("*** Update File: l.txt\n@@\n-one\n+uno");
+        let result = fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
+            .await
+            .unwrap();
+        assert!(matches!(result, ApplyPatchOutput::ApplicationError(_)), "{result:?}");
+        assert_eq!(std::fs::read(tmp.path().join("l.txt")).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn delete_of_non_utf8_file_still_deletes() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.bin"), b"x\xff\n").unwrap();
+        let (shared, mut rx) = resources_with_channel(tmp.path());
+        let patch = wrap_patch("*** Delete File: a.bin");
+        let result = fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
+            .await
+            .unwrap();
+        assert!(matches!(result, ApplyPatchOutput::Success { .. }), "{result:?}");
+        assert!(!tmp.path().join("a.bin").exists());
+        let w = written(&mut rx);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].previous_content, None);
+        assert!(!w[0].is_new_file);
+    }
+
+    /// A file system that refuses to write one named file, to fail a patch part way through its writes.
+    struct FailsOn(&'static str);
+    #[async_trait::async_trait]
+    impl AsyncFileSystem for FailsOn {
+        async fn read_file(&self, path: &std::path::Path) -> Result<Vec<u8>, crate::computer::types::ComputerError> {
+            LocalFs.read_file(path).await
+        }
+        async fn write_file(
+            &self,
+            path: &std::path::Path,
+            data: &[u8],
+        ) -> Result<(), crate::computer::types::ComputerError> {
+            if path.ends_with(self.0) {
+                return Err(crate::computer::types::ComputerError::io_with_kind(
+                    "injected write failure",
+                    std::io::ErrorKind::PermissionDenied,
+                ));
+            }
+            LocalFs.write_file(path, data).await
+        }
+        async fn delete_file(&self, path: &std::path::Path) -> Result<(), crate::computer::types::ComputerError> {
+            LocalFs.delete_file(path).await
+        }
+    }
+
+    /// Audit S4-F9: a write that fails part way reports exactly which files were applied and which were not.
+    #[tokio::test]
+    async fn a_failed_write_lists_applied_and_unapplied_files() {
+        let tmp = TempDir::new().unwrap();
+        let mut resources = test_resources(tmp.path());
+        resources.insert(FileSystem(Arc::new(FailsOn("b.txt"))));
+        let patch = wrap_patch(
+            "*** Add File: a.txt\n+one\n*** Add File: b.txt\n+two\n*** Add File: c.txt\n+three",
+        );
+        let result = fuigo_tool_runtime::Tool::run(
+            &ApplyPatchTool,
+            test_ctx(resources.into_shared()),
+            make_input(&patch),
+        )
+        .await
+        .unwrap();
+        let ApplyPatchOutput::ApplicationError(msg) = result else {
+            panic!("expected an application error naming the files, got {result:?}");
+        };
+        assert!(msg.contains("Applied") && msg.contains("a.txt"), "{msg}");
+        assert!(msg.contains("Not applied") && msg.contains("b.txt") && msg.contains("c.txt"), "{msg}");
+        assert!(tmp.path().join("a.txt").exists());
+        assert!(!tmp.path().join("c.txt").exists());
+    }
+
+    /// Audit S4-F9: a destination whose directory cannot be created is found before any file is written.
+    #[tokio::test]
+    async fn an_uncreatable_destination_directory_leaves_every_file_untouched() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("blocker"), "a file, not a directory").unwrap();
+        let shared = test_resources(tmp.path()).into_shared();
+        let patch = wrap_patch("*** Add File: a.txt\n+one\n*** Add File: blocker/x.txt\n+two");
+        let result = fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch)).await;
+        assert!(!matches!(result, Ok(ApplyPatchOutput::Success { .. })), "{result:?}");
+        assert!(!tmp.path().join("a.txt").exists(), "nothing is written when a later target cannot be");
+    }
+
+    /// Audit review L14: directories made ahead of a patch that then cannot be applied do not stay behind.
+    #[tokio::test]
+    async fn an_uncreatable_destination_removes_the_directories_made_before_it() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("blocker"), "a file, not a directory").unwrap();
+        let shared = test_resources(tmp.path()).into_shared();
+        let patch = wrap_patch("*** Add File: deep/er/a.txt\n+one\n*** Add File: blocker/x.txt\n+two");
+        let result = fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch)).await;
+        assert!(!matches!(result, Ok(ApplyPatchOutput::Success { .. })), "{result:?}");
+        assert!(!tmp.path().join("deep").exists(), "directories this call created are removed");
+        assert!(tmp.path().join("blocker").is_file());
+    }
+
+    /// Audit review L14: a write that fails leaves no empty directory this call made; a directory holding an applied
+    /// file, or one that existed before, stays.
+    #[tokio::test]
+    async fn a_failed_write_removes_empty_directories_it_created_only() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("old")).unwrap();
+        let mut resources = test_resources(tmp.path());
+        resources.insert(FileSystem(Arc::new(FailsOn("b.txt"))));
+        let patch = wrap_patch(
+            "*** Add File: keep/a.txt\n+one\n*** Add File: old/new/b.txt\n+two\n*** Add File: gone/er/c.txt\n+three",
+        );
+        let result = fuigo_tool_runtime::Tool::run(
+            &ApplyPatchTool,
+            test_ctx(resources.into_shared()),
+            make_input(&patch),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, ApplyPatchOutput::ApplicationError(_)), "{result:?}");
+        assert!(tmp.path().join("keep/a.txt").exists(), "an applied file stays with its directory");
+        assert!(tmp.path().join("old").is_dir(), "a directory that existed before stays");
+        assert!(!tmp.path().join("old/new").exists());
+        assert!(!tmp.path().join("gone").exists());
     }
 }

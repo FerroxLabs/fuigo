@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fuigo_tools::util::ProcessGroup;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::config::{HookSpec, RUNNER_ALWAYS_SET_ENV};
 use crate::event::{
@@ -241,6 +241,8 @@ pub async fn run_command_hook(
     let mut reap = HookProcessGuard::arm(hook_group.clone());
 
     let stdin = child.stdin.take();
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
     let timeout = Duration::from_millis(spec.timeout_ms);
     let result = tokio::time::timeout(timeout, async move {
         let write = async {
@@ -248,8 +250,17 @@ pub async fn run_command_hook(
                 let _ = stdin.write_all(stdin_json.as_bytes()).await;
             }
         };
-        let (_, output) = tokio::join!(write, child.wait_with_output());
-        output
+        let (_, stdout, stderr, status) = tokio::join!(
+            write,
+            read_capped(stdout_pipe),
+            read_capped(stderr_pipe),
+            child.wait()
+        );
+        Ok::<_, std::io::Error>(std::process::Output {
+            status: status?,
+            stdout: stdout?,
+            stderr: stderr?,
+        })
     })
     .await;
 
@@ -1395,6 +1406,25 @@ fn parse_post_tool_use_result(
     (HookRunnerResult::PostToolUse { outcome, failure }, elapsed)
 }
 
+/// Reads a pipe to EOF keeping at most `MAX_OUTPUT_BYTES + 1` bytes (one past the cap, so `truncate_output` still sees
+/// that the cap was exceeded) and discarding the rest as it arrives: a hook that prints without end neither grows
+/// memory nor blocks on a full pipe.
+async fn read_capped<R: AsyncRead + Unpin>(pipe: Option<R>) -> std::io::Result<Vec<u8>> {
+    let Some(mut pipe) = pipe else {
+        return Ok(Vec::new());
+    };
+    let mut kept: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = pipe.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok(kept);
+        }
+        let room = (MAX_OUTPUT_BYTES + 1).saturating_sub(kept.len());
+        kept.extend_from_slice(&chunk[..n.min(room)]);
+    }
+}
+
 /// The captured text and whether the size cap cut it off (the flag a `failClosed` hook is judged by).
 fn truncate_output(bytes: &[u8]) -> (String, bool) {
     if bytes.len() <= MAX_OUTPUT_BYTES {
@@ -2326,6 +2356,16 @@ mod tests {
             failure.contains("exit code 1") && failure.contains("boom"),
             "failure must carry exit code and stderr, got: {failure}"
         );
+    }
+
+    #[tokio::test]
+    async fn read_capped_bounds_what_a_noisy_hook_can_buffer() {
+        let flood = tokio::io::repeat(b'x').take(MAX_OUTPUT_BYTES as u64 * 8);
+        let kept = read_capped(Some(flood)).await.unwrap();
+        assert!(kept.len() <= MAX_OUTPUT_BYTES + 1, "kept {} bytes", kept.len());
+        assert!(truncate_output(&kept).1, "an over-cap stream is marked truncated");
+        let small = read_capped(Some(&b"ok"[..])).await.unwrap();
+        assert_eq!(small, b"ok");
     }
 
     #[test]

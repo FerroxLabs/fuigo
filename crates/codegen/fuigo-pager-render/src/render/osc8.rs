@@ -367,7 +367,9 @@ pub fn local_link_to_file_target(
     } else {
         relative_link_target(path, media_paths, cwd)?
     };
-    if !resolved.is_file() {
+    // Drop the `\\?\` verbatim prefix first, so `\\?\C:\x` stays a local path.
+    let resolved = crate::prompt_images::strip_verbatim_prefix(&resolved);
+    if crate::prompt_images::is_network_path(&resolved) || !resolved.is_file() {
         return None;
     }
     Some(LinkTarget::File(Arc::from(resolved)))

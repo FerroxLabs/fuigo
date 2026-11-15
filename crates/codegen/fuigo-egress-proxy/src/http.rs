@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use fuigo_sandbox::WebsiteOrigin;
 use fuigo_sandbox::command::CommandTag;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::error::{ConnectionError, ProxyError, write_committed};
+use crate::error::{ConnectionError, ProxyError, committed_write_error, write_all_idle, write_committed_idle};
+use crate::idle::IdleDeadline;
 use crate::metrics::{ProxyMetrics, ProxyOutcome};
 use crate::request::{ParsedRequest, parse_http_target, read_head, static_hop_by_hop};
 use crate::{BoxProxyIo, EgressProxyOptions, ProxyIo, ProxyState};
@@ -65,10 +65,12 @@ pub(crate) async fn handle<S: ProxyIo>(
         }
     }
     outbound.extend_from_slice(b"\r\n");
-    upstream
-        .write_all(&outbound)
+    write_all_idle(&mut upstream, &outbound, options.request_timeout)
         .await
-        .map_err(|_| ConnectionError::Precommit(ProxyError::Connect))?;
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::TimedOut => ConnectionError::Precommit(ProxyError::Timeout),
+            _ => ConnectionError::Precommit(ProxyError::Connect),
+        })?;
     forward_response(upstream, client, &request.method, options, metrics).await
 }
 
@@ -102,7 +104,7 @@ async fn forward_response<S: ProxyIo>(
         outbound.extend_from_slice(b"\r\n");
     }
     outbound.extend_from_slice(b"\r\n");
-    write_committed(client, &outbound).await?;
+    write_committed_idle(client, &outbound, options.request_timeout).await?;
 
     match body {
         ResponseBody::None(_) | ResponseBody::Reset { buffered: false } => {
@@ -117,7 +119,7 @@ async fn forward_response<S: ProxyIo>(
             if buffered_len > length {
                 return Err(ConnectionError::Committed(ProxyError::Malformed));
             }
-            write_committed(client, &buffered).await?;
+            write_committed_idle(client, &buffered, options.request_timeout).await?;
             copy_exact(
                 &mut upstream,
                 client,
@@ -275,32 +277,35 @@ impl ParsedResponse {
     }
 }
 
+/// Copies exactly `remaining` bytes. `idle` bounds each wait for the next bytes, and each wait for
+/// the destination to take them, not the whole transfer, so a slow body that keeps moving is
+/// delivered whole and a destination that stops reading is dropped.
 async fn copy_exact<S: ProxyIo>(
     source: &mut BoxProxyIo,
     destination: &mut S,
     mut remaining: u64,
-    timeout: Duration,
+    idle: Duration,
 ) -> Result<(), ConnectionError> {
-    tokio::time::timeout(timeout, async move {
-        let mut buffer = [0u8; 16 * 1024];
-        while remaining > 0 {
-            let limit = remaining.min(buffer.len() as u64) as usize;
-            let count = source
-                .read(&mut buffer[..limit])
-                .await
-                .map_err(|_| ConnectionError::Committed(ProxyError::Connect))?;
-            if count == 0 {
-                return Err(ConnectionError::Committed(ProxyError::Connect));
-            }
-            destination
-                .write_all(&buffer[..count])
-                .await
-                .map_err(ProxyError::from)
-                .map_err(ConnectionError::Committed)?;
-            remaining -= count as u64;
+    let mut buffer = [0u8; 16 * 1024];
+    let last = std::sync::atomic::AtomicU64::new(0);
+    let mut deadline = IdleDeadline::new(idle, std::time::Instant::now(), &last);
+    while remaining > 0 {
+        let limit = remaining.min(buffer.len() as u64) as usize;
+        let count = deadline
+            .read(source, &mut buffer[..limit])
+            .await
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::TimedOut => ConnectionError::Committed(ProxyError::Timeout),
+                _ => ConnectionError::Committed(ProxyError::Connect),
+            })?;
+        if count == 0 {
+            return Err(ConnectionError::Committed(ProxyError::Connect));
         }
-        Ok(())
-    })
-    .await
-    .map_err(|_| ConnectionError::Committed(ProxyError::Timeout))?
+        deadline
+            .write_all(destination, &buffer[..count])
+            .await
+            .map_err(committed_write_error)?;
+        remaining -= count as u64;
+    }
+    Ok(())
 }

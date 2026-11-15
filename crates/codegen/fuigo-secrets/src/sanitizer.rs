@@ -17,7 +17,21 @@ static GITHUB_TOKEN_REGEX: LazyLock<Regex> =
     LazyLock::new(|| compile(r"\b(?:gh[opusr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"));
 /// GitLab (`glpat-`) and Slack (`xoxa-`/`xoxb-`/`xoxp-`/`xapp-`) tokens.
 static VENDOR_TOKEN_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| compile(r"\b(?:glpat-|xox[abp]-|xapp-)[A-Za-z0-9-]{10,}"));
+    LazyLock::new(|| compile(r"\b(?:glpat-|xox[abprs]-|xapp-)[A-Za-z0-9-]{10,}"));
+/// Other vendor token families with a fixed prefix (audit S11-F2): npm, Hugging Face, SendGrid, DigitalOcean, Shopify,
+/// Stripe live publishable/restricted keys and webhook secrets, Groq, PyPI and Google OAuth access tokens. (Stripe
+/// `sk_live_` is already covered by the `sk_` prefix pattern.) Every alternative starts with a literal, so the scan
+/// stays linear.
+static OTHER_VENDOR_TOKEN_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    compile(
+        r"\b(?:npm_[A-Za-z0-9]{30,}|hf_[A-Za-z0-9]{30,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|do[por]_v1_[a-f0-9]{40,}|shp(?:at|ss|ca|pa)_[a-f0-9]{32}|(?:whsec|pk_live|rk_live)_[A-Za-z0-9]{20,}|gsk_[A-Za-z0-9]{30,}|pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{10,}|ya29\.[A-Za-z0-9_-]{20,})",
+    )
+});
+/// An HTTP `Basic` credential, only after an `Authorization` header name (a bare "Basic <word>" is ordinary prose).
+/// The header name and scheme are kept in the replacement.
+static BASIC_AUTH_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    compile(r#"(?i)\b(authorization["']?\s*[:=]\s*["']?basic)\s+([A-Za-z0-9+/=]{8,})"#)
+});
 /// Google API keys (`AIza` + 35 chars).
 static GOOGLE_API_KEY_REGEX: LazyLock<Regex> =
     LazyLock::new(|| compile(r"\bAIza[0-9A-Za-z_-]{35}"));
@@ -53,24 +67,96 @@ static BEARER_TOKEN_REGEX: LazyLock<Regex> =
 /// Bare JWT (`eyJ...header.payload.signature`) with no `Bearer`/`sk-` prefix, the shape used by deployment keys and OIDC tokens.
 static JWT_REGEX: LazyLock<Regex> =
     LazyLock::new(|| compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"));
-/// 8-char value floor to avoid false positives on short values.
+/// 8-char value floor to avoid false positives on short values. The keyword may follow an identifier prefix
+/// (`GITHUB_TOKEN`, `DB_PASSWORD`) and may be closed by a quote before the separator (`"password": "..."`), audit
+/// S11-F2. The keyword must still end the name (`tokens`, `token_count` do not match). The prefix is capped at 64
+/// characters and has no `\b` anchor: an unbounded prefix lets the engine's reverse scan from each keyword hit walk
+/// back over the whole identifier run, which is quadratic on a long run holding many keywords.
 static SECRET_ASSIGNMENT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     compile(
         r#"(?ix)
-        \b(
-            api[_-]?key
-          | (?:access|refresh|id)[_-]token
-          | token
-          | secret
-          | client[_-]secret
-          | password
-        )\b
+        (
+            [a-z0-9_]{0,64}(?:
+                api[_-]?key
+              | (?:access|refresh|id)[_-]token
+              | token
+              | secret(?:[_-](?:access[_-])?key)?
+              | client[_-]secret
+              | password
+            )
+        )
+        (["']?)
         (\s*[:=]\s*)
         (["']?)
-        [^\s"',&]{8,}
+        ([^\s"',&]{8,})
         "#,
     )
 });
+
+/// Whether the value of a secret-looking assignment is plainly not a secret (review M1): wholly a variable reference
+/// (`$TOKEN`, `${TOKEN}`, `${{secrets.TOKEN}}`, a closed `$(...)`, a complete shell parameter expansion such as
+/// `${TOKEN:-fallback}`), a closed placeholder (`<your-token>`), or code, meaning an identifier made of letters with a
+/// structural character (`. : < ( [`) and no digit (`resp.next_page_token`, `Option<String>`, `generate_csrf_token(`;
+/// never for a quoted literal), or an ellipsis placeholder (`eyJhbGciOi...`). A value that merely starts like a
+/// reference or placeholder (`$ecureP@ss`, a `$apr1$` hash, `<abc`), a plain word, words joined by `_`, a mixed-case
+/// or digit-bearing string, or anything else redacts.
+/// Delta review D2-05: `name` is the assignment's name. A password is never shown cut short, so after a password name
+/// an ellipsis is part of the literal; and code whose only structural characters are `.` and `:` must name a
+/// credential somewhere (`config.password`, `resp.next_page_token`), so words joined by dots
+/// (`correct.horse.battery.staple`) are a literal too.
+fn assignment_value_is_benign(name: &str, value: &str, quoted: bool) -> bool {
+    let value = value.trim_end_matches(';');
+    let password_name = name.to_ascii_lowercase().ends_with("password");
+    if (value.ends_with("...") || value.ends_with('\u{2026}')) && !password_name {
+        return true;
+    }
+    let is_name = |name: &str| {
+        name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if let Some(reference) = value.strip_prefix('$') {
+        let braced = reference
+            .strip_prefix('{')
+            .and_then(|r| r.strip_suffix('}'))
+            .is_some_and(|inner| {
+                (!inner.is_empty() && inner.chars().all(|c| c.is_ascii_alphanumeric() || "_.{}".contains(c)))
+                    || is_shell_parameter_expansion(inner)
+            });
+        let command = reference.starts_with('(') && reference.ends_with(')') && reference.len() > 2;
+        return is_name(reference) || braced || command;
+    }
+    if value.starts_with('<') {
+        return value.len() > 2 && value.ends_with('>');
+    }
+    let code = !quoted
+        && value.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && value.chars().all(|c| c.is_ascii_alphabetic() || "_.:<>()[]*;".contains(c))
+        && value.chars().any(|c| ".:<([".contains(c));
+    let only_dots_and_colons = !value.chars().any(|c| "<>()[]*".contains(c));
+    code && (!only_dots_and_colons || names_a_credential(value))
+}
+
+/// Whether `inner` (the text between `${` and `}`) is a complete shell parameter expansion: an optional `#` or `!`,
+/// a variable name, then nothing or an operator (`:-` `-` `:=` `=` `:?` `?` `:+` `+` `#` `##` `%` `%%` `/` `//` `:`)
+/// followed by any text without braces (delta review D2-05: `${TOKEN:-fallback}` is a reference, not a secret).
+fn is_shell_parameter_expansion(inner: &str) -> bool {
+    let inner = inner.strip_prefix(['#', '!']).unwrap_or(inner);
+    let name_len = inner.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(inner.len());
+    let (name, operator) = inner.split_at(name_len);
+    let valid_name = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()));
+    valid_name
+        && !operator.contains(['{', '}'])
+        && (operator.is_empty() || operator.starts_with([':', '-', '=', '?', '+', '#', '%', '/']))
+}
+
+/// Whether code such as `config.password` or `resp.next_page_token` names a credential in one of its parts: a whole
+/// part (split on `.`, `:` and `_`), so `monkey.business` and `author.name` are not read as naming one.
+fn names_a_credential(value: &str) -> bool {
+    const WORDS: [&str; 9] = ["token", "key", "secret", "password", "passwd", "pwd", "auth", "cred", "credentials"];
+    let value = value.to_ascii_lowercase();
+    value.split(['.', ':', '_']).any(|part| WORDS.contains(&part))
+}
 
 static SENSITIVE_QUERY_PARAMS: &[&str] = &[
     "access_token",
@@ -100,6 +186,8 @@ static MATCH_ANY: LazyLock<RegexSet> = LazyLock::new(|| {
         AWS_ACCESS_KEY_REGEX.as_str(),
         GITHUB_TOKEN_REGEX.as_str(),
         VENDOR_TOKEN_REGEX.as_str(),
+        OTHER_VENDOR_TOKEN_REGEX.as_str(),
+        BASIC_AUTH_REGEX.as_str(),
         GOOGLE_API_KEY_REGEX.as_str(),
         PEM_PRIVATE_KEY_REGEX.as_str(),
         PEM_UNTERMINATED_PRIVATE_KEY_REGEX.as_str(),
@@ -360,12 +448,28 @@ fn redact_shapes(input: &str, telemetry: bool) -> Cow<'_, str> {
     let s = AWS_ACCESS_KEY_REGEX.replace_all(&s, REDACTED);
     let s = GITHUB_TOKEN_REGEX.replace_all(&s, REDACTED);
     let s = VENDOR_TOKEN_REGEX.replace_all(&s, REDACTED);
+    let s = OTHER_VENDOR_TOKEN_REGEX.replace_all(&s, REDACTED);
+    // A plain lower-case word after `Authorization: Basic` is prose (review S11-F2-R1); anything else (a digit, an
+    // upper-case letter, one of `+ / =`) is taken for base64 of `user:password`, letters-only credentials included.
+    let s = BASIC_AUTH_REGEX.replace_all(&s, |c: &regex::Captures<'_>| {
+        if !c[2].chars().all(|ch| ch.is_ascii_lowercase()) {
+            format!("{} {REDACTED}", &c[1])
+        } else {
+            c[0].to_owned()
+        }
+    });
     let s = GOOGLE_API_KEY_REGEX.replace_all(&s, REDACTED);
     let s = BEARER_TOKEN_REGEX.replace_all(&s, format!("Bearer {REDACTED}"));
     let s = JWT_REGEX.replace_all(&s, REDACTED);
     let s = if telemetry { Cow::Owned(redact_urls_in(&s)) } else { s };
     let s = SECRET_ASSIGNMENT_REGEX
-        .replace_all(&s, format!("$1$2$3{REDACTED}"))
+        .replace_all(&s, |c: &regex::Captures<'_>| {
+            if assignment_value_is_benign(&c[1], &c[5], !c[4].is_empty()) {
+                c[0].to_owned()
+            } else {
+                format!("{}{}{}{}{REDACTED}", &c[1], &c[2], &c[3], &c[4])
+            }
+        })
         .into_owned();
     // A URL or a near miss can trip `MATCH_ANY` without any pattern replacing anything: report "unchanged" then.
     if s == input {
@@ -598,7 +702,7 @@ mod tests {
     /// If you add a regex to `MATCH_ANY`, also add a redaction pass in `redact_secrets` and update this count.
     #[test]
     fn match_any_count_matches_redact_secrets_passes() {
-        assert_eq!(MATCH_ANY.patterns().len(), 11);
+        assert_eq!(MATCH_ANY.patterns().len(), 13);
     }
 
     #[test]
@@ -650,6 +754,88 @@ mod tests {
         }
     }
 
+    /// Audit S11-F2: env-style names, JSON-quoted keys, `Basic` headers and more vendor token families.
+    #[test]
+    fn redacts_env_style_json_basic_and_more_vendor_tokens() {
+        // (input, the secret value that must be gone, text that must be kept)
+        let cases = [
+            ("GITHUB_TOKEN=abcd1234efgh5678", "abcd1234efgh5678", "GITHUB_TOKEN="),
+            ("export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENG", "wJalrXUtnFEMIK7MDENG", "export AWS_SECRET_ACCESS_KEY="),
+            ("DB_PASSWORD=hunter2hunter2", "hunter2hunter2", "DB_PASSWORD="),
+            ("db_password: \"hunter2hunter2\" # note", "hunter2hunter2", "# note"),
+            ("{\"password\": \"hunter2hunter2\", \"user\": \"bob\"}", "hunter2hunter2", "\"user\": \"bob\""),
+            ("{\"api_key\":\"abcdefghijkl\",\"n\":1}", "abcdefghijkl", "\"n\":1"),
+            ("{'client_secret': 'abcdefghijkl'}", "abcdefghijkl", "client_secret"),
+            ("curl -H 'Authorization: Basic dXNlcjpwYXNzd29yZDEyMzQ=' x", "dXNlcjpwYXNzd29yZDEyMzQ=", "curl -H"),
+            ("npm_token npm_0123456789abcdefghijABCDEFGHIJ012345 end", "npm_0123456789abcdefghijABCDEFGHIJ012345", " end"),
+            ("hf_abcdefghijklmnopqrstuvwxyzABCD0123 end", "hf_abcdefghijklmnopqrstuvwxyzABCD0123", " end"),
+            ("SG.abcdefghijklmnop.abcdefghijklmnopqrst end", "SG.abcdefghijklmnop.abcdefghijklmnopqrst", " end"),
+            ("dop_v1_0123456789abcdef0123456789abcdef0123456789abcdef end", "dop_v1_0123456789abcdef0123456789abcdef0123456789abcdef", " end"),
+            // Fake fixtures, split so a host secret scanner does not read the source as a real token.
+            (concat!("shp", "at_0123456789abcdef0123456789abcdef end"), concat!("shp", "at_0123456789abcdef0123456789abcdef"), " end"),
+            ("whsec_0123456789abcdefghijklmnop end", "whsec_0123456789abcdefghijklmnop", " end"),
+            ("pk_live_0123456789abcdefghijklmn end", "pk_live_0123456789abcdefghijklmn", " end"),
+            (concat!("rk_", "live_0123456789abcdefghijklmn end"), concat!("rk_", "live_0123456789abcdefghijklmn"), " end"),
+            ("gsk_0123456789abcdefghijklmnopqrstuvwxyz end", "gsk_0123456789abcdefghijklmnopqrstuvwxyz", " end"),
+            ("pypi-AgEIcHlwaS5vcmcAbcdefghijklmnop end", "pypi-AgEIcHlwaS5vcmcAbcdefghijklmnop", " end"),
+            ("ya29.a0AfH6SMBabcdefghijklmnopqrstuv end", "ya29.a0AfH6SMBabcdefghijklmnopqrstuv", " end"),
+            ("token xoxs-0123456789-abcdef end", "xoxs-0123456789-abcdef", " end"),
+        ];
+        for (input, secret, kept) in cases {
+            let out = redact_secrets(input);
+            assert!(!out.contains(secret), "{input:?} leaked: {out:?}");
+            assert!(out.contains("[REDACTED_SECRET]"), "{input:?}: {out:?}");
+            assert!(out.contains(kept), "{input:?} lost {kept:?}: {out:?}");
+        }
+    }
+
+    /// Audit S11-F2: the wider patterns leave ordinary code and prose alone.
+    #[test]
+    fn wider_patterns_keep_ordinary_text() {
+        for input in [
+            "let max_tokens = 4096;",
+            "token_count = compute_token_count(input)",
+            "tokenizer=bert-base-uncased-vocabulary",
+            "primary_key: user_identifier_column",
+            "monkey=banana",
+            "api_key_header_name: x-api-key-header",
+            "Basic authentication is required for this endpoint",
+            "Basic Internationalization support for the endpoint",
+            "the password field is shown",
+            "hf_dataset_loader and shpat_ are prefixes",
+            "ya29 is a prefix; SG.x.y is short; whsec_ too",
+            "disk_usage=95% task_id=12345678 risk-assessment-document-final",
+            "fn token(&self) -> Token { self.token.clone() }",
+        ] {
+            assert!(
+                matches!(redact_secrets(input), Cow::Borrowed(_)),
+                "{input:?} was rewritten: {:?}",
+                redact_secrets(input)
+            );
+        }
+    }
+
+    /// Audit S11-F2: the assignment scan stays linear on long runs of identifier characters.
+    #[test]
+    fn assignment_scan_is_not_quadratic() {
+        // Time the scrub itself, not the wait for the registry lock that other tests hold.
+        let _registry = crate::sent_credentials::REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::sent_credentials::clear_for_tests();
+        let long_run = format!("{} done\n", "a_".repeat(500_000));
+        let many_keywords = format!("{}=", "token_".repeat(100_000));
+        let start = std::time::Instant::now();
+        assert!(matches!(super::redact_secrets(&long_run), Cow::Borrowed(_)));
+        assert!(matches!(super::redact_secrets(&many_keywords), Cow::Borrowed(_)));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "took {:?}",
+            start.elapsed()
+        );
+    }
+
+
     #[test]
     fn redacts_additional_provider_prefixes() {
         let cases = [
@@ -692,6 +878,128 @@ mod tests {
         for (input, label) in cases {
             let out = redact_secrets(&input);
             assert!(out.contains(REDACTED), "{label} not redacted: {out:?}");
+        }
+    }
+
+    /// Review M1: a value that is a variable reference, a type, an identifier or a field access is not a secret,
+    /// whatever the name; real values still redact.
+    #[test]
+    fn assignments_of_references_types_and_identifiers_are_not_secrets() {
+        for input in [
+            "GITHUB_TOKEN=$GITHUB_TOKEN",
+            "NPM_TOKEN: ${{secrets.NPM_TOKEN}}",
+            "auth_token: Option<String>,",
+            "next_page_token = resp.next_page_token",
+            "let csrf_token = generate_csrf_token(&session);",
+            "self.session_token = response.session_token.clone();",
+            "db_password = os.environ['DB_PASSWORD']",
+            "\"token\": \"<your-token-here>\"",
+            "export FUIGO_API_KEY=<paste-key-here>",
+            "client_secret = ${CLIENT_SECRET}",
+        ] {
+            assert!(
+                matches!(redact_secrets(input), Cow::Borrowed(_)),
+                "{input:?} was rewritten: {:?}",
+                redact_secrets(input)
+            );
+        }
+    }
+
+    /// Review R04 / S11-F2-R1: ordinary code and prose stay; token-shaped values, quoted literals and real Basic
+    /// credentials still redact.
+    #[test]
+    fn code_after_credential_names_and_prose_after_basic_are_kept() {
+        for input in [
+            "let cancellation_token = CancellationToken::new();",
+            "session_token = request.cookie(",
+            "db_password = config.password",
+            "Authorization: Basic authentication is required",
+            "{\"access_token\": \"eyJhbGciOi...\", \"expires_in\": 3600}",
+        ] {
+            assert!(matches!(redact_secrets(input), Cow::Borrowed(_)), "{input:?} -> {:?}", redact_secrets(input));
+        }
+        for (input, secret) in [
+            ("GITHUB_TOKEN=abcd1234efgh5678", "abcd1234efgh5678"),
+            ("password = \"my_secret_password\"", "my_secret_password"),
+            ("Authorization: Basic dXNlcjpwYXNzd29yZDEyMzQ=", "dXNlcjpwYXNzd29yZDEyMzQ="),
+            ("Authorization: Basic Zm9vYmFyMTIz", "Zm9vYmFyMTIz"),
+        ] {
+            let out = redact_secrets(input);
+            assert!(!out.contains(secret), "{input:?} leaked: {out:?}");
+        }
+    }
+
+    /// Delta review (secret relaxation): only a value that is wholly a reference, a closed placeholder or code is kept;
+    /// these realistic secrets merely start like one, and a letters-only Basic credential is not prose.
+    #[test]
+    fn values_that_only_look_like_references_or_code_still_redact() {
+        for (input, secret) in [
+            ("DB_PASSWORD=super_secret_password", "super_secret_password"),
+            ("password: \"$ecureP@ss2024\"", "ecureP@ss2024"),
+            ("password=$apr1$Kq3xZ9mB$Wf1kLd8pQ2rT6yVb0nXcE.", "Kq3xZ9mB"),
+            ("secret = $argon2id$v=19$m=65536", "argon2id$v=19$m=65536"),
+            ("api_key = $(curl_secret", "curl_secret"),
+            ("token = <Zk3j9QxV7mPq2LwR", "Zk3j9QxV7mPq2LwR"),
+            ("client_secret = ${NOT_CLOSED_abc123", "NOT_CLOSED_abc123"),
+            ("Authorization: Basic ZmFrZVVzZXJGYWtlUGFzcw", "ZmFrZVVzZXJGYWtlUGFzcw"),
+            // Delta review D1: `user:pass` in Basic, and an unquoted literal password of words joined by `_`.
+            ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+            ("db_password=correct_horse_battery_staple", "correct_horse_battery_staple"),
+        ] {
+            let out = redact_secrets(input);
+            assert!(!out.contains(secret), "{input:?} leaked: {out:?}");
+        }
+        // Wholly a reference or a closed `$(...)` stays.
+        for input in ["TOKEN=$(read_token_from_vault)", "api_key = $API_KEY_FROM_ENV;"] {
+            assert!(matches!(redact_secrets(input), Cow::Borrowed(_)), "{input:?} -> {:?}", redact_secrets(input));
+        }
+    }
+
+    /// Delta review D2-05: a literal password of words joined by dots is not code, and a password is never shown cut
+    /// short, so one ending in `...` is not a placeholder. Complete shell parameter expansions stay readable.
+    #[test]
+    fn dotted_and_ellipsis_passwords_redact_and_shell_references_stay() {
+        for (input, secret) in [
+            ("db_password=correct.horse.battery.staple", "correct.horse.battery.staple"),
+            // Grok u45 round 2: a single dot does not make two words code.
+            ("password=correct.horse", "correct.horse"),
+            // Review dfix5-4: a credential word inside a longer word (monkey, author) is not a credential part.
+            ("password=monkey.business", "monkey.business"),
+            ("db_password=author.name", "author.name"),
+            ("password = \"Tr0ub4dorAndMore...\"", "Tr0ub4dorAndMore"),
+            ("\"password\": \"letmeinplease...\"", "letmeinplease"),
+            ("DB_PASSWORD=hunter2hunter2...", "hunter2hunter2"),
+        ] {
+            let out = redact_secrets(input);
+            assert!(!out.contains(secret), "{input:?} leaked: {out:?}");
+        }
+        for input in [
+            "TOKEN=${TOKEN:-fallback}",
+            "api_key = ${API_KEY:?missing}",
+            "secret=${SECRET_VALUE:=}",
+            "password=${DB_PASSWORD-unset}",
+            "token=${#GITHUB_TOKEN}",
+            "client_secret = ${CLIENT_SECRET%%suffix}",
+            "db_password = config.password",
+            "next_token = resp.next_page_token",
+            "{\"access_token\": \"eyJhbGciOi...\", \"expires_in\": 3600}",
+        ] {
+            assert!(matches!(redact_secrets(input), Cow::Borrowed(_)), "{input:?} -> {:?}", redact_secrets(input));
+        }
+    }
+
+    #[test]
+    fn real_assignment_values_still_redact() {
+        for (input, secret) in [
+            ("GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789", "abcdefghijklmnop"),
+            ("api_key = Zk3j9QxV7mPq2LwR8sTn", "Zk3j9QxV7mPq2LwR8sTn"),
+            ("auth_token: \"x8F2kQ9zLm4PvB7nR1sT\"", "x8F2kQ9zLm4PvB7nR1sT"),
+            ("password=correcthorsebatterystaple", "correcthorsebatterystaple"),
+            ("db_password = hunter2hunter2", "hunter2hunter2"),
+            ("secret_key=AbCdEfGhIjKlMnOp", "AbCdEfGhIjKlMnOp"),
+        ] {
+            let out = redact_secrets(input);
+            assert!(!out.contains(secret), "{input:?} leaked: {out:?}");
         }
     }
 

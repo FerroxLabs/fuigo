@@ -946,6 +946,7 @@ mod tests {
             tool_timeouts: None,
             expose_image_base64: None,
             untrusted_source: false,
+            campaign_source: false,
         };
         let bearer = |server: &fuigo_config_types::McpServerConfig| match server.to_acp_mcp_server("p70a") {
             Some(acp::McpServer::Http(http)) => {

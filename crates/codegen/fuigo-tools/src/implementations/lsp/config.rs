@@ -109,8 +109,10 @@ pub fn load_servers_with_plugins_sourced(
     servers
 }
 
-/// Drop repo-local (project-scoped) LSP servers from a sourced map when the
-/// workspace is untrusted; keep user/plugin. Warns per drop. The trust verdict is
+/// Drop every LSP server from a sourced map when the workspace is untrusted
+/// (audit X2-F3: a language server can run project code while it indexes, so
+/// even a user- or plugin-scoped one is not started against an untrusted
+/// folder). Warns once. Trusted workspaces keep all. The trust verdict is
 /// passed in (the folder-trust engine lives in the shell, out of this crate).
 ///
 /// Single source of truth for the folder-trust LSP load gate, shared by the
@@ -119,21 +121,16 @@ pub fn filter_project_lsp_when_untrusted(
     sourced: BTreeMap<String, (LspServerConfig, crate::types::config_source::ConfigSource)>,
     project_trusted: bool,
 ) -> BTreeMap<String, LspServerConfig> {
-    use crate::types::config_source::ConfigSource;
-    sourced
-        .into_iter()
-        .filter_map(|(name, (cfg, source))| {
-            if !project_trusted && matches!(source, ConfigSource::Project { .. }) {
-                tracing::warn!(
-                    server = %name,
-                    "folder untrusted: skipping repo-local (project-scoped) LSP server"
-                );
-                None
-            } else {
-                Some((name, cfg))
-            }
-        })
-        .collect()
+    if !project_trusted {
+        if !sourced.is_empty() {
+            tracing::warn!(
+                servers = sourced.len(),
+                "folder untrusted: not starting language servers; code intelligence is off until the folder is trusted"
+            );
+        }
+        return BTreeMap::new();
+    }
+    sourced.into_iter().map(|(name, (cfg, _source))| (name, cfg)).collect()
 }
 
 /// Load LSP server configs from `~/.fuigo/lsp.json` and `<cwd>/.fuigo/lsp.json`.
@@ -417,12 +414,9 @@ mod tests {
     }
 
     #[test]
-    fn untrusted_drops_only_project_keeps_user_and_plugin() {
+    fn untrusted_drops_every_server_including_user_and_plugin() {
         let kept = filter_project_lsp_when_untrusted(sourced(), false);
-        assert_eq!(kept.len(), 2);
-        assert!(!kept.contains_key("proj"));
-        assert!(kept.contains_key("usr"));
-        assert!(kept.contains_key("plug"));
+        assert!(kept.is_empty(), "audit X2-F3: no language server starts in an untrusted folder");
     }
 
     #[test]

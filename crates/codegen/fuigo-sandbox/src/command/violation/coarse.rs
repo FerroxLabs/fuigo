@@ -479,6 +479,11 @@ pub(super) fn as_path_token(word: &str, quoted: bool) -> Option<String> {
             unquoted
         }
     };
+    // A path with an escape byte, a bidi override or another unsafe display character is never
+    // proposed: the card would show something other than what the grant covers
+    if core.chars().any(fuigo_tty_utils::is_unsafe_display_char) {
+        return None;
+    }
     let is_path = core.starts_with('/')
         || core.starts_with("./")
         || core.starts_with("../")
@@ -649,9 +654,13 @@ fn is_loopback(host: &str) -> bool {
         || ip_literal(host).is_some_and(|address| address.to_canonical().is_loopback())
 }
 
-/// The last `max_bytes` of `stderr` on a char boundary, trimmed.
+/// The last `max_bytes` of `stderr` on a char boundary, trimmed. The text is the confined
+/// command's own, so every unsafe display character except a newline or tab (escape bytes, bidi
+/// overrides, fillers) is made visible as its percent-encoded bytes before it reaches a card or
+/// the model.
 pub fn stderr_tail(stderr: &str, max_bytes: usize) -> String {
-    let trimmed = stderr.trim();
+    let escaped = escape_unsafe_keep_layout(stderr.trim());
+    let trimmed = escaped.as_str();
     if trimmed.len() <= max_bytes {
         return trimmed.to_owned();
     }
@@ -660,6 +669,21 @@ pub fn stderr_tail(stderr: &str, max_bytes: usize) -> String {
         start += 1;
     }
     trimmed.get(start..).unwrap_or_default().to_owned()
+}
+
+fn escape_unsafe_keep_layout(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c == '\n' || c == '\t' || !fuigo_tty_utils::is_unsafe_display_char(c) {
+            out.push(c);
+        } else {
+            let mut utf8 = [0u8; 4];
+            for byte in c.encode_utf8(&mut utf8).bytes() {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

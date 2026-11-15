@@ -25,7 +25,14 @@
 #
 # Each tarball's sha512 is computed here and must equal the registry's
 # dist.integrity for that exact version, read separately with `npm view`.
+#
+# Origin checks on top of that integrity match (audit S8-F7): the macOS and Windows executables
+# must carry the Developer ID / Authenticode identity (check-signed-binary.py), and the manifest's
+# sourceCommit is the commit stamp read from a registry binary, not this run's GITHUB_SHA, because an
+# earlier run may have built and published these bytes. FUIGO_ALLOW_UNSIGNED=1 skips the signature
+# identity check; it exists for the fixture tests only and the release workflow never sets it.
 set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
 if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
   echo "usage: $0 <version> <binaries-out> <npm-packages-out> [<fresh-binaries-dir>]" >&2
@@ -121,7 +128,37 @@ for p in $PLATFORMS ""; do
     [ "$rc" = 3 ] || exit "$rc"
     drift=$((drift + 1))
   }
+
+  case "$p" in
+    darwin-*|win32-*)
+      if [ "${FUIGO_ALLOW_UNSIGNED:-}" = 1 ]; then
+        echo "::warning::FUIGO_ALLOW_UNSIGNED=1: not checking the signature identity of $p"
+      else
+        python3 "$SCRIPT_DIR/check-signed-binary.py" "$BIN_OUT/fuigo-$p/$built" >&2 || {
+          echo "error: the registry executable for $p is not signed with the release identity" >&2
+          exit 1
+        }
+      fi ;;
+  esac
 done
+
+# The commit this release's bytes were built from, as stamped in a registry executable. The stamp
+# is 12 hex digits; this run's full GITHUB_SHA is recorded only when it starts with that stamp.
+STAMP=
+if stamp_out=$("$BIN_OUT/fuigo-linux-x64/fuigo-pager" --version 2>/dev/null); then
+  STAMP=$(printf '%s\n' "$stamp_out" | tr -d '\r' | sed -n 's/^fuigo [^ ]* (\([0-9a-f]\{12\}\))$/\1/p' | head -n 1)
+fi
+SOURCE_COMMIT=
+if [ -n "$STAMP" ]; then
+  case "${GITHUB_SHA:-}" in
+    "$STAMP"*) SOURCE_COMMIT=$GITHUB_SHA ;;
+    *) SOURCE_COMMIT=$STAMP
+       echo "::warning::the registry binaries are stamped $STAMP, not this run's commit; the manifest records the stamp" ;;
+  esac
+else
+  echo "::warning::could not read a commit stamp from the registry linux-x64 executable; the manifest records no sourceCommit"
+fi
+export SOURCE_COMMIT
 
 # Same shape as verify-package-archives.js, describing the registry tarballs.
 # shellcheck disable=SC2016 # JavaScript, not shell: the ${...} are template literals
@@ -137,7 +174,7 @@ node -e '
       shasum: crypto.createHash("sha1").update(bytes).digest("hex"), size: bytes.length};
   });
   fs.writeFileSync(path.join(dir, "release-manifest.json"), JSON.stringify({
-    sourceCommit: process.env.GITHUB_SHA || null, version, packages,
+    sourceCommit: process.env.SOURCE_COMMIT || null, version, packages,
   }, null, 2) + "\n");
 ' "$NPM_OUT" "$VERSION"
 

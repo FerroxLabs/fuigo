@@ -6280,7 +6280,7 @@ async fn p161_outbound_queued_as_cancel_fires_is_drained_not_lost() {
     let (server_stream, _) = accepted.unwrap();
     let (mut reader, mut writer) = tokio::io::split(client.unwrap());
     let (tx, server_rx) = mpsc::unbounded_channel::<ClientOutbound>();
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let (event_tx, mut event_rx) = mpsc::channel::<ServerEvent>(CLIENT_EVENT_QUEUE_DEPTH);
     let cancel = CancellationToken::new();
     let (_ready_tx, ready_rx) = watch::channel(true);
     let session = tokio::spawn(run_client_session(
@@ -6819,4 +6819,501 @@ fn f5n_relay_lines_are_fitted_and_never_carry_the_reload() {
     assert!(pv(&fit_folder_trust_line_for_relay(load.to_string()))["result"]["_meta"].get("fuigo/folderTrustReload").is_none());
     let other = r#"{"jsonrpc":"2.0","id":5,"result":{"text":"a \"timeout\" here"}}"#;
     assert_eq!(fit_folder_trust_line_for_relay(other.to_string()), other);
+}
+
+/// Audit S10-F5: a client that sends faster than the server loop drains waits at the bounded event queue instead of
+/// growing it; the handler resumes once the loop takes an event.
+#[tokio::test]
+async fn client_events_apply_back_pressure() {
+    let (event_tx, mut event_rx) = mpsc::channel::<ServerEvent>(2);
+    let send_one = |n: usize| {
+        let event_tx = event_tx.clone();
+        async move {
+            handle_client_inbound_message(
+                Ok(ClientMessage::Acp { payload: format!("frame {n}") }),
+                ClientId(1),
+                &event_tx,
+                &mut tokio::io::sink(),
+            )
+            .await
+        }
+    };
+    assert!(send_one(1).await.is_ok());
+    assert!(send_one(2).await.is_ok());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), send_one(3)).await.is_err(),
+        "the third frame must wait for the server loop"
+    );
+    assert_eq!(event_rx.len(), 2, "queue depth stays at its bound");
+    assert!(event_rx.recv().await.is_some());
+    assert!(send_one(4).await.is_ok(), "room again once the loop took an event");
+}
+
+/// Start a leader server whose agent queue is a tracked [`acp_channel_with_cap`] queue, returning the sink (to read its depth) and the receiver (a test that never reads it is a stalled agent).
+async fn setup_capped_server(
+    temp: &TempDir,
+    cap: usize,
+) -> (PathBuf, CancellationToken, AcpSink, AcpReceiver) {
+    let sock_path = temp.path().join("test.sock");
+    let (acp_tx, acp_rx) = acp_channel_with_cap(cap);
+    let (_response_tx, response_rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let control_state = default_test_control_state(&sock_path);
+    let (_ready_tx, ready_rx) = watch::channel(true);
+    let (shutdown_tx, _shutdown_rx) =
+        watch::channel(super::super::protocol::ShutdownReason::Manual);
+    let depth_probe = acp_tx.clone();
+    let (sock_clone, cancel_clone) = (sock_path.clone(), cancel.clone());
+    tokio::spawn(async move {
+        let _ = run_leader_server(
+            sock_clone,
+            acp_tx,
+            response_rx,
+            cancel_clone,
+            true,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicBool::new(false)),
+            AgentActivity::default(),
+            ready_rx,
+            watch::channel(false).0,
+            shutdown_tx,
+            None,
+            control_state,
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (sock_path, cancel, depth_probe, acp_rx)
+}
+
+async fn send_acp_payload(writer: &mut tokio::io::WriteHalf<LeaderStream>, payload: String) {
+    write_message(writer, &ClientMessage::Acp { payload: payload.into() })
+        .await
+        .unwrap();
+}
+
+/// A stalled agent consumer: the queue stops at the cap, every excess request gets a `busy` error carrying its own id,
+/// droppable notifications vanish, and `session/cancel` still queues.
+#[tokio::test]
+async fn full_agent_queue_sheds_requests_with_busy_and_keeps_cancel() {
+    let temp = TempDir::new().unwrap();
+    let cap = 8;
+    let (sock_path, cancel, sink, mut acp_rx) = setup_capped_server(&temp, cap).await;
+    let (mut reader, mut writer) = connect_and_register(&sock_path, "test").await;
+
+    for i in 0..cap {
+        let req = serde_json::json!({"jsonrpc":"2.0","id":i,"method":"session/prompt","params":{}});
+        send_acp_payload(&mut writer, req.to_string()).await;
+    }
+    let excess = 40;
+    for i in 0..excess {
+        let req = serde_json::json!({"jsonrpc":"2.0","id":1000 + i,"method":"session/prompt","params":{}});
+        send_acp_payload(&mut writer, req.to_string()).await;
+    }
+    for i in 0..excess {
+        let msg: ServerMessage = tokio::time::timeout(Duration::from_secs(5), read_message(&mut reader))
+            .await
+            .expect("timed out waiting for a busy error")
+            .unwrap();
+        let ServerMessage::Acp { payload } = msg else { panic!("expected an Acp error, got another message") };
+        let v: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+        assert_eq!(v["id"], 1000 + i, "the busy error answers the shed request");
+        assert_eq!(v["error"], busy_error_body(), "the full busy error shape");
+    }
+    assert_eq!(sink.depth(), cap, "depth stays at the cap while the consumer is stalled");
+
+    // A droppable notification is shed; a cancel always queues.
+    send_acp_payload(&mut writer, r#"{"jsonrpc":"2.0","method":"_fuigo/progress","params":{}}"#.into()).await;
+    send_acp_payload(&mut writer, r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}"#.into()).await;
+    wait_depth(&sink, cap + 1).await;
+    assert_eq!(sink.depth(), cap + 1, "only the cancel was queued past the cap");
+
+    // The consumer waking drains everything that was accepted, in order, ending with the cancel.
+    let mut got = Vec::new();
+    while let Ok(m) = acp_rx.try_recv() {
+        got.push(m);
+    }
+    assert_eq!(got.len(), cap + 1);
+    assert!(got.last().unwrap().contains("session/cancel"));
+    assert_eq!(sink.depth(), 0, "the receiver side lowers the depth");
+    cancel.cancel();
+}
+
+/// Delta review (leader queue): past the cap only controls still queue, and not without bound. At the hard cap (four
+/// times the cap) a mode change is shed too; cancels (one per session) get one more cap of room, then nothing queues.
+#[tokio::test]
+async fn agent_queue_has_a_hard_cap_only_cancels_pass() {
+    let temp = TempDir::new().unwrap();
+    let cap = 2;
+    let (sock_path, cancel, sink, mut acp_rx) = setup_capped_server(&temp, cap).await;
+    let (mut reader, mut writer) = connect_and_register(&sock_path, "test").await;
+    let cancel_for = |n: usize| format!(r#"{{"jsonrpc":"2.0","method":"session/cancel","params":{{"sessionId":"s{n}"}}}}"#);
+
+    for i in 0..cap {
+        let req = serde_json::json!({"jsonrpc":"2.0","id":i,"method":"session/prompt","params":{}});
+        send_acp_payload(&mut writer, req.to_string()).await;
+    }
+    for n in 0..(cap * 4 - cap) {
+        send_acp_payload(&mut writer, cancel_for(n)).await;
+    }
+    wait_depth(&sink, cap * 4).await;
+    assert_eq!(sink.depth(), cap * 4, "distinct cancels queue up to the hard cap");
+
+    send_acp_payload(&mut writer, r#"{"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{"yolo_mode":true}}"#.into()).await;
+    for n in 100..130 {
+        send_acp_payload(&mut writer, cancel_for(n)).await;
+    }
+    wait_depth(&sink, cap * 5).await;
+    settle(&mut reader, &mut writer).await;
+    assert_eq!(sink.depth(), cap * 5, "past the hard cap only a cap of cancels, then nothing");
+    let mut got = Vec::new();
+    while let Ok(m) = acp_rx.try_recv() {
+        got.push(m);
+    }
+    assert!(!got.iter().any(|m| m.contains("yolo_mode_changed")), "the mode change was shed at the hard cap");
+    cancel.cancel();
+}
+
+/// Review (leader queue): the per-disconnect evict notice bypasses the cap, so clients that subscribe and disconnect
+/// against a stalled agent must not grow the queue by a notice each: notices queued back to back (nothing newer between
+/// them) share one, which carries every session id and still reaches the agent after the loads (review dfix5-1).
+#[tokio::test]
+async fn disconnect_evicts_coalesce_to_one_pending_notice() {
+    let temp = TempDir::new().unwrap();
+    let cap = 1000;
+    let (sock_path, cancel, sink, mut acp_rx) = setup_capped_server(&temp, cap).await;
+    let clients = 12;
+    let mut connections = Vec::new();
+    for i in 0..clients {
+        let (reader, mut writer) = connect_and_register(&sock_path, "test").await;
+        let load = serde_json::json!({"jsonrpc":"2.0","id":i,"method":"session/load","params":{"sessionId":format!("sess-{i}")}});
+        send_acp_payload(&mut writer, load.to_string()).await;
+        wait_depth(&sink, i + 1).await;
+        connections.push((reader, writer));
+    }
+    for (reader, mut writer) in connections {
+        write_message(&mut writer, &ClientMessage::Disconnect).await.unwrap();
+        drop(reader);
+        drop(writer);
+    }
+    // Every disconnect is handled once the waiting notice carries all the sessions; wait for that, bounded.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let AcpTx::Tracked(_, state) = &sink.tx else { unreachable!("a tracked sink") };
+        let carried = state.pending_evicts.lock().lists.back().map_or(0, Vec::len);
+        if carried == clients {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the notice carries {carried} of {clients} sessions");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let got = drain_acp(&mut acp_rx);
+    let mut evicted = std::collections::HashSet::new();
+    let mut evicts = 0;
+    for v in &got {
+        if v["method"].as_str().and_then(|m| m.strip_prefix('_')) == Some(InternalMethod::EvictSessions.name()) {
+            evicts += 1;
+            for id in v["params"]["sessionIds"].as_array().unwrap() {
+                evicted.insert(id.as_str().unwrap().to_owned());
+            }
+        }
+    }
+    assert_eq!(evicts, 1, "one coalesced evict notice");
+    assert_eq!(got.len(), clients + 1, "the loads and one notice");
+    assert!(
+        got.last().unwrap()["method"].as_str().unwrap().contains(InternalMethod::EvictSessions.name()),
+        "the notice follows the loads"
+    );
+    for i in 0..clients {
+        assert!(evicted.contains(&format!("sess-{i}")), "sess-{i} must still be evicted");
+    }
+    cancel.cancel();
+}
+
+/// Review dfix5-1: an evict notice must not overtake the messages its own session queued after it. Ids join a waiting
+/// notice only while it is the newest queue entry; otherwise a second notice queues behind the later message.
+#[test]
+fn evict_notice_does_not_overtake_later_queued_messages() {
+    let (sink, mut acp_rx) = acp_channel_with_cap(1000);
+    sink.send_evict(&["s1".to_owned()]).unwrap();
+    sink.send_evict(&["s1b".to_owned()]).unwrap();
+    sink.send_always(r#"{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"s2"}}"#.into()).unwrap();
+    sink.send_evict(&["s2".to_owned()]).unwrap();
+    sink.send_evict(&["s2b".to_owned()]).unwrap();
+    assert_eq!(sink.depth(), 3, "two notices and the load");
+    let got = drain_acp(&mut acp_rx);
+    let ids = |m: &serde_json::Value| -> Vec<String> {
+        m["params"]["sessionIds"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()).collect()
+    };
+    assert_eq!(got.len(), 3);
+    assert_eq!(ids(&got[0]), ["s1", "s1b"], "ids queued back to back share one notice");
+    assert_eq!(got[1]["method"], "session/load", "the load keeps its place");
+    assert_eq!(ids(&got[2]), ["s2", "s2b"], "the later evict queues behind the load, never ahead of it");
+    assert_eq!(sink.depth(), 0);
+}
+
+/// Wait (bounded) for the agent queue to reach `want`, so a test does not depend on how fast the leader loop runs.
+async fn wait_depth(sink: &AcpSink, want: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while sink.depth() != want {
+        assert!(tokio::time::Instant::now() < deadline, "queue depth stuck at {}, wanted {want}", sink.depth());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Barrier for a test whose queue is over its cap: the leader handles one client's messages in order, so once the
+/// `busy` answer to this extra request arrives, everything sent before it has been handled (queued or shed).
+async fn settle(reader: &mut tokio::io::ReadHalf<LeaderStream>, writer: &mut tokio::io::WriteHalf<LeaderStream>) {
+    let req = serde_json::json!({"jsonrpc":"2.0","id":424_242,"method":"session/prompt","params":{}});
+    send_acp_payload(writer, req.to_string()).await;
+    loop {
+        let msg: ServerMessage = tokio::time::timeout(Duration::from_secs(10), read_message(reader))
+            .await
+            .expect("timed out waiting for the barrier reply")
+            .unwrap();
+        let ServerMessage::Acp { payload } = msg else { continue };
+        let v: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+        if v["id"] == 424_242 {
+            assert_eq!(v["error"], busy_error_body(), "the barrier request is shed while over the cap");
+            return;
+        }
+    }
+}
+
+/// The `error` object of a busy reply: the documented "rate limited" class (`-32003`, not the `-32000` auth class) with
+/// the same object `data` (`error_kind` and `message`) every agent error carries.
+fn busy_error_body() -> serde_json::Value {
+    serde_json::json!({
+        "code": -32003,
+        "message": "Rate limited",
+        "data": {"error_kind": "busy", "message": "The agent has too many queued messages. Retry shortly."}
+    })
+}
+
+/// A batch over the cap answers each of its requests with the same busy shape, and only requests.
+#[test]
+fn busy_reply_for_a_batch_has_the_same_shape_per_element() {
+    let batch = serde_json::json!([
+        {"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{}},
+        {"jsonrpc":"2.0","method":"_fuigo/progress","params":{}},
+        {"jsonrpc":"2.0","id":"two","method":"session/prompt","params":{}}
+    ]);
+    let AcpOverflow::Busy(payload) = classify_acp_overflow(Some(&batch), AcpOverLevel::Soft, &acp_channel_with_cap(8).0) else {
+        panic!("a batch with requests over the cap is answered busy");
+    };
+    let replies: Vec<serde_json::Value> = serde_json::from_str(&payload).unwrap();
+    assert_eq!(replies.len(), 2);
+    for (reply, id) in replies.iter().zip([serde_json::json!(1), serde_json::json!("two")]) {
+        assert_eq!(reply["id"], id);
+        assert_eq!(reply["error"], busy_error_body());
+    }
+}
+
+/// Delta review D3: a batch counts as its elements; only exact control methods pass the cap; a control already queued
+/// and not yet taken is not queued again.
+#[tokio::test]
+async fn agent_queue_counts_batch_elements_and_coalesces_controls() {
+    let temp = TempDir::new().unwrap();
+    let cap = 8;
+    let (sock_path, cancel, sink, mut acp_rx) = setup_capped_server(&temp, cap).await;
+    let (mut reader, mut writer) = connect_and_register(&sock_path, "test").await;
+    let note = serde_json::json!({"jsonrpc":"2.0","method":"_fuigo/progress","params":{}});
+
+    // A batch larger than the room left is shed (its notifications dropped); one that fits counts as its elements.
+    let big = serde_json::Value::Array(vec![note.clone(); cap * 3]);
+    send_acp_payload(&mut writer, big.to_string()).await;
+    let fits = serde_json::Value::Array(vec![note.clone(); cap / 2]);
+    send_acp_payload(&mut writer, fits.to_string()).await;
+    wait_depth(&sink, cap / 2).await;
+    assert_eq!(sink.depth(), cap / 2, "a batch counts as its elements");
+    for _ in 0..cap {
+        send_acp_payload(&mut writer, note.to_string()).await;
+    }
+    wait_depth(&sink, cap).await;
+    settle(&mut reader, &mut writer).await;
+    assert_eq!(sink.depth(), cap, "notifications stop at the cap");
+
+    // Past the cap a method merely containing "cancel" is dropped; identical cancels coalesce.
+    send_acp_payload(&mut writer, r#"{"jsonrpc":"2.0","method":"_fuigo/cancel_spam","params":{}}"#.into()).await;
+    for _ in 0..10 {
+        send_acp_payload(&mut writer, r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}"#.into()).await;
+    }
+    send_acp_payload(&mut writer, r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s2"}}"#.into()).await;
+    wait_depth(&sink, cap + 2).await;
+    assert_eq!(sink.depth(), cap + 2, "one cancel per session past the cap");
+
+    let mut got = Vec::new();
+    while let Ok(m) = acp_rx.try_recv() {
+        got.push(m);
+    }
+    assert_eq!(sink.depth(), 0, "the receiver lowers the depth by each message's weight");
+    assert!(!got.iter().any(|m| m.contains("cancel_spam")));
+    // Taken, a cancel may be queued again.
+    for _ in 0..cap {
+        send_acp_payload(&mut writer, note.to_string()).await;
+    }
+    send_acp_payload(&mut writer, r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}"#.into()).await;
+    wait_depth(&sink, cap + 1).await;
+    assert_eq!(sink.depth(), cap + 1);
+    cancel.cancel();
+}
+
+/// Drain what the agent side of a capped queue holds, parsed.
+fn drain_acp(acp_rx: &mut AcpReceiver) -> Vec<serde_json::Value> {
+    let mut got = Vec::new();
+    while let Ok(m) = acp_rx.try_recv() {
+        got.push(serde_json::from_str(&m).unwrap());
+    }
+    got
+}
+
+/// Audit dfix3-1: the pager sends `fuigo/subagent/cancel` and `fuigo/btw/cancel` as requests with an id (the wire form
+/// carries the extension underscore). Over the soft and the hard cap they still queue, and get no `busy` reply.
+#[tokio::test]
+async fn cancel_requests_with_an_id_queue_over_the_soft_and_hard_cap() {
+    let temp = TempDir::new().unwrap();
+    let cap = 2;
+    let (sock_path, cancel, sink, mut acp_rx) = setup_capped_server(&temp, cap).await;
+    let (mut reader, mut writer) = connect_and_register(&sock_path, "test").await;
+    for i in 0..cap {
+        let req = serde_json::json!({"jsonrpc":"2.0","id":i,"method":"session/prompt","params":{}});
+        send_acp_payload(&mut writer, req.to_string()).await;
+    }
+    let subagent = |id: usize, n: usize| {
+        serde_json::json!({"jsonrpc":"2.0","id":id,"method":"_fuigo/subagent/cancel","params":{"sessionId":"s","subagentId":format!("a{n}")}})
+    };
+    let btw = |id: usize, n: usize| {
+        serde_json::json!({"jsonrpc":"2.0","id":id,"method":"fuigo/btw/cancel","params":{"sessionId":"s","requestId":format!("r{n}")}})
+    };
+    // Soft: one of each.
+    send_acp_payload(&mut writer, subagent(100, 0).to_string()).await;
+    send_acp_payload(&mut writer, btw(101, 0).to_string()).await;
+    wait_depth(&sink, cap + 2).await;
+    assert_eq!(sink.depth(), cap + 2, "cancel requests queue over the soft cap");
+    // Fill to the hard cap with filler cancels, then send request cancels past it.
+    for n in 0..(cap * 4 - cap - 2) {
+        let note = serde_json::json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":format!("f{n}")}});
+        send_acp_payload(&mut writer, note.to_string()).await;
+    }
+    wait_depth(&sink, cap * 4).await;
+    assert_eq!(sink.depth(), cap * 4);
+    send_acp_payload(&mut writer, subagent(200, 1).to_string()).await;
+    send_acp_payload(&mut writer, btw(201, 1).to_string()).await;
+    wait_depth(&sink, cap * 4 + 2).await;
+    assert_eq!(sink.depth(), cap * 4 + 2, "cancel requests queue over the hard cap");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), read_message::<_, ServerMessage>(&mut reader)).await.is_err(),
+        "no busy reply for a cancel request"
+    );
+    let got = drain_acp(&mut acp_rx);
+    // The leader renames request ids on the way to the agent, so match on the target.
+    for target in [("a0", "subagentId"), ("r0", "requestId"), ("a1", "subagentId"), ("r1", "requestId")] {
+        assert!(
+            got.iter().any(|m| m["params"][target.1] == target.0 && m.get("id").is_some()),
+            "cancel request for {} reached the agent",
+            target.0
+        );
+    }
+    cancel.cancel();
+}
+
+/// Audit dfix3-2: mode changes keep their order over the cap, so "off, on, off" leaves the agent off.
+#[tokio::test]
+async fn mode_changes_over_the_cap_keep_their_order() {
+    let temp = TempDir::new().unwrap();
+    let cap = 2;
+    let (sock_path, cancel, sink, mut acp_rx) = setup_capped_server(&temp, cap).await;
+    let (_reader, mut writer) = connect_and_register(&sock_path, "test").await;
+    for i in 0..cap {
+        let req = serde_json::json!({"jsonrpc":"2.0","id":i,"method":"session/prompt","params":{}});
+        send_acp_payload(&mut writer, req.to_string()).await;
+    }
+    for on in [false, true, false] {
+        let m = serde_json::json!({"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{"yolo_mode":on}});
+        send_acp_payload(&mut writer, m.to_string()).await;
+    }
+    wait_depth(&sink, cap + 3).await;
+    assert_eq!(sink.depth(), cap + 3, "every mode change queued");
+    let modes: Vec<bool> = drain_acp(&mut acp_rx)
+        .iter()
+        .filter(|m| m["method"].as_str().is_some_and(|x| x.contains("yolo_mode_changed")))
+        .map(|m| m["params"]["yolo_mode"].as_bool().unwrap())
+        .collect();
+    assert_eq!(modes, [false, true, false], "in order, ending off");
+    cancel.cancel();
+}
+
+/// Audit dfix3-1 (batches): a mixed batch never loses its `session/cancel`; its other request gets `busy`.
+#[tokio::test]
+async fn mixed_batch_keeps_its_cancel_and_sheds_the_rest() {
+    let temp = TempDir::new().unwrap();
+    let cap = 2;
+    let (sock_path, cancel, sink, mut acp_rx) = setup_capped_server(&temp, cap).await;
+    let (mut reader, mut writer) = connect_and_register(&sock_path, "test").await;
+    for i in 0..cap {
+        let req = serde_json::json!({"jsonrpc":"2.0","id":i,"method":"session/prompt","params":{}});
+        send_acp_payload(&mut writer, req.to_string()).await;
+    }
+    let batch = serde_json::json!([
+        {"jsonrpc":"2.0","id":77,"method":"session/prompt","params":{}},
+        {"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}},
+        {"jsonrpc":"2.0","method":"_fuigo/progress","params":{}}
+    ]);
+    send_acp_payload(&mut writer, batch.to_string()).await;
+    let msg: ServerMessage = tokio::time::timeout(Duration::from_secs(5), read_message(&mut reader)).await.unwrap().unwrap();
+    let ServerMessage::Acp { payload } = msg else { panic!("expected an Acp reply") };
+    let replies: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(replies[0]["id"], 77);
+    assert_eq!(replies[0]["error"], busy_error_body());
+    assert_eq!(sink.depth(), cap + 1, "only the cancel queued");
+    let got = drain_acp(&mut acp_rx);
+    let queued_batch = got.last().unwrap();
+    assert_eq!(queued_batch.as_array().unwrap().len(), 1);
+    assert_eq!(queued_batch[0]["method"], "session/cancel");
+    cancel.cancel();
+}
+
+/// Audit dfix3-1 (final cap): duplicate cancels, alone or in batches, do not fill the reserve past the hard cap; a
+/// cancel for a new target still queues afterwards, and the reserve is bounded.
+#[tokio::test]
+async fn duplicate_cancels_do_not_exhaust_the_reserve_at_the_final_cap() {
+    let temp = TempDir::new().unwrap();
+    let cap = 2;
+    let (sock_path, cancel, sink, mut acp_rx) = setup_capped_server(&temp, cap).await;
+    let (mut reader, mut writer) = connect_and_register(&sock_path, "test").await;
+    let cancel_for = |n: usize| serde_json::json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":format!("s{n}")}});
+    for i in 0..cap {
+        let req = serde_json::json!({"jsonrpc":"2.0","id":i,"method":"session/prompt","params":{}});
+        send_acp_payload(&mut writer, req.to_string()).await;
+    }
+    for n in 0..(cap * 4 - cap) {
+        send_acp_payload(&mut writer, cancel_for(n).to_string()).await;
+    }
+    wait_depth(&sink, cap * 4).await;
+    assert_eq!(sink.depth(), cap * 4);
+    // Past the hard cap: a batch repeating one target must use one place of the reserve, not its length.
+    send_acp_payload(&mut writer, serde_json::Value::Array(vec![cancel_for(1000); 2]).to_string()).await;
+    wait_depth(&sink, cap * 4 + 1).await;
+    assert_eq!(sink.depth(), cap * 4 + 1, "a batch of duplicates coalesces to one");
+    for _ in 0..20 {
+        send_acp_payload(&mut writer, cancel_for(1000).to_string()).await;
+    }
+    settle(&mut reader, &mut writer).await;
+    assert_eq!(sink.depth(), cap * 4 + 1, "further duplicates coalesce");
+    // A cancel for another target still gets through; the reserve then ends at one cap.
+    send_acp_payload(&mut writer, cancel_for(1001).to_string()).await;
+    for n in 2000..2020 {
+        send_acp_payload(&mut writer, cancel_for(n).to_string()).await;
+    }
+    wait_depth(&sink, cap * 4 + cap).await;
+    settle(&mut reader, &mut writer).await;
+    assert_eq!(sink.depth(), cap * 4 + cap, "bounded by the reserve");
+    let got = drain_acp(&mut acp_rx);
+    assert!(got.iter().any(|m| m["params"]["sessionId"] == "s1001"));
+    assert_eq!(sink.depth(), 0);
+    // Taken, the reserve is free again.
+    send_acp_payload(&mut writer, cancel_for(3000).to_string()).await;
+    wait_depth(&sink, 1).await;
+    assert_eq!(sink.depth(), 1);
+    cancel.cancel();
 }

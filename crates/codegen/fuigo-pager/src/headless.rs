@@ -2530,6 +2530,7 @@ async fn run_single_turn_inner(
             pid: std::process::id(),
             cwd: cwd.display().to_string(),
             opened_at: chrono::Utc::now(),
+            start_time: None,
         });
     }
 

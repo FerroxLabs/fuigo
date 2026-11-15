@@ -1,4 +1,5 @@
 use std::io;
+use std::time::Duration;
 
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
@@ -121,9 +122,43 @@ pub(crate) async fn write_committed<W: AsyncWrite + Unpin>(
         .map_err(ConnectionError::Committed)
 }
 
+/// [`write_committed`] for a peer that may stop reading: the write fails once the peer has taken
+/// no bytes for `idle`, while a slow peer that keeps taking bytes is served whole.
+pub(crate) async fn write_committed_idle<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    bytes: &[u8],
+    idle: Duration,
+) -> Result<(), ConnectionError> {
+    write_all_idle(writer, bytes, idle)
+        .await
+        .map_err(committed_write_error)
+}
+
+/// Writes all of `bytes`, failing with `TimedOut` once the peer has taken no bytes for `idle`.
+pub(crate) async fn write_all_idle<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    bytes: &[u8],
+    idle: Duration,
+) -> io::Result<()> {
+    let last = std::sync::atomic::AtomicU64::new(0);
+    crate::idle::IdleDeadline::new(idle, std::time::Instant::now(), &last)
+        .write_all(writer, bytes)
+        .await
+}
+
+/// A failed write to the client after the response started.
+pub(crate) fn committed_write_error(error: io::Error) -> ConnectionError {
+    match error.kind() {
+        io::ErrorKind::TimedOut => ConnectionError::Committed(ProxyError::Timeout),
+        _ => ConnectionError::Committed(ProxyError::from(error)),
+    }
+}
+
+/// Answers `error`, giving up once the client has taken no bytes for `deadline`.
 pub(crate) async fn write_error<W: AsyncWrite + Unpin>(
     stream: &mut W,
     error: &ProxyError,
+    deadline: Duration,
 ) -> Result<(), io::Error> {
     let (status, reason) = error.status();
     let auth = if status == 407 {
@@ -136,5 +171,5 @@ pub(crate) async fn write_error<W: AsyncWrite + Unpin>(
         "HTTP/1.1 {status} {reason}\r\n{auth}Content-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    stream.write_all(response.as_bytes()).await
+    write_all_idle(stream, response.as_bytes(), deadline).await
 }

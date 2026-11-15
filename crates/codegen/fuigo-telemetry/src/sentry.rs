@@ -7,7 +7,8 @@ use sentry::ClientInitGuard;
 use sentry::ClientOptions;
 use sentry::protocol::{Event, Value};
 
-const TRACES_SAMPLE_RATE: f32 = 0.01;
+/// Transactions are not wired, so none is sampled until they are deliberately added (audit S11-F8).
+const TRACES_SAMPLE_RATE: f32 = 0.0;
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
 // ─── Host integration ─────────────────────────────────────────────────────
@@ -263,9 +264,41 @@ fn before_send(mut event: Event<'static>, scrubber: &Scrubber) -> Option<Event<'
         *tag = scrubber.scrub(tag);
     }
 
+    // Fields no code fills with user text today; scrubbed so a later integration or SDK default cannot leak (S11-F8).
+    // `request` and `user` carry only URLs, headers, cookies and identity, none of which Fuigo reports: dropped.
+    event.request = None;
+    event.user = None;
+    event.culprit = event.culprit.as_deref().map(|s| scrubber.scrub(s));
+    event.transaction = event.transaction.as_deref().map(|s| scrubber.scrub(s));
+    event.logger = event.logger.as_deref().map(|s| scrubber.scrub(s));
+    event.logentry = event
+        .logentry
+        .take()
+        .and_then(|entry| scrub_via_json(&entry, scrubber));
+    event.contexts = scrub_via_json(&event.contexts, scrubber).unwrap_or_default();
+    event.stacktrace = event
+        .stacktrace
+        .take()
+        .and_then(|trace| scrub_via_json(&trace, scrubber));
+    event.threads = scrub_via_json(&event.threads, scrubber).unwrap_or_default();
+    event.debug_meta = Cow::Owned(
+        scrub_via_json(event.debug_meta.as_ref(), scrubber).unwrap_or_default(),
+    );
+
     event.server_name = None;
 
     Some(event)
+}
+
+/// Scrub every string inside `value` by way of its JSON form. `None` when the value does not survive the round trip,
+/// in which case the caller drops the field rather than send it unscrubbed.
+fn scrub_via_json<T>(value: &T, scrubber: &Scrubber) -> Option<T>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let mut json = serde_json::to_value(value).ok()?;
+    scrubber.scrub_values(std::iter::once(&mut json));
+    serde_json::from_value(json).ok()
 }
 
 /// Drop panics caused by broken pipe or disk-full, both user-environment noise.
@@ -499,6 +532,72 @@ mod tests {
         assert_eq!(out.extra["left"], "[REDACTED_SECRET]");
         assert_eq!(out.extra["right"], "[REDACTED_SECRET]");
         assert_eq!(out.extra["status"], 503);
+    }
+
+    /// Audit S11-F8: no field of the event may carry a credential out, including the ones no code fills today.
+    #[test]
+    fn before_send_scrubs_every_event_field() {
+        use sentry::protocol::{Context, DebugMeta, LogEntry, Request, Thread, User};
+        let secret = format!("sk-{}", "b".repeat(32));
+        let mut event = Event::default();
+        event.request = Some(Request {
+            data: Some(secret.clone()),
+            query_string: Some(format!("k={secret}")),
+            ..Default::default()
+        });
+        event.user = Some(User {
+            username: Some(secret.clone()),
+            email: Some(secret.clone()),
+            ..Default::default()
+        });
+        let mut other = std::collections::BTreeMap::new();
+        other.insert("note".to_owned(), Value::String(secret.clone()));
+        event.contexts.insert("custom".into(), Context::Other(other));
+        event.logentry = Some(LogEntry {
+            message: secret.clone(),
+            params: vec![Value::String(secret.clone())],
+        });
+        event.threads.values = vec![Thread {
+            name: Some(secret.clone()),
+            stacktrace: Some(Stacktrace {
+                frames: vec![Frame {
+                    abs_path: Some(secret.clone()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }];
+        event.stacktrace = Some(Stacktrace {
+            frames: vec![Frame {
+                filename: Some(secret.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let meta: DebugMeta = serde_json::from_value(serde_json::json!({
+            "images": [{
+                "type": "symbolic",
+                "name": secret,
+                "image_addr": "0x1000",
+                "image_size": 1,
+                "id": "00000000-0000-0000-0000-000000000000"
+            }]
+        }))
+        .unwrap();
+        event.debug_meta = Cow::Owned(meta);
+        event.transaction = Some(secret.clone());
+        event.culprit = Some(secret.clone());
+
+        let out = before_send(event, &make_scrubber()).unwrap();
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(!json.contains(&secret), "credential survived before_send: {json}");
+    }
+
+    /// Audit S11-F8: transactions are not wired, so none is sampled.
+    #[test]
+    fn traces_are_not_sampled() {
+        assert_eq!(TRACES_SAMPLE_RATE, 0.0);
     }
 
     #[test]

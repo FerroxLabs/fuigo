@@ -357,6 +357,7 @@ impl AgentView {
         if let Some(outcome) = self.peer_input(ev) {
             return outcome;
         }
+        self.note_composer_key(ev);
         if self.scrollback_drag_latched() {
             match ev {
                 Event::Mouse(MouseEvent {

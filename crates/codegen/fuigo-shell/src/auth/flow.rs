@@ -956,6 +956,9 @@ pub struct LogoutResult {
     pub email: Option<String>,
     /// `true` if `FUIGO_API_KEY` / `FUIGO_CODE_API_KEY` env var is set.
     pub api_key_still_set: bool,
+    /// `true` if a key saved with `fuigo login --api-key` is still stored in `auth.json` (logout keeps it, and it signs
+    /// the next start in again).
+    pub saved_api_key_still_set: bool,
 }
 /// Core logout logic shared by the CLI subcommand and the ACP handler.
 ///
@@ -965,7 +968,7 @@ pub fn perform_logout(
     auth_manager: &AuthManager,
     scope: Option<&str>,
 ) -> std::io::Result<LogoutResult> {
-    let result = prepare_logout(auth_manager, scope);
+    let result = prepare_logout(auth_manager, scope)?;
     if result.was_logged_in {
         if let Some(scope) = scope {
             auth_manager.remove_scope(scope)?;
@@ -973,7 +976,7 @@ pub fn perform_logout(
             auth_manager.clear()?;
         }
     }
-    Ok(finish_logout(result))
+    Ok(finish_logout(sweep_logout_leftovers(result, auth_manager)))
 }
 
 /// Logout with an asynchronous wait for the cross-process auth lock.
@@ -981,7 +984,7 @@ pub async fn perform_logout_async(
     auth_manager: &AuthManager,
     scope: Option<&str>,
 ) -> std::io::Result<LogoutResult> {
-    let result = prepare_logout(auth_manager, scope);
+    let result = prepare_logout(auth_manager, scope)?;
     if result.was_logged_in {
         if let Some(scope) = scope {
             auth_manager.remove_scope_async(scope).await?;
@@ -989,11 +992,29 @@ pub async fn perform_logout_async(
             auth_manager.clear_async().await?;
         }
     }
-    Ok(finish_logout(result))
+    Ok(finish_logout(sweep_logout_leftovers(result, auth_manager)))
 }
 
-fn prepare_logout(auth_manager: &AuthManager, scope: Option<&str>) -> LogoutResult {
+/// `Err` when there is no login in memory but `auth.json` exists and could not be read: a stored login may be there,
+/// and reporting "nothing to log out of" would leave its tokens on disk behind a success. The file is left untouched.
+fn prepare_logout(
+    auth_manager: &AuthManager,
+    scope: Option<&str>,
+) -> std::io::Result<LogoutResult> {
     let auth = auth_manager.current_or_expired();
+    if auth.is_none()
+        && let Err(e) = auth_manager.read_store()
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(std::io::Error::new(
+            e.kind(),
+            format!(
+                "could not read the stored login at {} ({e}); it was left untouched, so it may still be signed in. \
+                 Fix the file's permissions or remove it, then run logout again",
+                auth_manager.auth_json_path().display()
+            ),
+        ));
+    }
     let email = auth.as_ref().and_then(|a| a.email.clone());
     let was_logged_in = auth.is_some();
     fuigo_telemetry::unified_log::info(
@@ -1005,11 +1026,21 @@ fn prepare_logout(auth_manager: &AuthManager, scope: Option<&str>) -> LogoutResu
             "user_id": auth.as_ref().map(|a| a.user_id.clone()),
         })),
     );
-    LogoutResult {
+    Ok(LogoutResult {
         was_logged_in,
         email,
         api_key_still_set: crate::agent::auth_method::has_fuigo_api_key_env(),
-    }
+        saved_api_key_still_set: false,
+    })
+}
+
+/// Delete credential copies that outlive a logout (corrupt backups, crash-orphaned temp files) and report whether a
+/// saved API key is still stored (audit S1-F6).
+fn sweep_logout_leftovers(mut result: LogoutResult, auth_manager: &AuthManager) -> LogoutResult {
+    let path = auth_manager.auth_json_path();
+    super::storage::remove_credential_leftovers(path);
+    result.saved_api_key_still_set = super::storage::saved_api_key_present(path);
+    result
 }
 
 fn finish_logout(result: LogoutResult) -> LogoutResult {
@@ -1020,6 +1051,8 @@ fn finish_logout(result: LogoutResult) -> LogoutResult {
     }
     result
 }
+
+const SAVED_KEY_NOTICE: &str = "An API key saved with `fuigo login --api-key` is still stored and will sign you in at the next start.";
 
 pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<()> {
     let fuigo_home = fuigo_home::fuigo_home();
@@ -1032,6 +1065,9 @@ pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<(
             fuigo_tty_utils::cli_eprintln!(
                 "You are authenticated via FUIGO_API_KEY (environment variable)."
             );
+        }
+        if result.saved_api_key_still_set {
+            fuigo_tty_utils::cli_eprintln!("{}", SAVED_KEY_NOTICE);
         }
         return Ok(());
     }
@@ -1047,6 +1083,9 @@ pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<(
         fuigo_tty_utils::cli_eprintln!(
             "FUIGO_API_KEY is still set and will be used for authentication."
         );
+    }
+    if result.saved_api_key_still_set {
+        fuigo_tty_utils::cli_eprintln!("{}", SAVED_KEY_NOTICE);
     }
     Ok(())
 }
@@ -1222,9 +1261,20 @@ mod tests {
             .await
             .unwrap();
         let before = std::fs::read(manager.auth_json_path()).unwrap();
-        let _held =
-            crate::auth::manager::lock::try_lock_auth_file_nonblocking(manager.auth_json_path())
-                .unwrap();
+        // A child process forked by a concurrent test holds a copy of every open descriptor until its exec closes
+        // it, so the lock the save just released can read as held for a moment: retry briefly.
+        let _held = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(lock) =
+                    crate::auth::manager::lock::try_lock_auth_file_nonblocking(manager.auth_json_path())
+                {
+                    break lock;
+                }
+                assert!(std::time::Instant::now() < deadline, "the auth lock stayed held after the save");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
         let out = persist_or_use_minted(
             &manager,
             oidc_session("minted-token", Some("rt")),
@@ -2090,5 +2140,78 @@ mod tests {
             fs2::FileExt::try_lock_exclusive(&probe).is_err(),
             "the flock must still be held exclusively after the bounded refresh"
         );
+    }
+}
+
+#[cfg(test)]
+mod s1_f2_logout_unreadable_store {
+    use super::*;
+
+    #[test]
+    fn logout_errors_and_keeps_an_unreadable_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let garbage = br#"{"scope": {"key": "secret-token-text", "#;
+        std::fs::write(&path, garbage).unwrap();
+        let manager = AuthManager::new_at_path(path.clone(), Default::default());
+        let err = perform_logout(&manager, None).err().expect("an unreadable store must not log out as success");
+        assert!(err.to_string().contains("auth.json"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), garbage);
+    }
+
+    #[test]
+    fn logout_with_no_file_still_reports_nothing_to_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = AuthManager::new_at_path(dir.path().join("auth.json"), Default::default());
+        assert!(!perform_logout(&manager, None).unwrap().was_logged_in);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create and remove files in test-owned temp dirs")]
+mod s1_f6_logout_leftovers {
+    use super::*;
+    use crate::auth::model::{API_KEY_SCOPE, AuthMode, AuthStore, FuigoAuth};
+
+    /// Audit S1-F6: logout deletes corrupt backups and stale crash temp files next to the auth file, keeps a live
+    /// write's fresh temp file and unrelated files, and says a saved API key is still stored.
+    #[test]
+    fn logout_removes_credential_leftovers_and_reports_the_saved_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = AuthStore::new();
+        store.insert(
+            API_KEY_SCOPE.to_owned(),
+            FuigoAuth {
+                key: "saved-key-FAKE-0001".into(),
+                auth_mode: AuthMode::ApiKey,
+                ..Default::default()
+            },
+        );
+        crate::auth::storage::write_auth_json(&path, &store).unwrap();
+        let corrupt = dir.path().join("auth.json.corrupt.1700000000000");
+        std::fs::write(&corrupt, "refresh-token-FAKE").unwrap();
+        let stale = dir.path().join("auth.json.1.0.00.tmp");
+        std::fs::write(&stale, "refresh-token-FAKE").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
+        let fresh = dir.path().join("auth.json.2.0.01.tmp");
+        std::fs::write(&fresh, "in-flight").unwrap();
+        let unrelated = dir.path().join("notes.tmp");
+        std::fs::write(&unrelated, "mine").unwrap();
+
+        let manager = AuthManager::new_at_path(path.clone(), Default::default());
+        let result = perform_logout(&manager, None).unwrap();
+
+        assert!(!corrupt.exists(), "corrupt backup survived logout");
+        assert!(!stale.exists(), "stale temp file survived logout");
+        assert!(fresh.exists(), "a write in flight lost its temp file");
+        assert!(unrelated.exists());
+        assert!(result.saved_api_key_still_set);
+        assert!(path.exists(), "the saved key is kept, and reported");
     }
 }

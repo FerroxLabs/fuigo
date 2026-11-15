@@ -322,3 +322,26 @@ sharing, `[relay] enabled`) is not a bridge, but it sends the relay the whole se
 by the same opt-in: a session is synced only to a FluxRouter-operated relay or one whose origin is in
 `[relay] trusted_origins` (or `FUIGO_TRUSTED_RELAY_ORIGINS`). A refusal is shown in the TUI (which relay, why, how to
 trust it), for the leader's refused bridge as well as for a refused sync.
+
+## Campaign patches: an allowlist (1.0.45)
+
+A campaign (a remote `campaigns[]` entry, `[[campaigns]]` in any config layer, or `FUIGO_CAMPAIGNS_OVERRIDE`) can set
+only the keys in `CAMPAIGN_ALLOW_PATHS` (`fuigo-config/src/config_override.rs`); everything else in its patch is
+dropped before the merge, and the user gets one note per campaign naming the top-level keys it dropped (never their
+values). The list is the keys the shipped campaign features use, each with a value constraint:
+`models.default`, `models.image_description` and `models.session_summary` (strings: the soft model nudges, dismissed by
+an explicit `/model` pick; a selector naming a model whose `[model.<id>]` the configuration routes, with any of
+`MODEL_ROUTE_KEYS` such as `base_url`, `model_provider`, `api_key` or `query_params`, is dropped with a note, so a
+campaign can nudge to built-in and catalog models but cannot move content to an endpoint or credential the user set up
+for something else), `model.<id>.name` (string) and `model.<id>.context_window` (integer, 1024 to 10,000,000), `mcp_servers`
+(new servers only, with no header, environment, token or OAuth field, literal strings, marked untrusted), and
+`managed_mcps.enabled` (only `false`). None of them sets a credential or a permission, and only one sets a destination: a campaign can add an HTTP MCP
+server at a URL it chooses (untrusted, no secrets, no headers, environment or token sent to it). A campaign can
+ADD the definition of a stdio MCP server, but adding it does not authorize running it: such a server does not start
+until the user turns it on (`/mcp`, ACP `mcp/toggle` or `fuigo mcp enable <name>`). Turning it on records the approval
+in `[approved_campaign_mcp_servers]` of the user's own `config.toml` (server name to a SHA-256 of its command, arguments
+and working directory), which no campaign, project file or other layer can set; a campaign that later changes the
+command, arguments or working directory needs the approval again, and turning the server off withdraws it. Campaign
+HTTP servers start as before (secret-free and untrusted), and the user's own and project servers need no approval. The previous denylist (`CAMPAIGN_STRIP_KEYS`, `CAMPAIGN_STRIP_PATHS`, the MCP filter and the P192
+subscription rule) still runs after the allowlist as a second layer. Adding a path needs a reviewed entry in
+`fuigo-config/tests/campaign_key_guard.rs` (`REVIEWED_CAMPAIGN_ALLOW_PATHS`), or that test fails.

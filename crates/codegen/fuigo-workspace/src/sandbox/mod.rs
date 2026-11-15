@@ -156,6 +156,13 @@ pub enum WorkspaceSandboxError {
         "the command sandbox was just switched to enforce and is still starting for this folder; run the command again"
     )]
     NotEngaged,
+    /// The call id is already pinned under a different sandbox mode than the one this dispatch's
+    /// approval was decided under, so the call must not run: its prompts were settled for the
+    /// other mode.
+    #[error(
+        "sandbox refused the command: its call id is already pinned under a different sandbox mode"
+    )]
+    PinModeConflict,
     /// The call's final result is already in: a spawn for it is late and does not run, since
     /// nothing could ask about it or take its result.
     #[error("sandbox refused to prepare the command: its call has already finished")]
@@ -1136,6 +1143,27 @@ impl WorkspaceSandbox {
         };
         self.release_ended_holds(evicted);
         Ok(())
+    }
+
+    /// [`WorkspaceSandbox::pin_mode`] for a dispatch whose approval was decided under `mode`: the
+    /// call must hold exactly that mode afterwards. A duplicate call id that was pinned earlier
+    /// under another mode is refused (audit S5-F15) rather than left to run under the earlier
+    /// pin with prompts settled for this one.
+    ///
+    /// # Errors
+    /// [`WorkspaceSandboxError::PinModeConflict`] when the call holds a different mode;
+    /// otherwise as [`WorkspaceSandbox::pin_mode`].
+    pub fn pin_mode_exact(
+        &self,
+        call_id: &CallId,
+        mode: SandboxMode,
+    ) -> Result<(), WorkspaceSandboxError> {
+        self.pin_mode(call_id, mode)?;
+        if self.held_mode(call_id) == Some(mode) {
+            Ok(())
+        } else {
+            Err(WorkspaceSandboxError::PinModeConflict)
+        }
     }
 
     /// [`WorkspaceSandbox::pin_mode`] had no room for `call_id`, dispatched under `mode`: its spawn

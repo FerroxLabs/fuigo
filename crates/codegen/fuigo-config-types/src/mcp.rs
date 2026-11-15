@@ -299,6 +299,11 @@ pub struct McpServerConfig {
     /// environment would be bound the key after a restart.
     #[serde(default, rename = "__fuigo_untrusted_source", skip_serializing_if = "std::ops::Not::not")]
     pub untrusted_source: bool,
+    /// This server was ADDED by a campaign. Its strings are literals: [`McpServerConfig::expand_strings`] leaves them
+    /// alone, so a `${VAR}` in a campaign's `url`, `args`, `command` or `cwd` (or a value rendered from its `setup`)
+    /// never reads the process environment. Set by the campaign merge, never by a user (a user's own server expands).
+    #[serde(default, rename = "__fuigo_campaign_source", skip_serializing_if = "std::ops::Not::not")]
+    pub campaign_source: bool,
 }
 
 impl McpServerConfig {
@@ -461,6 +466,20 @@ impl McpServerConfig {
     }
 
     pub fn expand_strings(&mut self, sub: &dyn Fn(&str) -> String) {
+        if self.campaign_source {
+            // A campaign's strings never read the environment; a leading `~` (the user's home, no secret) still
+            // expands so a stdio server's command and paths resolve as they do for the user's own servers.
+            if let McpServerTransportConfig::Stdio { command, args, cwd, .. } = &mut self.transport {
+                *command = expand_home(command);
+                for arg in args.iter_mut() {
+                    *arg = expand_home(arg);
+                }
+                if let Some(cwd) = cwd.as_mut() {
+                    *cwd = expand_home(cwd);
+                }
+            }
+            return;
+        }
         match &mut self.transport {
             McpServerTransportConfig::Stdio {
                 command,
@@ -914,6 +933,7 @@ mod tests {
             tool_timeouts: Some(HashMap::from([("t".into(), 1)])),
             expose_image_base64: Some(true),
             untrusted_source: false,
+            campaign_source: false,
         };
         let http = McpServerConfig {
             transport: McpServerTransportConfig::StreamableHttp {
@@ -934,6 +954,7 @@ mod tests {
             tool_timeouts: None,
             expose_image_base64: None,
             untrusted_source: false,
+            campaign_source: false,
         };
         for config in [stdio, http] {
             let value = serde_json::to_value(&config).unwrap();
@@ -1043,6 +1064,7 @@ mod tests {
             tool_timeouts: None,
             expose_image_base64: None,
             untrusted_source: false,
+            campaign_source: false,
         };
         let prefs = McpServerPreferences {
             values: HashMap::from([("site".to_string(), "us5".to_string())]),
@@ -1103,6 +1125,7 @@ mod tests {
             tool_timeouts: None,
             expose_image_base64: None,
             untrusted_source: false,
+            campaign_source: false,
         };
         assert!(matches!(
             config.resolve_setup(None),
@@ -1170,6 +1193,7 @@ mod p70_redacted_debug {
             tool_timeouts: None,
             expose_image_base64: None,
             untrusted_source: false,
+            campaign_source: false,
         };
         let Some(acp::McpServer::Http(http)) = server.to_acp_mcp_server("p70a") else {
             panic!("an HTTP MCP server");

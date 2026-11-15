@@ -303,14 +303,14 @@ impl VideoViewerState {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         fuigo_tty_utils::detach_std_command(&mut ffmpeg_cmd);
-        let status = ffmpeg_cmd.status();
+        let status = crate::bounded_command::run_bounded(ffmpeg_cmd, VIDEO_EXTRACT_TIMEOUT, 0);
 
         match &status {
-            Err(e) => tracing::debug!("ffmpeg not available: {e}"),
-            Ok(s) if !s.success() => tracing::debug!("ffmpeg exited with {s}"),
+            Err(e) => tracing::debug!("ffmpeg did not run to completion: {e:?}"),
+            Ok(o) if !o.status.success() => tracing::debug!("ffmpeg exited with {}", o.status),
             _ => {}
         }
-        if !status.as_ref().is_ok_and(|s| s.success()) {
+        if !status.as_ref().is_ok_and(|o| o.status.success()) {
             let _ = std::fs::remove_dir_all(&tmp_dir);
             return None;
         }
@@ -395,6 +395,15 @@ impl VideoViewerState {
     }
 }
 
+/// Wall-clock budget for one ffmpeg or ffprobe call that runs on the draw path (audit S9-F2).
+const MEDIA_HELPER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Wall-clock budget for extracting every frame of a video for the viewer.
+const VIDEO_EXTRACT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Largest poster frame read back from ffmpeg.
+const POSTER_FRAME_MAX_BYTES: usize = 32 * 1024 * 1024;
+
 /// Extract a single poster frame from a video file via ffmpeg.
 /// Returns `(image_bytes, width, height)`. The image format depends on the active terminal protocol (PNG for Kitty, JPEG for iTerm2).
 pub fn extract_poster_frame(path: &std::path::Path) -> Option<(Vec<u8>, u32, u32)> {
@@ -421,9 +430,9 @@ pub fn extract_poster_frame(path: &std::path::Path) -> Option<(Vec<u8>, u32, u32
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         fuigo_tty_utils::detach_std_command(&mut cmd);
-        cmd.output()
+        crate::bounded_command::run_bounded(cmd, MEDIA_HELPER_TIMEOUT, POSTER_FRAME_MAX_BYTES)
             .ok()
-            .filter(|o| o.status.success() && !o.stdout.is_empty())
+            .filter(|o| o.status.success() && !o.truncated && !o.stdout.is_empty())
     };
 
     let output = try_extract(Some("1")).or_else(|| try_extract(None))?;
@@ -477,15 +486,15 @@ fn ffprobe_metadata(path: &std::path::Path) -> Option<(u32, u32, f64, f64)> {
     .stdin(std::process::Stdio::null())
     .stderr(std::process::Stdio::null());
     fuigo_tty_utils::detach_std_command(&mut cmd);
-    let output = match cmd.output() {
+    let output = match crate::bounded_command::run_bounded(cmd, MEDIA_HELPER_TIMEOUT, 64 * 1024) {
         Ok(o) => o,
         Err(e) => {
-            tracing::debug!("ffprobe not available: {e}");
+            tracing::debug!("ffprobe did not run to completion: {e:?}");
             return None;
         }
     };
 
-    if !output.status.success() {
+    if !output.status.success() || output.truncated {
         return None;
     }
 
@@ -818,7 +827,7 @@ const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", 
 /// Normalize a media path by dropping the Windows `\\?\` verbatim prefix (`\\?\C:\x` becomes `C:\x`, `\\?\UNC\srv\s` becomes `\\srv\s`).
 /// Applied once when a scrollback media ref is built, so display, open, and copy all get a path GUI openers and the clipboard can resolve.
 /// No-op off Windows.
-fn strip_verbatim_prefix(path: &std::path::Path) -> PathBuf {
+pub(crate) fn strip_verbatim_prefix(path: &std::path::Path) -> PathBuf {
     let s = path.to_string_lossy();
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         PathBuf::from(format!(r"\\{rest}"))
@@ -827,6 +836,26 @@ fn strip_verbatim_prefix(path: &std::path::Path) -> PathBuf {
     } else {
         path.to_path_buf()
     }
+}
+
+/// A path that names another machine: a UNC share or a device path
+/// (`\\host\share`, `//host/share`, `\\.\x`), checked after the verbatim
+/// prefix is stripped. Probing one makes Windows connect to that host and
+/// authenticate as the user, so paths found in model or tool text are never
+/// probed when they have this shape. Paths the user pastes or drops are not
+/// routed through here.
+pub(crate) fn is_network_path(path: &std::path::Path) -> bool {
+    let s = path.to_string_lossy();
+    let b = s.as_bytes();
+    let sep = |c: u8| c == b'\\' || c == b'/';
+    // `\\host`, `//host`, `\\.\device`, and NT-namespace `\??\` spellings (`\??\UNC\host`), which Windows
+    // treats like `\\?\`.
+    if b.len() < 2 || !sep(b[0]) || !(sep(b[1]) || b[1] == b'?') {
+        return false;
+    }
+    // WSL distributions are served locally (9P), not by an SMB host: `\\wsl$\` and `\\wsl.localhost\` stay usable.
+    let host = s[2..].split(['\\', '/']).next().unwrap_or("");
+    !(sep(b[1]) && (host.eq_ignore_ascii_case("wsl$") || host.eq_ignore_ascii_case("wsl.localhost")))
 }
 
 /// Drive-letter (`X:\` / `X:/`) or UNC (`\\…`) Windows path.
@@ -1704,7 +1733,13 @@ impl ScrollbackImageRef {
         if !IMAGE_EXTENSIONS.contains(&ext.as_str()) {
             return None;
         }
-        if !path.is_file() {
+        if is_network_path(&path) {
+            return None;
+        }
+        // Audit 1.0.44 S9-F2: a path named in model or tool text is read whole only when it is a regular file of
+        // reasonable size (the same 64 MiB the inline-media cache holds).
+        let meta = std::fs::metadata(&path).ok()?;
+        if !meta.is_file() || meta.len() >= 64 * 1024 * 1024 {
             return None;
         }
         let bytes = std::fs::read(&path).ok()?;
@@ -1829,7 +1864,7 @@ impl ScrollbackVideoRef {
     pub fn from_path_with_alt(path: impl Into<PathBuf>, alt_text: String) -> Option<Self> {
         let path = strip_verbatim_prefix(&path.into());
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-        if !VIDEO_EXTENSIONS.contains(&ext.as_str()) || !path.is_file() {
+        if !VIDEO_EXTENSIONS.contains(&ext.as_str()) || is_network_path(&path) || !path.is_file() {
             return None;
         }
         Some(Self { path, alt_text })
@@ -4532,6 +4567,53 @@ mod tests {
     #[test]
     fn scrollback_ref_rejects_missing_file() {
         assert!(ScrollbackImageRef::from_path("/nonexistent/image.png").is_none());
+    }
+
+    #[test]
+    fn a45_network_paths_from_text_are_never_probed() {
+        for p in [
+            r"\\attacker\share\x.png",
+            "//attacker/share/x.png",
+            r"\\?\UNC\attacker\share\x.png",
+            r"\\.\pipe\x.png",
+            r"\??\UNC\attacker\share\x.png",
+            r"\??\GLOBALROOT\x.png",
+            r"/?/UNC/attacker/share/x.png",
+        ] {
+            assert!(is_network_path(&strip_verbatim_prefix(std::path::Path::new(p))), "{p}");
+            assert!(ScrollbackImageRef::from_path(p).is_none(), "{p}");
+            assert!(ScrollbackVideoRef::from_path(p.replace(".png", ".mp4")).is_none(), "{p}");
+        }
+        for p in [
+            "/tmp/x.png",
+            r"C:\x.png",
+            "C:/x.png",
+            "./x.png",
+            r"\\wsl$\Ubuntu\x.png",
+            r"\\wsl.localhost\Ubuntu\x.png",
+        ] {
+            assert!(!is_network_path(std::path::Path::new(p)), "{p}");
+        }
+    }
+
+    /// Each call site's check is what refuses the path: the same existing file is found by its plain path and refused
+    /// when spelled as a network path (`//` + its absolute path names the same file on Unix).
+    #[cfg(unix)]
+    #[test]
+    fn a45_each_media_call_site_refuses_a_network_spelling_of_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("x.png");
+        std::fs::write(&png, make_test_png(4, 4)).unwrap();
+        let mp4 = dir.path().join("x.mp4");
+        std::fs::write(&mp4, b"not really").unwrap();
+        let net = |p: &std::path::Path| format!("/{}", p.display());
+        assert!(ScrollbackImageRef::from_path(&png).is_some());
+        assert!(ScrollbackImageRef::from_path(net(&png)).is_none());
+        assert!(ScrollbackVideoRef::from_path(&mp4).is_some());
+        assert!(ScrollbackVideoRef::from_path(net(&mp4)).is_none());
+        let plain = png.display().to_string();
+        assert!(crate::render::osc8::local_link_to_file_target(&plain, &[], None).is_some());
+        assert!(crate::render::osc8::local_link_to_file_target(&net(&png), &[], None).is_none());
     }
 
     // ----- extract_image_refs ------------------------------------------------

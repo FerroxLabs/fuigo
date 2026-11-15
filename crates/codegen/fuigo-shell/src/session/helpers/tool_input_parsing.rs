@@ -38,9 +38,31 @@ pub fn normalize_empty_arguments(arguments: &str) -> &str {
     }
 }
 
+/// Picks the concatenated object to run: the first one that parsed for the named tool (`first_match`), else the
+/// first object. Returns the index actually used together with the value, so the log names the object kept.
+pub fn select_concatenated_object(
+    objects: &[serde_json::Value],
+    first_match: Option<usize>,
+) -> (usize, serde_json::Value) {
+    let index = first_match.filter(|i| *i < objects.len()).unwrap_or(0);
+    (index, objects[index].clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn select_concatenated_object_uses_the_matching_object() {
+        let objects = vec![json!({"nope": 1}), json!({"target_file": "b.java"})];
+        let (index, value) = select_concatenated_object(&objects, Some(1));
+        assert_eq!(index, 1);
+        assert_eq!(value, objects[1]);
+        let (index, value) = select_concatenated_object(&objects, None);
+        assert_eq!(index, 0);
+        assert_eq!(value, objects[0]);
+    }
 
     #[test]
     fn test_extract_objects() {

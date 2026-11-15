@@ -527,6 +527,7 @@ pub fn command_trust<'a>(dirs: impl IntoIterator<Item = &'a Path>) -> CommandTru
 pub fn install_process_judges() {
     fuigo_tty_utils::install_repo_exec_judge(|dir| dir_trust(dir).is_trusted());
     crate::permission::install_runner_trust_judge();
+    fuigo_sandbox::install_project_profile_judge(|dir| dir_trust(dir).is_trusted());
 }
 
 #[cfg(test)]

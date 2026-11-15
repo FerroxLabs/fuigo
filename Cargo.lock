@@ -4165,6 +4165,7 @@ dependencies = [
  "futures",
  "gcloud-storage",
  "http 1.4.0",
+ "hyper-util",
  "indexmap",
  "opentelemetry",
  "opentelemetry_sdk",
@@ -4302,6 +4303,7 @@ version = "0.1.0"
 dependencies = [
  "fuigo-auth",
  "fuigo-extra-ca",
+ "fuigo-file-utils",
  "fuigo-sampler",
  "fuigo-telemetry",
  "fuigo-version",
@@ -4323,6 +4325,7 @@ dependencies = [
  "dunce",
  "fuigo-gix-status",
  "fuigo-test-utils",
+ "fuigo-tty-utils",
  "gix",
  "rustc-hash 2.1.1",
  "serde",
@@ -4916,6 +4919,7 @@ dependencies = [
  "fuigo-dirs",
  "fuigo-file-lock",
  "fuigo-session-writer",
+ "fuigo-test-support",
  "fuigo-tty-utils",
  "globset",
  "ignore",
@@ -5498,12 +5502,14 @@ dependencies = [
  "glob",
  "globset",
  "htmd",
+ "html5ever 0.29.1",
  "ignore",
  "image",
  "indexmap",
  "infer 0.19.0",
  "kamadak-exif",
  "libc",
+ "markup5ever_rcdom",
  "minijinja",
  "nix 0.30.1",
  "parking_lot",
@@ -5645,7 +5651,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.44"
+version = "1.0.45"
 dependencies = [
  "semver",
 ]
@@ -7344,8 +7350,6 @@ dependencies = [
 [[package]]
 name = "htmd"
 version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7eee9b00ee2e599b4f86507157e3db786e7a3319fc225f0e9584151dbea2291d"
 dependencies = [
  "html5ever 0.38.0",
  "markup5ever_rcdom",

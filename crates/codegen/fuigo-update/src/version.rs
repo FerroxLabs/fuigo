@@ -63,7 +63,7 @@ pub(crate) fn cli_base_urls() -> Vec<String> {
 
 /// Parsed, not prefix-matched: `http://127.0.0.1:9@evil.com` starts with a
 /// loopback prefix but its host is `evil.com` (userinfo trick).
-fn is_loopback_base(base: &str) -> bool {
+pub(crate) fn is_loopback_base(base: &str) -> bool {
     let Ok(u) = url::Url::parse(base) else {
         return false;
     };
@@ -264,10 +264,10 @@ pub(crate) fn npm_view_args(
 
 /// A fresh private directory for one `npm view` cache, removed on drop. Created with `create_dir` (fails if the name
 /// exists, so a planted directory or symlink is never used) and 0700 on Unix.
-struct PrivateNpmCache(std::path::PathBuf);
+pub(crate) struct PrivateNpmCache(pub(crate) std::path::PathBuf);
 
 impl PrivateNpmCache {
-    fn create() -> Result<Self> {
+    pub(crate) fn create() -> Result<Self> {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let base = std::env::temp_dir();
         let mut last_err = None;
@@ -479,6 +479,14 @@ pub(crate) fn highest_release_version(tags: &str, exclude_pre: bool) -> Option<S
         .map(|version| version.to_string())
 }
 
+/// What a copy with no update source is told (audit S8-F10). The internal installer has no base URL in
+/// public builds, so a hand-downloaded binary lands here: say how to move forward instead of naming a
+/// missing base URL.
+pub(crate) const NO_UPDATE_SOURCE_GUIDANCE: &str = "this copy of Fuigo has no update source configured. \
+Reinstall with `npm i -g fuigo@latest`, or download a release with \
+`gh release download --repo FerroxLabs/fuigo --pattern 'fuigo-*'` and set `installer = \"gh-release\"` under [cli] \
+in config.toml so `fuigo update` can use GitHub Releases from then on";
+
 /// Fetch the latest version from a public CLI channel pointer.
 ///
 /// Reads `{base}/{channel}` which contains a plain-text semver string (e.g. `0.1.181`).
@@ -489,8 +497,12 @@ pub(crate) fn highest_release_version(tags: &str, exclude_pre: bool) -> Option<S
 /// Tries each base URL in [`CLI_BASE_URLS`] in order and stops at the first success.
 /// Each base also retries up to 3 times with exponential backoff (1s, 2s, 4s) on transient failures before falling through to the next base.
 pub(crate) async fn fetch_gcs_version(channel: &str) -> Result<String> {
+    fetch_gcs_version_over(channel, &cli_base_urls()).await
+}
+
+/// [`fetch_gcs_version`] over an explicit list of bases.
+pub(crate) async fn fetch_gcs_version_over(channel: &str, bases: &[String]) -> Result<String> {
     let mut last_err: Option<anyhow::Error> = None;
-    let bases = cli_base_urls();
     for (i, base) in bases.iter().enumerate() {
         match fetch_gcs_version_from_base(channel, base).await {
             Ok(v) => return Ok(v),
@@ -506,7 +518,7 @@ pub(crate) async fn fetch_gcs_version(channel: &str) -> Result<String> {
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no CLI base URLs configured")))
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!(NO_UPDATE_SOURCE_GUIDANCE)))
 }
 
 /// Test-only entry point: same as [`fetch_gcs_version`] but reads from `base_url` instead of the hardcoded GCS bucket.
@@ -617,7 +629,9 @@ pub async fn write_version_cache(version: &str, stable_version: Option<&str>) {
         tracing::warn!("failed to create version cache directory: {}", e);
         return;
     }
-    let tmp = version_path.with_extension("json.tmp");
+    // A unique name (audit S8-F12): two updaters at once must not share a temp file, and a planted
+    // `version.json.tmp` (or a symlink there) must not be written through.
+    let tmp = crate::auto_update::unique_temp_sibling(&version_path, "tmp");
     let data = match serde_json::to_vec_pretty(&json) {
         Ok(d) => d,
         Err(e) => {
@@ -631,6 +645,7 @@ pub async fn write_version_cache(version: &str, stable_version: Option<&str>) {
     }
     if let Err(e) = fs::rename(&tmp, &version_path).await {
         tracing::warn!("failed to rename version cache file: {}", e);
+        let _ = fs::remove_file(&tmp).await;
     }
 }
 

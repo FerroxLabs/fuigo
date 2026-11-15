@@ -321,6 +321,8 @@ impl fuigo_tool_runtime::Tool for HashlineEditTool {
 
         let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
         let joined_path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+        // Serialised with `apply_patch` on the same file (audit S4-F9).
+        let _edit_lock = crate::util::lock_path::lock_edit_paths(&[&joined_path], &cwd).await;
         // P166 Grok r5 MEDIUM 3: refuse a gitignored path (logical or physical) before reading it, like `search_replace`.
         if crate::implementations::fuigo_build::read_file::tool_path_refused_by_gitignore(
             &resources,
@@ -340,7 +342,7 @@ impl fuigo_tool_runtime::Tool for HashlineEditTool {
             Err(_) => {
                 // Try unicode-confusable resolution before giving up.
                 // Used in search_replace.
-                let resolved = crate::util::try_resolve_unicode_filename(&joined_path).await;
+                let resolved = crate::util::try_resolve_unicode_filename_for_edit(&joined_path).await;
                 if let Some(m) = resolved {
                     m.resolved_path
                 } else {
@@ -392,9 +394,16 @@ impl fuigo_tool_runtime::Tool for HashlineEditTool {
         };
 
         // Read current file content.
-        let file_bytes = match fs.read_file(&path).await {
+        let file_bytes = match crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), &path).await {
             Ok(b) => b,
             Err(e) => {
+                if let Some(msg) = crate::implementations::fuigo_build::read_file::source_too_large_message(
+                    &e,
+                    &input.file_path,
+                    "edit",
+                ) {
+                    return Ok(crate::types::output::SearchReplaceOutput::InvalidInput(msg));
+                }
                 let display_path = display_dcwd.join(&input.file_path);
                 return Ok(match e.io_error_kind() {
                     Some(std::io::ErrorKind::NotFound) => {
@@ -413,7 +422,18 @@ impl fuigo_tool_runtime::Tool for HashlineEditTool {
                 });
             }
         };
-        let old_content = String::from_utf8_lossy(&file_bytes).into_owned();
+        // Refuse non-UTF-8 content: a lossy decode plus a whole-file rewrite would replace every invalid byte in the
+        // file, not only the edited region (audit S4-F5).
+        let old_content = match String::from_utf8(file_bytes) {
+            Ok(text) => text,
+            Err(_) => {
+                return Ok(crate::types::output::SearchReplaceOutput::InvalidInput(format!(
+                    "Error: {} is not valid UTF-8, so edit cannot change it without corrupting the other bytes. \
+                     Edit it with a shell command (sed, patch) instead.",
+                    input.file_path
+                )));
+            }
+        };
 
         let apply_result = apply::apply_edits(&old_content, &input.edits, &path, &*scheme);
 
@@ -1192,5 +1212,28 @@ mod tests {
             other => panic!("expected the gitignore refusal, got {other:?}"),
         }
         assert_eq!(std::fs::read_to_string(outside.path().join("key.txt")).unwrap(), "TOP SECRET\n");
+    }
+
+    #[tokio::test]
+    async fn non_utf8_file_is_refused_and_leaves_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let original: &[u8] = b"one\n\xff\nthree\n";
+        std::fs::write(tmp.path().join("l.txt"), original).unwrap();
+        let input = HashlineEditInput {
+            file_path: "l.txt".to_string(),
+            edits: vec![HashlineOp::InsertAfter {
+                anchor: "EOF".to_owned(),
+                content: "hello".to_owned(),
+            }],
+        };
+        let result = fuigo_tool_runtime::Tool::run(
+            &HashlineEditTool,
+            test_ctx(test_resources(tmp.path()).into_shared()),
+            input,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, SearchReplaceOutput::InvalidInput(_)), "{result:?}");
+        assert_eq!(std::fs::read(tmp.path().join("l.txt")).unwrap(), original);
     }
 }

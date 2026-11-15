@@ -52,6 +52,10 @@ minijinja = { version = "2", features = ["custom_syntax"] }
 parking_lot = { workspace = true }
 htmd = { workspace = true }
 scraper = { workspace = true }
+# The tree builder scraper is built on (same version); web_fetch drives it directly to bound depth and size.
+html5ever = "0.29"
+# The converter's tree type (same version htmd builds on), for web_fetch's table handler.
+markup5ever_rcdom = "0.38"
 reqwest = { workspace = true, features = ["rustls-tls", "json", "gzip", "brotli", "deflate"] }
 pulldown-cmark = { workspace = true }
 regex = { workspace = true }

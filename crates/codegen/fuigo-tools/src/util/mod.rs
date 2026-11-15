@@ -40,7 +40,10 @@ pub use command_display::strip_redundant_session_cd;
 pub use env::detach_from_tty;
 pub use env::substitute_plugin_tokens;
 pub use env::{FUIGO_AGENT_ENV, FUIGO_AGENT_ENV_VALUE, apply_fuigo_agent_marker, pager_env};
-pub use fs::{UnicodePathMatch, canonicalize_with_timeout, try_resolve_unicode_filename};
+pub use fs::{
+    UnicodePathMatch, canonicalize_with_timeout, try_resolve_unicode_filename,
+    try_resolve_unicode_filename_for_edit,
+};
 pub use fuigo_home::{fuigo_application, fuigo_home};
 pub use path_suggestions::format_not_found_error;
 pub use remap::{remap_json_keys, remap_schema_properties, reverse_map};

@@ -1149,4 +1149,52 @@ mod tests {
             0o640
         );
     }
+
+    /// A FIFO with no reader must fail at once: opening it for writing blocks until a reader appears, which hung
+    /// the file tools (audit S4-F6). One with a reader still gets the data; a device is still written.
+    #[cfg(unix)]
+    #[test]
+    fn writing_a_fifo_with_no_reader_fails_instead_of_blocking() {
+        use std::io::Read as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pipe");
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let p = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(replace_file_contents(&p, b"x", NewFileMode::Default));
+        });
+        let outcome = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a write to a FIFO with no reader must not block");
+        assert!(outcome.is_err(), "no reader: {outcome:?}");
+
+        let mut reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .unwrap();
+        replace_file_contents(&path, b"hello", NewFileMode::Default).unwrap();
+        // The reader is non-blocking. A child another test forks at the moment the write end is open keeps a copy of
+        // it until its exec, so a read can briefly say WouldBlock instead of EOF; retry until EOF.
+        let mut got = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut buf = [0u8; 64];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(e) => panic!("reading the FIFO: {e}"),
+            }
+        }
+        assert_eq!(got, b"hello");
+
+        replace_file_contents(Path::new("/dev/null"), b"ignored", NewFileMode::Default).unwrap();
+    }
 }

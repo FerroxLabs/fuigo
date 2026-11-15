@@ -121,6 +121,30 @@ pub fn is_full_commit_sha(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// Transports a plugin or marketplace git invocation may use (`GIT_ALLOW_PROTOCOL`, audit S7-F6): the plain
+/// network transports plus `file` for local repositories. Remote helpers (`ext::`, `fd::`, `foo::`) and every
+/// other scheme are refused by git itself even if a URL slips past [`validate_git_url`].
+pub const PLUGIN_GIT_ALLOW_PROTOCOL: &str = "https:http:ssh:git:file";
+
+/// Pin `cmd` to [`PLUGIN_GIT_ALLOW_PROTOCOL`]. Applied to the git commands of plugin and marketplace installs
+/// and updates only, never to git commands that run in the user's own repositories.
+pub fn restrict_git_protocols(cmd: &mut std::process::Command) {
+    cmd.env("GIT_ALLOW_PROTOCOL", PLUGIN_GIT_ALLOW_PROTOCOL);
+}
+
+/// Reject `scheme://` URLs outside the allow-list. scp-style (`git@host:path`), plain local paths and
+/// `helper::address` forms carry no `://` and pass here; git itself refuses the helper forms under
+/// [`PLUGIN_GIT_ALLOW_PROTOCOL`].
+fn validate_git_transport(url: &str) -> Result<(), String> {
+    if let Some((scheme, _)) = url.split_once("://") {
+        let scheme = scheme.to_ascii_lowercase();
+        if !matches!(scheme.as_str(), "https" | "http" | "ssh" | "git" | "file") {
+            return Err(format!("git URL scheme '{scheme}' is not allowed (https, ssh, git@host:path or a path)"));
+        }
+    }
+    Ok(())
+}
+
 fn validate_git_operand<'a>(value: &'a str, kind: &str) -> Result<&'a str, String> {
     let value = value.trim();
     if value.is_empty() {
@@ -137,7 +161,9 @@ fn validate_git_operand<'a>(value: &'a str, kind: &str) -> Result<&'a str, Strin
 
 /// Validate and trim a Git repository URL or path used as a CLI operand.
 pub fn validate_git_url(url: &str) -> Result<&str, String> {
-    validate_git_operand(url, "URL")
+    let url = validate_git_operand(url, "URL")?;
+    validate_git_transport(url)?;
+    Ok(url)
 }
 
 /// Validate and trim a Git ref used as a CLI operand.
@@ -258,8 +284,9 @@ pub fn install_from_source_with_label(
     let source_id = repo_source_id(source);
     let repo_key = InstallRegistry::repo_key(&source_id);
 
-    if registry.get_repo(&repo_key).is_some() {
-        return Err(InstallError::AlreadyInstalled { key: repo_key });
+    // An install made under the pre-1.0.45 key scheme counts too (audit S7-F5).
+    if let Some(existing) = registry.find_installed_key(&source_id) {
+        return Err(InstallError::AlreadyInstalled { key: existing });
     }
 
     let install_dir = registry.install_dir().to_path_buf();
@@ -412,6 +439,7 @@ fn clone_repo(
         .map(Path::to_path_buf)
         .unwrap_or_else(std::env::temp_dir);
     let mut cmd = fuigo_tty_utils::git_command_user_invoked(&run_in);
+    restrict_git_protocols(&mut cmd);
     cmd.arg("clone").arg("--depth").arg("1");
 
     if let Some(r) = git_ref {
@@ -488,6 +516,7 @@ fn run_git_in_capture(cwd: &Path, args: &[&str]) -> Result<std::process::Output,
     // Same auth/LFS/SSH suppression as marketplace cache clones.
     // The user's install of the plugin checkout it just cloned (not judged).
     let mut cmd = fuigo_tty_utils::git_command_user_invoked(cwd);
+    restrict_git_protocols(&mut cmd);
     cmd.args(args);
     let output = cmd
         .output()
@@ -691,6 +720,35 @@ pub enum UpdateStatus {
     LiveLocal,
 }
 
+/// Does `<namespace>/<name>` exist in the clone? `None` when git cannot answer.
+fn ref_exists(repo_path: &Path, namespace: &str, name: &str) -> Option<bool> {
+    let mut cmd = fuigo_tty_utils::git_command_user_invoked(repo_path);
+    restrict_git_protocols(&mut cmd);
+    cmd.args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("{namespace}/{name}^{{commit}}"));
+    let output = cmd.output().ok()?;
+    match output.status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
+/// Ask git what `name` is in the clone instead of guessing from its spelling (audit S7-F7): a tag with no
+/// branch of that name is a fixed pin; a branch (whatever it is called) follows its head. When the clone
+/// cannot be queried, fall back to the old spelling guess (`v` plus a dot).
+fn ref_is_tag(repo_path: &Path, name: &str) -> bool {
+    if repo_path.is_dir()
+        && let (Some(tag), Some(branch)) = (
+            ref_exists(repo_path, "refs/tags", name),
+            ref_exists(repo_path, "refs/heads", name),
+        )
+    {
+        return tag && !branch;
+    }
+    name.starts_with('v') && name.contains('.')
+}
+
 /// How each install kind updates:
 /// - Branch installs: `git fetch` and fast-forward to remote branch head
 /// - Tag installs: pinned, no-op
@@ -709,11 +767,9 @@ pub fn update_repo(
             commit,
             subdir,
         } => {
-            // Check if pinned
+            // Check if pinned: a full commit id, or a ref that is a tag (not a branch) in the clone
             if let Some(r) = git_ref {
-                // Heuristic: if the ref looks like a commit hash or a version tag (starts with v and contains dots), it's pinned
-                let is_tag_or_commit =
-                    is_full_commit_sha(r) || (r.starts_with('v') && r.contains('.'));
+                let is_tag_or_commit = is_full_commit_sha(r) || ref_is_tag(&repo.path, r);
                 if is_tag_or_commit {
                     return Ok(UpdateStatus::Pinned {
                         ref_name: r.clone(),
@@ -734,6 +790,7 @@ pub fn update_repo(
 
             // A plugin update the user typed (not judged).
             let mut cmd = fuigo_tty_utils::git_command_user_invoked(repo_path);
+            restrict_git_protocols(&mut cmd);
             cmd.args(["pull", "--ff-only"]);
             let output = cmd.output().map_err(|e| InstallError::InstallFailed {
                 detail: format!("failed to run git pull: {e}"),
@@ -1598,5 +1655,140 @@ mod tests {
             ),
             "a mutable-ref update must be refused under the pin policy"
         );
+    }
+
+    /// audit S7-F6
+    #[test]
+    fn git_url_allow_list_rejects_unknown_schemes() {
+        for bad in [
+            "ftp://example.com/repo.git",
+            "gopher://example.com/repo",
+            "FTP://example.com/repo.git",
+        ] {
+            assert!(validate_git_url(bad).is_err(), "{bad} must be rejected");
+        }
+        for good in [
+            "https://github.com/org/repo",
+            "http://git.internal.example/org/repo.git",
+            "ssh://git@example.com/org/repo.git",
+            "git@github.com:org/repo.git",
+            "git://example.com/org/repo.git",
+            "/home/me/src/repo",
+            "../relative/repo",
+            "file:///tmp/fixture.git",
+        ] {
+            assert!(validate_git_url(good).is_ok(), "{good} must pass");
+        }
+        assert!(clone_operands("ftp://example.com/r", None, None).is_err());
+        assert!(PLUGIN_GIT_ALLOW_PROTOCOL.split(':').all(|p| p != "ext"));
+        let mut cmd = Command::new("git");
+        restrict_git_protocols(&mut cmd);
+        let allow = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "GIT_ALLOW_PROTOCOL")
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned());
+        assert_eq!(allow.as_deref(), Some(PLUGIN_GIT_ALLOW_PROTOCOL));
+    }
+
+    /// A helper-transport source (`ext::`) is refused at run time by git, not only by the URL parser: the
+    /// helper program is never started (audit S7-F6).
+    #[test]
+    fn ext_transport_source_is_refused_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("helper-ran");
+        let url = format!("ext::touch {}", marker.display());
+        let target = dir.path().join("clone");
+        let err = clone_repo(&url, None, None, &target).expect_err("ext:: must not clone");
+        assert!(!marker.exists(), "git ran the ext helper: {err:?}");
+        let mut cmd = fuigo_tty_utils::git_command_user_invoked(dir.path());
+        restrict_git_protocols(&mut cmd);
+        let out = cmd.args(["ls-remote", "--", &url]).output().unwrap();
+        assert!(!out.status.success());
+        assert!(!marker.exists(), "git ran the ext helper for ls-remote");
+    }
+
+    /// Install-shaped checkout: `git clone --depth 1 --branch <name>` of `origin`, then the InstalledRepo for it.
+    fn shallow_install(origin: &Path, install: &Path, name: &str) -> InstalledRepo {
+        let repo_path = install.join(format!("repo-{name}"));
+        let origin_url = format!("file://{}", origin.display());
+        run_git_test(
+            install,
+            &[
+                "clone",
+                "--quiet",
+                "--depth",
+                "1",
+                "--branch",
+                name,
+                origin_url.as_str(),
+                repo_path.to_str().unwrap(),
+            ],
+        );
+        let commit = read_head_commit(&repo_path).expect("read HEAD of clone");
+        InstalledRepo {
+            kind: InstallKind::Git {
+                url: origin_url,
+                git_ref: Some(name.to_string()),
+                commit,
+                subdir: None,
+            },
+            installed_at: String::new(),
+            updated_at: String::new(),
+            path: repo_path,
+            plugins: std::collections::HashMap::new(),
+            marketplace: None,
+        }
+    }
+
+    /// audit S7-F7: a tag spelled without `v` or a dot is still a pin.
+    #[test]
+    fn update_repo_treats_a_plain_tag_as_pinned() {
+        if !git_available() {
+            return;
+        }
+        let (origin, _sha) = make_local_repo();
+        for tag in ["1.0.0", "release-3"] {
+            run_git_test(origin.path(), &["tag", tag]);
+        }
+        let install = tempfile::tempdir().unwrap();
+        for tag in ["1.0.0", "release-3"] {
+            let repo = shallow_install(origin.path(), install.path(), tag);
+            std::fs::write(origin.path().join(format!("later-{tag}.txt")), "x").unwrap();
+            run_git_test(origin.path(), &["add", "-A"]);
+            run_git_test(origin.path(), &["commit", "-m", "later", "--quiet"]);
+            match update_repo("repo-key", &repo, false).expect("update") {
+                UpdateStatus::Pinned { ref_name } => assert_eq!(ref_name, tag),
+                _ => panic!("tag {tag} must be pinned"),
+            }
+            assert_eq!(
+                read_head_commit(&repo.path).as_deref(),
+                match &repo.kind {
+                    InstallKind::Git { commit, .. } => Some(commit.as_str()),
+                    _ => None,
+                },
+                "the checkout must stay at the tag"
+            );
+        }
+    }
+
+    /// audit S7-F7: a branch named like a version still follows its head.
+    #[test]
+    fn update_repo_follows_a_branch_named_like_a_version() {
+        if !git_available() {
+            return;
+        }
+        let (origin, _sha) = make_local_repo();
+        run_git_test(origin.path(), &["checkout", "--quiet", "-b", "v1.x"]);
+        let install = tempfile::tempdir().unwrap();
+        let repo = shallow_install(origin.path(), install.path(), "v1.x");
+        std::fs::write(origin.path().join("later.txt"), "x").unwrap();
+        run_git_test(origin.path(), &["add", "-A"]);
+        run_git_test(origin.path(), &["commit", "-m", "later", "--quiet"]);
+        match update_repo("repo-key", &repo, false).expect("update") {
+            UpdateStatus::Updated(result) => assert!(result.changed, "the branch must advance"),
+            UpdateStatus::Pinned { .. } => panic!("a branch is not a pin, whatever its name"),
+            _ => panic!("expected an update"),
+        }
     }
 }

@@ -360,6 +360,8 @@ pub fn load_project_config_file(path: &Path) -> std::io::Result<toml::Value> {
 /// The P118 refusals, `$VAR` expansion and `[[version_overrides]]` applied to a parsed config file.
 fn finish_config_file(mut v: toml::Value, path: &Path, may_name_saved_key: bool) -> std::io::Result<toml::Value> {
     let label = path.display().to_string();
+    // Only the campaign merge may set the campaign marker; a file of any kind (project files included) loses it.
+    crate::config_override::strip_campaign_source_marker(&mut v);
     if !may_name_saved_key {
         // Refuse, and mark every server this file defines (also inside its `version_overrides`) so the mark travels
         // with the definition to the spawn, where the final strings are refused once more (Astra r3 N2, N4).
@@ -998,7 +1000,7 @@ pub fn deep_merge_toml(base: &mut toml::Value, overrides: &toml::Value) {
     }
 }
 
-/// Expand `$VAR` / `${VAR}` in all string values.
+/// Expand `$VAR` / `${VAR}` in all string values, except those under a top-level `campaigns` key (kept literal).
 ///
 /// P147: a `${FUIGO_API_KEY:-default}` is kept for the destination only where the saved key is resolved when the value
 /// is used (an MCP server's `env`, `args` and `headers`, a model's `api_key`); everywhere else it is its default, as
@@ -1025,6 +1027,11 @@ fn expand_env_vars_in_toml_at(value: &mut toml::Value, path: &mut Vec<String>) {
         }
         toml::Value::Table(table) => {
             for (key, item) in table.iter_mut() {
+                // `[[campaigns]]` entries are patches from a source that may be remote or shared: their strings stay
+                // literal, so a `${VAR}` in one can never carry the process environment into the effective config.
+                if path.is_empty() && key == "campaigns" {
+                    continue;
+                }
                 path.push(key.clone());
                 expand_env_vars_in_toml_at(item, path);
                 path.pop();

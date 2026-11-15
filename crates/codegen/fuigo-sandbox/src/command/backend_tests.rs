@@ -563,3 +563,23 @@ fn a_tool_id_spelled_like_a_shell_init_spawn_stays_a_tool_call() {
     }
     assert_eq!("tc-5", CallId::tool("tc-5").to_string());
 }
+
+/// Source guard (the Seatbelt profile is rendered on macOS only): every pty-slave regex in the
+/// profile text is anchored at both ends, so `/dev/ttys001-anything` is not matched.
+#[test]
+fn seatbelt_profile_pty_slave_regexes_are_end_anchored() {
+    for (name, text) in [
+        ("base", include_str!("backend/sbpl/base.sbpl")),
+        ("platform_defaults", include_str!("backend/sbpl/platform_defaults.sbpl")),
+    ] {
+        let mut seen = 0;
+        for line in text.lines().filter(|l| l.contains("/dev/ttys")) {
+            if let Some(at) = line.find("^/dev/ttys") {
+                seen += 1;
+                let rest = &line[at..];
+                assert!(rest.starts_with("^/dev/ttys[0-9]+$\""), "{name}: {line}");
+            }
+        }
+        assert!(seen > 0, "{name} names no pty slave regex");
+    }
+}

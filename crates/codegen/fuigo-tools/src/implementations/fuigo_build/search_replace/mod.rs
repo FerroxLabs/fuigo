@@ -178,13 +178,15 @@ pub(crate) async fn run_search_replace(
     let path = match crate::util::fs::try_canonicalize(&resolved).await {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            match crate::util::try_resolve_unicode_filename(&resolved).await {
+            match crate::util::try_resolve_unicode_filename_for_edit(&resolved).await {
                 Some(m) => m.resolved_path,
                 None => resolved,
             }
         }
         Err(_) => resolved,
     };
+    // Serialised with `apply_patch` on the same file (audit S4-F9).
+    let _edit_lock = crate::util::lock_path::lock_edit_paths(&[&path], &cwd).await;
     if let Some(err) = validate_path_length(&input.file_path) {
         return Ok(err);
     }
@@ -337,14 +339,20 @@ async fn handle_new_file_creation(
     hints_enabled: bool,
     empty_old_string_does_not_override: bool,
 ) -> Result<SearchReplaceOutput, fuigo_tool_runtime::ToolError> {
-    let file_exists = match fs.read_file(path).await {
-        Ok(bytes) => !bytes.is_empty(),
-        Err(_) => false,
-    };
-    let old_text = match fs.read_file(path).await {
-        Ok(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
-        Err(_) => None,
-    };
+    // One bounded read serves both the exists check and the prior-state snapshot (audit S4-F7).
+    let read = crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), path).await;
+    if let Err(e) = &read
+        && let Some(msg) = crate::implementations::fuigo_build::read_file::source_too_large_message(
+            e,
+            &input.file_path,
+            "search_replace",
+        )
+    {
+        return Ok(SearchReplaceOutput::InvalidInput(msg));
+    }
+    let file_exists = read.as_ref().is_ok_and(|bytes| !bytes.is_empty());
+    // Snapshot the true prior state: an empty or non-UTF-8 file is not a new file (audit S4-F3).
+    let prior = crate::notification::types::PriorContent::from_read(read);
     if file_exists && empty_old_string_does_not_override {
         let old_string_name;
         {
@@ -390,26 +398,13 @@ async fn handle_new_file_creation(
             )),
         });
     }
-    if let Some(old_text) = old_text
-        && file_exists
-        && !empty_old_string_does_not_override
-    {
-        notification_handle.send_file_written(FileWritten {
-            tool_call_id: tool_call_id.to_string(),
-            absolute_path: path.to_path_buf(),
-            content: input.new_string.clone(),
-            previous_content: Some(old_text.clone()),
-            is_new_file: false,
-        });
-    } else {
-        notification_handle.send_file_written(FileWritten {
-            tool_call_id: tool_call_id.to_string(),
-            absolute_path: path.to_path_buf(),
-            content: input.new_string.clone(),
-            previous_content: None,
-            is_new_file: true,
-        });
-    }
+    notification_handle.send_file_written(FileWritten {
+        tool_call_id: tool_call_id.to_string(),
+        absolute_path: path.to_path_buf(),
+        content: input.new_string.clone(),
+        previous_content: prior.previous_content(),
+        is_new_file: prior.is_new_file(),
+    });
     let tool_output_for_prompt = format!(
         "The file {} has been created successfully.",
         &input.file_path
@@ -551,6 +546,59 @@ fn build_confusable_hint(
          use a shorter {} anchored on nearby ASCII-only context{}.",
         line_summary, read_qualifier, old_string_param, terminal_fallback
     ))
+}
+/// How long [`restore_mixed_line_endings`] may spend diffing before it settles for an approximate diff.
+const LINE_ENDING_DIFF_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+/// Rewrite an edited text (all `\n`) for a file that had CRLF somewhere: lines the edit left alone keep the ending
+/// they had, and a replaced or inserted span takes the ending of the first line it replaces (the previous line's for a
+/// pure insert), so a mixed file does not change on lines the edit never touched (audit S4-F8). `old_text` is the
+/// file as read, `match_text` its LF-normalised form and `new_text` the edited LF-normalised text.
+fn restore_mixed_line_endings(old_text: &str, match_text: &str, new_text: &str) -> String {
+    let new_text = new_text.replace("\r\n", "\n");
+    let original: Vec<&str> = old_text.split_inclusive('\n').collect();
+    let old_lines: Vec<&str> = match_text.split_inclusive('\n').collect();
+    let new_lines: Vec<&str> = new_text.split_inclusive('\n').collect();
+    if original.len() != old_lines.len() {
+        return new_text.replace('\n', "\r\n");
+    }
+    let terminated = original.iter().filter(|l| l.ends_with('\n')).count();
+    let crlf = original.iter().filter(|l| l.ends_with("\r\n")).count();
+    let dominant_crlf = crlf * 2 >= terminated;
+    // A deadline keeps a whole-file diff of two very different texts from running for minutes: past it the diff is
+    // approximated (a larger replaced span), never wrong (review L15).
+    let diff = similar::TextDiff::configure()
+        .timeout(LINE_ENDING_DIFF_BUDGET)
+        .diff_slices(&old_lines, &new_lines);
+    let mut out = String::with_capacity(old_text.len().max(new_text.len()) + 16);
+    for op in diff.ops() {
+        if op.tag() == similar::DiffTag::Equal {
+            for i in op.old_range() {
+                out.push_str(original[i]);
+            }
+            continue;
+        }
+        let old_range = op.old_range();
+        let crlf_style = old_range
+            .clone()
+            .find_map(|i| original[i].ends_with('\n').then(|| original[i].ends_with("\r\n")))
+            .or_else(|| {
+                old_range
+                    .start
+                    .checked_sub(1)
+                    .map(|i| original[i].ends_with("\r\n"))
+            })
+            .unwrap_or(dominant_crlf);
+        for i in op.new_range() {
+            match new_lines[i].strip_suffix('\n') {
+                Some(body) => {
+                    out.push_str(body);
+                    out.push_str(if crlf_style { "\r\n" } else { "\n" });
+                }
+                None => out.push_str(new_lines[i]),
+            }
+        }
+    }
+    out
 }
 /// Handle replacement in existing file.
 async fn handle_replacement(
@@ -753,7 +801,7 @@ async fn handle_replacement(
         )
     };
     let write_text = if has_crlf {
-        new_text.replace("\r\n", "\n").replace('\n', "\r\n")
+        restore_mixed_line_endings(&old_text, &match_text, &new_text)
     } else {
         new_text.clone()
     };
@@ -1222,6 +1270,20 @@ mod tests {
         let msg = unreadable_source_message(&err, "huge.log").expect("a size refusal");
         assert!(msg.contains("huge.log") && msg.contains("256 MB"), "{msg}");
     }
+    /// Review L15: the line-ending restore for a CRLF file stops its diff after a deadline and still returns a correct
+    /// text, instead of running for as long as a whole-file diff of two unrelated texts takes.
+    #[test]
+    fn restore_mixed_line_endings_is_bounded_on_a_pathological_diff() {
+        let lines = 100_000;
+        let old: String = (0..lines).map(|i| format!("old line {i}\r\n")).collect();
+        let matched = old.replace("\r\n", "\n");
+        let new: String = (0..lines).map(|i| format!("new line {i}\n")).collect();
+        let started = std::time::Instant::now();
+        let out = restore_mixed_line_endings(&old, &matched, &new);
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(15), "took {took:?}");
+        assert_eq!(out.replace("\r\n", "\n"), new, "the text is the edit, whatever the endings");
+    }
     #[tokio::test]
     async fn file_not_found() {
         let tmp = TempDir::new().unwrap();
@@ -1535,6 +1597,25 @@ mod tests {
             }
             other => panic!("Expected EditsApplied, got {:?}", other),
         }
+    }
+    /// Audit S4-F7: the create path pre-reads with the same 256 MB bound as the replace path and refuses past it,
+    /// instead of loading the whole file twice.
+    #[tokio::test]
+    async fn create_path_refuses_a_file_over_the_source_cap() {
+        let tmp = TempDir::new().unwrap();
+        let big = tmp.path().join("big.log");
+        let len = (super::super::read_file::MAX_READ_SOURCE_BYTES + 1) as u64;
+        std::fs::File::create(&big).unwrap().set_len(len).unwrap();
+        let resources = test_resources(tmp.path());
+        let input = make_input("big.log", "", "replacement\n");
+        let result = fuigo_tool_runtime::Tool::run(&SearchReplaceTool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => assert!(msg.contains("256 MB"), "{msg}"),
+            other => panic!("expected a size refusal, got {other:?}"),
+        }
+        assert_eq!(std::fs::metadata(&big).unwrap().len(), len, "the file must be left untouched");
     }
     #[tokio::test]
     async fn empty_old_string_overrides_with_explicit_false() {
@@ -2730,10 +2811,8 @@ neutTest_set);
             other => panic!("Expected EditsApplied, got {:?}", other),
         }
     }
-    /// Mixed line endings (\r\n and \n in the same file): CRLF normalization
-    /// kicks in because the file contains at least one \r\n, so all \n in the
-    /// result are converted to \r\n. This normalizes the file to consistent
-    /// CRLF endings, which is the expected behavior.
+    /// Mixed line endings (\r\n and \n in the same file): lines outside the edit keep their endings and the
+    /// replaced span takes the endings of the lines it replaces (audit S4-F8).
     #[tokio::test]
     async fn crlf_mixed_line_endings() {
         let tmp = TempDir::new().unwrap();
@@ -2753,10 +2832,38 @@ neutTest_set);
         match result {
             SearchReplaceOutput::EditsApplied(_) => {
                 let written = std::fs::read(tmp.path().join("test.txt")).unwrap();
-                assert_eq!(written, b"line1\r\nREPLACED\r\nline4\r\n");
+                assert_eq!(written, b"line1\r\nREPLACED\nline4\n");
             }
             other => panic!("Expected EditsApplied, got {:?}", other),
         }
+    }
+
+    /// Audit S4-F8: an edit changes only the lines it replaces; the lines it leaves alone keep their own endings.
+    #[tokio::test]
+    async fn mixed_line_endings_are_kept_on_untouched_lines() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("test.txt"), b"#!/bin/sh\r\nline2\nline3\r\nline4\n").unwrap();
+        let mut resources = test_resources(tmp.path());
+        resources.insert(Params(SearchReplaceParams {
+            skip_read_before_edit: true,
+            empty_old_string_does_not_override: false,
+            ..Default::default()
+        }));
+        let shared = resources.into_shared();
+        let input = make_input("test.txt", "line4", "NEW");
+        let result = fuigo_tool_runtime::Tool::run(&SearchReplaceTool, test_ctx(shared.clone()), input)
+            .await
+            .unwrap();
+        assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)), "{result:?}");
+        let written = std::fs::read(tmp.path().join("test.txt")).unwrap();
+        assert_eq!(written, b"#!/bin/sh\r\nline2\nline3\r\nNEW\n");
+        let input = make_input("test.txt", "line2\nline3", "A\nB\nC");
+        let result = fuigo_tool_runtime::Tool::run(&SearchReplaceTool, test_ctx(shared), input)
+            .await
+            .unwrap();
+        assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)), "{result:?}");
+        let written = std::fs::read(tmp.path().join("test.txt")).unwrap();
+        assert_eq!(written, b"#!/bin/sh\r\nA\nB\nC\nNEW\n", "a replaced span takes the endings of the lines it replaces");
     }
 
     /// P166 Grok r4 MEDIUM 5 (S7 parity): `search_replace` refuses an ignored LOGICAL path, even when its symlink

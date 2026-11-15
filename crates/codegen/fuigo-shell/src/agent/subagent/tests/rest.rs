@@ -1100,6 +1100,18 @@ fn resume_source_worktree_reuse() {
             "no worktree to reuse"
         );
 }
+/// Audit X2-F4: a relative Task `cwd` is under the parent's directory, not the process's.
+#[test]
+fn resolve_task_cwd_resolves_a_relative_cwd_against_the_parent() {
+    let parent = tempfile::tempdir().unwrap();
+    let parent_path = dunce::canonicalize(parent.path()).unwrap();
+    std::fs::create_dir(parent_path.join("sub")).unwrap();
+    assert_eq!(resolve_task_cwd("sub", &parent_path), parent_path.join("sub").to_string_lossy());
+    assert_eq!(resolve_task_cwd("./sub/../sub", &parent_path), parent_path.join("sub").to_string_lossy());
+    // A folder that does not exist stays under the parent (the caller's is_dir check then reports it).
+    assert_eq!(resolve_task_cwd("missing", &parent_path), parent_path.join("missing").to_string_lossy());
+    assert_eq!(resolve_task_cwd("/abs/dir", &parent_path), "/abs/dir");
+}
 #[test]
 fn resolve_child_cwd_uses_override_when_no_worktree() {
     let parent = PathBuf::from("/parent/workspace");

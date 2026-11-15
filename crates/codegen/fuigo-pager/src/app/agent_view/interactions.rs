@@ -35,6 +35,21 @@ fn is_broad_grant(opt: &agent_client_protocol::PermissionOption) -> bool {
     fuigo_workspace::permission::is_enable_always_approve_option(opt)
         || opt.kind == agent_client_protocol::PermissionOptionKind::AllowAlways
 }
+/// Move `perm`'s cursor off a broad grant onto its first `AllowOnce` row, if it has one (P152, Astra r2 #3).
+fn unfocus_broad_grant(perm: &mut crate::views::permission_view::PermissionViewState) {
+    if !perm
+        .options
+        .get(perm.active_idx)
+        .is_some_and(is_broad_grant)
+    {
+        return;
+    }
+    if let Some(idx) = perm.options.iter().position(|o| {
+        o.kind == agent_client_protocol::PermissionOptionKind::AllowOnce && !is_broad_grant(o)
+    }) {
+        perm.active_idx = idx;
+    }
+}
 impl AgentView {
     /// P152 (e2e lane M #4): text typed straight through an open permission prompt (the user was writing their next
     /// message when it appeared) must not answer it. Letters are not selector keys, but a digit, `e`, `j`/`k` and the
@@ -109,20 +124,43 @@ impl AgentView {
     /// Move the front permission card's cursor off a broad grant (an `AllowAlways` row or the global always-approve
     /// row) onto its first `AllowOnce` row, if it has one (P152, Astra r2 #3).
     fn unfocus_broad_grant_while_typing(&mut self) {
-        let Some(perm) = self.permission_queue.front_mut() else {
+        if let Some(perm) = self.permission_queue.front_mut() {
+            unfocus_broad_grant(perm);
+        }
+    }
+    /// Remember a key the user typed into the composer (no card open), for [`Self::guard_new_permission_card`].
+    pub(super) fn note_composer_key(&mut self, ev: &crossterm::event::Event) {
+        use crossterm::event::{Event, KeyEventKind};
+        let Event::Key(key) = ev else {
             return;
         };
-        if !perm
-            .options
-            .get(perm.active_idx)
-            .is_some_and(is_broad_grant)
-        {
+        if key.kind == KeyEventKind::Release || self.focused_card().is_some() {
             return;
         }
-        if let Some(idx) = perm.options.iter().position(|o| {
-            o.kind == agent_client_protocol::PermissionOptionKind::AllowOnce && !is_broad_grant(o)
-        }) {
-            perm.active_idx = idx;
+        let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+        if plain
+            && matches!(
+                key.code,
+                KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete | KeyCode::Enter
+            )
+        {
+            self.composer_key_at = Some(Instant::now());
+        }
+    }
+    /// Audit S9-F4: a card that opens inside the typing window of the last composer key starts with the typing guard
+    /// on, so the Enter or digit that was meant for the draft is held rather than answering it, and its cursor does
+    /// not start on a broad grant. Call right after the card is queued.
+    pub(crate) fn guard_new_permission_card(&mut self) {
+        let now = Instant::now();
+        let composing = self
+            .composer_key_at
+            .is_some_and(|t| now.saturating_duration_since(t) < PERMISSION_TYPING_WINDOW);
+        if !composing || self.permission_queue.len() != 1 {
+            return;
+        }
+        if let Some(perm) = self.permission_queue.front_mut() {
+            self.permission_typed_at = Some((perm.id, now));
+            unfocus_broad_grant(perm);
         }
     }
     /// Handle key input for the permission card.
@@ -2984,6 +3022,48 @@ mod p152_permission_typing_guard_tests {
             "the Enter ending a typed burst must not answer: {enter:?}"
         );
         assert_eq!(agent.permission_queue.len(), 1, "the prompt stays open");
+    }
+
+    /// Audit S9-F4: a card that opens while the user is typing in the composer holds the Enter and the digit meant
+    /// for the draft, and does not start on a broad grant.
+    #[test]
+    fn card_opened_inside_composer_typing_holds_enter_and_digit() {
+        let mut agent = make_agent();
+        let registry = crate::actions::ActionRegistry::defaults();
+        for c in "queued".chars() {
+            let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty());
+            let _ = agent.handle_input(&Event::Key(key), &registry);
+        }
+        assert!(agent.composer_key_at.is_some(), "composer typing is recorded");
+        setup(&mut agent);
+        agent.permission_queue.front_mut().unwrap().active_idx = 1; // the sticky allow-always row
+        agent.guard_new_permission_card();
+        assert_eq!(
+            agent.permission_queue.front().unwrap().active_idx,
+            2,
+            "the cursor does not start on a broad grant"
+        );
+        agent.permission_queue.front_mut().unwrap().active_idx = 1;
+        let enter = press(&mut agent, KeyCode::Enter);
+        assert!(!is_select(&enter), "the Enter meant for the draft must not answer: {enter:?}");
+        let digit = press(&mut agent, KeyCode::Char('3'));
+        assert!(!is_select(&digit), "a digit meant for the draft must not answer: {digit:?}");
+        assert_eq!(agent.permission_queue.len(), 1, "the prompt stays open");
+    }
+
+    /// Audit S9-F4 controls: no composer typing, or typing long before the card opened, leaves the card as it was.
+    #[test]
+    fn card_without_recent_composer_typing_answers_normally() {
+        for stale in [None, Instant::now().checked_sub(std::time::Duration::from_secs(5))] {
+            let mut agent = make_agent();
+            agent.composer_key_at = stale;
+            setup(&mut agent);
+            agent.permission_queue.front_mut().unwrap().active_idx = 1;
+            agent.guard_new_permission_card();
+            assert_eq!(agent.permission_queue.front().unwrap().active_idx, 1);
+            let enter = press(&mut agent, KeyCode::Enter);
+            assert!(is_select(&enter), "a deliberate Enter answers: {enter:?}");
+        }
     }
 
     /// Astra r1 #3: a digit never picks the always-approve row (a message starting with `1` must not enable it); it

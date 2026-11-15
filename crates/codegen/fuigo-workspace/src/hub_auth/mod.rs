@@ -516,6 +516,8 @@ pub fn provider(
     )
     .map_err(|refused| anyhow::anyhow!("{refused}"))?;
     let (scope_key, entry) = read_auth_entry(&auth_path)?;
+    // The hub receives this token on every connect: record it so an echo in a log or error is scrubbed (audit X1-F5).
+    fuigo_secrets::sent_credentials::record(&entry.key);
     build_oidc_provider(scope_key, &entry, auth_path, refresh_cfg).map(|(provider, _)| provider)
 }
 
@@ -1080,6 +1082,35 @@ mod tests {
             unsaved.lock().as_ref().map(|e| e.access_token.as_str()),
             Some("eyJ.newer"),
             "the stale retry must not clear or overwrite the newer unsaved event"
+        );
+    }
+
+    /// Audit X1-F5: the session token the hub receives from auth.json is recorded as a sent credential.
+    #[test]
+    fn hub_session_token_is_recorded_as_sent() {
+        const TOKEN: &str = "eyJ.x1f5-hub-token-FAKE-0001";
+        let echoed = format!("hub said bad token {TOKEN}");
+        assert_eq!(fuigo_secrets::sent_credentials::scrub(&echoed).as_ref(), echoed);
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_auth_json(
+            dir.path(),
+            &format!(
+                r#"{{ "oidc": {{ "key": "{TOKEN}", "user_id": "u1", "refresh_token": "rt", "oidc_issuer": "https://auth.x.ai", "oidc_client_id": "c1" }} }}"#
+            ),
+        );
+        provider(
+            &Url::parse("wss://hub.example.test/v1/tools").unwrap(),
+            Some(&path),
+            &ProactiveRefreshConfig {
+                enabled: false,
+                ..ProactiveRefreshConfig::default()
+            },
+        )
+        .expect("provider");
+        assert_ne!(
+            fuigo_secrets::sent_credentials::scrub(&echoed).as_ref(),
+            echoed,
+            "the hub session token was not recorded"
         );
     }
 

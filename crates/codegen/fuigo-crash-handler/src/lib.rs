@@ -345,18 +345,25 @@ pub fn check_previous_crashes(crash_dir: &Path, current_version: &str) -> Vec<Cr
         let put_back = || {
             let _ = std::fs::rename(&claimed, crash_dir.join(&original));
         };
-        let data = match std::fs::read(&claimed) {
-            Ok(data) => data,
+        // Bounded read (audit S11-F6): a real blob never exceeds MAX_FILE_SIZE, so anything longer is not ours.
+        let data = match read_capped(&claimed, format::MAX_FILE_SIZE) {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                let _ = std::fs::remove_file(&claimed);
+                continue;
+            }
             Err(_) => {
                 put_back();
                 continue;
             }
         };
-        let Some(blob) = format::CrashBlob::parse(&data) else {
+        let Some(mut blob) = format::CrashBlob::parse(&data) else {
             // Empty slot (a clean or SIGKILLed exit) or not a crash blob.
             let _ = std::fs::remove_file(&claimed);
             continue;
         };
+        // The blob's own clock is untrusted: a far-future value would defeat the lexical prune of the history names.
+        blob.timestamp = blob.timestamp.min(unix_now());
         let local = local.get_or_insert_with(|| symbolicate::LocalImage::current(current_version));
         match build_report(crash_dir, &blob, local) {
             Ok(report) => {
@@ -386,6 +393,22 @@ pub fn check_previous_crashes(crash_dir: &Path, current_version: &str) -> Vec<Cr
 /// comparison.
 pub fn check_previous_crash(crash_dir: &Path) -> Option<CrashReport> {
     check_previous_crashes(crash_dir, "").into_iter().next()
+}
+
+/// Read at most `cap` bytes of `path`; `Ok(None)` when the file is longer.
+fn read_capped(path: &Path, cap: usize) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let mut data = Vec::new();
+    std::fs::File::open(path)?
+        .take(cap as u64 + 1)
+        .read_to_end(&mut data)?;
+    Ok((data.len() <= cap).then_some(data))
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 fn build_report(
@@ -453,17 +476,27 @@ fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     {
         use std::io::Write;
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        use std::os::unix::fs::MetadataExt;
+        // O_NOFOLLOW and no truncate-on-open: a planted link is refused, and a file is only truncated after
+        // it has been checked to be a regular file of ours (audit S11-F5).
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
-            .truncate(true)
+            .custom_flags(libc::O_NOFOLLOW)
             .mode(0o600)
             .open(path)?;
+        let meta = file.metadata()?;
+        if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } {
+            return Err(std::io::Error::other(
+                "refusing to write through a link or a file that is not ours",
+            ));
+        }
         // mode() only applies on create — force owner-only before writing so a
         // preexisting 0644 file never holds sensitive content while world-readable.
-        let mut perms = file.metadata()?.permissions();
+        let mut perms = meta.permissions();
         perms.set_mode(0o600);
         file.set_permissions(perms)?;
+        file.set_len(0)?;
         file.write_all(contents)?;
         file.flush()?;
         Ok(())
@@ -640,6 +673,63 @@ mod tests {
             blob_v2(ppid, CrashKind::Signal, PanicClass::None, b"").len()
         );
         assert!(own.exists(), "the reader's own slot must stay");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Audit S11-F6: an oversized blob is rejected, a far-future timestamp is clamped to now (so the history name
+    /// still prunes), and control characters in the version never add lines to the notice.
+    #[cfg(unix)]
+    #[test]
+    fn hostile_blobs_are_bounded_and_sanitised() {
+        let dir = unique_tmp_dir("hostile");
+        let pid = dead_pid();
+
+        let mut oversized = blob_v2(pid, CrashKind::Signal, PanicClass::None, b"");
+        oversized.resize(format::MAX_FILE_SIZE + 4096, 0);
+        let big_slot = dir.join(slot_file_name(pid, 1));
+        std::fs::write(&big_slot, &oversized).expect("seed oversized");
+        assert!(
+            check_previous_crashes(&dir, "").is_empty(),
+            "an oversized blob is not a crash report"
+        );
+        assert!(!big_slot.exists(), "the oversized blob is discarded");
+
+        let mut hostile = blob_v2(pid, CrashKind::Signal, PanicClass::None, b"");
+        hostile[22..30].copy_from_slice(&u64::MAX.to_le_bytes());
+        let version = b"1.0\nInjected: line\x1b[2J";
+        hostile[32..32 + version.len()].copy_from_slice(version);
+        std::fs::write(dir.join(slot_file_name(pid, 2)), &hostile).expect("seed hostile");
+        let reports = check_previous_crashes(&dir, "");
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        assert!(reports[0].timestamp <= now, "timestamp clamped to now");
+        let name = reports[0].report_path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(!name.contains(&u64::MAX.to_string()), "{name}");
+        assert!(
+            reports[0].app_version.chars().all(|c| (' '..='~').contains(&c)),
+            "{:?}",
+            reports[0].app_version
+        );
+        let notice = startup_notice(&reports).expect("notice");
+        assert_eq!(notice.lines().count(), 5, "{notice}");
+        assert!(!notice.lines().any(|l| l.starts_with("Injected")), "{notice}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Audit S11-F5: the history/report writer does not follow a planted symlink.
+    #[cfg(unix)]
+    #[test]
+    fn write_owner_only_refuses_a_symlink() {
+        let dir = unique_tmp_dir("wo-link");
+        let sentinel = dir.join("sentinel");
+        std::fs::write(&sentinel, b"keep me").expect("seed");
+        let link = dir.join("report.txt");
+        std::os::unix::fs::symlink(&sentinel, &link).expect("symlink");
+        assert!(write_owner_only(&link, b"overwritten").is_err());
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep me");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

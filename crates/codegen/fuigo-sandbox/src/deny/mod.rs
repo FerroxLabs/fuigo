@@ -118,6 +118,22 @@ fn emit_seatbelt_deny(caps: &mut CapabilitySet, filter: &str) -> anyhow::Result<
     Ok(())
 }
 
+/// Seatbelt filters for a read-and-write deny of one escaped path form.
+/// An existing directory gets `subpath`, an existing file `literal`. A path that does not exist at
+/// launch gets both, so a directory created there later is denied together with its children.
+#[cfg(all(feature = "enforce", unix, any(target_os = "macos", test)))]
+fn seatbelt_read_write_deny_filters(escaped: &str, canonical: &Path) -> Vec<String> {
+    let literal = format!("(literal \"{escaped}\")");
+    let subpath = format!("(subpath \"{escaped}\")");
+    if deny_path_is_dir(canonical) {
+        vec![subpath]
+    } else if std::fs::symlink_metadata(canonical).is_err() {
+        vec![literal, subpath]
+    } else {
+        vec![literal]
+    }
+}
+
 /// Write-only Seatbelt deny rules for one filter (hook sources stay readable).
 #[cfg(all(feature = "enforce", unix, any(target_os = "macos", test)))]
 fn seatbelt_write_deny_rules(filter: &str) -> Vec<String> {
@@ -197,7 +213,9 @@ pub(crate) fn render_write_deny_rules(
     let mut ancestor_seen = std::collections::HashSet::new();
     for (path, is_dir) in entries {
         let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.clone());
-        let use_subpath = *is_dir || deny_path_is_dir(&canonical);
+        let use_subpath = *is_dir
+            || deny_path_is_dir(&canonical)
+            || std::fs::symlink_metadata(&canonical).is_err();
         for form in macos_deny_aliases(path, &canonical) {
             let Some(escaped) = escape_seatbelt_path(&form) else {
                 anyhow::bail!("cannot escape write-deny path {form:?} for Seatbelt");
@@ -365,8 +383,6 @@ pub(crate) fn apply_deny_paths_to_capability_set(
         let mut rule_paths: Vec<PathBuf> = Vec::new();
         for path in deny_paths {
             let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.clone());
-            // Dir-ness (subpath vs literal) is decided by existence and applies to all alias forms of this path
-            let use_subpath = deny_path_is_dir(&canonical);
             // The base profile grants `(allow file-read* (subpath "/"))`, which matches every *literal* path
             // macOS reaches /tmp, /var, /etc via symlinks into /private, so denying only the canonical form is bypassable through the alias
             // Emit a deny for each alias form
@@ -378,13 +394,10 @@ pub(crate) fn apply_deny_paths_to_capability_set(
                     // That matches Linux, where any failed bind fails closed
                     anyhow::bail!("cannot escape deny path {form:?} for Seatbelt");
                 };
-                // `literal` for files, `subpath` for dirs, so deny rules are more specific than parent-directory allows
-                let filter = if use_subpath {
-                    format!("(subpath \"{escaped}\")")
-                } else {
-                    format!("(literal \"{escaped}\")")
-                };
-                emit_seatbelt_deny(caps, &filter)?;
+                // `literal` for files, `subpath` for dirs, both for a path that does not exist yet
+                for filter in seatbelt_read_write_deny_filters(&escaped, &canonical) {
+                    emit_seatbelt_deny(caps, &filter)?;
+                }
                 rule_paths.push(form);
             }
         }
@@ -469,9 +482,8 @@ pub(crate) fn exact_deny_path_strings(workspace: &Path, exact: &[PathBuf]) -> Ve
 /// True for existing directories, false otherwise.
 /// Shared by the macOS and Linux deny sites so the two cannot silently diverge.
 ///
-/// Limitation: a non-existent deny path is treated as a single file (macOS emits `(literal …)`).
-/// If it is later created as a directory its children are not covered on macOS.
-/// Name concrete existing paths to deny a whole directory tree.
+/// A non-existent deny path is not a directory here, but the macOS rules emit both `literal` and
+/// `subpath` for it (see `seatbelt_read_write_deny_filters`), so a directory created there later is covered.
 #[cfg(all(feature = "enforce", unix))]
 pub(crate) fn deny_path_is_dir(canonical: &Path) -> bool {
     canonical.is_dir()
@@ -479,6 +491,37 @@ pub(crate) fn deny_path_is_dir(canonical: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(all(feature = "enforce", unix))]
+    fn missing_deny_path_yields_literal_and_subpath_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("not-yet");
+        let escaped = missing.display().to_string();
+        let filters = super::seatbelt_read_write_deny_filters(&escaped, &missing);
+        assert_eq!(
+            filters,
+            vec![
+                format!("(literal \"{escaped}\")"),
+                format!("(subpath \"{escaped}\")")
+            ]
+        );
+        let file = tmp.path().join("f");
+        std::fs::write(&file, "x").unwrap();
+        let escaped = file.display().to_string();
+        assert_eq!(
+            super::seatbelt_read_write_deny_filters(&escaped, &file),
+            vec![format!("(literal \"{escaped}\")")]
+        );
+        let escaped = tmp.path().display().to_string();
+        assert_eq!(
+            super::seatbelt_read_write_deny_filters(&escaped, tmp.path()),
+            vec![format!("(subpath \"{escaped}\")")]
+        );
+        let rules = super::render_write_deny_rules(&[(missing.clone(), false)], &[]).unwrap();
+        let joined = rules.rules.join("\n");
+        assert!(joined.contains("(subpath ") && joined.contains("(literal "));
+    }
+
     // All tests here exercise enforce+unix paths; without the gate `super::*` is unused on `--no-default-features`
     #[cfg(all(feature = "enforce", unix))]
     use super::*;

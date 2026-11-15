@@ -98,21 +98,36 @@ const SINK_FUNCTIONS: &[(&str, &[&str])] = &[
         "pub upload_bytes", "pub upload_file", "pub upload_stream", "to_credentials_content",
     ]),
     (STORAGE_CLIENT, &[
-        "add_common_headers", "apply", "calculate_delay", "calculate_delay_with_retry_after",
+        // audit S11-F9, review M2 and the delta review M2 residual / D4: `check_signed_url`, `check_signed_url_with`,
+        // `ensure_public_addrs`, `is_loopback_host`, `no_proxy_matches`, `proxy_carries_signed_url`,
+        // `refuse_signed_url`, `signed_url_host_to_resolve` and `signed_url_uses_checked_client` are private checks of
+        // a signed URL the storage proxy returned. They send nothing and move no content; they only refuse a URL, or
+        // pick the client for it, before the signed upload or download starts.
+        // review L20: `check_signed_urls`, `distinct_signed_urls` and `lookup_addrs` are the same check once per host;
+        // `checked_signed_url_client` and `client_for_signed_url` choose the (address-checked) client that carries the
+        // already-gated signed request. None moves content of its own.
+        // review u45 D2-03: `library_proxy_matcher` replaces `no_proxy_matches`; it is the HTTP library's own proxy
+        // selection, read by `proxy_carries_signed_url`. Fable u45 Low 5: `set_signed_url_user_agent` and
+        // `signed_url_user_agent` record the upload client's User-Agent for the checked client. None sends anything.
+        "add_common_headers", "apply", "calculate_delay", "calculate_delay_with_retry_after", "check_signed_url",
+        "check_signed_url_with", "check_signed_urls", "checked_signed_url_client", "client_for_signed_url",
         "collect_upload_results", "create_read_at_stream", "default", "default", "default_upload_client",
-        "fire_401_attribution", "fmt", "from_response", "gate", "generate_jitter", "get_signed_upload_url",
-        "is_retryable_status", "multipart_complete", "multipart_init", "parse_retry_after",
+        "distinct_signed_urls", "ensure_public_addrs", "fire_401_attribution", "fmt", "from_response", "gate",
+        "generate_jitter", "get_signed_upload_url", "is_loopback_host", "is_retryable_status", "library_proxy_matcher",
+        "lookup_addrs",
+        "multipart_complete", "multipart_init", "parse_retry_after", "proxy_carries_signed_url",
         "pub batch_check_exists", "pub batch_upload", "pub batch_upload_json", "pub bearer_destination",
-        "pub check_exists", "pub conservative", "pub download_blob", "pub get_upload_limits", "pub new",
-        "pub new", "pub new", "pub new", "pub service_session_destination", "pub storage_breaker_is_open",
-        "pub upload", "pub upload_bytes_signed", "pub upload_file", "pub upload_multipart",
-        "pub upload_stream", "pub wire_bearer", "pub with_attribution", "pub with_client_identity",
-        "pub with_client_mode", "pub with_initial_delay", "pub with_jitter_factor", "pub with_max_concurrent",
-        "pub with_max_delay", "pub with_max_retries", "pub with_multiplier", "pub with_part_size",
-        "pub with_provider", "pub with_retry_config", "pub with_static_key", "record_401",
-        "storage_breaker_config", "upload_part_direct", "upload_part_streaming", "upload_parts_direct",
-        "upload_parts_via_proxy", "upload_via_signed_url", "wait_for_network_retry", "wait_for_retry",
-        "with_static",
+        "pub check_exists", "pub conservative", "pub download_blob", "pub get_upload_limits", "pub new", "pub new",
+        "pub new", "pub new", "pub service_session_destination", "pub set_signed_url_user_agent",
+        "pub signed_url_user_agent", "pub storage_breaker_is_open", "pub upload",
+        "pub upload_bytes_signed", "pub upload_file", "pub upload_multipart", "pub upload_stream", "pub wire_bearer",
+        "pub with_attribution", "pub with_client_identity", "pub with_client_mode", "pub with_initial_delay",
+        "pub with_jitter_factor", "pub with_max_concurrent", "pub with_max_delay", "pub with_max_retries",
+        "pub with_multiplier", "pub with_part_size", "pub with_provider", "pub with_retry_config",
+        "pub with_static_key", "record_401", "refuse_signed_url", "signed_url_host_to_resolve",
+        "signed_url_uses_checked_client", "storage_breaker_config", "upload_part_direct", "upload_part_streaming",
+        "upload_parts_direct", "upload_parts_via_proxy", "upload_via_signed_url", "wait_for_network_retry",
+        "wait_for_retry", "with_static",
     ]),
 ];
 

@@ -1084,7 +1084,7 @@ fn tmp_download_path(dest: &std::path::Path) -> std::path::PathBuf {
 /// Unique temp path `<base>.{pid}-{seq}.{ext}`, appended to the full name.
 /// A versioned base like `fuigo-0.1.181` would collide via `with_extension`, which treats everything after the last dot as the extension.
 /// The PID and a per-process counter keep racing updaters from clobbering each other.
-fn unique_temp_sibling(base: &std::path::Path, ext: &str) -> std::path::PathBuf {
+pub(crate) fn unique_temp_sibling(base: &std::path::Path, ext: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let mut name = base
@@ -1518,7 +1518,7 @@ pub async fn install_internal_from_bases(
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no CLI base URLs to try")))
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!(crate::version::NO_UPDATE_SOURCE_GUIDANCE)))
 }
 
 /// First-launch of a freshly downloaded macOS binary can exceed 10s (Rosetta AOT and Gatekeeper on ~140MB).
@@ -1689,6 +1689,12 @@ async fn download_verified_from_base(
     // The downloaded binary is already +x (see `publish_downloaded_artifact`)
     download_cli_artifact_from_gcs(gcs_base_url, &binary_name, &binary_path, true).await?;
 
+    // Digest check BEFORE anything runs the file (audit S8-F9): the smoke test below executes it.
+    if let Err(e) = verify_internal_download(gcs_base_url, &binary_name, &binary_path).await {
+        let _ = tokio::fs::remove_file(&binary_path).await;
+        return Err(e);
+    }
+
     // Smoke-test: run the binary before activating it
     // A truncated or corrupt download is caught here and never becomes the active fuigo
     if let Err(fail) = smoke_test_binary(&binary_path).await {
@@ -1704,6 +1710,55 @@ async fn download_verified_from_base(
         version,
         binary_path,
     })
+}
+
+/// Check a downloaded internal-installer binary against the sha256 the base publishes at
+/// `{base}/{binary_name}.sha256` (a bare digest, or `<digest>  <name>`), before it is ever executed.
+/// A real base must publish one per binary (`{binary_name}.sha256`, in the same step as the binary): a missing or
+/// malformed digest refuses the download, and the error names the file. The digest comes from the same base as the
+/// binary, so it catches corruption and a half-published release, not a compromised base. Only a loopback
+/// base (the test override, see [`crate::version::cli_base_urls`]) may go without or answer with a
+/// non-digest; a well-formed digest it does publish is still enforced.
+async fn verify_internal_download(
+    base: &str,
+    binary_name: &str,
+    binary_path: &std::path::Path,
+) -> Result<()> {
+    let required = !crate::version::is_loopback_base(base);
+    let url = format!("{}/{binary_name}.sha256", base.trim_end_matches('/'));
+    let sums_tmp = unique_temp_sibling(binary_path, "sha256.tmp");
+    let text = match download_plain(&url, &sums_tmp, false).await {
+        Ok(()) => tokio::fs::read_to_string(&sums_tmp).await.ok(),
+        Err(_) => None,
+    };
+    let _ = tokio::fs::remove_file(&sums_tmp).await;
+    let Some(text) = text else {
+        if required {
+            anyhow::bail!(
+                "this download base must publish `{binary_name}.sha256` next to the binary, in the same step that publishes the binary \
+                 (see RELEASE.md, \"Internal installer base\"); none was found at {url}, so the download was refused before it ran"
+            );
+        }
+        tracing::debug!("no checksum at {url}; loopback base, continuing");
+        return Ok(());
+    };
+    let digest = text
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+        if required {
+            anyhow::bail!(
+                "`{binary_name}.sha256` at {url} is not a sha256 digest; the base must publish a bare 64-digit hex digest \
+                 (or `<digest>  {binary_name}`) for each binary (see RELEASE.md, \"Internal installer base\")"
+            );
+        }
+        // A loopback test server may answer every path with the artifact itself.
+        tracing::debug!("{url} is not a sha256 digest; loopback base, continuing");
+        return Ok(());
+    }
+    verify_gh_asset(binary_path, binary_name, &format!("{digest}  {binary_name}")).await
 }
 
 /// Local activation phase: swap the managed bin links to the downloaded binary and finish bookkeeping.
@@ -1769,8 +1824,80 @@ async fn regenerate_completions(binary: &std::path::Path, fuigo_home: &std::path
             continue;
         };
         if output.status.success() && !output.stdout.is_empty() {
-            let _ = tokio::fs::write(dest, &output.stdout).await;
+            write_completion_file(dest, &output.stdout).await;
         }
+    }
+}
+
+/// Write a completions file through a unique temp file and a rename. A destination that is a symlink (dotfile
+/// managers make them) is written through when what it points at is a file inside the user's home, so the target is
+/// refreshed and the link stays; anywhere else it is left alone (audit S8-F12: the old direct write followed a link to
+/// wherever it pointed) with a warning, printed once per file rather than on every update (review L26).
+async fn write_completion_file(dest: &std::path::Path, contents: &[u8]) {
+    let user_home = fuigo_dirs::home_dir().unwrap_or_default();
+    let marker = fuigo_home().join("completions-symlink-warned");
+    write_completion_file_in(dest, contents, &user_home, &marker).await;
+}
+
+async fn write_completion_file_in(
+    dest: &std::path::Path,
+    contents: &[u8],
+    user_home: &std::path::Path,
+    warned_marker: &std::path::Path,
+) {
+    let mut target = dest.to_path_buf();
+    if tokio::fs::symlink_metadata(dest)
+        .await
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        match link_target_inside_home(dest, user_home).await {
+            Some(real) => target = real,
+            None => {
+                warn_completion_symlink_once(dest, warned_marker).await;
+                return;
+            }
+        }
+    }
+    let tmp = unique_temp_sibling(&target, "tmp");
+    if tokio::fs::write(&tmp, contents).await.is_err()
+        || tokio::fs::rename(&tmp, &target).await.is_err()
+    {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+}
+
+/// Where the symlink `link` points, when that is an existing regular file inside `user_home`.
+async fn link_target_inside_home(link: &std::path::Path, user_home: &std::path::Path) -> Option<std::path::PathBuf> {
+    if user_home.as_os_str().is_empty() {
+        return None;
+    }
+    let (link, user_home) = (link.to_path_buf(), user_home.to_path_buf());
+    tokio::task::spawn_blocking(move || {
+        let real = dunce::canonicalize(&link).ok()?;
+        let home = dunce::canonicalize(&user_home).ok()?;
+        (real.is_file() && real.starts_with(&home)).then_some(real)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Tell the user once per completions file that a symlinked one is not refreshed. The paths already told about are kept
+/// one per line in `warned_marker` (in `~/.fuigo`), which outlives the update process; with no such directory the
+/// warning is simply repeated.
+async fn warn_completion_symlink_once(dest: &std::path::Path, warned_marker: &std::path::Path) {
+    let line = dest.display().to_string();
+    let known = tokio::fs::read_to_string(warned_marker).await.unwrap_or_default();
+    if known.lines().any(|l| l == line) {
+        return;
+    }
+    fuigo_tty_utils::cli_eprintln!(
+        "Not refreshing the shell completions at {line}: it is a symlink to somewhere outside your home folder. \
+         Remove the link to let Fuigo manage this file (this notice is shown once)."
+    );
+    tracing::warn!("not regenerating {line}: it is a symlink pointing outside the home folder");
+    if warned_marker.parent().is_some_and(std::path::Path::is_dir) {
+        let _ = tokio::fs::write(warned_marker, format!("{known}{line}\n")).await;
     }
 }
 
@@ -2303,7 +2430,7 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
     );
     pb.enable_steady_tick(Duration::from_millis(100));
 
-    let mut cmd = tokio::process::Command::new("gh");
+    let mut cmd = tokio::process::Command::new(crate::npm_command::trusted_program("gh")?);
     cmd.args([
         "release",
         "download",
@@ -2512,7 +2639,11 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
 /// The temporary .npmrc holding `NPM_TOKEN`, removed when dropped: the npm calls that use it are awaited and can be
 /// cancelled (the leader's own cancellation drops the update future), and a cancelled call must not leave the token on
 /// disk (Astra P145 r1 #4).
-struct TempNpmrc(std::path::PathBuf);
+///
+/// The file sits in a fresh owner-only directory (`PrivateNpmCache`, dropped with the guard) and is created with
+/// `create_new` and mode 0600 at open, so a planted file or symlink is never followed and the token is never readable
+/// by another user (audit S8-F3).
+struct TempNpmrc(std::path::PathBuf, #[allow(dead_code)] crate::version::PrivateNpmCache);
 
 impl std::ops::Deref for TempNpmrc {
     type Target = std::path::Path;
@@ -2543,8 +2674,8 @@ fn create_temp_npmrc(npm_registry: Option<&str>) -> Result<Option<TempNpmrc>> {
     if let Ok(token) = std::env::var("NPM_TOKEN") {
         let token = token.trim();
         if !token.is_empty() {
-            let dir = std::env::temp_dir();
-            let npmrc_path = dir.join(format!(".npmrc-{}-install", std::process::id()));
+            let dir = crate::version::PrivateNpmCache::create()?;
+            let npmrc_path = dir.0.join(format!(".npmrc-{}-install", std::process::id()));
             let registry_host = npm_registry
                 .and_then(|r| reqwest::Url::parse(r).ok())
                 .map(|u| {
@@ -2554,14 +2685,17 @@ fn create_temp_npmrc(npm_registry: Option<&str>) -> Result<Option<TempNpmrc>> {
                 })
                 .unwrap_or_else(|| "registry.npmjs.org".to_string());
             let npmrc_content = format!("//{}/:_authToken={}\n", registry_host, token);
-            // The guard exists before the token is written, so every failure below still removes the file.
-            let guard = TempNpmrc(npmrc_path);
-            std::fs::write(&guard.0, npmrc_content)?;
+            // The guard (and so the directory) exists before the token is written, so every failure below still
+            // removes both.
+            let guard = TempNpmrc(npmrc_path, dir);
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&guard.0, std::fs::Permissions::from_mode(0o600))?;
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
             }
+            std::io::Write::write_all(&mut options.open(&guard.0)?, npmrc_content.as_bytes())?;
             return Ok(Some(guard));
         }
     }
@@ -2981,7 +3115,7 @@ async fn run_npm_setup_at(
 
     let script = pkg_dir.join("bin").join("fuigo-bootstrap.js");
     let home = fuigo_home();
-    let mut cmd = tokio::process::Command::new("node");
+    let mut cmd = tokio::process::Command::new(crate::npm_command::trusted_program("node")?);
     cmd.arg(&script)
         // Never the user's project: the node side looks up the npm registry from this directory.
         .current_dir(if home.is_dir() { home.clone() } else { std::env::temp_dir() })
@@ -3065,9 +3199,33 @@ fn canonical_points_at(version: &str) -> bool {
     #[cfg(not(unix))]
     {
         // Windows copies the versioned binary over fuigo.exe (symlinks need elevation).
-        match (std::fs::metadata(&app), std::fs::metadata(dir.join(&name))) {
-            (Ok(a), Ok(b)) => a.is_file() && a.len() == b.len(),
-            _ => false,
+        same_file_content(&app, &dir.join(&name))
+    }
+}
+
+/// Whether two files hold the same bytes: lengths first, then a streaming comparison. A length-only test
+/// treats two builds of equal size as the same binary (audit S8-F12).
+#[cfg_attr(unix, allow(dead_code))]
+fn same_file_content(a: &std::path::Path, b: &std::path::Path) -> bool {
+    use std::io::Read;
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    if !ma.is_file() || !mb.is_file() || ma.len() != mb.len() {
+        return false;
+    }
+    let (Ok(mut fa), Ok(mut fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else {
+        return false;
+    };
+    let mut ba = vec![0u8; 64 * 1024];
+    let mut bb = vec![0u8; 64 * 1024];
+    loop {
+        let Ok(n) = fa.read(&mut ba) else { return false };
+        if n == 0 {
+            return true;
+        }
+        if fb.read_exact(&mut bb[..n]).is_err() || ba[..n] != bb[..n] {
+            return false;
         }
     }
 }

@@ -220,6 +220,52 @@ fn mcp_server_prefix_allowed(name: &str, servers: &HashSet<String>) -> bool {
         && parse_mcp_qualified_name(name).is_some_and(|(_, server, _)| servers.contains(server))
 }
 
+/// Audit S6-F4: what [`note_mcp_definition`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpDefinitionNote {
+    /// No definition known for the call, or not a qualified MCP name: nothing checked.
+    Unknown,
+    /// The definition recorded for the server.
+    Same,
+    /// None was recorded (a grant from before definitions were recorded): recorded now.
+    Recorded,
+    /// Not the recorded definition: warned about, and recorded.
+    Changed,
+}
+
+/// Audit S6-F4: a remembered MCP grant is keyed by name. The definition the server had when the grant was given or last
+/// used is recorded with it, and a call that reaches a different definition under that name is warned about loudly.
+/// Warning only: the grant still applies (peers key MCP approvals by name too), and the new definition is recorded, so
+/// the warning is given once per change.
+fn note_mcp_definition(state: &mut PermissionState, name: &str, definition: Option<&str>) -> McpDefinitionNote {
+    let (Some(definition), Some((_, server, _))) = (definition, parse_mcp_qualified_name(name)) else {
+        return McpDefinitionNote::Unknown;
+    };
+    match state.mcp_server_definitions.insert(server.to_owned(), definition.to_owned()) {
+        Some(old) if old == definition => McpDefinitionNote::Same,
+        None => McpDefinitionNote::Recorded,
+        Some(_) => {
+            tracing::warn!(%server, "MCP server definition changed since its always-allow grant; the grant still applies");
+            let warning = format!(
+                "the MCP server `{server}` has an \"always allow\" grant, but its definition (command or URL) \
+                 changed since then; its tools still run without asking. If you did not change it, check where the \
+                 server is defined (a project config can define a server under the same name)."
+            );
+            // The TUI discards stderr, so the same text also goes through the notice list the session shows.
+            fuigo_config::mcp_bearer_file::record_note(warning.clone());
+            fuigo_tty_utils::cli_eprintln!("warning: {warning}");
+            McpDefinitionNote::Changed
+        }
+    }
+}
+
+/// Audit S6-F4: record the definition an "always allow" MCP grant is given for (no warning: the user just answered).
+fn record_mcp_definition(state: &mut PermissionState, name: &str, definition: Option<&str>) {
+    if let (Some(definition), Some((_, server, _))) = (definition, parse_mcp_qualified_name(name)) {
+        state.mcp_server_definitions.insert(server.to_owned(), definition.to_owned());
+    }
+}
+
 /// Pre-decision lookup for an MCP tool.
 /// A remembered "never allow" rejects, checked before the `ask`-floor early return so a deny wins over any grant (mirroring the bash disallow path).
 /// A tool or server-prefix grant allows; anything else returns `None` and falls through to the prompt.
@@ -3178,6 +3224,9 @@ fn spawn_permission_manager_with_pin(
                             read_targets,
                             peer_note,
                             exec_cwd,
+                            parent_run_dir,
+                            shell_run_dir,
+                            mcp_definition,
                         },
                         respond_to,
                     )) = pending.take()
@@ -3370,7 +3419,15 @@ fn spawn_permission_manager_with_pin(
                         AccessKind::Bash(cmd) => {
                             // u35 g11 (Astra r10 High): every directory the command can run in, the tool's own
                             // working directory (OpenCode bash `workdir`) included, gets every repository check.
-                            let run_dirs = bash_run_dirs(request_cwd, exec_cwd.as_deref());
+                            let mut run_dirs = bash_run_dirs(request_cwd, exec_cwd.as_deref());
+                            // Audit S3-F2: a persistent shell starts the command in the directory it has moved to.
+                            if let Some(dir) = shell_run_dir.as_ref().filter(|dir| !run_dirs.contains(dir)) {
+                                run_dirs.push(dir.clone());
+                            }
+                            // Audit X2-F1: a subagent's command is also judged in its parent session's folder.
+                            if let Some(parent) = parent_run_dir.as_ref().filter(|dir| !run_dirs.contains(dir)) {
+                                run_dirs.push(parent.clone());
+                            }
                             let trust = crate::permission::run_dirs::run_dirs_trust(&run_dirs);
                             let folder_trusted = trust.is_trusted();
                             if !folder_trusted {
@@ -3592,6 +3649,16 @@ fn spawn_permission_manager_with_pin(
                             %reason,
                             "session grant short-circuit before auto classifier"
                         );
+                        // Audit S6-F4: a call a remembered MCP grant allows checks the server's definition against the
+                        // grant's (the usual path for a grant; the pre-decision below covers the ask-rule case).
+                        if let (Decision::Allow, AccessKind::MCPTool { name, .. }) = (&decision, &access)
+                            && matches!(
+                                note_mcp_definition(&mut state, name, mcp_definition.as_deref()),
+                                McpDefinitionNote::Recorded | McpDefinitionNote::Changed
+                            )
+                        {
+                            persist_state(&cwd, &state, client_id_ref).await;
+                        }
                         let event = emit_event(&decision, true, false, None, Some(reason));
                         let _ = respond_to.send(PermissionResolution {
                             decision,
@@ -4151,6 +4218,16 @@ fn spawn_permission_manager_with_pin(
                     if hook_forced_prompt && matches!(pre_decision, Some((Decision::Allow, _))) {
                         pre_decision = None;
                     }
+                    // Audit S6-F4: a call a remembered MCP grant allows checks the server's definition against the grant's.
+                    if let (Some((Decision::Allow, reason)), AccessKind::MCPTool { name, .. }) = (&pre_decision, &access)
+                        && *reason == reasons::PERSISTED_GRANT
+                        && matches!(
+                            note_mcp_definition(&mut state, name, mcp_definition.as_deref()),
+                            McpDefinitionNote::Recorded | McpDefinitionNote::Changed
+                        )
+                    {
+                        persist_state(&cwd, &state, client_id_ref).await;
+                    }
                     if let Some((decision, reason)) = pre_decision {
                         let event = emit_event(&decision, true, false, None, Some(reason));
                         let _ = respond_to.send(PermissionResolution {
@@ -4334,6 +4411,7 @@ fn spawn_permission_manager_with_pin(
                                 PromptOutcome::AllowAlways => {
                                     if let AccessKind::MCPTool { name, .. } = &access {
                                         state.allowed_mcp_tools.insert(name.clone());
+                                        record_mcp_definition(&mut state, name, mcp_definition.as_deref());
                                     }
                                     persist_state(&cwd, &state, client_id_ref).await;
                                     Decision::Allow
@@ -4374,6 +4452,7 @@ fn spawn_permission_manager_with_pin(
                                             );
                                         }
                                         state.allowed_mcp_tools.insert(access_name.clone());
+                                        record_mcp_definition(&mut state, access_name, mcp_definition.as_deref());
                                         persist_state(&cwd, &state, client_id_ref).await;
                                     }
                                     Decision::Allow
@@ -4390,6 +4469,7 @@ fn spawn_permission_manager_with_pin(
                                                 state
                                                     .allowed_mcp_servers
                                                     .insert(canonical.to_owned());
+                                                record_mcp_definition(&mut state, access_name, mcp_definition.as_deref());
                                                 tracing::info!(
                                                     server = %canonical,
                                                     count = state.allowed_mcp_servers.len(),
@@ -4404,6 +4484,7 @@ fn spawn_permission_manager_with_pin(
                                                     "AllowAlwaysMcpServer prefix mismatch; downgrading to tool-scope"
                                                 );
                                                 state.allowed_mcp_tools.insert(access_name.clone());
+                                                record_mcp_definition(&mut state, access_name, mcp_definition.as_deref());
                                                 persist_state(&cwd, &state, client_id_ref).await;
                                             }
                                         }
@@ -13875,6 +13956,65 @@ mod tests {
                     "session MCP server grant must Allow before classifier, got {d:?}"
                 );
                 assert_eq!(prompts.borrow().len(), 0);
+            })
+            .await;
+    }
+
+    #[test]
+    fn s6_f4_note_mcp_definition_warns_only_on_a_change() {
+        let mut state = PermissionState::default();
+        assert_eq!(note_mcp_definition(&mut state, "linear__list", None), McpDefinitionNote::Unknown);
+        assert_eq!(note_mcp_definition(&mut state, "linear__list", Some("a")), McpDefinitionNote::Recorded);
+        assert_eq!(note_mcp_definition(&mut state, "linear__other", Some("a")), McpDefinitionNote::Same);
+        assert_eq!(note_mcp_definition(&mut state, "linear__list", Some("b")), McpDefinitionNote::Changed);
+        assert_eq!(state.mcp_server_definitions.get("linear").map(String::as_str), Some("b"));
+    }
+
+    /// Review L8: the changed-definition warning also reaches the notice list the session shows (stderr is discarded
+    /// by the TUI).
+    #[test]
+    fn l8_changed_mcp_definition_is_recorded_as_a_notice() {
+        let mut state = PermissionState::default();
+        assert_eq!(note_mcp_definition(&mut state, "rfixl8srv__list", Some("a")), McpDefinitionNote::Recorded);
+        assert_eq!(note_mcp_definition(&mut state, "rfixl8srv__list", Some("b")), McpDefinitionNote::Changed);
+        let notes = fuigo_config::key_naming::refusal_notes();
+        assert!(
+            notes.iter().any(|n| n.contains("`rfixl8srv`") && n.contains("definition")),
+            "no notice for the changed definition: {notes:?}"
+        );
+    }
+
+    /// Audit S6-F4: an "always allow" grant for an MCP server notices a different definition under the granted name:
+    /// the call still runs unasked (warning only, as peers key MCP approvals by name), and the new definition is
+    /// recorded, so the warning is given once per change. An older grant without a definition records it on first use.
+    #[tokio::test]
+    async fn s6_f4_mcp_grant_notices_a_changed_server_definition() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let mut seeded = PermissionState::default();
+                seeded.allowed_mcp_servers.insert("linear".to_string());
+                persist_state(&cwd, &seeded, None).await;
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, _e) = manager_with_recording_client(&cwd, None, client, ClientType::FuigoPager);
+                let call = |definition: &str| PermissionRequest {
+                    mcp_definition: Some(definition.to_owned()),
+                    ..PermissionRequest::new(
+                        AccessKind::MCPTool { name: "linear__list".into(), input: serde_json::Value::Null },
+                        tool_call(),
+                    )
+                };
+                assert_eq!(mgr.request(call("first")).await.decision, Decision::Allow);
+                let persisted = crate::permission::state::load_state_from_disk(&cwd, None).await;
+                assert_eq!(persisted.mcp_server_definitions.get("linear").map(String::as_str), Some("first"));
+                assert_eq!(mgr.request(call("second")).await.decision, Decision::Allow);
+                let persisted = crate::permission::state::load_state_from_disk(&cwd, None).await;
+                assert_eq!(persisted.mcp_server_definitions.get("linear").map(String::as_str), Some("second"));
+                assert!(persisted.allowed_mcp_servers.contains("linear"), "the grant is kept");
+                assert_eq!(prompts.borrow().len(), 0, "no new prompt");
             })
             .await;
     }

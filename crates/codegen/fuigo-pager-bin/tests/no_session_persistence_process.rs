@@ -504,7 +504,6 @@ async fn r1h3_sandboxed_subagent_runs_on_a_cold_home_and_over_old_permission_sta
     reason = "F5-A: the test seeds a warm cwd bucket by path in a temp FUIGO_HOME and asserts nothing under sessions changed; it never writes a session folder"
 )]
 async fn r2_no_session_persistence_matrix_cold_and_warm_home_by_sandbox_mode_writes_nothing_and_refuses_nothing() {
-    use std::os::unix::fs::PermissionsExt as _;
     let mut failures = Vec::new();
     for warm in [false, true] {
         for mode in ["off", "observe", "enforce", "strict"] {
@@ -517,7 +516,9 @@ async fn r2_no_session_persistence_matrix_cold_and_warm_home_by_sandbox_mode_wri
                     &sandbox.workspace().to_string_lossy(),
                 );
                 std::fs::create_dir_all(&bucket).unwrap();
+                #[cfg(unix)]
                 for dir in [&sessions, &bucket] {
+                    use std::os::unix::fs::PermissionsExt as _;
                     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
                 }
             }

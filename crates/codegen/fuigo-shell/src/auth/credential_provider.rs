@@ -83,6 +83,17 @@ impl HttpAuth for ShellAuthCredentialProvider {
         {
             creds.user_token = Some(auth.key);
         }
+        // Everything this provider puts on a request is a credential actually sent (audit X1-F5)
+        for secret in [
+            creds.deployment_key.as_deref(),
+            creds.user_token.as_deref(),
+            creds.alpha_test_key.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            fuigo_telemetry::sent_credentials::record(secret);
+        }
         creds.apply(builder, base_url)
     }
 }
@@ -236,6 +247,9 @@ pub fn build_storage_client_for_proxy(
         } else {
             fuigo_auth::BearerDestination::Unrestricted
         };
+        if let Some(bearer) = &wire_bearer {
+            fuigo_telemetry::sent_credentials::record(bearer);
+        }
         let provider: Arc<dyn AuthCredentialProvider> = Arc::new(
             StaticAuthCredentialProvider::new(Box::new(creds), wire_bearer, destination),
         );
@@ -1002,5 +1016,25 @@ mod tests {
         let snap = provider.snapshot();
         assert_eq!(snap.token.as_deref(), Some("deployment-key-12345"));
         assert!(snap.user_id.is_none());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures use test-owned temp dirs")]
+mod x1_f5_sent_credential_tests {
+    use super::*;
+    use fuigo_telemetry::sent_credentials::scrub;
+
+    /// Audit X1-F5: a deployment key or session token that rides a request built by the shell provider is recorded as
+    /// sent, so exact-value scrubbing covers it at the log, upload and session sinks.
+    #[test]
+    fn provider_apply_records_the_deployment_key() {
+        const KEY: &str = "x1f5-deployment-key-FAKE-0001";
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = std::sync::Arc::new(AuthManager::new(dir.path(), Default::default()));
+        let provider = ShellAuthCredentialProvider::new(mgr, Some(KEY.to_owned()), None, None, "test");
+        let _ = provider.apply(reqwest::Client::new().get("https://api.example/x"), "https://api.example");
+        let echoed = format!("upstream said: bad key {KEY}");
+        assert!(!scrub(&echoed).contains(KEY), "the deployment key was not recorded");
     }
 }

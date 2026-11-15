@@ -1735,3 +1735,82 @@ fn a_published_price_is_read_and_a_bad_one_is_ignored() {
     let none = serde_json::json!({ "id": "m4", "baseUrl": "https://default.url" });
     assert!(parse_remote_model_value(&none, "https://default.url").unwrap().price.is_none());
 }
+
+/// Audit S11-F1: the session the share backend receives is scrubbed like the storage copy. A credential this process
+/// recorded as sent, and a secret-shaped string, must not appear in any request body of `share_session`.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn share_session_scrubs_the_body_sent_to_the_backend() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "remote::client::tests::share_session_scrubs_the_body_sent_to_the_backend",
+    ) else {
+        return;
+    };
+    let recorded = "zq-recorded-credential-0123456789abcdef";
+    let shaped = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghij";
+    fuigo_telemetry::sent_credentials::record(recorded);
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (b1, b2) = (bodies.clone(), bodies.clone());
+    let app = Router::new()
+        .route(
+            "/sessions/{id}",
+            axum::routing::put(move |body: String| async move {
+                b1.lock().unwrap().push(body);
+                StatusCode::OK
+            }),
+        )
+        .route(
+            "/sessions/{id}/data",
+            axum::routing::post(move |body: String| async move {
+                b2.lock().unwrap().push(body);
+                StatusCode::OK
+            }),
+        )
+        .route(
+            "/sessions/{id}/share",
+            axum::routing::post(|| async { axum::Json(serde_json::json!({"permissionId": "p1"})) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let _web = fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "https://w.example.test");
+    let client =
+        BackendClient::with_base_url(front.front(&format!("http://{addr}"))).with_auth_manager(test_auth_manager());
+    let session = ExportedSession {
+        session_id: "s1".to_string(),
+        messages: vec![ExportedMessage {
+            content: serde_json::json!({"method": "x", "text": format!("env echoed {recorded} and {shaped}")})
+                .to_string(),
+            timestamp: None,
+        }],
+        metadata: serde_json::from_value(
+            serde_json::json!({"title": format!("title {recorded}"), "cwd": "/tmp/x"}),
+        )
+        .unwrap(),
+    };
+    let url = client.share_session(&session, "agent").await.unwrap();
+    assert!(url.ends_with("/build/share/p1"), "{url}");
+    let seen = bodies.lock().unwrap().join("\n");
+    assert!(seen.contains("env echoed"), "the messages were sent: {seen}");
+    assert!(!seen.contains(recorded), "recorded credential reached the share backend");
+    assert!(!seen.contains(shaped), "secret-shaped string reached the share backend");
+    server.abort();
+}
+
+/// audit S7-F10: a body over the cap fails with a size error instead of being buffered.
+#[tokio::test(flavor = "current_thread")]
+async fn read_body_capped_refuses_a_body_over_the_cap() {
+    let response = |body: Vec<u8>| reqwest::Response::from(axum::http::Response::new(body));
+    let ok = read_body_capped(response(vec![7u8; 100]), 100).await.unwrap();
+    assert_eq!(ok.len(), 100, "a body exactly at the cap is accepted");
+    let err = read_body_capped(response(vec![7u8; 101]), 100)
+        .await
+        .expect_err("a body over the cap must be refused");
+    match err {
+        BackendError::RequestFailed { status, body } => {
+            assert_eq!(status, 413);
+            assert!(body.contains("limit"), "{body}");
+        }
+        other => panic!("expected a size error, got {other:?}"),
+    }
+}

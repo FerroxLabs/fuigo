@@ -23,11 +23,22 @@ use zip::ZipArchive;
 /// against zip bombs (the compressed input is already capped by the caller).
 const MAX_XML_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Cap on the decompressed size of all entries read from one deck, so a
+/// small archive of many highly compressed slides cannot exhaust memory.
+const MAX_TOTAL_XML_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Cap on the number of slides read from one deck.
+const MAX_SLIDES: usize = 10_000;
+
 /// Extract plain text from PPTX bytes.
 ///
 /// Returns the concatenated slide texts, or an error string suitable for
 /// `ReadFileOutput::FileReadError`.
 pub(crate) fn extract_pptx_text_from_bytes(bytes: &[u8]) -> Result<String, String> {
+    extract_pptx_text_with_budget(bytes, MAX_TOTAL_XML_BYTES)
+}
+
+fn extract_pptx_text_with_budget(bytes: &[u8], mut budget: u64) -> Result<String, String> {
     let mut archive = ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| format!("Failed to open PPTX archive: {e}"))?;
 
@@ -47,10 +58,17 @@ pub(crate) fn extract_pptx_text_from_bytes(bytes: &[u8]) -> Result<String, Strin
     if slide_numbers.is_empty() {
         return Err("No slides found in PPTX".to_string());
     }
+    if slide_numbers.len() > MAX_SLIDES {
+        return Err(format!("PPTX has more than {MAX_SLIDES} slides"));
+    }
 
     let mut all_text = String::new();
     for number in slide_numbers {
-        let slide_xml = read_entry(&mut archive, &format!("ppt/slides/slide{number}.xml"))?
+        let slide_xml = read_entry(
+            &mut archive,
+            &format!("ppt/slides/slide{number}.xml"),
+            &mut budget,
+        )?
             .ok_or_else(|| format!("Failed to read slide {number}"))?;
         let slide_text = extract_drawingml_text(&slide_xml)
             .map_err(|e| format!("Error parsing slide {number}: {e}"))?;
@@ -59,6 +77,7 @@ pub(crate) fn extract_pptx_text_from_bytes(bytes: &[u8]) -> Result<String, Strin
         let notes_text = read_entry(
             &mut archive,
             &format!("ppt/notesSlides/notesSlide{number}.xml"),
+            &mut budget,
         )
         .ok()
         .flatten()
@@ -83,19 +102,29 @@ pub(crate) fn extract_pptx_text_from_bytes(bytes: &[u8]) -> Result<String, Strin
 fn read_entry(
     archive: &mut ZipArchive<Cursor<&[u8]>>,
     name: &str,
+    budget: &mut u64,
 ) -> Result<Option<String>, String> {
     let file = match archive.by_name(name) {
         Ok(file) => file,
         Err(zip::result::ZipError::FileNotFound) => return Ok(None),
         Err(e) => return Err(format!("Failed to open {name}: {e}")),
     };
-    let mut content = String::new();
-    file.take(MAX_XML_ENTRY_BYTES)
-        .read_to_string(&mut content)
-        .map_err(|e| format!("Failed to read {name}: {e}"))?;
-    if content.len() as u64 == MAX_XML_ENTRY_BYTES {
-        return Err(format!("{name} exceeds the decompressed size limit"));
+    let limit = MAX_XML_ENTRY_BYTES.min(*budget);
+    let mut raw = Vec::new();
+    let read_result = file.take(limit + 1).read_to_end(&mut raw);
+    // Charge what was decompressed on every path, so an entry that fails (too large, not UTF-8, unreadable notes)
+    // still spends the budget.
+    let read = raw.len() as u64;
+    *budget = budget.saturating_sub(read.min(limit));
+    read_result.map_err(|e| format!("Failed to read {name}: {e}"))?;
+    if read > limit {
+        return Err(if limit < MAX_XML_ENTRY_BYTES {
+            "PPTX exceeds the total decompressed size limit".to_string()
+        } else {
+            format!("{name} exceeds the decompressed size limit")
+        });
     }
+    let content = String::from_utf8(raw).map_err(|e| format!("Failed to read {name}: {e}"))?;
     Ok(Some(content))
 }
 
@@ -215,6 +244,38 @@ mod tests {
         let bytes = build_zip(&[("ppt/slides/slide1.xml", slide)]);
         let text = extract_pptx_text_from_bytes(&bytes).unwrap();
         assert_eq!(text, "--- Slide 1 ---\nkept");
+    }
+
+    #[test]
+    fn a45_total_decompressed_budget_is_enforced() {
+        let big = slide_xml(&[&"x".repeat(4096)]);
+        let bytes = build_zip(&[
+            ("ppt/slides/slide1.xml", &big),
+            ("ppt/slides/slide2.xml", &big),
+            ("ppt/slides/slide3.xml", &big),
+        ]);
+        let err = extract_pptx_text_with_budget(&bytes, 10_000).unwrap_err();
+        assert!(err.contains("total decompressed size limit"), "{err}");
+        assert!(extract_pptx_text_with_budget(&bytes, 100_000).is_ok());
+    }
+
+    #[test]
+    fn a45_notes_spend_the_budget_and_slides_are_capped() {
+        let small = slide_xml(&["a"]);
+        let big_notes = slide_xml(&[&"n".repeat(8192)]);
+        let bytes = build_zip(&[
+            ("ppt/slides/slide1.xml", &small),
+            ("ppt/notesSlides/notesSlide1.xml", &big_notes),
+            ("ppt/slides/slide2.xml", &small),
+        ]);
+        // The notes exceed what is left, are dropped, and still spend the budget: slide 2 then fails.
+        let err = extract_pptx_text_with_budget(&bytes, 4096).unwrap_err();
+        assert!(err.contains("total decompressed size limit"), "{err}");
+
+        let names: Vec<String> = (1..=MAX_SLIDES + 1).map(|n| format!("ppt/slides/slide{n}.xml")).collect();
+        let entries: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "<p:sld/>")).collect();
+        let err = extract_pptx_text_from_bytes(&build_zip(&entries)).unwrap_err();
+        assert!(err.contains("more than"), "{err}");
     }
 
     #[test]

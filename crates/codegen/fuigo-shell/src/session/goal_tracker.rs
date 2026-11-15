@@ -321,13 +321,31 @@ fn append_skeptic_reports(
     let _ = writer.with_append_file(rel, |out| append_reports(out, reports));
 }
 
+/// Open a skeptic report for reading without following a symlink or waiting on a FIFO; `None` unless it is a regular file.
+fn open_report_no_follow(path: &std::path::Path) -> Option<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY);
+    }
+    let file = options.open(path).ok()?;
+    file.metadata().ok()?.is_file().then_some(file)
+}
+
 fn append_reports(out: &mut std::fs::File, reports: Vec<((u32, u32), PathBuf)>) {
     use std::io::Write;
     let mut budget = crate::session::goal_classifier::GOAL_VERIFIER_PANEL_MAX_BYTES as u64;
     for (_, report) in reports {
         let name = report.file_name().unwrap_or_default().to_string_lossy();
         let header = format!("\n\n---\n## Inlined skeptic report: {name}\n\n");
-        let Ok(len) = std::fs::symlink_metadata(&report).map(|m| m.len()) else {
+        // One no-follow, non-blocking open decides everything (audit S12-F3): a symlink is refused (ELOOP), a FIFO
+        // opens at once and fails the regular-file check, and the size comes from the opened file, not an earlier stat.
+        let Some(file) = open_report_no_follow(&report) else {
+            continue;
+        };
+        let Ok(len) = file.metadata().map(|m| m.len()) else {
             continue;
         };
         if header.len() as u64 + len > budget {
@@ -335,9 +353,16 @@ fn append_reports(out: &mut std::fs::File, reports: Vec<((u32, u32), PathBuf)>) 
                 .write_all(b"\n\n---\n(remaining skeptic reports elided: rescue budget reached)\n");
             return;
         }
-        let Ok(body) = std::fs::read_to_string(&report) else {
+        // A file that grew since the length check still cannot take more than the budget left.
+        let mut body = String::new();
+        if std::io::Read::read_to_string(
+            &mut std::io::Read::take(file, budget.saturating_sub(header.len() as u64)),
+            &mut body,
+        )
+        .is_err()
+        {
             continue;
-        };
+        }
         budget = budget.saturating_sub(header.len() as u64 + body.len() as u64);
         if out
             .write_all(header.as_bytes())

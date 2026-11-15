@@ -1032,6 +1032,29 @@ fn render_welcome_blocked(
     (menu_rects, post_flush_escapes)
 }
 
+/// The folder path as the trust question shows it: unsafe characters (bidi overrides, controls,
+/// invisible fillers) are made visible as their percent-encoded bytes, and a path wider than
+/// `max_cols` keeps its tail behind a leading ellipsis, so the last component the user is
+/// approving is always on screen.
+fn trust_path_label(path: &std::path::Path, max_cols: usize) -> String {
+    let text = fuigo_tty_utils::escape_unsafe_display(&path.display().to_string()).into_owned();
+    if max_cols == 0 || UnicodeWidthStr::width(text.as_str()) <= max_cols {
+        return text;
+    }
+    let mut tail: Vec<char> = Vec::new();
+    let mut cols = 1; // the ellipsis
+    for c in text.chars().rev() {
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if cols + w > max_cols {
+            break;
+        }
+        cols += w;
+        tail.push(c);
+    }
+    tail.reverse();
+    format!("\u{2026}{}", tail.into_iter().collect::<String>())
+}
+
 /// Render the folder-trust question.
 /// Mirrors [`render_welcome_blocked`]'s stacked layout (logo, message, menu, version badge).
 /// Here the message is a multi-line block showing the workspace path and the warning that Fuigo may run or modify contents in this directory.
@@ -1079,7 +1102,7 @@ fn render_welcome_trust(
         theme.gray_bright,
     ));
     lines.push(centered(
-        &workspace.display().to_string(),
+        &trust_path_label(workspace, usize::from(content_area.width.saturating_sub(4))),
         theme.accent_user,
     ));
     lines.push(centered(
@@ -3252,6 +3275,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn trust_question_scrubs_the_path_and_keeps_the_last_component_visible() {
+        let theme = Theme::current();
+        let area = Rect::new(0, 0, 60, 24);
+        let mut buf = Buffer::empty(area);
+        render_welcome_trust(
+            area,
+            &mut buf,
+            &theme,
+            std::path::Path::new("/home/user/proj\u{202E}gpj.exe"),
+            false,
+            None,
+            0,
+            false,
+        );
+        let text = buffer_text(&buf);
+        assert!(!text.contains('\u{202E}'), "{text:?}");
+        assert!(text.contains("proj%E2%80%AEgpj.exe"), "{text:?}");
+
+        let long = format!("/{}/final-component", "very-long-directory/".repeat(10));
+        let mut buf = Buffer::empty(area);
+        render_welcome_trust(
+            area,
+            &mut buf,
+            &theme,
+            std::path::Path::new(&long),
+            false,
+            None,
+            0,
+            false,
+        );
+        let text = buffer_text(&buf);
+        assert!(text.contains("final-component"), "{text:?}");
+        assert!(text.contains('\u{2026}'), "{text:?}");
     }
 
     #[test]

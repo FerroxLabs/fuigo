@@ -160,9 +160,18 @@ pub fn is_ungrantable(root: &Path, floor: &[Protected]) -> bool {
 
 /// Subpaths of the workspace root that stay read-only even though the root is writable: the
 /// editors' and agents' own config trees. The git entries are derived from the repository's
-/// layout by [`git_config::git_entries_in`].
-pub const WORKSPACE_PROTECTED_SUBPATHS: &[&str] =
-    &[".fuigo", ".cursor", ".claude", ".vscode", ".idea"];
+/// layout by [`git_config::git_entries_in`]. `.mcp.json` and `.claude.json` are the MCP server
+/// configs the daemon hot-reloads and starts servers from outside the sandbox; as path entries a
+/// missing file is pinned too.
+pub const WORKSPACE_PROTECTED_SUBPATHS: &[&str] = &[
+    ".fuigo",
+    ".cursor",
+    ".claude",
+    ".vscode",
+    ".idea",
+    ".mcp.json",
+    ".claude.json",
+];
 
 /// The entries of a git directory that run or reconfigure code on the user's next git action:
 /// `hooks/`, `config` and `config.worktree` (`core.hooksPath`, `core.fsmonitor`, filters; the

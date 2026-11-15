@@ -678,7 +678,7 @@ pub fn render_permission_view(
         } else {
             selected_words.as_deref()
         };
-        let line = build_permission_option_line(
+        let mut line = build_permission_option_line(
             option,
             i,
             is_cursor,
@@ -689,6 +689,9 @@ pub fn render_permission_view(
             content_width,
             theme,
         );
+
+        // The option label and its scope words come from the tool call: scrubbed like the rest of the card
+        clean_line(&mut line);
 
         let row_rect = Rect {
             x: content_x,
@@ -764,7 +767,12 @@ fn render_pattern_editor_line(
         } else {
             text_style
         };
-        buf.set_span(text_x + col, y, &Span::styled(ch.to_string(), style), 1);
+        // The pattern is seeded from the command: one scrubbed cell per character
+        let shown = clean_text(&ch.to_string());
+        if shown.is_empty() {
+            continue;
+        }
+        buf.set_span(text_x + col, y, &Span::styled(shown, style), 1);
         col += 1;
     }
     if cursor_idx >= chars.len() && (col as usize) < window {
@@ -832,7 +840,9 @@ fn render_pattern_preview_line(
             spans.push(Span::styled(" cancel", dim));
         }
     }
-    buf.set_line(content_x, y, &Line::from(spans), content_width);
+    let mut line = Line::from(spans);
+    clean_line(&mut line);
+    buf.set_line(content_x, y, &line, content_width);
 }
 
 pub(crate) fn render_bash_command_display_lines(
@@ -3014,5 +3024,41 @@ mod tests {
         assert!(text.contains("subagent: worker"), "{text}");
         assert!(text.contains("echo hithere"), "{text}");
         assert!(text.contains("\"path\": \"a bc\""), "{text}");
+    }
+
+    /// Audit S9-F7/F8: option rows and the pattern editor are scrubbed like the rest of the card, and the invisible
+    /// fillers (Hangul fillers, braille blank, grapheme joiner, variation selectors supplement) never reach the buffer.
+    #[test]
+    fn permission_option_rows_and_pattern_editor_never_paint_an_unsafe_character() {
+        let _theme = crate::theme::cache::pin_theme();
+        let theme = Theme::current();
+        let unsafe_set = "\u{202e}\u{2028}\u{00ad}\u{e0041}\u{115f}\u{1160}\u{3164}\u{ffa0}\u{2800}\u{034f}\u{e0100}";
+        let mut state = permission_state_with_title("Allow command?", 1);
+        state.options = vec![acp::PermissionOption::new(
+            acp::PermissionOptionId::new(Arc::from("opt-0")),
+            format!("Allow a{unsafe_set}b"),
+            acp::PermissionOptionKind::AllowOnce,
+        )];
+        let area = Rect::new(0, 0, 100, 20);
+        let paints_unsafe = |text: &str| {
+            text.chars()
+                .any(|c| c != '\n' && fuigo_tty_utils::is_unsafe_display_char(c))
+        };
+        let text = render_to_text(&state, area);
+        assert!(!paints_unsafe(&text), "option row painted an unsafe character:\n{text:?}");
+        assert!(text.contains("Allow a b"), "{text}");
+
+        state.focus = PermissionFocus::PatternEdit;
+        let edit = PatternEditState::new(format!("gh{unsafe_set}api"));
+        let mut buf = Buffer::empty(area);
+        let _ = render_permission_view(&mut buf, area, &state, "", Some(&edit), None, &theme, true);
+        let text: String = (0..area.height)
+            .flat_map(|row| {
+                (0..area.width)
+                    .map(|col| buf[(col, row)].symbol().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(!paints_unsafe(&text), "pattern editor painted an unsafe character:\n{text:?}");
     }
 }

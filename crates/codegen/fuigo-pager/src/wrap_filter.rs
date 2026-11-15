@@ -74,7 +74,49 @@ enum FilterState {
 /// Clipboard sink type: a boxed closure that receives decoded clipboard data.
 type ClipboardSink = Box<dyn FnMut(&[u8])>;
 
-type WrapImageRequestHandler = Box<dyn FnMut()>;
+type WrapImageRequestHandler = Box<dyn FnMut(WrapImageTicket)>;
+
+/// Least time between two served host-image requests (audit S9-F5): a read can take hundreds of ms and queues up to
+/// ~27 MiB of PTY input, so a request sequence repeated in wrapped output must not start one per occurrence.
+const WRAP_IMAGE_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(750);
+
+/// Admits at most one host-image request in flight and at most one per interval; the rest are dropped.
+struct WrapImageGate {
+    in_flight: Arc<std::sync::atomic::AtomicBool>,
+    min_interval: std::time::Duration,
+    last_served: Option<std::time::Instant>,
+}
+
+/// Held by the worker serving a request; dropping it ends the in-flight state.
+pub(crate) struct WrapImageTicket(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for WrapImageTicket {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl WrapImageGate {
+    fn new(min_interval: std::time::Duration) -> Self {
+        Self {
+            in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            min_interval,
+            last_served: None,
+        }
+    }
+
+    fn admit(&mut self) -> Option<WrapImageTicket> {
+        use std::sync::atomic::Ordering;
+        if self.last_served.is_some_and(|t| t.elapsed() < self.min_interval) {
+            return None;
+        }
+        if self.in_flight.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        self.last_served = Some(std::time::Instant::now());
+        Some(WrapImageTicket(Arc::clone(&self.in_flight)))
+    }
+}
 
 /// Streaming filter that intercepts OSC 52 clipboard sequences from PTY output and sends their decoded payload to the local clipboard.
 ///
@@ -85,6 +127,9 @@ pub(crate) struct Osc52Filter {
     buf: Vec<u8>,
     clipboard_sink: ClipboardSink,
     wrap_image_handler: Option<WrapImageRequestHandler>,
+    /// Session nonce a host-image request must echo; `None` accepts the bare request (tests, library use).
+    wrap_nonce: Option<String>,
+    wrap_image_gate: WrapImageGate,
     mode_tracker: Option<Arc<ModeTracker>>,
 }
 
@@ -96,12 +141,23 @@ impl Osc52Filter {
             buf: Vec::new(),
             clipboard_sink: Box::new(set_local_clipboard),
             wrap_image_handler: None,
+            wrap_nonce: None,
+            wrap_image_gate: WrapImageGate::new(WRAP_IMAGE_MIN_INTERVAL),
             mode_tracker: None,
         }
     }
 
-    pub(crate) fn with_wrap_image_handler(mut self, handler: impl FnMut() + 'static) -> Self {
+    pub(crate) fn with_wrap_image_handler(
+        mut self,
+        handler: impl FnMut(WrapImageTicket) + 'static,
+    ) -> Self {
         self.wrap_image_handler = Some(Box::new(handler));
+        self
+    }
+
+    /// Answer a host-image request only when it echoes `nonce`; any other request is consumed and ignored.
+    pub(crate) fn with_wrap_nonce(mut self, nonce: String) -> Self {
+        self.wrap_nonce = Some(nonce);
         self
     }
 
@@ -119,6 +175,8 @@ impl Osc52Filter {
             buf: Vec::new(),
             clipboard_sink: Box::new(sink),
             wrap_image_handler: None,
+            wrap_nonce: None,
+            wrap_image_gate: WrapImageGate::new(WRAP_IMAGE_MIN_INTERVAL),
             mode_tracker: None,
         }
     }
@@ -289,11 +347,19 @@ impl Osc52Filter {
     }
 
     fn try_handle_wrap_image_request(&mut self, body: &[u8]) -> bool {
-        if body != crate::wrap_clipboard_image::REQUEST_BODY {
+        let Some(rest) = body.strip_prefix(crate::wrap_clipboard_image::REQUEST_BODY) else {
             return false;
+        };
+        match &self.wrap_nonce {
+            // A request without the session nonce, or with a wrong one, is swallowed and not answered
+            Some(nonce) if rest != nonce.as_bytes() => return true,
+            None if !rest.is_empty() => return false,
+            _ => {}
         }
-        if let Some(handler) = self.wrap_image_handler.as_mut() {
-            handler();
+        if let Some(handler) = self.wrap_image_handler.as_mut()
+            && let Some(ticket) = self.wrap_image_gate.admit()
+        {
+            handler(ticket);
         }
         true
     }
@@ -643,7 +709,7 @@ mod tests {
         let mut filter = Osc52Filter::with_sink(move |data: &[u8]| {
             clips_clone.borrow_mut().push(data.to_vec());
         })
-        .with_wrap_image_handler(move || {
+        .with_wrap_image_handler(move |_ticket| {
             *calls_clone.borrow_mut() += 1;
         });
         let mut input = b"before".to_vec();
@@ -655,11 +721,53 @@ mod tests {
         assert!(clips.borrow().is_empty());
     }
 
+    /// Audit S9-F5: a flood of request sequences starts one read, not one per occurrence; the rest are dropped.
+    #[test]
+    fn wrap_image_requests_are_gated_to_one_in_flight_and_one_per_interval() {
+        let tickets = Rc::new(RefCell::new(Vec::new()));
+        let tickets_clone = Rc::clone(&tickets);
+        let mut filter = Osc52Filter::with_sink(|_| {}).with_wrap_image_handler(move |ticket| {
+            tickets_clone.borrow_mut().push(ticket);
+        });
+        let one = crate::wrap_clipboard_image::request_osc_bytes();
+        let flood: Vec<u8> = one.iter().copied().cycle().take(one.len() * 50).collect();
+        assert!(filter.feed(&flood).is_empty(), "every request is still consumed");
+        assert_eq!(tickets.borrow().len(), 1, "one read in flight, the rest dropped");
+        // Finished, but inside the minimum interval: still dropped.
+        tickets.borrow_mut().clear();
+        filter.feed(&flood);
+        assert!(tickets.borrow().is_empty(), "a request inside the interval is dropped");
+        // Past the interval a new request is served again.
+        filter.wrap_image_gate.min_interval = std::time::Duration::ZERO;
+        filter.feed(&flood);
+        assert_eq!(tickets.borrow().len(), 1);
+    }
+
+    #[test]
+    fn wrap_image_request_needs_the_session_nonce() {
+        let calls = Rc::new(RefCell::new(0usize));
+        let calls_clone = Rc::clone(&calls);
+        let mut filter = Osc52Filter::with_sink(|_| {})
+            .with_wrap_image_handler(move |_ticket| {
+                *calls_clone.borrow_mut() += 1;
+            })
+            .with_wrap_nonce("s3cret".to_owned());
+        let missing = crate::wrap_clipboard_image::request_osc_bytes();
+        let wrong = crate::wrap_clipboard_image::request_osc_bytes_with_nonce(Some("guess"));
+        for seq in [&missing, &wrong] {
+            assert!(filter.feed(seq).is_empty(), "consumed, never shown");
+        }
+        assert_eq!(*calls.borrow(), 0, "no nonce or a wrong one is not answered");
+        let right = crate::wrap_clipboard_image::request_osc_bytes_with_nonce(Some("s3cret"));
+        assert!(filter.feed(&right).is_empty());
+        assert_eq!(*calls.borrow(), 1);
+    }
+
     #[test]
     fn wrap_image_request_split_across_chunks() {
         let calls = Rc::new(RefCell::new(0usize));
         let calls_clone = Rc::clone(&calls);
-        let mut filter = Osc52Filter::with_sink(|_| {}).with_wrap_image_handler(move || {
+        let mut filter = Osc52Filter::with_sink(|_| {}).with_wrap_image_handler(move |_ticket| {
             *calls_clone.borrow_mut() += 1;
         });
         let seq = crate::wrap_clipboard_image::request_osc_bytes();

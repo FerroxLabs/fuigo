@@ -40,6 +40,16 @@ either crate, re-vendor the new version (or drop the copy if upstream no longer 
 source. `tiff`'s own unit tests and doctests are off: their image fixtures are not in the crates.io
 package.
 
+## Linear-time patch
+
+| Crate | Version | License | Change |
+|-------|---------|---------|--------|
+| [`htmd`](./htmd-0.5.4/) | 0.5.4 | Apache-2.0 | sibling combining in one pass; trailing-newline count capped at two (`src/dom_walker.rs`); byte scan for inline-code backticks (`src/element_handler/code.rs`) |
+
+`web_fetch` converts fetched pages with it; upstream's two loops were quadratic in the page. Wired the
+same way (`[patch.crates-io]`, workspace member); upstream's own tests pass on the patched source and
+are dropped from the copy. `fuigo-tools/tests/tiff_dead_stderr.rs` also checks `Cargo.lock` keeps it local.
+
 Dependency shape:
 
 ```text

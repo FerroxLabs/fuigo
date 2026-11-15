@@ -900,6 +900,34 @@ fn contains_background_operator(command: &str) -> bool {
 ///   )
 ///   \s+                           -- separator before pattern
 ///   (?:'(?P<sq>[^']*)'|"(?P<dq>[^"]*)"|(?P<bare>[^\s;&|()]+))  -- pattern arg
+/// Name for a call's log file. Call ids come from the provider, so a repeated or empty id must not make two commands
+/// share one log: the first use of an id in a session folder keeps the plain name, every later use gets a unique one.
+fn unique_log_stem(session_folder: &std::path::Path, call_id: &str) -> String {
+    static SEEN: LazyLock<std::sync::Mutex<LogStemsSeen>> = LazyLock::new(Default::default);
+    let mut seen = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    unique_log_stem_in(&mut seen, LOG_STEMS_SEEN_CAP, session_folder, call_id)
+}
+
+type LogStemsSeen = std::collections::HashSet<(std::path::PathBuf, String)>;
+
+/// Most (folder, id) pairs remembered for the life of the process (audit L6). Past it nothing more is recorded and
+/// every name gets the unique suffix, so memory stays bounded and a repeated id still never reuses a log.
+const LOG_STEMS_SEEN_CAP: usize = 10_000;
+
+fn unique_log_stem_in(
+    seen: &mut LogStemsSeen,
+    cap: usize,
+    session_folder: &std::path::Path,
+    call_id: &str,
+) -> String {
+    let first_use = seen.len() < cap && seen.insert((session_folder.to_path_buf(), call_id.to_owned()));
+    if first_use && !call_id.is_empty() {
+        return call_id.to_owned();
+    }
+    let base = if call_id.is_empty() { "call" } else { call_id };
+    format!("{base}-{}", uuid::Uuid::now_v7().simple())
+}
+
 static PKILL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"(?m)(?:^|[;&|\(\n])\s*(?P<cmd>pkill|pgrep)(?P<args>(?:\s+-[A-Za-z]*f[A-Za-z]*|\s+--full\b)+)\s+(?:'(?P<sq>[^']*)'|"(?P<dq>[^"]*)"|(?P<bare>[^\s;&|()]+))"#,
@@ -2218,7 +2246,8 @@ impl fuigo_tool_runtime::Tool for BashTool {
         let display_command: Option<String> = None;
 
         // --- Route to foreground or background ---
-        let output_rel = std::path::PathBuf::from("terminal").join(format!("{}.log", tool_call_id.as_str()));
+        let log_stem = unique_log_stem(&session_folder, tool_call_id.as_str());
+        let output_rel = std::path::PathBuf::from("terminal").join(format!("{log_stem}.log"));
         let output_file = session_folder.join(&output_rel);
         let output_log =
             crate::computer::types::OutputLog::open(session_writer.as_ref(), output_rel).await;
@@ -2514,6 +2543,28 @@ impl fuigo_tool_runtime::Tool for BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_or_empty_call_ids_get_distinct_log_names() {
+        let folder = std::path::Path::new("/tmp/unique-log-stem-test");
+        assert_eq!(unique_log_stem(folder, "dup"), "dup");
+        let second = unique_log_stem(folder, "dup");
+        assert_ne!(second, "dup");
+        assert!(second.starts_with("dup-"));
+        let (a, b) = (unique_log_stem(folder, ""), unique_log_stem(folder, ""));
+        assert_ne!(a, b);
+        assert_ne!(a, "");
+    }
+    #[test]
+    fn remembered_log_stems_are_bounded_and_never_collide() {
+        let folder = std::path::Path::new("/tmp/unique-log-stem-cap-test");
+        let mut seen = LogStemsSeen::default();
+        assert_eq!(unique_log_stem_in(&mut seen, 2, folder, "a"), "a");
+        assert_eq!(unique_log_stem_in(&mut seen, 2, folder, "b"), "b");
+        let over = unique_log_stem_in(&mut seen, 2, folder, "c");
+        assert!(over.starts_with("c-"), "past the cap every name is suffixed: {over}");
+        assert_eq!(seen.len(), 2, "nothing more is recorded past the cap");
+    }
     #[test]
     fn bash_timeout_schema_defaults_to_120s() {
         let schema = serde_json::to_value(schemars::schema_for!(BashToolInput)).unwrap();

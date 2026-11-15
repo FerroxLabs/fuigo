@@ -29,6 +29,31 @@ pub struct StaticShellSnapshot {
     pub shell: UnixShellKind,
 }
 
+/// Where the start-up captures run: the home directory, never the session folder. The captured snapshot does not
+/// depend on the folder, and directory-sensitive login tooling (version managers, env loaders) must not read an
+/// untrusted repository's files before any approval.
+pub(crate) fn neutral_start_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|home| home.is_absolute() && home.is_dir())
+        .unwrap_or_else(|| std::path::PathBuf::from("/"))
+}
+
+/// Where a start-up capture runs for a session in `cwd` (audit L5): in the session folder when folder trust lets Fuigo
+/// start repository tools there (so a trusted project's version manager or env loader behaves as before), and in the
+/// neutral home directory otherwise. No trust judge installed counts as untrusted.
+pub(crate) fn capture_start_dir(cwd: &std::path::Path) -> std::path::PathBuf {
+    start_dir_for(cwd, fuigo_tty_utils::repo_exec_allowed(cwd))
+}
+
+fn start_dir_for(cwd: &std::path::Path, trusted: bool) -> std::path::PathBuf {
+    if trusted && cwd.is_absolute() && cwd.is_dir() {
+        cwd.to_path_buf()
+    } else {
+        neutral_start_dir()
+    }
+}
+
 fn shell_binary(shell: UnixShellKind) -> &'static str {
     fuigo_config::shell::unix_shell_path(shell)
 }
@@ -84,7 +109,7 @@ impl StaticShellSnapshot {
         let result = tokio::time::timeout(INIT_TIMEOUT, async {
             // P189-unplaced: static-shell snapshot capture; stays UNPLACED on purpose: it runs the user's login shell start-up files with a Fuigo-chosen fixed script (never a model-chosen command), and a stop must not kill an ssh-agent or similar started by the profile. Stated limit: a process detached by the user's shell start-up files is outside the session cgroup and survives a stop.
             let mut cmd = tokio::process::Command::new(shell_binary(shell));
-            cmd.args(["-lc", &script]).current_dir(cwd);
+            cmd.args(["-lc", &script]).current_dir(capture_start_dir(cwd));
             crate::util::apply_shell_environment_policy(&mut cmd, policy);
             cmd.envs(crate::util::pager_env());
             let call = crate::sandbox_launch::CallId::shell_init("static-shell");
@@ -277,6 +302,41 @@ mod cli_facing_unchanged_tests;
 mod tests {
     use std::process::Stdio;
     use super::*;
+
+    #[test]
+    fn start_up_capture_runs_outside_the_session_folder() {
+        let dir = neutral_start_dir();
+        assert!(dir.is_absolute() && dir.is_dir());
+        let source = include_str!("static_shell.rs");
+        let init = &source[source.find("pub async fn init_with_policy").unwrap()..];
+        let init = &init[..init.find("\n    }\n").unwrap()];
+        assert!(
+            !init.contains(".current_dir(cwd)") && init.contains(".current_dir(capture_start_dir(cwd))"),
+            "the static shell capture must start in the session folder only through the trust check"
+        );
+        let terminal = include_str!("terminal.rs");
+        let probe = &terminal[terminal.find("async fn capture_login_env_in(").unwrap()..];
+        let probe = &probe[..probe.find("\n}\n").unwrap()];
+        assert!(
+            probe.contains(".current_dir(super::static_shell::capture_start_dir(cwd))"),
+            "the login-env probe must start in the session folder only through the trust check"
+        );
+    }
+
+    /// Audit L5: the neutral directory is for untrusted folders only; a trusted folder is the capture's directory.
+    #[test]
+    fn trusted_folder_is_the_capture_directory_untrusted_is_neutral() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(start_dir_for(dir.path(), true), dir.path());
+        assert_eq!(start_dir_for(dir.path(), false), neutral_start_dir());
+        assert_eq!(start_dir_for(&dir.path().join("missing"), true), neutral_start_dir());
+        assert_eq!(start_dir_for(std::path::Path::new(""), true), neutral_start_dir());
+        let terminal = include_str!("terminal.rs");
+        assert!(
+            terminal.contains("capture_login_env_in(cwd,") && terminal.contains("capture_login_env_in(&cwd,"),
+            "the session paths must hand the folder to the login-env probe"
+        );
+    }
     use command_fds::CommandFdExt;
 
     fn bash_available() -> bool {

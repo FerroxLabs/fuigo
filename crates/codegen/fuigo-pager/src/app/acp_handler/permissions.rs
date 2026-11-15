@@ -171,6 +171,7 @@ pub(super) fn enqueue_permission(
         options_scroll_offset: 0,
     });
 
+    agent.guard_new_permission_card();
     agent.last_active_at = Some(std::time::Instant::now());
 
     true

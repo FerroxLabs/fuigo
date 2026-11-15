@@ -6,7 +6,7 @@ use super::super::config::{ForceLoginTeam, FuigoComConfig, OAuth2ProviderConfig,
 use super::super::{AuthMode, FuigoAuth};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use parking_lot::RwLock;
 use serde::Deserialize;
@@ -18,6 +18,8 @@ use std::time::{Duration as StdDuration, Instant};
 pub(super) enum OidcError {
     #[error("OIDC not configured")]
     NotConfigured,
+    #[error("OIDC discovery document refused: {0}")]
+    DiscoveryRefused(String),
     #[error("failed to bind OIDC loopback server: {0}")]
     BindLoopback(String),
     #[error("failed to save OIDC auth: {0}")]
@@ -251,7 +253,9 @@ pub(super) fn build_fuigo_auth(
         coding_data_retention_opt_out: user_info.coding_data_retention_opt_out,
         has_fuigo_code_access: None,
         refresh_token: tokens.refresh_token,
-        expires_at: tokens.expires_in.map(|s| now + Duration::seconds(s as i64)),
+        expires_at: tokens
+            .expires_in
+            .and_then(crate::auth::token_output::expiry_after_seconds),
         oidc_issuer: Some(issuer.to_owned()),
         oidc_client_id: Some(client_id.to_owned()),
     }
@@ -319,7 +323,10 @@ async fn discover_once(issuer_key: &str) -> anyhow::Result<Discovery> {
             url,
         }));
     }
-    let doc: Discovery = resp.json().await.map_err(reqwest::Error::without_url)?;
+    let raw: serde_json::Value = resp.json().await.map_err(reqwest::Error::without_url)?;
+    check_discovery_document(issuer_key, &raw)?;
+    let doc: Discovery = serde_json::from_value(raw)
+        .map_err(|e| anyhow::Error::new(OidcError::DiscoveryRefused(format!("malformed document ({e})"))))?;
     // The document is data from the network: log origin and path only, never userinfo or a query.
     tracing::debug!(
         authorization_endpoint = %redacted_for_log(&doc.authorization_endpoint),
@@ -330,6 +337,43 @@ async fn discover_once(issuer_key: &str) -> anyhow::Result<Discovery> {
     );
     Ok(doc)
 }
+/// The discovery document is data from the network (audit S1-F10): when it names an `issuer` it must be the configured
+/// one, and the URLs the browser opener and the JWKS fetch are handed must be https without userinfo (plain http only
+/// to loopback under the same local-dev rule as the token endpoint).
+fn check_discovery_document(issuer_key: &str, doc: &serde_json::Value) -> anyhow::Result<()> {
+    let refused = |reason: String| anyhow::Error::new(OidcError::DiscoveryRefused(reason));
+    if let Some(claimed) = doc.get("issuer").and_then(serde_json::Value::as_str)
+        && claimed.trim_end_matches('/') != issuer_key.trim_end_matches('/')
+    {
+        return Err(refused("it names a different issuer than the configured one".into()));
+    }
+    let allow_http = allow_loopback_http(
+        cfg!(test),
+        super::super::config::is_local_dev_issuer(issuer_key),
+    );
+    for field in ["authorization_endpoint", "jwks_uri"] {
+        if let Some(value) = doc.get(field).and_then(serde_json::Value::as_str) {
+            check_discovery_url(field, value, allow_http).map_err(refused)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_discovery_url(field: &str, value: &str, allow_loopback_http: bool) -> Result<(), String> {
+    if value.chars().any(char::is_control) {
+        return Err(format!("{field} holds control characters"));
+    }
+    let url = reqwest::Url::parse(value).map_err(|_| format!("{field} is not a valid URL"))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(format!("{field} carries userinfo"));
+    }
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if allow_loopback_http && fuigo_extra_ca::service_trust::is_local_host(&url) => Ok(()),
+        _ => Err(format!("{field} is not an https URL")),
+    }
+}
+
 /// Origin and path of a discovery-named URL, for logs: no userinfo, no query, no fragment.
 /// Only http and https URLs are rendered: any other scheme (a `blob:` URL carries a whole URL in its path)
 /// is replaced by a fixed placeholder.
@@ -1752,5 +1796,83 @@ mod p70_redacted_debug {
         }))
         .expect("token response");
         assert_redacted(&response, &["p70ac-FAKE-1a2b3c4d", "p70rf-FAKE-5e6f7a8b", "p70id-FAKE-9c0d1e2f"]);
+    }
+}
+
+#[cfg(test)]
+mod s1_f1_expires_in_overflow {
+    use super::*;
+
+    fn user_info() -> OidcUserInfo {
+        OidcUserInfo {
+            user_id: "u".into(),
+            email: None,
+            first_name: None,
+            last_name: None,
+            profile_image_asset_id: None,
+            principal_type: None,
+            principal_id: None,
+            team_id: None,
+            team_name: None,
+            team_role: None,
+            organization_id: None,
+            organization_name: None,
+            organization_role: None,
+            user_blocked_reason: None,
+            team_blocked_reasons: vec![],
+            coding_data_retention_opt_out: false,
+        }
+    }
+
+    fn tokens(expires_in: u64) -> TokenResponse {
+        serde_json::from_value(serde_json::json!({
+            "access_token": "at", "expires_in": expires_in,
+        }))
+        .expect("token response")
+    }
+
+    #[test]
+    fn huge_expires_in_does_not_panic() {
+        for secs in [u64::MAX, u64::MAX / 2, 10_000_000_000_000] {
+            let auth = build_fuigo_auth(tokens(secs), user_info(), "https://i.test", "cid");
+            assert!(auth.expires_at.is_none(), "overflowing expiry must be dropped, got {:?}", auth.expires_at);
+        }
+        let ok = build_fuigo_auth(tokens(3600), user_info(), "https://i.test", "cid");
+        assert!(ok.expires_at.is_some());
+    }
+}
+
+#[cfg(test)]
+mod s1_f10_discovery_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Audit S1-F10 (the check runs inside `discover_once`, before any URL reaches the browser opener).
+    #[test]
+    fn discovery_document_is_checked_before_use() {
+        let ok = json!({
+            "issuer": "https://idp.example",
+            "authorization_endpoint": "https://idp.example/authorize",
+            "jwks_uri": "https://idp.example/jwks"
+        });
+        assert!(check_discovery_document("https://idp.example", &ok).is_ok());
+        assert!(check_discovery_document("https://idp.example/", &ok).is_ok());
+        let no_issuer = json!({"authorization_endpoint": "https://idp.example/authorize"});
+        assert!(check_discovery_document("https://idp.example", &no_issuer).is_ok());
+        for (field, value) in [
+            ("authorization_endpoint", "file:///etc/passwd"),
+            ("authorization_endpoint", "javascript:alert(1)"),
+            ("authorization_endpoint", "https://user:pw@idp.example/a"),
+            ("authorization_endpoint", "not a url"),
+            ("authorization_endpoint", "http://idp.example/authorize"),
+            ("jwks_uri", "file:///x"),
+        ] {
+            let mut doc = ok.clone();
+            doc[field] = json!(value);
+            assert!(check_discovery_document("https://idp.example", &doc).is_err(), "{field}={value}");
+        }
+        let mut wrong_issuer = ok.clone();
+        wrong_issuer["issuer"] = json!("https://evil.example");
+        assert!(check_discovery_document("https://idp.example", &wrong_issuer).is_err());
     }
 }

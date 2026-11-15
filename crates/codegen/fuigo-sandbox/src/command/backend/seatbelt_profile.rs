@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 
 use crate::command::backend::{BackendName, CommandTag, SandboxCommandError};
 use crate::command::canonical::{
-    contains_path, firmlink_spellings, is_same_path, is_within, resolved_spellings,
+    VolumeRule, case_insensitive_regex_body, contains_path, firmlink_spellings, is_same_path,
+    is_within, resolved_spellings,
 };
 use crate::command::policy::{DenyEntry, NetworkPolicy, ReadPolicy, SandboxPolicy};
 use crate::command::protected::{self, Protected};
@@ -380,6 +381,10 @@ fn render_mandatory(
     for (index, entry) in floor.iter().enumerate() {
         let filters = pinned_filters(out, entry, &format!("PROTECTED_{index}"))?;
         deny_writes_links_and_sockets(out, &filters);
+        let variants = case_variant_filters(entry, policy)?;
+        if !variants.is_empty() {
+            deny_writes_links_and_sockets(out, &variants);
+        }
     }
     let mut read_filters: Vec<Vec<PathFilter>> = Vec::with_capacity(policy.read.deny().len());
     for (index, entry) in policy.read.deny().iter().enumerate() {
@@ -397,6 +402,55 @@ fn render_mandatory(
         out.rule(&format!("deny file-read* {}", file_filters(filters)));
     }
     Ok(())
+}
+
+/// For a floor path that does not exist yet inside a write root, on a volume that compares names
+/// without case: one anchored regex per spelling that matches the entry and what lies beneath it
+/// in any letter case. The kernel judges a missing entry by the spelling the command supplies, so
+/// the byte-exact `literal` and `subpath` filters miss `.FUIGO` for `.fuigo`; an existing entry
+/// resolves to its on-disk spelling and needs no more. Only when the nearest existing ancestor
+/// lies in a write root, where a command can create the entry: a floor entry elsewhere is not
+/// writable at all.
+fn case_variant_filters(
+    entry: &Pinned<'_>,
+    policy: &SandboxPolicy,
+) -> Result<Vec<PathFilter>, SandboxCommandError> {
+    let Pinned::Path(path) = entry else {
+        return Ok(Vec::new());
+    };
+    if VolumeRule::current() != VolumeRule::Apfs
+        || std::fs::symlink_metadata(path).is_ok()
+        || !creatable_in_a_write_root(path, policy)
+    {
+        return Ok(Vec::new());
+    }
+    let mut filters = Vec::new();
+    for form in expand_aliases(&[*path]) {
+        let body = form
+            .to_str()
+            .and_then(case_insensitive_regex_body)
+            .ok_or_else(|| unrenderable(format!("cannot express path: {}", form.display())))?;
+        let filter = deny::seatbelt_regex_filter(&format!("^{body}(/.*)?$"))
+            .ok_or_else(|| unrenderable(format!("cannot express path: {}", form.display())))?;
+        filters.push(PathFilter::Leaf(filter));
+    }
+    Ok(filters)
+}
+
+/// Whether the nearest existing ancestor of `path` is at or beneath a write root.
+fn creatable_in_a_write_root(path: &Path, policy: &SandboxPolicy) -> bool {
+    let Some(existing) = path
+        .ancestors()
+        .skip(1)
+        .find(|ancestor| std::fs::symlink_metadata(ancestor).is_ok())
+    else {
+        return false;
+    };
+    policy.write_roots.iter().any(|root| {
+        firmlink_spellings(root)
+            .iter()
+            .any(|form| is_within(existing, form))
+    })
 }
 
 fn deny_writes_links_and_sockets(out: &mut ProfileBuilder, filters: &[PathFilter]) {

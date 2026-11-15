@@ -91,11 +91,12 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-config/src/managed_cache.rs", 3),
     ("crates/codegen/fuigo-config/src/managed_cache/claim_tests.rs", 4),
     ("crates/codegen/fuigo-config/src/managed_cache/tests.rs", 49), // 26-6a: +2 are test fixture literals `principal: Some("team-a")` / `Some("dep-1")` in the compromise-reason test; no body site
+    ("crates/codegen/fuigo-config/src/signed_policy.rs", 2), // delta review (old-marker upgrade): `deployment_id`, `team_id` read from the local sidecar's payload to seed a pre-upgrade floor; no body site
     ("crates/codegen/fuigo-config/src/signed_policy/claim_tests.rs", 1),
-    ("crates/codegen/fuigo-config/src/signed_policy/tests.rs", 19),
+    ("crates/codegen/fuigo-config/src/signed_policy/tests.rs", 31), // review u45 D2-04: +2 test fixtures (`principal` in an old test marker and in a test `SyncMarker`, for the legacy-floor migration); delta review (old-marker upgrade): +3 test fixtures (`team_id`, `deployment_id` in a test envelope, `principal` in a test marker); review R06/R07: +5 test fixtures (per-identity revision floors: `deployment_id` in signed test envelopes, `principal` in test marker files); audit S12-F2: +2 test-fixture sites, `"team_id"` in a signed-policy envelope and `"principal"` in a marker file, both in unit tests of the revision floor; no body site
     ("crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs", 1),
     ("crates/codegen/fuigo-fast-worktree/src/git/safety_tests/git_dir.rs", 2),
-    ("crates/codegen/fuigo-hunk-tracker/src/actor/tests.rs", 2),
+    ("crates/codegen/fuigo-hunk-tracker/src/actor/tests.rs", 3),
     ("crates/codegen/fuigo-hunk-tracker/src/loc/mod.rs", 7),
     ("crates/codegen/fuigo-hunk-tracker/src/loc/tests.rs", 2),
     ("crates/codegen/fuigo-mcp/src/elicitation.rs", 4),
@@ -206,7 +207,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-shell/src/agent/mvp_agent/tests.rs", 16), // 1.0.30: +2 in `concurrent_subscription_checks_share_one_live_check_and_both_see_fresh_meta`: the test `FuigoAuth { user_id }` and the mock `/user` reply's `"userId"` (inbound fixture). Test only; no body site
     ("crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p83_teardown_tests.rs", 2), // P83 (d042e473) teardown test: `email:` + `team_id:` fields of a local `FuigoAuth` fixture; test-only, no body site (R092)
     ("crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p81_relay_bridge_tests.rs", 17), // P81 tests: the real agent's `initialize`, `fuigo/auth/info` and auth metadata through the relay writer (4 `"agentId"`, 3 `"hostname"`, 3 `"email"`, 2 `"team_id"`, 1 `"teamId"`, 1 `agent_id()` call; 3 fields of a session fixture: `email:`, `team_id:`, `organization_id:`)
-    ("crates/codegen/fuigo-shell/src/agent/relay.rs", 158), // The relay socket writer's filter (`relay_outbound_frame`) and its tests. Production (10): 2 `"hostname"` (P77: withheld from `result._meta` of ACP initialize and from the `fuigo/session/list` rows), 2 `"agentId"` (P81: the machine id in `result._meta` becomes the relay-origin pseudonym), 2 `"email"`, 1 `"team_id"`, 2 `"teamId"`, 1 `"userId"` (P81: the key lists of the account fields withheld from the auth responses and of the owner ids withheld from the cloud-environment responses). Tests (148): 48 `"hostname"`, 42 `"agentId"`, 21 `"email"`, 15 `"userId"`, 10 `"teamId"`, 5 `"team_id"`, 1 `agent_id()` call, 6 fixture fields (2 `user_id:`, 2 `team_id:`, `hostname:`, `email:`). All of it applies only to a relay that is not FluxRouter-operated
+    ("crates/codegen/fuigo-shell/src/agent/relay.rs", 159), // audit X1-F5: +1 `user_id:` test fixture field in the relay-bearer credential test (tests 149 of 159, not production); the rest: The relay socket writer's filter (`relay_outbound_frame`) and its tests. Production (10): 2 `"hostname"` (P77: withheld from `result._meta` of ACP initialize and from the `fuigo/session/list` rows), 2 `"agentId"` (P81: the machine id in `result._meta` becomes the relay-origin pseudonym), 2 `"email"`, 1 `"team_id"`, 2 `"teamId"`, 1 `"userId"` (P81: the key lists of the account fields withheld from the auth responses and of the owner ids withheld from the cloud-environment responses). Tests (148): 48 `"hostname"`, 42 `"agentId"`, 21 `"email"`, 15 `"userId"`, 10 `"teamId"`, 5 `"team_id"`, 1 `agent_id()` call, 6 fixture fields (2 `user_id:`, 2 `team_id:`, `hostname:`, `email:`). All of it applies only to a relay that is not FluxRouter-operated
     ("crates/codegen/fuigo-shell/src/agent/session_registry_client.rs", 22), // P77: +9 `hostname` of the registry register body (omitted at a non-FluxRouter registry by `register_body_for`, P54), the list entry (inbound) and tests
     ("crates/codegen/fuigo-shell/src/agent/subagent/handle_request.rs", 3),
     ("crates/codegen/fuigo-shell/src/agent/subagent/mod.rs", 2),
@@ -223,7 +224,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-shell/src/auth/meta.rs", 4),
     ("crates/codegen/fuigo-shell/src/auth/model.rs", 23),
     ("crates/codegen/fuigo-shell/src/auth/oidc/login.rs", 1),
-    ("crates/codegen/fuigo-shell/src/auth/oidc/protocol.rs", 18),
+    ("crates/codegen/fuigo-shell/src/auth/oidc/protocol.rs", 22),
     ("crates/codegen/fuigo-shell/src/auth/oidc/refresh.rs", 4),
     ("crates/codegen/fuigo-shell/src/auth/oidc/test_helpers.rs", 2),
     ("crates/codegen/fuigo-shell/src/auth/p47_service_wire_tests.rs", 1), // P47: FuigoAuth test fixture
@@ -262,7 +263,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-shell/src/managed_config/response.rs", 2),
     ("crates/codegen/fuigo-shell/src/managed_config/store.rs", 4),
     ("crates/codegen/fuigo-shell/src/managed_config/supervisor.rs", 4),
-    ("crates/codegen/fuigo-shell/src/managed_config/tests.rs", 16), // P147: +2 are `deployment_id: None` / `team_id: None` in a test `ManagedConfigResponse` (a FluxRouter response being parsed, not a body Fuigo sends). P167: +1 is the `team_id` of a local test login written to a temp `FUIGO_AUTH_PATH` file (read back, never sent).
+    ("crates/codegen/fuigo-shell/src/managed_config/tests.rs", 22), // review R06/R07: +3 test markers and a test `ManagedConfigResponse` (`principal`, `deployment_id: None`, `team_id`), parsed, never sent. P147: +2 are `deployment_id: None` / `team_id: None` in a test `ManagedConfigResponse` (a FluxRouter response being parsed, not a body Fuigo sends). P167: +1 is the `team_id` of a local test login written to a temp `FUIGO_AUTH_PATH` file (read back, never sent). dfix5-3: +3 are the `deployment_id`, `team_id` and marker `principal` of a test payload applied to a temp home (parsed, never sent).
     ("crates/codegen/fuigo-shell/src/relay/sync.rs", 14), // P77: the relay-sync `initialize` `_meta.hostname`, gated by `relay_initialize_meta` (parameter, key, removal), and its tests (`hostname` and "agentId" fixtures); 1 is the pre-P77 session-scoped "agentId"
     ("crates/codegen/fuigo-shell/src/remote/client.rs", 6),
     ("crates/codegen/fuigo-shell/src/remote/client_tests.rs", 17),
@@ -318,6 +319,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-telemetry/src/id.rs", 7),
     ("crates/codegen/fuigo-telemetry/src/otel_layer/mod.rs", 63),
     ("crates/codegen/fuigo-telemetry/src/otel_layer/redact.rs", 4),
+    ("crates/codegen/fuigo-telemetry/src/sentry.rs", 1), // audit S11-F8: `email: Some(secret)` in a unit test of the Sentry event scrubber; no body site
     ("crates/codegen/fuigo-telemetry/tests/agent_id_prewarm.rs", 2),
     ("crates/codegen/fuigo-telemetry/tests/external_otlp_gates_on.rs", 9),
     ("crates/codegen/fuigo-telemetry/tests/machine_id_off_boot_path.rs", 2),
@@ -339,7 +341,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-workspace/src/bin/workspace_server_probe.rs", 1),
     ("crates/codegen/fuigo-workspace/src/config.rs", 3),
     ("crates/codegen/fuigo-workspace/src/handle_tests.rs", 1),
-    ("crates/codegen/fuigo-workspace/src/hub_auth/mod.rs", 19), // P70a (R087): +1 is the quoted field name `"user_id"` in `AuthEntry`'s hand-written redacting `Debug`, +1 is `"user_id": "p70-user"` in a unit-test JSON fixture; no body site | P47 (d429c380) deleted a loopback test whose auth.json fixture quoted "user_id"; local file read, no body site (re-pinned by P54-K, R080 §11)
+    ("crates/codegen/fuigo-workspace/src/hub_auth/mod.rs", 20), // audit X1-F5: +1 `"user_id": "u1"` in a unit-test auth.json fixture for the hub-session-token credential test; no body site | P70a (R087): +1 is the quoted field name `"user_id"` in `AuthEntry`'s hand-written redacting `Debug`, +1 is `"user_id": "p70-user"` in a unit-test JSON fixture; no body site | P47 (d429c380) deleted a loopback test whose auth.json fixture quoted "user_id"; local file read, no body site (re-pinned by P54-K, R080 §11)
     ("crates/codegen/fuigo-workspace/src/hub_auth/proactive_tests.rs", 2),
     ("crates/codegen/fuigo-workspace/src/permission/auto_mode/mod.rs", 1), // P77: the `hostname` shell command in an allowlist; not a body
     ("crates/codegen/fuigo-workspace/src/permission/manager/mod.rs", 3), // P77: the `hostname` shell command in allowlists and a test; not a body

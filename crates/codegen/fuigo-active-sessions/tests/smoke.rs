@@ -7,6 +7,7 @@ use fuigo_active_sessions::*;
 
 fn session(id: &str, pid: u32) -> ActiveSession {
     ActiveSession {
+        start_time: None,
         session_id: agent_client_protocol::SessionId::new(id),
         pid,
         cwd: "/tmp/test".into(),

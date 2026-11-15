@@ -428,6 +428,20 @@ impl ProcessState {
         self.truncated = true;
     }
 
+    /// One chunk read after exit or kill. Keeps memory and the log bounded while a descendant still writes: the
+    /// buffer is trimmed as it grows and the log stops growing once the retained-file cap is reached.
+    async fn absorb_drained_chunk(&mut self, chunk: &[u8]) {
+        self.output_buffer.extend_from_slice(chunk);
+        let log_has_room = (self.total_bytes as u64) < MAX_RETAINED_OUTPUT_FILE_BYTES;
+        self.total_bytes += chunk.len();
+        if log_has_room && let Some(ref mut file) = self.file_handle {
+            let _ = file.write_all(chunk).await;
+        }
+        if self.output_buffer.len() > self.output_byte_limit.saturating_mul(4) {
+            self.maybe_truncate();
+        }
+    }
+
     async fn flush_and_truncate_output_file(&mut self) {
         if let Some(ref mut file) = self.file_handle {
             let _ = file.flush().await;
@@ -698,7 +712,7 @@ impl LocalTerminalActor {
         #[cfg(unix)]
         if self.login_env.is_none() {
             self.login_env =
-                Some(capture_login_env(self.shell_env_policy.as_ref(), self.sandbox_hook()).await);
+                Some(capture_login_env_in(cwd, self.shell_env_policy.as_ref(), self.sandbox_hook()).await);
         }
 
         #[cfg(unix)]
@@ -750,7 +764,7 @@ impl LocalTerminalActor {
             },
             async {
                 if self.login_env.is_none() {
-                    Some(capture_login_env(self.shell_env_policy.as_ref(), hook).await)
+                    Some(capture_login_env_in(cwd, self.shell_env_policy.as_ref(), hook).await)
                 } else {
                     None
                 }
@@ -1214,7 +1228,7 @@ impl LocalTerminalActor {
                     self.ensure_static_shell_initialized(&cwd).await;
                 } else if self.login_env.is_none() {
                     self.login_env = Some(
-                        capture_login_env(self.shell_env_policy.as_ref(), self.sandbox_hook()).await,
+                        capture_login_env_in(&cwd, self.shell_env_policy.as_ref(), self.sandbox_hook()).await,
                     );
                 }
                 #[cfg(not(unix))]
@@ -2161,7 +2175,18 @@ impl LocalTerminalActor {
             ?reason,
             "Foreground command transitioned to background"
         );
-        self.processes.insert(tool_call_id, process);
+        // Call ids come from the provider and may repeat: never replace another live entry (its state would be
+        // dropped without the group kill), keep this one under its own unique key instead.
+        let key = if self.processes.contains_key(&tool_call_id) {
+            tracing::warn!(
+                tool_call_id = %tool_call_id,
+                "another task already uses this tool call id; keeping the backgrounded task under its internal id"
+            );
+            old_key.to_owned()
+        } else {
+            tool_call_id
+        };
+        self.processes.insert(key, process);
         true
     }
 
@@ -3003,6 +3028,15 @@ mod actor_trace {
     }
 }
 
+/// Most bytes the detached drain keeps (audit L4). The reader keeps reading to the end of the window so the writer is
+/// never blocked on a full pipe, but a child that floods the pipe for the whole `DRAIN_TIMEOUT` cannot grow memory.
+const DETACHED_DRAIN_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+fn push_capped(output: &mut Vec<u8>, chunk: &[u8]) {
+    let room = DETACHED_DRAIN_MAX_BYTES.saturating_sub(output.len());
+    output.extend_from_slice(&chunk[..chunk.len().min(room)]);
+}
+
 /// Drains the taken pipes off the actor, then hands the output and the
 /// already-determined exit status back as a [`TerminalCommand::DrainedOutput`].
 fn spawn_detached_drain(
@@ -3022,7 +3056,7 @@ fn spawn_detached_drain(
                 loop {
                     match stdout.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => output.extend_from_slice(&buf[..n]),
+                        Ok(n) => push_capped(&mut output, &buf[..n]),
                     }
                 }
             }
@@ -3031,7 +3065,7 @@ fn spawn_detached_drain(
                 loop {
                     match stderr.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => output.extend_from_slice(&buf[..n]),
+                        Ok(n) => push_capped(&mut output, &buf[..n]),
                     }
                 }
             }
@@ -3053,34 +3087,22 @@ fn spawn_detached_drain(
 /// must not block the actor loop indefinitely.
 async fn drain_remaining_output(process: &mut ProcessState) {
     let timed_out = tokio::time::timeout(DRAIN_TIMEOUT, async {
-        if let Some(stdout) = process.child.stdout.as_mut() {
+        if let Some(mut stdout) = process.child.stdout.take() {
             let mut buf = [0u8; READ_BUFFER_SIZE];
             loop {
                 match stdout.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        process.output_buffer.extend_from_slice(&buf[..n]);
-                        process.total_bytes += n;
-                        if let Some(ref mut file) = process.file_handle {
-                            let _ = file.write_all(&buf[..n]).await;
-                        }
-                    }
+                    Ok(n) => process.absorb_drained_chunk(&buf[..n]).await,
                 }
             }
         }
 
-        if let Some(stderr) = process.child.stderr.as_mut() {
+        if let Some(mut stderr) = process.child.stderr.take() {
             let mut buf = [0u8; READ_BUFFER_SIZE];
             loop {
                 match stderr.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        process.output_buffer.extend_from_slice(&buf[..n]);
-                        process.total_bytes += n;
-                        if let Some(ref mut file) = process.file_handle {
-                            let _ = file.write_all(&buf[..n]).await;
-                        }
-                    }
+                    Ok(n) => process.absorb_drained_chunk(&buf[..n]).await,
                 }
             }
         }
@@ -3406,8 +3428,19 @@ fn parse_login_env_capture(stdout: &str) -> (Option<String>, HashMap<String, Str
     (login_path, env_map)
 }
 
-#[cfg(unix)]
+/// The probe without a session folder: always the neutral directory.
+#[cfg(all(unix, test))]
 async fn capture_login_env(
+    policy: Option<&crate::util::ShellEnvironmentPolicy>,
+    sandbox_hook: Option<&dyn crate::sandbox_launch::SandboxLaunch>,
+) -> HashMap<String, String> {
+    capture_login_env_in(std::path::Path::new(""), policy, sandbox_hook).await
+}
+
+/// `cwd` is the session folder: the probe runs there only when folder trust allows it (audit L5), else in the home.
+#[cfg(unix)]
+async fn capture_login_env_in(
+    cwd: &std::path::Path,
     policy: Option<&crate::util::ShellEnvironmentPolicy>,
     sandbox_hook: Option<&dyn crate::sandbox_launch::SandboxLaunch>,
 ) -> HashMap<String, String> {
@@ -3425,7 +3458,8 @@ async fn capture_login_env(
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         // P189-unplaced: login-env probe; stays UNPLACED on purpose: it runs the user's login shell start-up files with a Fuigo-chosen fixed script (never a model-chosen command), and a stop must not kill an ssh-agent or similar started by the profile. Stated limit: a process detached by the user's shell start-up files is outside the session cgroup and survives a stop.
         let mut cmd = tokio::process::Command::new(shell.binary_path());
-        cmd.args(["-lc", &script]);
+        cmd.args(["-lc", &script])
+            .current_dir(super::static_shell::capture_start_dir(cwd));
         crate::util::apply_shell_environment_policy(&mut cmd, policy);
         cmd.envs(crate::util::pager_env());
         let call = crate::sandbox_launch::CallId::shell_init("login-env");
@@ -3817,6 +3851,81 @@ mod tests {
     use crate::computer::types::TaskKind;
     use std::ffi::OsString;
     use std::path::PathBuf;
+
+    /// Audit L4: the detached drain keeps at most `DETACHED_DRAIN_MAX_BYTES`, however much the child writes.
+    #[test]
+    fn detached_drain_buffer_is_capped() {
+        let mut out = Vec::new();
+        let chunk = vec![b'x'; READ_BUFFER_SIZE];
+        for _ in 0..(DETACHED_DRAIN_MAX_BYTES / READ_BUFFER_SIZE) * 3 {
+            push_capped(&mut out, &chunk);
+        }
+        assert_eq!(out.len(), DETACHED_DRAIN_MAX_BYTES);
+        push_capped(&mut out, b"more");
+        assert_eq!(out.len(), DETACHED_DRAIN_MAX_BYTES);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn drain_keeps_buffer_and_log_bounded() {
+        let child = tokio::process::Command::new("true").spawn().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.log");
+        let file = tokio::fs::File::create(&path).await.unwrap();
+        let limit = 1000usize;
+        let mut process = ProcessState {
+            child,
+            process_group: None,
+            output_buffer: Vec::new(),
+            front_buffer: None,
+            truncated: false,
+            total_bytes: 0,
+            lifecycle: Lifecycle::Running,
+            draining: false,
+            bg_status: BackgroundStatus::Foreground {
+                auto_bg_on_timeout: false,
+            },
+            completion_waiters: Vec::new(),
+            output_byte_limit: limit,
+            timeout: Duration::from_secs(30),
+            foreground_block_budget: Duration::from_secs(30),
+            start_time: Instant::now(),
+            output_file: path.clone(),
+            file_handle: Some(LogSink::File(file)),
+            command: "true".to_owned(),
+            display_command: None,
+            cwd: "/tmp".to_owned(),
+            start_wall_time: std::time::SystemTime::now(),
+            end_wall_time: None,
+            notification_handle: ToolNotificationHandle::noop(),
+            tool_call_id: "drain-cap".to_owned(),
+            kind: TaskKind::Bash,
+            last_notified_total: 0,
+            block_waited: false,
+            explicitly_killed: false,
+            kill_result_delivered: false,
+            state_dump_handle: None,
+            owner_session_id: None,
+            description: None,
+        };
+        let chunk = [b'a'; READ_BUFFER_SIZE];
+        let mut peak = 0usize;
+        let chunks = (MAX_RETAINED_OUTPUT_FILE_BYTES as usize / READ_BUFFER_SIZE) + 64;
+        for _ in 0..chunks {
+            process.absorb_drained_chunk(&chunk).await;
+            peak = peak.max(process.output_buffer.len());
+        }
+        process.file_handle.as_mut().unwrap().flush().await.unwrap();
+        assert!(
+            peak <= limit * 4 + READ_BUFFER_SIZE,
+            "buffer peaked at {peak} bytes during the drain"
+        );
+        let on_disk = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            on_disk <= MAX_RETAINED_OUTPUT_FILE_BYTES + READ_BUFFER_SIZE as u64,
+            "log grew to {on_disk} bytes during the drain"
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -4456,6 +4565,52 @@ mod tests {
             "kill after auto-bg should succeed: {outcome:?}"
         );
         let _ = tokio::fs::remove_file(&output_file).await;
+    }
+
+    #[tokio::test]
+    async fn same_tool_call_id_backgrounded_twice_keeps_both_tasks() {
+        let backend = std::sync::Arc::new(LocalTerminalBackend::new());
+        let request = |n: u32| TerminalRunRequest {
+            request_cwd: None,
+            approved_without_grant: false,
+            command: "sleep 60".to_string(),
+            working_directory: PathBuf::from("/tmp"),
+            env: HashMap::new(),
+            timeout: Duration::from_millis(500),
+            output_byte_limit: 10000,
+            output_file: std::env::temp_dir().join(format!(
+                "terminal-test-dup-id-{}-{n}.out",
+                std::process::id()
+            )),
+            output_log: Default::default(),
+            notification_handle: ToolNotificationHandle::noop(),
+            tool_call_id: "dup-call-id".to_string(),
+            display_command: None,
+            auto_background_on_timeout: true,
+            foreground_block_budget: None,
+            kind: TaskKind::Bash,
+            owner_session_id: None,
+            description: None,
+        };
+        let (a, b) = tokio::join!(backend.run(request(1)), backend.run(request(2)));
+        a.unwrap();
+        b.unwrap();
+        let tasks = backend.list_tasks().await;
+        assert_eq!(tasks.len(), 2, "both backgrounded tasks stay listed: {tasks:?}");
+        for task in tasks {
+            let outcome = backend.kill_task(&task.task_id).await;
+            assert!(
+                matches!(outcome, KillOutcome::Killed | KillOutcome::AlreadyExited),
+                "each task is killable by its listed id: {outcome:?}"
+            );
+        }
+        for n in 1..=2 {
+            let _ = tokio::fs::remove_file(std::env::temp_dir().join(format!(
+                "terminal-test-dup-id-{}-{n}.out",
+                std::process::id()
+            )))
+            .await;
+        }
     }
 
     #[tokio::test]

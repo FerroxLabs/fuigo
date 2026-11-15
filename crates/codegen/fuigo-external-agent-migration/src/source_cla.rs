@@ -16,8 +16,9 @@ use super::scope::find_project_root;
 /// - `settings_paths`: the source settings files, highest priority first. A path under `~/.claude` is global,
 ///   any other is project. For each, `snapshot` supplies its permission rules and environment variables
 ///   (`None` skips the file) and its `hooks` block is read here.
-/// - `claude_json_servers`: MCP servers from `~/.claude.json` (user-level and this project's entry in one list).
-///   Both are stored in the global scope.
+/// - `claude_json_servers`: the user-level MCP servers of `~/.claude.json`, stored in the global scope.
+/// - `claude_json_project_servers`: the servers `~/.claude.json` records for this project (`projects.<cwd>`),
+///   stored in the project scope: they were set up for one folder, not for every folder (audit S7-F11).
 /// - `mcp_json_servers`: MCP servers from the repository's `.mcp.json` files, stored in the project scope.
 ///
 /// `~/.claude/{skills,rules}` and `<repo>/.claude/{skills,rules}` are discovered here, a project directory that
@@ -28,6 +29,7 @@ pub fn scan_importable_settings(
     settings_paths: &[PathBuf],
     mut snapshot: impl FnMut(&Path) -> Option<ClaudeSettingsSnapshot>,
     claude_json_servers: Vec<(String, McpServerConfig)>,
+    claude_json_project_servers: Vec<(String, McpServerConfig)>,
     mcp_json_servers: Vec<(String, McpServerConfig)>,
 ) -> ImportPlan {
     let mut plan = ImportPlan::default();
@@ -72,6 +74,12 @@ pub fn scan_importable_settings(
 
     for (name, config) in claude_json_servers {
         plan.global_items.push(ImportableItem::McpServer {
+            name,
+            config: Box::new(config),
+        });
+    }
+    for (name, config) in claude_json_project_servers {
+        plan.project_items.push(ImportableItem::McpServer {
             name,
             config: Box::new(config),
         });

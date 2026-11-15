@@ -832,10 +832,21 @@ pub async fn save_mcp_server_enabled_in(
 ) -> Result<Vec<PathBuf>> {
     let mut modified = Vec::new();
 
+    // Review C7-02: turning a campaign-added stdio server on is the user's approval of its current command; turning
+    // any server off (or on, when it needs no approval) clears a stored approval.
+    let approval = if enabled {
+        let preferences = load_mcp_preferences().file();
+        load_all_mcp_configs(cwd)
+            .get(server_name)
+            .and_then(|config| campaign_stdio_fingerprint(&setup_resolved_for_approval(server_name, config, &preferences)))
+    } else {
+        None
+    };
     let user_path = config_path();
     let name = server_name.to_owned();
     if write_toml_table_if_changed(&user_path, move |table| {
         apply_mcp_server_enabled(table, &name, enabled);
+        set_campaign_mcp_approval(table, &name, approval.clone());
     })
     .await?
     {
@@ -873,6 +884,9 @@ pub(crate) async fn save_user_mcp_server_enabled(server_name: &str, enabled: boo
     let name = server_name.to_owned();
     write_toml_table_if_changed(&config_path(), move |table| {
         apply_mcp_server_enabled(table, &name, enabled);
+        if !enabled {
+            set_campaign_mcp_approval(table, &name, None);
+        }
     })
     .await
     .map(|_| ())
@@ -1212,11 +1226,29 @@ pub async fn delete_mcp_server_config_at(
     }
 
     // Clean up OAuth credentials for the deleted server.
-    if let Ok(mut cred_store) = fuigo_mcp::credentials::McpCredentialStore::load_default() {
-        let removed = cred_store.remove_by_server_name(server_name);
-        if removed > 0 {
-            let _ = cred_store.save_default();
+    // Reloaded and edited under the store lock (never a stale snapshot written back); the lock can wait, so off the runtime.
+    let name = server_name.to_owned();
+    match tokio::task::spawn_blocking(move || {
+        fuigo_mcp::credentials::McpCredentialStore::default().remove_by_server_name_and_save(&name)
+    })
+    .await
+    {
+        Ok(Ok(_)) => {}
+        // The server is gone from the config either way; say that its saved sign-in could not be removed.
+        // Only the category and the store path: the raw error text can quote a value from the file.
+        Ok(Err(e)) => {
+            let store = fuigo_config::user_fuigo_home()
+                .map(|h| h.join("mcp_credentials.json").display().to_string())
+                .unwrap_or_else(|| "mcp_credentials.json".to_owned());
+            tracing::warn!(server = %server_name, "mcp credentials cleanup failed: {}", e.safe_summary());
+            fuigo_config::mcp_bearer_file::record_note(format!(
+                "removed MCP server `{server_name}` but could not remove its saved sign-in ({}; file: {store}); it stays in the credentials file",
+                e.safe_summary()
+            ))
         }
+        Err(e) => fuigo_config::mcp_bearer_file::record_note(format!(
+            "removed MCP server `{server_name}` but its saved sign-in cleanup did not finish ({e})"
+        )),
     }
 
     Ok(true)
@@ -1259,6 +1291,7 @@ fn deserialize_mcp_server_config(
             .keys()
             .filter(|field| {
                 field.as_str() != fuigo_config::key_naming::UNTRUSTED_SOURCE_MARKER
+                    && field.as_str() != fuigo_config::config_override::CAMPAIGN_SOURCE_MARKER
                     && !KNOWN_MCP_SERVER_FIELDS.contains(&field.as_str())
             })
             .cloned()
@@ -1606,6 +1639,47 @@ pub(crate) fn load_claude_json_mcp_servers_as_configs_unfiltered(
     load_claude_json_mcp_servers_from_as_configs(&claude_json_path, cwd)
 }
 
+/// The servers of `~/.claude.json` as `(user-level, this project's)`, bypassing the import-marker gate.
+/// Used by the `/import-claude` scanner, which stores the two in different scopes (audit S7-F11).
+pub(crate) fn load_claude_json_mcp_servers_split_unfiltered(
+    cwd: &std::path::Path,
+) -> (IndexMap<String, McpServerConfig>, IndexMap<String, McpServerConfig>) {
+    let Some(home) = fuigo_dirs::home_dir() else {
+        return (IndexMap::new(), IndexMap::new());
+    };
+    split_claude_json_mcp_servers_from(&home.join(".claude.json"), cwd)
+}
+
+fn split_claude_json_mcp_servers_from(
+    claude_json_path: &std::path::Path,
+    cwd: &std::path::Path,
+) -> (IndexMap<String, McpServerConfig>, IndexMap<String, McpServerConfig>) {
+    let Ok(content) = std::fs::read_to_string(claude_json_path) else {
+        return (IndexMap::new(), IndexMap::new());
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return (IndexMap::new(), IndexMap::new());
+    };
+    let config = claude_json_mcp_from_value(&value);
+    let user = config
+        .user_mcp
+        .mcp_servers
+        .iter()
+        .map(|(name, cfg)| (name.clone(), cfg.clone()))
+        .collect();
+    let project = config
+        .projects
+        .get(cwd.to_string_lossy().as_ref())
+        .map(|p| {
+            p.mcp_servers
+                .iter()
+                .map(|(name, cfg)| (name.clone(), cfg.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    (user, project)
+}
+
 fn load_claude_json_mcp_servers_from_as_configs(
     claude_json_path: &std::path::Path,
     cwd: &std::path::Path,
@@ -1942,10 +2016,13 @@ pub(crate) fn load_mcp_server_problems_with_project(
 }
 
 /// MCP server names with `enabled = false` in config.toml (including project overrides).
+/// Also holds every campaign-added stdio server the user has not approved for its current command (review C7-02).
 pub fn disabled_mcp_server_names(cwd: &std::path::Path) -> std::collections::HashSet<String> {
+    let approvals = user_campaign_mcp_approvals();
+    let preferences = load_mcp_preferences().file();
     let mut disabled: std::collections::HashSet<String> = load_all_mcp_configs(cwd)
         .into_iter()
-        .filter(|(_, cfg)| !cfg.enabled)
+        .filter(|(name, cfg)| !cfg.enabled || !campaign_server_approved(name, cfg, &approvals, &preferences))
         .map(|(name, _)| name)
         .collect();
 
@@ -1961,6 +2038,127 @@ pub fn disabled_mcp_server_names(cwd: &std::path::Path) -> std::collections::Has
     }
 
     disabled
+}
+
+/// Review C7-02: `[approved_campaign_mcp_servers]` in the user's own config.toml maps a campaign-added stdio server's
+/// name to the [`campaign_stdio_fingerprint`] of the command the user approved by turning the server on (`/mcp`, ACP
+/// `mcp/toggle`, `fuigo mcp enable`). Read from that file alone: a campaign cannot set it (it is outside
+/// `CAMPAIGN_ALLOW_PATHS`), nor can a project file or another layer.
+pub const CAMPAIGN_MCP_APPROVALS_KEY: &str = "approved_campaign_mcp_servers";
+
+/// A digest of what a campaign-added stdio server runs: its command, arguments and working directory. `None` for any
+/// other server (the user's own, a project's, or a campaign's HTTP server), which needs no approval.
+/// Delta review D2: a versioned, structured encoding (command; argument count, then each argument; cwd tagged present
+/// or absent), so moving a string between fields changes it.
+/// Delta review D2-01: callers pass the definition as setup resolves it ([`setup_resolved_for_approval`]), so the
+/// digest covers the program that actually runs. The input changed, so the tag is v3: an approval recorded under an
+/// earlier encoding no longer matches and is asked for again.
+pub(crate) fn campaign_stdio_fingerprint(config: &McpServerConfig) -> Option<String> {
+    use sha2::Digest as _;
+    if !config.campaign_source {
+        return None;
+    }
+    let McpServerTransportConfig::Stdio { command, args, cwd, .. } = &config.transport else {
+        return None;
+    };
+    let mut hasher = sha2::Sha256::new();
+    let mut field = |bytes: &[u8]| {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    };
+    field(b"fuigo.campaign_mcp_approval.v3");
+    field(command.as_bytes());
+    field(&(args.len() as u64).to_le_bytes());
+    for arg in args {
+        field(arg.as_bytes());
+    }
+    match cwd {
+        Some(dir) => {
+            field(b"cwd");
+            field(dir.as_bytes());
+        }
+        None => field(b"no-cwd"),
+    }
+    Some(format!("v3:{:x}", hasher.finalize()))
+}
+
+/// Delta review D2-01: the definition a server actually runs, its `setup` templates filled from the user's saved
+/// choice (`command = "{{program}}"` names a program only once resolved). Approval is recorded, checked and shown
+/// against this, so a campaign that changes only a setup mapping needs approval again. A definition whose setup does
+/// not resolve does not start, and is judged as written.
+fn setup_resolved_for_approval(name: &str, config: &McpServerConfig, preferences: &McpPreferencesFile) -> McpServerConfig {
+    match config.resolve_setup(preferences.servers.get(name)) {
+        McpSetupResolution::Resolved(resolved) => *resolved,
+        McpSetupResolution::Required(_) | McpSetupResolution::Invalid(_) => config.clone(),
+    }
+}
+
+/// What to tell the user when turning `server_name` on approves a campaign stdio server's command (review C7-02):
+/// the program, its arguments and folder. `None` when it needs no approval or the user already approved this command.
+pub(crate) fn campaign_approval_notice(server_name: &str, cwd: &std::path::Path) -> Option<String> {
+    let preferences = load_mcp_preferences().file();
+    let config = load_all_mcp_configs(cwd).shift_remove(server_name)?;
+    if campaign_server_approved(server_name, &config, &user_campaign_mcp_approvals(), &preferences) {
+        return None;
+    }
+    let config = setup_resolved_for_approval(server_name, &config, &preferences);
+    let McpServerTransportConfig::Stdio { command, args, cwd: dir, .. } = &config.transport else {
+        return None;
+    };
+    // Fable delta-2 Low 4: every part is the campaign's own text, so it is cleaned and capped like the other campaign
+    // notices; a control sequence or a very long argument cannot hide the program name.
+    let tidy = fuigo_config::config_override::tidy_note_text;
+    let program = std::iter::once(command).chain(args).map(String::as_str).collect::<Vec<_>>().join(" ");
+    let program = tidy(&program, 240);
+    let folder = dir.as_deref().map(|d| format!(" in {}", tidy(d, 120))).unwrap_or_default();
+    let name = tidy(server_name, 64);
+    Some(format!("Approved campaign MCP server `{name}` to run: {program}{folder}. Turn it off to withdraw the approval."))
+}
+
+/// The [`CAMPAIGN_MCP_APPROVALS_KEY`] table of the user's own config.toml (empty when absent or unreadable).
+fn user_campaign_mcp_approvals() -> TomlMap<String, TomlValue> {
+    std::fs::read_to_string(config_path())
+        .ok()
+        .and_then(|text| toml::from_str::<TomlValue>(&text).ok())
+        .and_then(|root| root.get(CAMPAIGN_MCP_APPROVALS_KEY).and_then(TomlValue::as_table).cloned())
+        .unwrap_or_default()
+}
+
+/// Whether `config` may start as far as campaign approval goes: always for a server that needs none, otherwise only
+/// when the user approved exactly its current command, as setup resolves it.
+fn campaign_server_approved(
+    name: &str,
+    config: &McpServerConfig,
+    approvals: &TomlMap<String, TomlValue>,
+    preferences: &McpPreferencesFile,
+) -> bool {
+    campaign_stdio_fingerprint(&setup_resolved_for_approval(name, config, preferences))
+        .is_none_or(|fp| approvals.get(name).and_then(TomlValue::as_str) == Some(fp.as_str()))
+}
+
+/// Record (`Some`) or withdraw (`None`) the user's approval of campaign server `server_name` in the user table.
+fn set_campaign_mcp_approval(table: &mut TomlMap<String, TomlValue>, server_name: &str, approval: Option<String>) {
+    match approval {
+        Some(fingerprint) => {
+            let entry = table
+                .entry(CAMPAIGN_MCP_APPROVALS_KEY.to_owned())
+                .or_insert_with(|| TomlValue::Table(TomlMap::new()));
+            if !entry.is_table() {
+                *entry = TomlValue::Table(TomlMap::new());
+            }
+            if let Some(approvals) = entry.as_table_mut() {
+                approvals.insert(server_name.to_owned(), TomlValue::String(fingerprint));
+            }
+        }
+        None => {
+            if let Some(approvals) = table.get_mut(CAMPAIGN_MCP_APPROVALS_KEY).and_then(TomlValue::as_table_mut) {
+                approvals.remove(server_name);
+                if approvals.is_empty() {
+                    table.remove(CAMPAIGN_MCP_APPROVALS_KEY);
+                }
+            }
+        }
+    }
 }
 
 /// Names `fuigo mcp enable`/`disable` may target.
@@ -2805,6 +3003,24 @@ expose_image_base64 = true
         assert!(config.mcp_servers.contains_key("test_server"));
     }
 
+    /// audit S7-F11: the split loader keeps user-level and per-project servers apart.
+    #[test]
+    fn split_claude_json_servers_keeps_user_and_project_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude_json = dir.path().join("claude.json");
+        let cwd = dir.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_key = cwd.to_string_lossy().into_owned();
+        let fixture = serde_json::json!({
+            "mcpServers": { "user-srv": { "command": "true" } },
+            "projects": { cwd_key: { "mcpServers": { "proj-srv": { "command": "true" } } } }
+        });
+        std::fs::write(&claude_json, serde_json::to_string(&fixture).unwrap()).unwrap();
+        let (user, project) = split_claude_json_mcp_servers_from(&claude_json, &cwd);
+        assert_eq!(user.keys().collect::<Vec<_>>(), vec!["user-srv"]);
+        assert_eq!(project.keys().collect::<Vec<_>>(), vec!["proj-srv"]);
+    }
+
     /// Path-based loader used by kill-switch attribution (no mcps/import gates).
     #[test]
     fn load_claude_json_mcp_servers_from_reads_temp_file() {
@@ -3260,10 +3476,23 @@ mod write_tests;
 #[path = "mcp_p113_tests.rs"]
 mod p113_tests;
 
+#[cfg(test)]
+#[path = "mcp_c34_tests.rs"]
+mod c34_tests;
+
 #[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 #[path = "mcp_p118_tests.rs"]
 mod p118_tests;
+
+#[cfg(test)]
+#[path = "mcp_campaign_literal_tests.rs"]
+mod campaign_literal_tests;
+
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures write config.toml in a test FUIGO_HOME; no product session writer runs there")]
+#[cfg(test)]
+#[path = "mcp_campaign_approval_tests.rs"]
+mod campaign_approval_tests;
 
 #[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]

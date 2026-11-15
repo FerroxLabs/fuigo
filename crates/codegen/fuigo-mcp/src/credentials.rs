@@ -56,6 +56,17 @@ pub enum McpCredentialError {
     Other(String),
 }
 
+impl McpCredentialError {
+    /// A description that never holds file content: the JSON and OS texts can quote a value from the store.
+    pub fn safe_summary(&self) -> &'static str {
+        match self {
+            Self::Json(_) => "the credentials file is damaged (it is not valid credential JSON)",
+            Self::Io(_) => "the credentials file could not be read or written",
+            Self::Other(_) => "the credentials store could not be updated",
+        }
+    }
+}
+
 /// File name for the credential store inside `$FUIGO_HOME`.
 const CREDENTIALS_FILENAME: &str = "mcp_credentials.json";
 
@@ -93,10 +104,17 @@ impl McpCredentialStore {
     }
 
     pub fn load_from(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let content = std::fs::read_to_string(path)?;
+        // Only a MISSING file is an empty store; a permission error or link loop is reported as itself.
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => {
+                return Err(McpCredentialError::Other(format!(
+                    "cannot read the MCP credential store {}: {e}",
+                    path.display()
+                )));
+            }
+        };
         // Tighten world-readable credential files on load (hand copies, etc.).
         // Best-effort: chmod failure must not block using existing tokens.
         if let Err(e) = ensure_owner_only_permissions(path) {
@@ -110,30 +128,67 @@ impl McpCredentialStore {
         Ok(store)
     }
 
-    pub fn save_default(&self) -> Result<()> {
-        let path = Self::default_path().ok_or_else(|| {
-            McpCredentialError::Other("no user fuigo home (set $FUIGO_HOME or $HOME)".into())
-        })?;
-        self.save_to(&path)
-    }
-
     fn locked_mutate_and_save(&mut self, mutate: &dyn Fn(&mut Self)) -> Result<()> {
         let path = Self::default_path().ok_or_else(|| {
             McpCredentialError::Other("no user fuigo home (set $FUIGO_HOME or $HOME)".into())
         })?;
-        match acquire_store_lock(&path) {
-            Some(_lock) => {
-                let mut fresh = Self::load_from(&path).unwrap_or_default();
+        self.locked_mutate_and_save_at(&path, mutate)
+    }
+
+    /// One read-modify-write of `path` under the store lock, on every platform.
+    ///
+    /// Only a MISSING file is an empty store. Any other read error fails the write with the file untouched.
+    /// An unparsable file is copied aside (see [`copy_corrupt_aside`]) and then treated as empty,
+    /// so a damaged store never silently overwrites tokens and never blocks sign-in.
+    /// If the lock cannot be taken the write fails; there is no unlocked fallback.
+    fn locked_mutate_and_save_at(
+        &mut self,
+        path: &Path,
+        mutate: &dyn Fn(&mut Self),
+    ) -> Result<()> {
+        use fuigo_config::fs_atomic::{Edit, EditError, edit_under_lock, stage_atomically};
+
+        // The edit closure runs exactly once, under the lock (`edit_under_lock`): the aside copy it makes is a side
+        // effect that is only valid there. Do not move this to an optimistic `edit_locked`, which may rerun it.
+        let fresh = edit_under_lock(
+            path,
+            &path.with_extension("lock"),
+            |contents| stage_atomically(path, contents, Some(0o600)),
+            |current| {
+                let mut fresh = match current {
+                    Ok(None) => Self::default(),
+                    Ok(Some(bytes)) => match serde_json::from_slice::<Self>(bytes) {
+                        Ok(store) => store,
+                        Err(e) => {
+                            copy_corrupt_aside(path, bytes, &e.to_string())?;
+                            Self::default()
+                        }
+                    },
+                    Err(e) => {
+                        return Err(McpCredentialError::Io(std::io::Error::new(
+                            e.kind(),
+                            format!("cannot read {}: {e}", path.display()),
+                        )));
+                    }
+                };
                 mutate(&mut fresh);
-                fresh.save_to(&path)?;
-                *self = fresh;
-                Ok(())
-            }
-            None => {
-                mutate(self);
-                self.save_to(&path)
-            }
-        }
+                let contents = serde_json::to_vec_pretty(&fresh)?;
+                Ok(Edit::Replace {
+                    contents,
+                    value: fresh,
+                })
+            },
+        )
+        .map_err(|e| match e {
+            EditError::Lock(e) => McpCredentialError::Io(std::io::Error::new(
+                e.kind(),
+                format!("could not lock {}: {e}", path.display()),
+            )),
+            EditError::Write(e) => McpCredentialError::Io(e),
+            EditError::Edit(e) => e,
+        })?;
+        *self = fresh;
+        Ok(())
     }
 
     /// Locked insert ([`Self::locked_mutate_and_save`]) with a freshness guard.
@@ -159,6 +214,9 @@ impl McpCredentialStore {
         })
     }
 
+    /// Whole-file write of this in-memory snapshot, unlocked: tests only. Production writes go through the locked
+    /// `insert_and_save` / `remove_and_save` / `remove_by_server_name_and_save`, which reload under the lock.
+    #[cfg(test)]
     pub fn save_to(&self, path: &Path) -> Result<()> {
         write_owner_only_atomic(path, &serde_json::to_string_pretty(self)?)
     }
@@ -192,7 +250,7 @@ impl McpCredentialStore {
     }
 
     /// Remove a server's credentials and persist, under the cross-process file lock (reload and merge, remove, then atomic save).
-    /// The locked counterpart of [`Self::remove`] and [`Self::save_default`] for callers that persist the removal.
+    /// The locked counterpart of [`Self::remove`] for callers that persist the removal.
     /// An unlocked whole-file rewrite can drop other processes' concurrent writes for unrelated servers.
     pub fn remove_and_save(&mut self, server_name: &str, server_url: &Url) -> Result<()> {
         let key = Self::key(server_name, server_url);
@@ -207,6 +265,69 @@ impl McpCredentialStore {
         let before = self.entries.len();
         self.entries.retain(|k, _| !k.starts_with(&prefix));
         before - self.entries.len()
+    }
+
+    /// Remove all credentials for a server by name (any URL) and persist, under the cross-process file lock.
+    /// The store is reloaded under the lock, so entries other processes saved since this snapshot was loaded survive.
+    /// Nothing is written when the reloaded store has no entry for the server. Returns the number of entries removed.
+    /// Blocks while the lock is held elsewhere: call it from `spawn_blocking` in async code.
+    pub fn remove_by_server_name_and_save(&mut self, server_name: &str) -> Result<usize> {
+        let path = Self::default_path().ok_or_else(|| {
+            McpCredentialError::Other("no user fuigo home (set $FUIGO_HOME or $HOME)".into())
+        })?;
+        self.remove_by_server_name_and_save_at(&path, server_name)
+    }
+
+    fn remove_by_server_name_and_save_at(
+        &mut self,
+        path: &Path,
+        server_name: &str,
+    ) -> Result<usize> {
+        use fuigo_config::fs_atomic::{Edit, EditError, edit_under_lock, stage_atomically};
+
+        let (fresh, removed) = edit_under_lock(
+            path,
+            &path.with_extension("lock"),
+            |contents| stage_atomically(path, contents, Some(0o600)),
+            |current| {
+                // Runs exactly once, under the lock (see `locked_mutate_and_save_at`).
+                let mut fresh = match current {
+                    Ok(None) => return Ok(Edit::Keep((Self::default(), 0))),
+                    Ok(Some(bytes)) => match serde_json::from_slice::<Self>(bytes) {
+                        Ok(store) => store,
+                        Err(e) => {
+                            // Not ours to repair here: leave the damaged file for the next write to set aside.
+                            return Err(McpCredentialError::Json(e));
+                        }
+                    },
+                    Err(e) => {
+                        return Err(McpCredentialError::Io(std::io::Error::new(
+                            e.kind(),
+                            format!("cannot read {}: {e}", path.display()),
+                        )));
+                    }
+                };
+                let removed = fresh.remove_by_server_name(server_name);
+                if removed == 0 {
+                    return Ok(Edit::Keep((fresh, 0)));
+                }
+                let contents = serde_json::to_vec_pretty(&fresh)?;
+                Ok(Edit::Replace {
+                    contents,
+                    value: (fresh, removed),
+                })
+            },
+        )
+        .map_err(|e| match e {
+            EditError::Lock(e) => McpCredentialError::Io(std::io::Error::new(
+                e.kind(),
+                format!("could not lock {}: {e}", path.display()),
+            )),
+            EditError::Write(e) => McpCredentialError::Io(e),
+            EditError::Edit(e) => e,
+        })?;
+        *self = fresh;
+        Ok(removed)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -235,35 +356,102 @@ fn disk_entry_is_newer(
     }
 }
 
-#[must_use]
-fn acquire_store_lock(store_path: &Path) -> Option<std::fs::File> {
-    let lock_path = store_path.with_extension("lock");
-    if let Some(parent) = lock_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)
-            .ok()?;
-        loop {
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
-                return Some(file);
-            }
-            if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-                return None;
-            }
+/// Keep a copy of an unparsable credential file's bytes (already read under the lock) in a NEW owner-only file
+/// `<name>.corrupt-<unix-nanos>` and log a warning. The damaged file itself is not renamed or chmodded (it may be a
+/// symlink); the caller's normal atomic write replaces it. An existing aside copy is never replaced.
+fn copy_corrupt_aside(path: &Path, bytes: &[u8], reason: &str) -> Result<()> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let aside = write_aside_copy(path, nanos, bytes)?;
+    prune_aside_copies(path, &aside, KEEP_ASIDE_COPIES);
+    fuigo_config::mcp_bearer_file::record_note(format!(
+        "the saved MCP sign-in file could not be read, so MCP servers will ask you to sign in again. A copy of the damaged file was kept next to it as {}",
+        aside.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+    ));
+    tracing::warn!(
+        path = %path.display(),
+        aside = %aside.display(),
+        reason,
+        "mcp credentials: store could not be parsed; a copy was kept aside and the store starts empty (re-authenticate MCP servers)"
+    );
+    Ok(())
+}
+
+/// How many `.corrupt-*` copies stay beside the store: each holds live refresh tokens, so older ones are deleted.
+const KEEP_ASIDE_COPIES: usize = 2;
+
+/// Delete all but the newest `keep` aside copies of `path` (the one just written, `just_written`, always stays).
+/// Newest is by the numeric stamp in the name, then the suffix. Best-effort: a failed delete is only logged.
+fn prune_aside_copies(path: &Path, just_written: &Path, keep: usize) {
+    let (Some(dir), Some(base)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let prefix = format!("{}.corrupt-", base.to_string_lossy());
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut found: Vec<((u128, u32), PathBuf)> = read
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let rest = name.strip_prefix(&prefix)?;
+            let (stamp, suffix) = match rest.split_once('-') {
+                Some((stamp, suffix)) => (stamp, suffix.parse::<u32>().ok()?),
+                None => (rest, 0),
+            };
+            Some(((stamp.parse::<u128>().ok()?, suffix), entry.path()))
+        })
+        .collect();
+    // The copy just written always stays and takes one slot; keep the newest `keep - 1` of the rest.
+    found.retain(|(_, p)| p != just_written);
+    found.sort();
+    let excess = found.len().saturating_sub(keep.saturating_sub(1));
+    for (_, old) in found.into_iter().take(excess) {
+        if let Err(e) = std::fs::remove_file(&old) {
+            tracing::warn!(path = %old.display(), error = %e, "mcp credentials: could not delete an old aside copy");
         }
     }
-    #[cfg(not(unix))]
-    None
+}
+
+/// Write `bytes` to a new file `<path>.corrupt-<stamp>` (mode 0600 on Unix), with a numeric suffix `-1`, `-2`, ...
+/// when the name is taken. `create_new` never replaces an existing file and does not follow a symlink at the name.
+fn write_aside_copy(path: &Path, stamp: u128, bytes: &[u8]) -> Result<PathBuf> {
+    use std::io::Write;
+
+    let mut attempt = 0u32;
+    loop {
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(".corrupt-{stamp}"));
+        if attempt > 0 {
+            name.push(format!("-{attempt}"));
+        }
+        let aside = PathBuf::from(name);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&aside) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+                    let _ = std::fs::remove_file(&aside);
+                    return Err(e.into());
+                }
+                return Ok(aside);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 10_000 => {
+                attempt += 1;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
 }
 
 /// Config URLs can embed secrets.
+#[cfg(test)]
 fn write_owner_only_atomic(path: &Path, content: &str) -> Result<()> {
     use std::io::Write;
 
@@ -282,6 +470,7 @@ fn write_owner_only_atomic(path: &Path, content: &str) -> Result<()> {
     }
     tmp.write_all(content.as_bytes())?;
     tmp.flush()?;
+    tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
@@ -316,6 +505,19 @@ fn access_token_secret(creds: Option<&rmcp::transport::auth::StoredCredentials>)
     creds
         .and_then(|c| c.token_response.as_ref())
         .map(|t| t.access_token().secret().clone())
+}
+
+/// Record the OAuth access and refresh tokens as credentials sent (audit S11-F4), so exact-value scrubbing covers an
+/// error or log line that echoes one. Called on every load and save of the adapter.
+fn record_sent_tokens(creds: Option<&rmcp::transport::auth::StoredCredentials>) {
+    use oauth2::TokenResponse as _;
+    let Some(token) = creds.and_then(|c| c.token_response.as_ref()) else {
+        return;
+    };
+    fuigo_telemetry::sent_credentials::record(token.access_token().secret());
+    if let Some(refresh) = token.refresh_token() {
+        fuigo_telemetry::sent_credentials::record(refresh.secret());
+    }
 }
 
 /// Every load records the served token in `observed`.
@@ -357,6 +559,7 @@ impl rmcp::transport::auth::CredentialStore for McpCredentialStoreAdapter {
         .await
         .map_err(|e| rmcp::transport::auth::AuthError::InternalError(e.to_string()))?;
         if let Ok(creds) = &result {
+            record_sent_tokens(creds.as_ref());
             self.observed.record(access_token_secret(creds.as_ref()));
         }
         result
@@ -366,10 +569,11 @@ impl rmcp::transport::auth::CredentialStore for McpCredentialStoreAdapter {
         &self,
         credentials: rmcp::transport::auth::StoredCredentials,
     ) -> std::result::Result<(), rmcp::transport::auth::AuthError> {
+        record_sent_tokens(Some(&credentials));
         let name = self.server_name.clone();
         let url = self.server_url.clone();
         tokio::task::spawn_blocking(move || {
-            let mut store = McpCredentialStore::load_default().unwrap_or_default();
+            let mut store = McpCredentialStore::default();
             store
                 .insert_and_save(&name, &url, credentials)
                 .map_err(|e| rmcp::transport::auth::AuthError::InternalError(e.to_string()))
@@ -385,7 +589,7 @@ impl rmcp::transport::auth::CredentialStore for McpCredentialStoreAdapter {
             // Under the same flock as `insert_and_save`: this is a whole-file read-modify-write
             // An unlocked snapshot here could silently drop *other servers'* entries another process wrote concurrently
             // Their just-rotated refresh tokens would go with them
-            let mut store = McpCredentialStore::load_default().unwrap_or_default();
+            let mut store = McpCredentialStore::default();
             store
                 .remove_and_save(&name, &url)
                 .map_err(|e| rmcp::transport::auth::AuthError::InternalError(e.to_string()))
@@ -401,6 +605,28 @@ mod tests {
 
     fn test_stored_creds(client_id: &str) -> rmcp::transport::auth::StoredCredentials {
         rmcp::transport::auth::StoredCredentials::new(client_id.to_string(), None, Vec::new(), None)
+    }
+
+    /// Audit S11-F4: the OAuth tokens the adapter serves and saves are recorded as sent.
+    #[test]
+    fn oauth_tokens_are_recorded_as_sent() {
+        use fuigo_telemetry::sent_credentials::scrub;
+        let fixture = r#"{
+            "srv:https://mcp.example.com/mcp": {
+                "client_id": "c",
+                "token_response": {
+                    "access_token": "s11f4-oauth-access-FAKE-0001",
+                    "token_type": "bearer",
+                    "refresh_token": "s11f4-oauth-refresh-FAKE-0002"
+                }
+            }
+        }"#;
+        let store: McpCredentialStore = serde_json::from_str(fixture).unwrap();
+        let url = Url::parse("https://mcp.example.com/mcp").unwrap();
+        record_sent_tokens(store.get("srv", &url));
+        for token in ["s11f4-oauth-access-FAKE-0001", "s11f4-oauth-refresh-FAKE-0002"] {
+            assert!(!scrub(&format!("upstream echoed {token}")).contains(token), "{token}");
+        }
     }
 
     #[test]
@@ -583,6 +809,328 @@ mod tests {
             !disk_entry_is_newer(Some(&no_ts), &older),
             "timestamp-less disk entry keeps pre-guard behavior (writes)"
         );
+    }
+
+    #[test]
+    fn unparsable_store_is_moved_aside_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CREDENTIALS_FILENAME);
+        let garbage = b"{ not json, but someone's only copy of tokens";
+        std::fs::write(&path, garbage).unwrap();
+
+        let mut store = McpCredentialStore::default();
+        let url = Url::parse("https://example.com/mcp").unwrap();
+        store
+            .locked_mutate_and_save_at(&path, &|s: &mut McpCredentialStore| {
+                s.insert_rmcp("new", &url, test_stored_creds("new"));
+            })
+            .unwrap();
+
+        let asides: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("mcp_credentials.json.corrupt-")
+            })
+            .collect();
+        assert_eq!(asides.len(), 1, "exactly one moved-aside file");
+        assert_eq!(std::fs::read(&asides[0]).unwrap(), garbage);
+        let loaded = McpCredentialStore::load_from(&path).unwrap();
+        assert_eq!(loaded.entries.len(), 1);
+        assert!(loaded.has_credentials("new", &url));
+    }
+
+    fn aside_files(dir: &Path) -> Vec<PathBuf> {
+        let mut v: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("mcp_credentials.json.corrupt-")
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Unparsable stores in a row (no matter how close in time) keep the newest two recovery copies, never overwriting.
+    #[test]
+    fn corruptions_keep_the_newest_aside_copies_and_prune_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CREDENTIALS_FILENAME);
+        let url = Url::parse("https://example.com/mcp").unwrap();
+        let mut seen = Vec::new();
+        for i in 0..5 {
+            let garbage = format!("{{ broken {i}");
+            std::fs::write(&path, &garbage).unwrap();
+            let mut store = McpCredentialStore::default();
+            store
+                .locked_mutate_and_save_at(&path, &|s: &mut McpCredentialStore| {
+                    s.insert_rmcp("n", &url, test_stored_creds("n"));
+                })
+                .unwrap();
+            seen.push(garbage);
+        }
+        let mut contents: Vec<String> = aside_files(dir.path())
+            .iter()
+            .map(|p| std::fs::read_to_string(p).unwrap())
+            .collect();
+        contents.sort();
+        let mut newest: Vec<String> = seen[seen.len() - KEEP_ASIDE_COPIES..].to_vec();
+        newest.sort();
+        assert_eq!(contents, newest, "only the newest copies stay (review L2)");
+    }
+
+    /// review L4: a store that cannot be statted or read is an error, not an empty store.
+    #[cfg(unix)]
+    #[test]
+    fn load_from_reports_a_read_error_instead_of_an_empty_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CREDENTIALS_FILENAME);
+        // A link loop: `exists()` is false for it, `read` fails with a non-NotFound error.
+        std::os::unix::fs::symlink(&path, &path).unwrap();
+        assert!(McpCredentialStore::load_from(&path).is_err());
+        let missing = dir.path().join("absent.json");
+        assert!(McpCredentialStore::load_from(&missing).unwrap().is_empty());
+    }
+
+    /// C7-03: the safe summary of a damaged-store error never holds file content.
+    #[test]
+    fn safe_summary_never_holds_store_contents() {
+        let e = McpCredentialError::Json(
+            serde_json::from_str::<McpCredentialStore>(r#"{"srv:https://h.invalid/mcp":"SECRET-C703-TOKEN"}"#).unwrap_err(),
+        );
+        assert!(e.to_string().contains("SECRET-C703-TOKEN"), "premise: the raw text quotes the value");
+        assert!(!e.safe_summary().contains("SECRET-C703-TOKEN"));
+    }
+
+    /// C7-04: the copy just written takes one retention slot even when it sorts oldest.
+    #[test]
+    fn prune_keeps_the_just_written_copy_and_the_newest_of_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CREDENTIALS_FILENAME);
+        let aside = |stamp: u32| dir.path().join(format!("{CREDENTIALS_FILENAME}.corrupt-{stamp}"));
+        for stamp in [1, 5, 6, 7] {
+            std::fs::write(aside(stamp), b"x").unwrap();
+        }
+        prune_aside_copies(&path, &aside(1), KEEP_ASIDE_COPIES);
+        let left: Vec<u32> = [1, 5, 6, 7].into_iter().filter(|s| aside(*s).exists()).collect();
+        assert_eq!(left, vec![1, 7]);
+    }
+
+    /// A read error names the store file, so a user at sign-in knows which file to look at.
+    #[cfg(unix)]
+    #[test]
+    fn load_from_read_error_names_the_store_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CREDENTIALS_FILENAME);
+        std::os::unix::fs::symlink(&path, &path).unwrap();
+        let text = match McpCredentialStore::load_from(&path) {
+            Ok(_) => panic!("a link loop must not load"),
+            Err(e) => e.to_string(),
+        };
+        assert!(text.contains(CREDENTIALS_FILENAME), "{text}");
+    }
+
+    /// A name that is already taken is never replaced: the next free numeric suffix is used.
+    #[test]
+    fn aside_name_collision_never_replaces_an_existing_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CREDENTIALS_FILENAME);
+        let first = dir.path().join("mcp_credentials.json.corrupt-5");
+        std::fs::write(&first, b"first").unwrap();
+        let second = write_aside_copy(&path, 5, b"second").unwrap();
+        assert_eq!(std::fs::read(&first).unwrap(), b"first");
+        assert_eq!(std::fs::read(&second).unwrap(), b"second");
+        assert_ne!(first, second);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aside_copy_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CREDENTIALS_FILENAME);
+        std::fs::write(&path, b"{ broken").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut store = McpCredentialStore::default();
+        store.locked_mutate_and_save_at(&path, &|_| {}).unwrap();
+        let asides = aside_files(dir.path());
+        assert_eq!(asides.len(), 1);
+        let mode = std::fs::metadata(&asides[0]).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    /// A symlinked store whose target is damaged: the target is neither renamed nor chmodded, and its bytes stay.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_damaged_store_target_is_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere.json");
+        std::fs::write(&target, b"{ broken").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let path = dir.path().join(CREDENTIALS_FILENAME);
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        let mut store = McpCredentialStore::default();
+        store.locked_mutate_and_save_at(&path, &|_| {}).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"{ broken");
+        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o644);
+        let asides = aside_files(dir.path());
+        assert_eq!(asides.len(), 1);
+        assert!(!std::fs::symlink_metadata(&asides[0]).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&asides[0]).unwrap(), b"{ broken");
+    }
+
+    /// Removing a server reloads under the lock: an entry another writer saved after this snapshot was loaded survives.
+    #[test]
+    fn server_removal_keeps_entries_written_after_the_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CREDENTIALS_FILENAME);
+        let url = Url::parse("https://example.com/mcp").unwrap();
+        let mut seed = McpCredentialStore::default();
+        seed.locked_mutate_and_save_at(&path, &|s: &mut McpCredentialStore| {
+            s.insert_rmcp("a", &url, test_stored_creds("a"));
+            s.insert_rmcp("b", &url, test_stored_creds("b"));
+        })
+        .unwrap();
+        let mut snapshot = McpCredentialStore::load_from(&path).unwrap();
+        let mut other = McpCredentialStore::default();
+        other
+            .locked_mutate_and_save_at(&path, &|s: &mut McpCredentialStore| {
+                s.insert_rmcp("c", &url, test_stored_creds("c"));
+            })
+            .unwrap();
+
+        let removed = snapshot.remove_by_server_name_and_save_at(&path, "a").unwrap();
+        assert_eq!(removed, 1);
+        let loaded = McpCredentialStore::load_from(&path).unwrap();
+        assert!(!loaded.has_credentials("a", &url));
+        assert!(loaded.has_credentials("b", &url));
+        assert!(loaded.has_credentials("c", &url), "a concurrent write must not be rolled back");
+    }
+
+    /// Removing a server that has no entry writes nothing (no empty store is created).
+    #[test]
+    fn server_removal_with_nothing_to_remove_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CREDENTIALS_FILENAME);
+        let mut store = McpCredentialStore::default();
+        assert_eq!(store.remove_by_server_name_and_save_at(&path, "a").unwrap(), 0);
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_store_fails_the_write_and_stays_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CREDENTIALS_FILENAME);
+        // A symlink loop: reading it fails with ELOOP (not NotFound, and independent of root),
+        // while a rename over it would succeed, so an overwrite would be possible.
+        std::os::unix::fs::symlink(&path, &path).unwrap();
+
+        let mut store = McpCredentialStore::default();
+        let url = Url::parse("https://example.com/mcp").unwrap();
+        let result = store.locked_mutate_and_save_at(&path, &|s: &mut McpCredentialStore| {
+            s.insert_rmcp("new", &url, test_stored_creds("new"));
+        });
+        assert!(result.is_err(), "an unreadable store must fail the write");
+        assert_eq!(
+            std::fs::read_link(&path).unwrap(),
+            path,
+            "the unreadable path is left untouched"
+        );
+    }
+
+    /// The adapter's `save` and `clear` go through the default path.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn adapter_clear_and_save_fail_on_unreadable_store_and_keep_it() {
+        use rmcp::transport::auth::CredentialStore;
+        crate::isolate_fuigo_home_for_tests();
+        let path = McpCredentialStore::default_path().unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&path);
+        std::os::unix::fs::symlink(&path, &path).unwrap();
+
+        let url = Url::parse("https://example.com/mcp").unwrap();
+        let adapter = McpCredentialStoreAdapter::new("srv".into(), url);
+        assert!(adapter.clear().await.is_err(), "clear must error");
+        assert!(adapter.save(test_stored_creds("c")).await.is_err(), "save must error");
+        assert_eq!(
+            std::fs::read_link(&path).unwrap(),
+            path,
+            "the unreadable path is left untouched"
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// Audit S11-F4: an OAuth access token the adapter serves or saves is recorded as sent, so an upstream that echoes
+    /// it back has it replaced by the exact-match scrub.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn adapter_records_served_and_saved_access_tokens_as_sent() {
+        use rmcp::transport::auth::CredentialStore;
+        crate::isolate_fuigo_home_for_tests();
+        let creds = |token: &str| -> rmcp::transport::auth::StoredCredentials {
+            serde_json::from_str(&format!(
+                r#"{{"client_id":"c","token_response":{{"access_token":"{token}","token_type":"bearer","expires_in":3600}}}}"#
+            ))
+            .unwrap()
+        };
+        let echoed = |token: &str| format!("401 from upstream: invalid token {token}");
+        let recorded = |token: &str| fuigo_telemetry::sent_credentials::scrub(&echoed(token)).as_ref() != echoed(token);
+
+        let url = Url::parse("https://s11f4.example.com/mcp").unwrap();
+        let adapter = McpCredentialStoreAdapter::new("s11f4".into(), url);
+        const SAVED: &str = "s11f4-oauth-saved-FAKE-0001";
+        assert!(!recorded(SAVED));
+        adapter.save(creds(SAVED)).await.unwrap();
+        assert!(recorded(SAVED), "a saved access token was not recorded");
+
+        const LOADED: &str = "s11f4-oauth-loaded-FAKE-0002";
+        let mut store = McpCredentialStore::default();
+        store
+            .insert_and_save("s11f4", &Url::parse("https://s11f4.example.com/mcp").unwrap(), creds(LOADED))
+            .unwrap();
+        assert!(!recorded(LOADED));
+        assert!(adapter.load().await.unwrap().is_some());
+        assert!(recorded(LOADED), "a served access token was not recorded");
+    }
+
+    #[test]
+    fn concurrent_writers_on_different_servers_both_survive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CREDENTIALS_FILENAME);
+        let url = Url::parse("https://example.com/mcp").unwrap();
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                let url = url.clone();
+                std::thread::spawn(move || {
+                    let mut store = McpCredentialStore::default();
+                    let name = format!("srv{i}");
+                    store
+                        .locked_mutate_and_save_at(&path, &|s: &mut McpCredentialStore| {
+                            s.insert_rmcp(&name, &url, test_stored_creds("c"));
+                        })
+                        .unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let loaded = McpCredentialStore::load_from(&path).unwrap();
+        assert_eq!(loaded.entries.len(), 8, "no writer's entry may be lost");
     }
 
     /// The refresh-failure classifier gates browser escalation (`force_reauth`).

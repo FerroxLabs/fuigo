@@ -9705,3 +9705,19 @@ fn user_always_approve_lock_key_is_not_reported_unused() {
         "the user lock key must not warn as unrecognized: {unused:?}"
     );
 }
+
+/// A wrongly typed `sandbox.auto_allow_bash` must not drop a valid `sandbox.profile` (it used to resolve the
+/// whole section to its default, so the profile became `off` with no message).
+#[test]
+fn a_bad_sandbox_field_does_not_drop_the_profile() {
+    let value: toml::Value =
+        toml::from_str("[sandbox]\nprofile = \"strict\"\nauto_allow_bash = \"yes\"\n").unwrap();
+    let config = SandboxSettingsConfig::from_config_value(&value);
+    assert_eq!(Some("strict"), config.profile.as_deref());
+    assert_eq!(None, config.auto_allow_bash);
+    assert_eq!("strict", config.resolve_profile(None, None).value);
+    let value: toml::Value = toml::from_str("[sandbox]\nprofile = 3\nauto_allow_bash = true\n").unwrap();
+    let config = SandboxSettingsConfig::from_config_value(&value);
+    assert_eq!(None, config.profile);
+    assert_eq!(Some(true), config.auto_allow_bash);
+}

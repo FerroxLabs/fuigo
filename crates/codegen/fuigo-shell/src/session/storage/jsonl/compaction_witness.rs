@@ -857,4 +857,39 @@ mod tests {
             .unwrap();
         assert_eq!(texts(&loaded.chat_history), ["SYS", "SUMMARY", "P1"]);
     }
+
+    /// Audit S12-F4: the recovered history goes through the same invalid-image strip as a normal load, so an item
+    /// appended after the unapplied compaction cannot make the provider reject every request of the resumed run.
+    #[tokio::test]
+    async fn s12_f4_recovered_history_strips_an_invalid_image() {
+        use crate::session::storage::StorageAdapter as _;
+        let root = tempfile::tempdir().unwrap();
+        let adapter = super::super::JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let info = crate::session::info::Info {
+            id: agent_client_protocol::SessionId::new("s12-f4"),
+            cwd: "/work".to_string(),
+        };
+        adapter.init_session(&info, crate::session::persistence::default_model_id()).await.unwrap();
+        let dir = adapter.session_dir(&info);
+        let old = vec![ConversationItem::system("SYS"), ConversationItem::user("P0")];
+        chat(&dir, &old);
+        let c1 = write_checkpoint(&dir, "c1", vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY")]);
+        write_compaction_witness_sync(&test_writer(&dir), &dir, &c1).unwrap();
+        std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c1", 1)).unwrap();
+        let mut appended = old.clone();
+        appended.push(ConversationItem::user_with_parts(vec![
+            fuigo_sampling_types::ContentPart::Text { text: "look".into() },
+            fuigo_sampling_types::ContentPart::Image { url: "data:image/png;base64,!!not-base64!!".into() },
+        ]));
+        std::fs::write(dir.join("chat_history.jsonl"), raw(&appended)).unwrap();
+
+        let writer = fuigo_session_writer::SessionWriter::try_claim("s12-f4", &dir).unwrap();
+        let loaded = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Owner(&writer))
+            .await
+            .unwrap();
+        let dump = format!("{:?}", loaded.chat_history);
+        assert!(dump.contains("[image removed"), "{dump}");
+        assert!(!dump.contains("not-base64"), "{dump}");
+    }
 }
