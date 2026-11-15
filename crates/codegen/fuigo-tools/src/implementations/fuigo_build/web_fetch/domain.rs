@@ -47,9 +47,17 @@ pub struct DomainMatcher {
     entries: HashMap<String, HostEntry>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test seam (review L10): how many matchers this thread has built.
+    pub(super) static MATCHERS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl DomainMatcher {
     /// Build from raw allowlist entries like `"docs.rs"`, `"vercel.com/docs"`.
     pub fn new(raw_entries: &[String]) -> Self {
+        #[cfg(test)]
+        MATCHERS_BUILT.with(|n| n.set(n.get() + 1));
         let mut entries: HashMap<String, HostEntry> = HashMap::new();
 
         for raw in raw_entries {

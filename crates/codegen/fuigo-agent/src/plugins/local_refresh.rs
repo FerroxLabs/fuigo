@@ -86,6 +86,13 @@ fn refresh_local_installs(
         expected,
     } in targets
     {
+        // A vendored marketplace plugin's source is the marketplace cache, which every marketplace sync moves to the
+        // branch head. Refreshing from it would adopt unreviewed hooks/MCP definitions at session start; those installs
+        // change only through the explicit marketplace update path (audit S7-F3).
+        if is_under_marketplace_cache(&source_path) {
+            summary.skipped += 1;
+            continue;
+        }
         let refreshable =
             TrustStore::is_config_path_auto_trusted(&source_path) || trust.is_trusted(&source_path);
         if !source_path.is_dir() || !refreshable {
@@ -124,6 +131,13 @@ fn refresh_local_installs(
     summary
 }
 
+/// True when `path` is inside the marketplace source cache (`<fuigo home>/marketplace-cache`).
+fn is_under_marketplace_cache(path: &Path) -> bool {
+    let cache = fuigo_config::fuigo_home().join("marketplace-cache");
+    let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(path).starts_with(canon(&cache))
+}
+
 /// The set of `(relative_path, file_len)` for every non-symlink file under a tree.
 /// Symlinks are skipped, matching [`copy_dir_recursive`].
 /// Comparing two of these detects add/remove/rename/size-change with no stored fingerprint and no mtime compare (a copy does not preserve mtimes).
@@ -150,12 +164,34 @@ fn tree_file_set(root: &Path) -> Option<BTreeMap<PathBuf, u64>> {
     Some(out)
 }
 
-/// Whether the snapshot at `dest` matches the live `source` by `(relpath, len)` set.
-/// Catches add/remove/rename/resize; misses only a same-path/same-len edit.
+/// Whether the snapshot at `dest` matches the live `source`: the same `(relpath, len)` set (a stat-walk that
+/// catches add/remove/rename/resize), and then the same bytes in every file, so a same-length edit is picked up
+/// too (audit S7-F4). The byte comparison only runs when the stat-walk already agrees, and stops at the first
+/// difference.
 fn snapshot_matches_source(source: &Path, dest: &Path) -> bool {
     match (tree_file_set(source), tree_file_set(dest)) {
-        (Some(src), Some(dst)) => src == dst,
+        (Some(src), Some(dst)) if src == dst => src
+            .keys()
+            .all(|rel| same_file_bytes(&source.join(rel), &dest.join(rel))),
         _ => false,
+    }
+}
+
+fn same_file_bytes(a: &Path, b: &Path) -> bool {
+    use std::io::Read;
+    let (Ok(mut fa), Ok(mut fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else {
+        return false;
+    };
+    let mut ba = vec![0u8; 32 * 1024];
+    let mut bb = vec![0u8; 32 * 1024];
+    loop {
+        let Ok(n) = fa.read(&mut ba) else { return false };
+        if n == 0 {
+            return matches!(fb.read(&mut bb), Ok(0));
+        }
+        if fb.read_exact(&mut bb[..n]).is_err() || ba[..n] != bb[..n] {
+            return false;
+        }
     }
 }
 
@@ -403,6 +439,33 @@ mod tests {
 
     #[test]
     #[serial(home_env)]
+    fn refresh_skips_installs_sourced_from_marketplace_cache() {
+        // audit S7-F3: a vendored marketplace plugin must not follow the cache at session start.
+        let (_home_tmp, home, _home_guard) = home_tempdir();
+        let _fuigo_home = EnvVarGuard::set("FUIGO_HOME", home.join(".fuigo"));
+        let source = home
+            .join(".fuigo")
+            .join("marketplace-cache")
+            .join("abc")
+            .join("plugins")
+            .join("demo-plugin");
+        write_plugin_json(&source, "demo-plugin");
+        write_agent_md(&source, "old");
+
+        let mut registry = InstallRegistry::empty(home.join(".fuigo").join("installed-plugins"));
+        let installed = register_local_install(&mut registry, &source, None);
+
+        // A marketplace sync moves the cache to a new head.
+        write_agent_md(&source, "new");
+
+        let trust = TrustStore::load_from(home.join(".fuigo").join("trusted-plugins"));
+        let summary = refresh_local_installs(&mut registry, &trust, false);
+        assert_eq!(summary.refreshed, 0, "{summary:?}");
+        assert!(!installed.repo_path.join("agents/new.md").exists());
+    }
+
+    #[test]
+    #[serial(home_env)]
     fn refresh_skips_unchanged_source() {
         let (_home_tmp, home, _home_guard) = home_tempdir();
         let source = home.join(".claude").join("demo-plugin");
@@ -421,6 +484,30 @@ mod tests {
         assert_eq!(summary.skipped, 1, "{summary:?}");
         let after = std::fs::metadata(&snapshot).unwrap().modified().unwrap();
         assert_eq!(before, after, "unchanged snapshot must not be re-copied");
+    }
+
+    /// audit S7-F4: a one-byte edit that keeps the file length is still picked up by the non-forced refresh.
+    #[test]
+    #[serial(home_env)]
+    fn refresh_picks_up_a_same_length_edit() {
+        let (_home_tmp, home, _home_guard) = home_tempdir();
+        let source = home.join(".claude").join("demo-plugin");
+        write_plugin_json(&source, "demo-plugin");
+        write_agent_md(&source, "old");
+        std::fs::create_dir_all(source.join("hooks")).unwrap();
+        std::fs::write(source.join("hooks/run.sh"), "echo aaaa\n").unwrap();
+
+        let mut registry = InstallRegistry::empty(home.join(".fuigo").join("installed-plugins"));
+        let installed = register_local_install(&mut registry, &source, None);
+
+        std::fs::write(source.join("hooks/run.sh"), "echo bbbb\n").unwrap();
+        let trust = TrustStore::load_from(home.join(".fuigo").join("trusted-plugins"));
+        let summary = refresh_local_installs(&mut registry, &trust, false);
+        assert_eq!(summary.refreshed, 1, "{summary:?}");
+        assert_eq!(
+            std::fs::read_to_string(installed.repo_path.join("hooks/run.sh")).unwrap(),
+            "echo bbbb\n"
+        );
     }
 
     #[test]

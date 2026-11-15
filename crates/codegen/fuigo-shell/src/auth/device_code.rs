@@ -9,7 +9,7 @@
 use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -19,6 +19,22 @@ use crate::auth::{AuthChannels, AuthManager, AuthMode, AuthUrlInfo, AuthUrlMode,
 const DEVICE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const DEFAULT_DEVICE_POLL_INTERVAL_SECS: i32 = 5;
 const DEVICE_SLOW_DOWN_INCREMENT_SECS: u64 = 5;
+/// Longest wait between polls and longest polling window honoured, whatever the server sends.
+const MAX_DEVICE_POLL_INTERVAL_SECS: i32 = 60;
+const MAX_DEVICE_CODE_EXPIRY_SECS: i64 = 30 * 60;
+
+fn device_poll_interval(interval: i32) -> std::time::Duration {
+    std::time::Duration::from_secs(interval.clamp(1, MAX_DEVICE_POLL_INTERVAL_SECS) as u64)
+}
+
+fn device_poll_window(expires_in: i64) -> std::time::Duration {
+    let secs = expires_in.clamp(
+        MIN_DEVICE_CODE_EXPIRY_FALLBACK_SECS,
+        MAX_DEVICE_CODE_EXPIRY_SECS,
+    );
+    std::time::Duration::from_secs(secs as u64)
+}
+
 const MIN_DEVICE_CODE_EXPIRY_FALLBACK_SECS: i64 = 10 * 60;
 
 /// Only the 404 "no device endpoint" case is typed, because the login flow matches on it to fall back to loopback.
@@ -232,13 +248,8 @@ pub(crate) async fn complete_device_code_login(
 ) -> anyhow::Result<(FuigoAuth, bool)> {
     let client = crate::http::shared_client();
     let token_url = format!("{}/oauth2/token", issuer.trim_end_matches('/'));
-    let mut poll_interval = std::time::Duration::from_secs(device_code.interval.max(1) as u64);
-    let deadline = tokio::time::Instant::now()
-        + std::time::Duration::from_secs(
-            device_code
-                .expires_in
-                .max(MIN_DEVICE_CODE_EXPIRY_FALLBACK_SECS) as u64,
-        );
+    let mut poll_interval = device_poll_interval(device_code.interval);
+    let deadline = tokio::time::Instant::now() + device_poll_window(device_code.expires_in);
 
     loop {
         // Sleep first: an immediate poll on a fresh code only returns authorization_pending (and risks slow_down)
@@ -531,7 +542,10 @@ async fn build_auth(
         coding_data_retention_opt_out: crate::auth::default_coding_data_retention_opt_out(),
         has_fuigo_code_access: None,
         refresh_token: tokens.refresh_token.clone(),
-        expires_at: tokens.expires_in.map(|s| now + Duration::seconds(s)),
+        expires_at: tokens
+            .expires_in
+            .and_then(chrono::Duration::try_seconds)
+            .and_then(|d| now.checked_add_signed(d)),
         oidc_issuer: Some(issuer.to_owned()),
         oidc_client_id: Some(client_id.to_owned()),
     };
@@ -858,6 +872,30 @@ pub(crate) mod tests {
         assert_eq!(Some("http://localhost:22255".to_string()), auth.oidc_issuer);
         assert_eq!(Some("client-id".to_string()), auth.oidc_client_id);
         assert!(auth_manager.current().is_some());
+    }
+
+    #[test]
+    fn build_auth_survives_huge_expires_in() {
+        for secs in [i64::MAX, 10_000_000_000_000] {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let fuigo_home = temp_dir.path().join(".fuigo");
+            std::fs::create_dir_all(&fuigo_home).unwrap();
+            let auth_manager = auth_manager_with_fuigo_home(&fuigo_home, "http://127.0.0.1:9");
+            let tokens = super::TokenOk {
+                access_token: "access-token".to_string(),
+                refresh_token: None,
+                expires_in: Some(secs),
+                scope: None,
+                id_token: Some(
+                    "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJ1c2VyLTEyMyIsImVtYWlsIjoiZGV2aWNlLWF1dGhAbG9jYWwudGVzdCJ9.sig".to_string(),
+                ),
+            };
+            let auth = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(build_auth(&tokens, "http://localhost:22255", "client-id", &auth_manager, None))
+                .unwrap();
+            assert!(auth.expires_at.is_none());
+        }
     }
 
     /// jsonwebtoken needs a process-level CryptoProvider; tests that encode JWTs can't rely on another test having installed it first.
@@ -1191,5 +1229,20 @@ mod p181_styled_sites {
         assert!(device.contains(concat!("cli_eprint_trusted!(\"", "\\x1b[0m\\n\")")));
         let flow = include_str!("flow.rs");
         assert!(flow.contains(concat!("cli_eprint_trusted!(\"", "\\r\\x1b[K\")")));
+    }
+}
+
+#[cfg(test)]
+mod s1_f1_device_clamps {
+    use super::*;
+
+    #[test]
+    fn hostile_interval_and_expiry_are_clamped() {
+        assert_eq!(device_poll_interval(i32::MAX).as_secs(), 60);
+        assert_eq!(device_poll_interval(i32::MIN).as_secs(), 1);
+        assert_eq!(device_poll_interval(5).as_secs(), 5);
+        assert_eq!(device_poll_window(i64::MAX).as_secs(), 1800);
+        assert_eq!(device_poll_window(-5).as_secs(), MIN_DEVICE_CODE_EXPIRY_FALLBACK_SECS as u64);
+        let _ = tokio::time::Instant::now() + device_poll_window(i64::MAX);
     }
 }

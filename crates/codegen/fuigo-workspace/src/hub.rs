@@ -1152,7 +1152,7 @@ impl ToolServerHandler for SessionRoutedToolHandler {
         // that is no weaker than its dispatch mode.
         if path.follows_result_path()
             && let (Some(sandbox), Some(mode)) = (&sandbox, mode)
-            && let Err(error) = sandbox.pin_mode(
+            && let Err(error) = sandbox.pin_mode_exact(
                 &fuigo_sandbox::command::CallId::tool(call_id.as_str()),
                 mode,
             )

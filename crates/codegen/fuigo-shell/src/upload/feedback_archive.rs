@@ -431,6 +431,8 @@ impl JsonScrub {
             }
             Value::Object(map) => {
                 let mut changed = false;
+                // Next suffix to try per redacted base name, so k colliding names cost O(k), not O(k^2) (audit S11-F7).
+                let mut next_suffix: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
                 for (name, mut item) in std::mem::take(map) {
                     changed |= self.value(&mut item, Some(&name));
                     let mut name = match fuigo_secrets::redact_credential_shapes(&name) {
@@ -441,11 +443,13 @@ impl JsonScrub {
                         std::borrow::Cow::Borrowed(_) => name,
                     };
                     // Two names redacted alike must not overwrite each other's data (Astra r4 #5).
-                    let base = name.clone();
-                    let mut n = 2;
-                    while map.contains_key(&name) {
-                        name = format!("{base}#{n}");
-                        n += 1;
+                    if map.contains_key(&name) {
+                        let base = name.clone();
+                        let n = next_suffix.entry(base.clone()).or_insert(2);
+                        while map.contains_key(&name) {
+                            name = format!("{base}#{n}");
+                            *n += 1;
+                        }
                     }
                     map.insert(name, item);
                 }
@@ -585,6 +589,31 @@ mod tests {
     use super::*;
 
     const FLUX: &str = "https://api.fluxrouter.ai/v1";
+
+    /// Audit S11-F7: many property names that redact to the same text must not cost a quadratic probe, and none may
+    /// overwrite another's data.
+    #[test]
+    fn colliding_redacted_property_names_scrub_in_linear_time() {
+        const KEYS: usize = 30_000;
+        let mut map = serde_json::Map::new();
+        for i in 0..KEYS {
+            map.insert(format!("sk-{i:030}"), serde_json::Value::from(i));
+        }
+        let mut value = serde_json::Value::Object(map);
+        let start = std::time::Instant::now();
+        let mut scrub = JsonScrub { recorded: false, pem: fuigo_secrets::PrivateKeyJoin::default() };
+        assert!(scrub.value(&mut value, None));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "took {:?}",
+            start.elapsed()
+        );
+        let object = value.as_object().unwrap();
+        assert_eq!(object.len(), KEYS, "no property was lost to a name clash");
+        assert!(object.contains_key("[REDACTED_SECRET]"));
+        assert!(object.contains_key("[REDACTED_SECRET]#2"));
+    }
+
 
     fn tar_file(bytes: &[u8], suffix: &str) -> String {
         use flate2::read::GzDecoder;

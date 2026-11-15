@@ -69,7 +69,7 @@ impl VolumeRule {
         VolumeRule::Exact
     };
 
-    fn current() -> VolumeRule {
+    pub(crate) fn current() -> VolumeRule {
         #[cfg(test)]
         if let Some(rule) = TEST_VOLUME_RULE.get() {
             return rule;
@@ -138,6 +138,40 @@ pub(crate) fn strip_within(path: &Path, root: &Path) -> Option<PathBuf> {
         .strip_prefix(comparison_key(root))
         .ok()
         .map(Path::to_path_buf)
+}
+
+/// A regex body matching `path` in any letter case, for a kernel filter that compares the spelling
+/// a command supplied byte for byte on a volume that does not (APFS): each cased letter becomes a
+/// two-letter class (`.fuigo` -> `\.[fF][uU][iI][gG][oO]`) and a metacharacter is escaped. `None`
+/// for a path with a control character, which no profile text can carry.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub(crate) fn case_insensitive_regex_body(path: &str) -> Option<String> {
+    if path.chars().any(char::is_control) {
+        return None;
+    }
+    let mut out = String::new();
+    for c in path.chars() {
+        let mut lower = c.to_lowercase();
+        let mut upper = c.to_uppercase();
+        match (lower.next(), lower.next(), upper.next(), upper.next()) {
+            (Some(lo), None, Some(up), None) if lo != up => {
+                out.push('[');
+                out.push(lo);
+                out.push(up);
+                out.push(']');
+            }
+            _ => {
+                if matches!(
+                    c,
+                    '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\'
+                ) {
+                    out.push('\\');
+                }
+                out.push(c);
+            }
+        }
+    }
+    Some(out)
 }
 
 /// The workspace root as the folder was served: the spelling it was opened by and the real path

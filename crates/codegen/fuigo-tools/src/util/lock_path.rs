@@ -86,6 +86,41 @@ fn canonicalize_existing_ancestor(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// One mutex per edit target, shared by every edit tool in the process. A multi-file `apply_patch` has no single path
+/// for the dispatcher's per-batch key (audit S4-F9), so the tools themselves hold these for the read-modify-write.
+static EDIT_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Lock every path in `paths` (resolved against `cwd` to the same key [`lock_path_for_path`] gives), in key order so two
+/// callers with overlapping sets cannot deadlock. The locks release when the returned guards drop.
+pub(crate) async fn lock_edit_paths<P: AsRef<Path>>(
+    paths: &[P],
+    cwd: &Path,
+) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+    let mut keys: Vec<String> = paths
+        .iter()
+        .map(|p| lock_path_for_path(p.as_ref(), cwd))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    let mutexes: Vec<std::sync::Arc<tokio::sync::Mutex<()>>> = {
+        let mut map = EDIT_LOCKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Forget locks nobody holds or waits on, so the map does not grow with every path ever edited.
+        map.retain(|_, m| std::sync::Arc::strong_count(m) > 1);
+        keys.into_iter()
+            .map(|k| std::sync::Arc::clone(map.entry(k).or_default()))
+            .collect()
+    };
+    let mut guards = Vec::with_capacity(mutexes.len());
+    for m in mutexes {
+        guards.push(m.lock_owned().await);
+    }
+    guards
+}
+
 #[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
 #[cfg(test)]
 mod tests {
@@ -161,5 +196,20 @@ mod tests {
                 lock_path_for_path(Path::new("real/new.txt"), dir.path()),
             );
         }
+    }
+
+
+    /// Audit S4-F9: two holders of one path (however spelled) run one after the other; other paths do not wait.
+    #[tokio::test]
+    async fn edit_locks_serialise_one_path_and_not_others() {
+        let cwd = Path::new("/cwd");
+        let first = lock_edit_paths(&["a.txt", "b.txt"], cwd).await;
+        let waiter = tokio::spawn(async move { lock_edit_paths(&["./a.txt"], Path::new("/cwd")).await.len() });
+        tokio::task::yield_now().await;
+        assert!(lock_edit_paths(&["c.txt"], cwd).await.len() == 1, "another path is free");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "the same path must wait");
+        drop(first);
+        assert_eq!(waiter.await.unwrap(), 1);
     }
 }

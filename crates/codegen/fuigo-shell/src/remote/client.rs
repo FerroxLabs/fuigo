@@ -152,6 +152,29 @@ pub async fn fetch_subagent_bundle(
     );
     Ok(bundle)
 }
+/// Largest compressed bundle body accepted (audit S7-F10). Extraction already caps the decompressed size at
+/// 50 MB, so 64 MB compressed is generous; a larger response is refused while it streams, never buffered whole.
+const MAX_BUNDLE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read a response body, failing once it exceeds `cap` bytes (declared length first, then while streaming).
+async fn read_body_capped(mut response: reqwest::Response, cap: u64) -> Result<Vec<u8>, BackendError> {
+    let too_large = || BackendError::RequestFailed {
+        status: 413,
+        body: format!("bundle response is larger than the {cap} byte limit"),
+    };
+    if response.content_length().is_some_and(|len| len > cap) {
+        return Err(too_large());
+    }
+    let mut out: Vec<u8> = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if out.len() as u64 + chunk.len() as u64 > cap {
+            return Err(too_large());
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
 /// The result of fetching a bundle: either raw tar.gz bytes from the new archive endpoint, or a parsed JSON bundle from the legacy endpoint.
 #[derive(Debug)]
 pub enum FetchedBundle {
@@ -224,8 +247,9 @@ async fn fetch_bundle_inner(
         reqwest_middleware::Error::Middleware(e) => middleware_error(e),
     })?;
     if archive_response.status().is_success() {
-        let bytes = archive_response.bytes().await?;
-        return Ok(FetchedBundle::Archive(bytes.to_vec()));
+        return Ok(FetchedBundle::Archive(
+            read_body_capped(archive_response, MAX_BUNDLE_BYTES).await?,
+        ));
     }
     if archive_response.status() == reqwest::StatusCode::UNAUTHORIZED {
         let body = archive_response.text().await.unwrap_or_default();
@@ -481,6 +505,8 @@ impl BackendClient {
         // Fail closed BEFORE uploading anything: a share with no page to view
         // it on is not a share, and no host is ever invented for the link.
         let web_url = self.share_link_origin()?;
+        // The storage copy is scrubbed on its way out (P149); the copy the share link serves gets the same scrub.
+        let session = &scrub_session_for_share(session)?;
         self.upsert_session(&session.session_id, &session.metadata, agent_id)
             .await?;
         match self
@@ -720,6 +746,14 @@ impl BackendClient {
         }
         Ok(())
     }
+}
+/// The session as the share backend may receive it (audit S11-F1): serialised and run through the same JSON scrub as
+/// every storage upload (credentials this process sent or holds, credential shapes, private-key blocks), then read
+/// back. A scrub result that no longer parses is an error, so nothing is posted unscrubbed.
+fn scrub_session_for_share(session: &ExportedSession) -> Result<ExportedSession, BackendError> {
+    let json = serde_json::to_vec(session)?;
+    let scrubbed = crate::upload::trace::scrub_upload_payload(&json, "application/json");
+    Ok(serde_json::from_slice(&scrubbed)?)
 }
 /// Distinguishes the three cases the external-OTEL gate cares about (see [`crate::agent::mvp_agent`]).
 #[derive(Debug, Clone)]

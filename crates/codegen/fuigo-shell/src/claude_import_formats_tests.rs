@@ -333,15 +333,18 @@ fn format_claude_json_mcp_servers() {
     });
     w.write(&w.home.join(".claude.json"), &claude_json.to_string());
     let plan = w.scan();
-    assert_eq!(mcp_names(&plan.global_items), ["proj-local-srv", "user-srv"]);
-    assert!(mcp_names(&plan.project_items).is_empty());
+    // audit S7-F11: the user-level server is global; the one recorded for this project is a project server.
+    assert_eq!(mcp_names(&plan.global_items), ["user-srv"]);
+    assert_eq!(mcp_names(&plan.project_items), ["proj-local-srv"]);
 
     let result = w.apply(&plan);
-    assert_eq!(result.global_count, 2);
+    assert_eq!((result.global_count, result.project_count), (1, 1));
     let global = w.global_config();
     assert_eq!(global["mcp_servers"]["user-srv"]["command"].as_str(), Some("npx"));
+    assert!(global["mcp_servers"].get("proj-local-srv").is_none());
+    let project = w.project_config();
     assert_eq!(
-        global["mcp_servers"]["proj-local-srv"]["url"].as_str(),
+        project["mcp_servers"]["proj-local-srv"]["url"].as_str(),
         Some("https://example.com/mcp")
     );
     assert!(global["mcp_servers"].get("other-srv").is_none());

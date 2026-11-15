@@ -56,6 +56,11 @@ pub fn find_other_installs(
         if seen.len() > MAX_CANDIDATES {
             break;
         }
+        // An empty or relative entry resolves against the current folder; the shell would never prefer it, and
+        // running a file from the repo at startup is not something a PATH scan should do (audit S8-F4).
+        if !dir.is_absolute() {
+            continue;
+        }
         let candidate = dir.join(name);
         if !candidate.is_file() {
             continue;
@@ -162,6 +167,25 @@ mod tests {
         assert_eq!(parse_version("fuigo 1.0.32-rc.1+build").as_deref(), Some("1.0.32-rc.1+build"));
         assert_eq!(parse_version("no version here"), None);
         assert_eq!(parse_version("1.0"), None);
+    }
+
+    /// Audit S8-F4: a relative or empty PATH entry resolves against the current folder, so a `fuigo` file in the
+    /// repo must never be run by the scan.
+    #[test]
+    fn relative_and_empty_path_entries_are_never_probed() {
+        let rel_dir = tempfile::tempdir_in(".").unwrap();
+        let rel_name = rel_dir.path().file_name().unwrap().to_owned();
+        fake_install(rel_dir.path(), "fuigo");
+        let real_dir = tempfile::tempdir().unwrap();
+        let current = fake_install(&real_dir.path().join("cur"), "fuigo");
+        let path_var = std::env::join_paths([std::ffi::OsString::from(""), std::ffi::OsString::from("."), rel_name]).unwrap();
+        let probed = std::cell::RefCell::new(Vec::new());
+        let found = find_other_installs(&path_var, &current, "1.0.31", |p| {
+            probed.borrow_mut().push(p.to_path_buf());
+            Some("fuigo 1.0.19".into())
+        });
+        assert!(probed.borrow().is_empty(), "probed {:?}", probed.borrow());
+        assert!(found.is_empty());
     }
 
     /// Sean's Mac: a stale Homebrew-node 1.0.19 ahead of nvm 1.0.31.

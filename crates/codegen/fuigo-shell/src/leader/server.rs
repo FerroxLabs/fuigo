@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -39,6 +39,9 @@ const ID_NAMESPACE_SEP: char = '|';
 /// On overflow we stop buffering and forward live normally.
 /// Correctness of the transcript is preserved by the client's eventId dedup; only the ordering nicety is lost in this degenerate case.
 const MAX_BUFFERED_LIVE_PER_LOAD: usize = 4096;
+/// Events from client handlers waiting for the server loop. A handler that is ahead of the loop waits here, so the
+/// socket stops being read (back-pressure on that peer) instead of the queue growing without limit (audit S10-F5).
+const CLIENT_EVENT_QUEUE_DEPTH: usize = 64;
 enum ServerEvent {
     Disconnected(ClientId),
     Registered(ClientId, ClientMode, ClientCapabilities, String),
@@ -2532,7 +2535,7 @@ fn forward_process_notices(clients: &HashMap<ClientId, ClientState>, forwarded: 
 #[allow(clippy::disallowed_methods, reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder")]
 pub async fn run_leader_server(
     socket_path: std::path::PathBuf,
-    acp_tx: mpsc::UnboundedSender<String>,
+    acp_tx: impl Into<AcpSink>,
     mut response_rx: mpsc::UnboundedReceiver<String>,
     cancel: CancellationToken,
     no_exit_on_disconnect: bool,
@@ -2545,6 +2548,8 @@ pub async fn run_leader_server(
     leader_version_override: Option<&'static str>,
     control_state: LeaderServerControlState,
 ) -> Result<(), ServerError> {
+    let acp_tx: AcpSink = acp_tx.into();
+    let mut acp_shed: u64 = 0;
     let _ = std::fs::remove_file(&socket_path);
     let shutdown_reason_rx = shutdown_tx.subscribe();
     let mut relay_refusal_rx = control_state.relay_refusal.subscribe();
@@ -2553,7 +2558,7 @@ pub async fn run_leader_server(
     let mut notices_forwarded: usize = 0;
     let listener = super::peer_check::bind_private(&socket_path)?;
     info!("Leader server listening");
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let (event_tx, mut event_rx) = mpsc::channel::<ServerEvent>(CLIENT_EVENT_QUEUE_DEPTH);
     let mut clients: HashMap<ClientId, ClientState> = HashMap::new();
     let mut session_driver: HashMap<String, ClientId> = HashMap::new();
     // Who owns each session: the one authority for owner-gated changes (see `super::drivers`). `session_driver` below is only
@@ -2774,10 +2779,7 @@ pub async fn run_leader_server(
                         last_active_client = None;
                     }
                     if !detached_sessions.is_empty() {
-                        let _ = acp_tx.send(internal_notification(
-                            InternalMethod::EvictSessions,
-                            serde_json::json!({ "sessionIds": detached_sessions }),
-                        ));
+                        let _ = acp_tx.send_evict(&detached_sessions);
                         info!(
                             client_id = id.0,
                             session_count = detached_sessions.len(),
@@ -2889,6 +2891,45 @@ pub async fn run_leader_server(
                             );
                         }
                         continue;
+                    }
+                    // The agent is not keeping up: shed load here rather than queue without bound (the loop never blocks).
+                    // Requests get a `busy` error; see `classify_acp_overflow` for what always queues.
+                    let mut acp_weight = acp_weight(json.as_ref());
+                    let mut acp_admit = AcpAdmit::default();
+                    if let Some(level) = acp_tx.over_level(acp_weight) {
+                        match classify_acp_overflow(json.as_ref(), level, &acp_tx) {
+                            AcpOverflow::Queue { admit, replace, busy } => {
+                                acp_admit = admit;
+                                if let Some(error_payload) = busy
+                                    && let Some(client) = clients.get(&id)
+                                {
+                                    let _ = client.tx.send(ClientOutbound::Acp(error_payload.into()));
+                                }
+                                // A batch that only partly queues goes on without the elements that were shed.
+                                if let Some(kept) = replace {
+                                    acp_weight = self::acp_weight(Some(&kept));
+                                    json = Some(kept);
+                                    payload_mutated = true;
+                                }
+                            }
+                            AcpOverflow::Busy(error_payload) => {
+                                acp_shed += 1;
+                                if acp_shed % 1024 == 1 {
+                                    warn!(client_id = id.0, depth = acp_tx.depth(), shed = acp_shed, "Agent queue full: answering requests with busy");
+                                }
+                                if let Some(client) = clients.get(&id) {
+                                    let _ = client.tx.send(ClientOutbound::Acp(error_payload.into()));
+                                }
+                                continue;
+                            }
+                            AcpOverflow::Drop => {
+                                acp_shed += 1;
+                                if acp_shed % 1024 == 1 {
+                                    warn!(client_id = id.0, depth = acp_tx.depth(), shed = acp_shed, "Agent queue full: dropping notification");
+                                }
+                                continue;
+                            }
+                        }
                     }
                     // An answer to one of the agent's requests for a session counts only from the client the leader delivered
                     // it to (the session's owner). Another window's answer, e.g. an always-approve window's, never reaches the
@@ -3074,7 +3115,7 @@ pub async fn run_leader_server(
                         agent_busy.store(true, Ordering::Relaxed);
                     }
                     let outbound = select_outbound_payload(json.as_ref(), payload_mutated, payload);
-                    let _ = acp_tx.send(outbound);
+                    let _ = acp_tx.send_counted(outbound, acp_weight, acp_admit);
                 }
                 ServerEvent::Message(_, _) => {}
             },
@@ -3652,7 +3693,7 @@ fn spawn_client_handler(
     client_id: ClientId,
     stream: LeaderStream,
     server_rx: mpsc::UnboundedReceiver<ClientOutbound>,
-    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    event_tx: mpsc::Sender<ServerEvent>,
     cancel: CancellationToken,
     ready_rx: watch::Receiver<bool>,
     control_state: LeaderServerControlState,
@@ -3671,14 +3712,14 @@ fn spawn_client_handler(
         if let Err(e) = &result {
             debug!(client_id = client_id.0, error = %e, "Client session ended");
         }
-        let _ = event_tx.send(ServerEvent::Disconnected(client_id));
+        let _ = event_tx.send(ServerEvent::Disconnected(client_id)).await;
     });
 }
 async fn run_client_session(
     client_id: ClientId,
     stream: LeaderStream,
     mut server_rx: mpsc::UnboundedReceiver<ClientOutbound>,
-    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    event_tx: mpsc::Sender<ServerEvent>,
     cancel: CancellationToken,
     mut ready_rx: watch::Receiver<bool>,
     control_state: LeaderServerControlState,
@@ -3772,12 +3813,14 @@ async fn run_client_session(
             "Leader ready; sent LeaderReady to client"
         );
     }
-    let _ = event_tx.send(ServerEvent::Registered(
-        client_id,
-        mode,
-        capabilities.clone(),
-        client_type.clone(),
-    ));
+    let _ = event_tx
+        .send(ServerEvent::Registered(
+            client_id,
+            mode,
+            capabilities.clone(),
+            client_type.clone(),
+        ))
+        .await;
     info!(client_id = client_id.0, client_type = %client_type, ?mode, yolo_mode = capabilities.yolo_mode, client_version = ?capabilities.client_version, "Client registered");
     loop {
         tokio::select! {
@@ -3836,7 +3879,7 @@ async fn drain_client_outbound_on_cancel<W>(
 async fn handle_client_inbound_message<W>(
     msg_result: Result<ClientMessage, ProtocolError>,
     client_id: ClientId,
-    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event_tx: &mpsc::Sender<ServerEvent>,
     writer: &mut W,
 ) -> Result<ClientSessionAction, ProtocolError>
 where
@@ -3844,7 +3887,7 @@ where
 {
     match msg_result {
         Ok(msg @ (ClientMessage::Acp { .. } | ClientMessage::Control { .. })) => {
-            let _ = event_tx.send(ServerEvent::Message(client_id, msg));
+            let _ = event_tx.send(ServerEvent::Message(client_id, msg)).await;
             Ok(ClientSessionAction::Continue)
         }
         Ok(ClientMessage::Ping) => {
@@ -3895,6 +3938,349 @@ fn broadcast_shutdown(
         );
         let _ = client.tx.send(ServerMessage::Shutdown.into());
     }
+}
+/// Most messages the leader queues for the agent before it starts shedding load (see [`AcpSink`]).
+/// Generous on purpose: a healthy agent drains the queue as fast as clients fill it, so normal use never reaches it.
+pub(crate) const ACP_QUEUE_CAP: usize = 4096;
+/// Past the cap only responses and controls still queue (see [`classify_acp_overflow`]), and not without bound: at
+/// this many times the cap only cancels queue, and one cap later nothing does.
+const ACP_HARD_CAP_FACTOR: usize = 4;
+/// The exact control methods that must reach the agent while its queue is over the cap (delta review D3: not every
+/// method that merely contains "cancel").
+const ACP_CANCEL_METHODS: &[&str] = &["session/cancel", "$/cancel_request", "fuigo/btw/cancel", "fuigo/subagent/cancel"];
+/// JSON-RPC error code returned for a request shed because the agent queue is full: the documented "rate limited"
+/// class (`-32003`), never `-32000`, which means authentication required.
+const ACP_BUSY_CODE: i64 = -32003;
+/// What the leader does with a client message when the agent queue is over its cap.
+enum AcpOverflow {
+    /// Queue it anyway: losing it would break correctness. `admit` carries the coalescing keys of its cancels (not
+    /// queued again while an identical one waits) and the reserve it uses. A batch that only partly queues carries
+    /// the elements to queue in `replace`, and the `busy` replies for the requests that were shed.
+    Queue { admit: AcpAdmit, replace: Option<serde_json::Value>, busy: Option<String> },
+    /// A request (or a batch holding requests): answer with this error response instead of queueing.
+    Busy(String),
+    /// A notification that can be lost: drop it.
+    Drop,
+}
+/// How far over the cap a message would take the queue.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AcpOverLevel {
+    /// Over the cap: responses and controls still queue.
+    Soft,
+    /// Over the hard cap: only cancels queue, and only from the bounded cancellation reserve (one cap of them).
+    Hard,
+}
+/// What a message queued past the cap holds: the coalescing keys of its cancels and the cancellation reserve it uses.
+#[derive(Default)]
+struct AcpAdmit {
+    keys: Vec<String>,
+    reserve: usize,
+}
+/// One queued message, with the depth it counts for (a batch counts as its elements) and what it holds past the cap.
+struct AcpQueued {
+    msg: String,
+    weight: usize,
+    admit: AcpAdmit,
+    /// A placeholder for the coalesced evict notice: the receiver builds the message from the pending ids when it
+    /// takes it.
+    evict: bool,
+}
+/// Shared by the two halves of a tracked queue.
+#[derive(Default)]
+struct AcpQueueState {
+    depth: AtomicUsize,
+    /// Coalescing keys of the controls queued past the cap and not yet taken.
+    pending_controls: Mutex<HashSet<String>>,
+    /// Cancels queued past the hard cap and not yet taken: the bounded cancellation reserve in use.
+    reserve: AtomicUsize,
+    /// Session ids of the evict notices waiting in the queue, oldest first.
+    pending_evicts: Mutex<PendingEvicts>,
+}
+/// The evict notices still queued, and whether the newest queue entry is one of them.
+#[derive(Default)]
+struct PendingEvicts {
+    lists: VecDeque<Vec<String>>,
+    /// Ids may join the last list only while its placeholder is the newest entry in the queue; otherwise they would
+    /// take its position and overtake the messages queued since.
+    newest_is_evict: bool,
+}
+#[derive(Clone)]
+enum AcpTx {
+    Tracked(mpsc::UnboundedSender<AcpQueued>, Arc<AcpQueueState>),
+    Untracked(mpsc::UnboundedSender<String>),
+}
+/// Sender half of the leader to agent queue: an unbounded channel plus a depth counter the receiver half lowers.
+/// The leader main loop is the producer and must never block, so over the cap the loop sheds work (see
+/// [`classify_acp_overflow`]) instead of waiting. `From<UnboundedSender>` gives an untracked sink with no cap.
+#[derive(Clone)]
+pub struct AcpSink {
+    tx: AcpTx,
+    cap: usize,
+}
+/// Receiver half of [`acp_channel`]; taking a message lowers the sink's depth by what it counted for.
+pub(crate) struct AcpReceiver {
+    rx: mpsc::UnboundedReceiver<AcpQueued>,
+    state: Arc<AcpQueueState>,
+}
+/// A tracked agent queue with the default cap ([`ACP_QUEUE_CAP`]).
+pub(crate) fn acp_channel() -> (AcpSink, AcpReceiver) {
+    acp_channel_with_cap(ACP_QUEUE_CAP)
+}
+/// A tracked agent queue shedding above `cap` queued messages.
+pub(crate) fn acp_channel_with_cap(cap: usize) -> (AcpSink, AcpReceiver) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let state = Arc::new(AcpQueueState::default());
+    (
+        AcpSink { tx: AcpTx::Tracked(tx, state.clone()), cap },
+        AcpReceiver { rx, state },
+    )
+}
+impl From<mpsc::UnboundedSender<String>> for AcpSink {
+    fn from(tx: mpsc::UnboundedSender<String>) -> Self {
+        Self { tx: AcpTx::Untracked(tx), cap: usize::MAX }
+    }
+}
+impl AcpSink {
+    /// Queue `msg` regardless of depth, counting for one message.
+    pub fn send_always(&self, msg: String) -> Result<(), mpsc::error::SendError<String>> {
+        self.send_counted(msg, 1, AcpAdmit::default())
+    }
+    /// Queue an `EvictSessions` notice for `ids`. While the newest queue entry is a waiting notice, later ids join it
+    /// instead of queueing another, so repeated disconnects against a stalled agent cannot grow the queue; a notice
+    /// never takes a place ahead of messages queued after it, and is never dropped.
+    pub(crate) fn send_evict(&self, ids: &[String]) -> Result<(), mpsc::error::SendError<String>> {
+        let evict_message = |ids: &[String]| {
+            internal_notification(InternalMethod::EvictSessions, serde_json::json!({ "sessionIds": ids }))
+        };
+        match &self.tx {
+            AcpTx::Untracked(tx) => tx.send(evict_message(ids)),
+            AcpTx::Tracked(tx, state) => {
+                let mut pending = state.pending_evicts.lock();
+                let newest_is_evict = pending.newest_is_evict;
+                if let Some(waiting) = pending.lists.back_mut().filter(|_| newest_is_evict) {
+                    for id in ids {
+                        if !waiting.contains(id) {
+                            waiting.push(id.clone());
+                        }
+                    }
+                    return Ok(());
+                }
+                pending.lists.push_back(ids.to_vec());
+                pending.newest_is_evict = true;
+                state.depth.fetch_add(1, Ordering::Relaxed);
+                let queued = AcpQueued { msg: String::new(), weight: 1, admit: AcpAdmit::default(), evict: true };
+                tx.send(queued).map_err(|mpsc::error::SendError(queued)| {
+                    pending.lists.pop_back();
+                    pending.newest_is_evict = false;
+                    state.release(&queued);
+                    mpsc::error::SendError(evict_message(ids))
+                })
+            }
+        }
+    }
+    /// Queue `msg` regardless of depth, counting for `weight` messages; `admit` is what it holds while queued.
+    fn send_counted(&self, msg: String, weight: usize, admit: AcpAdmit) -> Result<(), mpsc::error::SendError<String>> {
+        match &self.tx {
+            AcpTx::Untracked(tx) => tx.send(msg),
+            AcpTx::Tracked(tx, state) => {
+                // Held across the send so the flag and the queue order agree.
+                let mut evicts = state.pending_evicts.lock();
+                evicts.newest_is_evict = false;
+                state.depth.fetch_add(weight, Ordering::Relaxed);
+                state.reserve.fetch_add(admit.reserve, Ordering::Relaxed);
+                state.pending_controls.lock().extend(admit.keys.iter().cloned());
+                tx.send(AcpQueued { msg, weight, admit, evict: false }).map_err(|mpsc::error::SendError(queued)| {
+                    state.release(&queued);
+                    mpsc::error::SendError(queued.msg)
+                })
+            }
+        }
+    }
+    /// Messages queued and not yet taken by the receiver, a batch counting as its elements (0 for an untracked sink).
+    pub fn depth(&self) -> usize {
+        match &self.tx {
+            AcpTx::Tracked(_, state) => state.depth.load(Ordering::Relaxed),
+            AcpTx::Untracked(_) => 0,
+        }
+    }
+    /// How far over the cap queueing `weight` more would take the queue; `None` while it fits.
+    fn over_level(&self, weight: usize) -> Option<AcpOverLevel> {
+        let after = self.depth().saturating_add(weight);
+        let hard = self.cap.saturating_mul(ACP_HARD_CAP_FACTOR);
+        if after <= self.cap {
+            None
+        } else if after <= hard {
+            Some(AcpOverLevel::Soft)
+        } else {
+            Some(AcpOverLevel::Hard)
+        }
+    }
+    /// How many more cancels the reserve past the hard cap can take (one cap in all).
+    fn reserve_room(&self) -> usize {
+        match &self.tx {
+            AcpTx::Tracked(_, state) => self.cap.saturating_sub(state.reserve.load(Ordering::Relaxed)),
+            AcpTx::Untracked(_) => usize::MAX,
+        }
+    }
+    /// Whether an identical control is queued past the cap and not yet taken.
+    fn control_pending(&self, key: &str) -> bool {
+        match &self.tx {
+            AcpTx::Tracked(_, state) => state.pending_controls.lock().contains(key),
+            AcpTx::Untracked(_) => false,
+        }
+    }
+}
+impl AcpQueueState {
+    /// Give back what a queued message held: its depth, its reserve and its coalescing keys.
+    fn release(&self, queued: &AcpQueued) {
+        self.depth.fetch_sub(queued.weight, Ordering::Relaxed);
+        self.reserve.fetch_sub(queued.admit.reserve, Ordering::Relaxed);
+        let mut pending = self.pending_controls.lock();
+        for key in &queued.admit.keys {
+            pending.remove(key);
+        }
+    }
+}
+impl AcpReceiver {
+    fn take(&self, queued: AcpQueued) -> String {
+        self.state.release(&queued);
+        if queued.evict {
+            let ids = self.state.pending_evicts.lock().lists.pop_front().unwrap_or_default();
+            return internal_notification(InternalMethod::EvictSessions, serde_json::json!({ "sessionIds": ids }));
+        }
+        queued.msg
+    }
+    pub(crate) async fn recv(&mut self) -> Option<String> {
+        let queued = self.rx.recv().await?;
+        Some(self.take(queued))
+    }
+    pub(crate) fn try_recv(&mut self) -> Result<String, mpsc::error::TryRecvError> {
+        let queued = self.rx.try_recv()?;
+        Ok(self.take(queued))
+    }
+}
+/// How many messages a client payload counts for in the agent queue: a batch counts as its elements (delta review D3).
+fn acp_weight(json: Option<&serde_json::Value>) -> usize {
+    json.and_then(serde_json::Value::as_array).map_or(1, |batch| batch.len().max(1))
+}
+/// The `busy` error answering request `id`.
+fn acp_busy_error(id: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": ACP_BUSY_CODE,
+            "message": "Rate limited",
+            "data": {
+                "error_kind": "busy",
+                "message": "The agent has too many queued messages. Retry shortly."
+            }
+        }
+    })
+}
+/// Decide the fate of a client message that would take the agent queue over its cap (`level`).
+/// Over the cap (soft): responses to the agent's own requests (it waits on them), exact cancel methods (as requests
+/// with an id or as notifications) and yolo/auto mode changes (the leader and agent must agree on them, and each one
+/// queues so their order holds) still queue, a cancel notification only once while an identical one waits; requests
+/// get a `busy` error; every other notification, and non-JSON, is dropped. Past the hard cap only cancels queue, from
+/// a reserve of one cap of them. A batch is judged element by element: what queues goes on, its shed requests get
+/// `busy` errors and the rest is dropped, so a mixed batch never loses its cancel.
+fn classify_acp_overflow(json: Option<&serde_json::Value>, level: AcpOverLevel, sink: &AcpSink) -> AcpOverflow {
+    let mut seen = HashSet::new();
+    let mut reserve_left = sink.reserve_room();
+    let mut admit = AcpAdmit::default();
+    match json {
+        Some(message @ serde_json::Value::Object(_)) => {
+            match classify_acp_element(message, level, sink, &mut seen, &mut reserve_left) {
+                AcpElement::Queue { key, reserve } => {
+                    admit.keys.extend(key);
+                    admit.reserve = reserve;
+                    AcpOverflow::Queue { admit, replace: None, busy: None }
+                }
+                AcpElement::Busy(error) => AcpOverflow::Busy(error.to_string()),
+                AcpElement::Drop => AcpOverflow::Drop,
+            }
+        }
+        Some(serde_json::Value::Array(batch)) => {
+            let mut kept = Vec::new();
+            let mut errors = Vec::new();
+            for element in batch {
+                match classify_acp_element(element, level, sink, &mut seen, &mut reserve_left) {
+                    AcpElement::Queue { key, reserve } => {
+                        admit.keys.extend(key);
+                        admit.reserve += reserve;
+                        kept.push(element.clone());
+                    }
+                    AcpElement::Busy(error) => errors.push(error),
+                    AcpElement::Drop => {}
+                }
+            }
+            let busy = (!errors.is_empty()).then(|| serde_json::Value::Array(errors).to_string());
+            if kept.is_empty() {
+                return busy.map_or(AcpOverflow::Drop, AcpOverflow::Busy);
+            }
+            let replace = (kept.len() != batch.len()).then(|| serde_json::Value::Array(kept));
+            AcpOverflow::Queue { admit, replace, busy }
+        }
+        _ => AcpOverflow::Drop,
+    }
+}
+/// The verdict on one JSON-RPC message past the cap.
+enum AcpElement {
+    /// Queue it; `key` coalesces an exact duplicate cancel notification, `reserve` is what it takes from the reserve.
+    Queue { key: Option<String>, reserve: usize },
+    /// Answer it with this error response.
+    Busy(serde_json::Value),
+    Drop,
+}
+/// [`classify_acp_overflow`] for one JSON-RPC message. `seen` holds the cancel keys already queued by this payload and
+/// `reserve_left` the reserve it has not yet used.
+fn classify_acp_element(
+    json: &serde_json::Value,
+    level: AcpOverLevel,
+    sink: &AcpSink,
+    seen: &mut HashSet<String>,
+    reserve_left: &mut usize,
+) -> AcpElement {
+    if !json.is_object() {
+        return AcpElement::Drop;
+    }
+    let Some(method) = json.get("method").and_then(|m| m.as_str()) else {
+        // A response to one of the agent's own requests.
+        return if level == AcpOverLevel::Soft { AcpElement::Queue { key: None, reserve: 0 } } else { AcpElement::Drop };
+    };
+    let id = json.get("id").filter(|v| !v.is_null());
+    let cancel = ACP_CANCEL_METHODS.contains(&method.strip_prefix('_').unwrap_or(method));
+    let mode_change = extract_yolo_mode_change(json).is_some() || extract_auto_mode_change(json).is_some();
+    let shed = || match id {
+        Some(id) => AcpElement::Busy(acp_busy_error(id)),
+        None => AcpElement::Drop,
+    };
+    if cancel {
+        // Past the hard cap a cancel takes one place in the reserve; at the soft level it takes none.
+        let reserve = usize::from(level == AcpOverLevel::Hard);
+        if *reserve_left < reserve {
+            return shed();
+        }
+        // Only an exact duplicate notification coalesces: a request with an id must be answered.
+        let key = if id.is_none() {
+            let params = json.get("params").map(serde_json::Value::to_string).unwrap_or_default();
+            let key = format!("{method}\n{params}");
+            if sink.control_pending(&key) || !seen.insert(key.clone()) {
+                return AcpElement::Drop;
+            }
+            Some(key)
+        } else {
+            None
+        };
+        *reserve_left -= reserve;
+        return AcpElement::Queue { key, reserve };
+    }
+    if mode_change && id.is_none() && level == AcpOverLevel::Soft {
+        // Never coalesced: "off, on, off" must reach the agent in that order.
+        return AcpElement::Queue { key: None, reserve: 0 };
+    }
+    shed()
 }
 pub struct ServerHandle {
     pub cancel: CancellationToken,

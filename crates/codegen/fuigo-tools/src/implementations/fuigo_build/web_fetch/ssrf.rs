@@ -11,7 +11,7 @@
 //!
 //! Reference: [IANA IPv4 Special-Purpose Address Registry](https://www.iana.org/assignments/iana-ipv4-special-registry/)
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 
 use url::Url;
 
@@ -39,59 +39,10 @@ pub(crate) fn is_explicit_local_host(host: &str) -> bool {
 }
 
 /// Returns `true` if an IP is not globally routable and should be treated as
-/// local/private for SSRF.
+/// local/private for SSRF. The classifier is shared with the egress proxy
+/// (`fuigo_extra_ca::ip`), so both cover the IPv6 transition ranges alike.
 pub(crate) fn is_non_public_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => is_non_public_ipv4(v4),
-        IpAddr::V6(v6) => is_non_public_ipv6(v6),
-    }
-}
-
-fn is_non_public_ipv4(ip: Ipv4Addr) -> bool {
-    ip.is_loopback()
-        || ip.is_private()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        || ip.is_broadcast()
-        // "This network" (RFC 1122) 0.0.0.0/8
-        || ipv4_in_cidr(ip, [0, 0, 0, 0], 8)
-        // CGNAT (RFC 6598) 100.64.0.0/10 — cloud metadata-ish
-        || ipv4_in_cidr(ip, [100, 64, 0, 0], 10)
-        // IETF Protocol Assignments (RFC 6890) 192.0.0.0/24
-        || ipv4_in_cidr(ip, [192, 0, 0, 0], 24)
-        // TEST-NET-1 (RFC 5737)
-        || ipv4_in_cidr(ip, [192, 0, 2, 0], 24)
-        // Benchmarking (RFC 2544)
-        || ipv4_in_cidr(ip, [198, 18, 0, 0], 15)
-        // TEST-NET-2 / TEST-NET-3
-        || ipv4_in_cidr(ip, [198, 51, 100, 0], 24)
-        || ipv4_in_cidr(ip, [203, 0, 113, 0], 24)
-        // Reserved (RFC 6890) 240.0.0.0/4
-        || ipv4_in_cidr(ip, [240, 0, 0, 0], 4)
-}
-
-fn ipv4_in_cidr(ip: Ipv4Addr, base: [u8; 4], prefix: u8) -> bool {
-    let ip = u32::from(ip);
-    let base = u32::from(Ipv4Addr::from(base));
-    let mask = if prefix == 0 {
-        0
-    } else {
-        u32::MAX << (32 - prefix)
-    };
-    (ip & mask) == (base & mask)
-}
-
-fn is_non_public_ipv6(ip: Ipv6Addr) -> bool {
-    if let Some(v4) = ip.to_ipv4_mapped() {
-        return is_non_public_ipv4(v4);
-    }
-    // Anything not globally routable: loopback, ULA, link-local, unspecified, multicast.
-    ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        || ip.is_unique_local()
-        || ip.is_unicast_link_local()
+    !fuigo_extra_ca::ip::is_public_ip(ip)
 }
 
 /// Loopback including IPv4-mapped forms (`::ffff:127.0.0.1`).
@@ -120,6 +71,25 @@ pub(crate) fn is_blocked_for_host(ip: IpAddr, host: &str, allow_local: bool) -> 
         return false;
     }
     true
+}
+
+/// The check the HTTP client's own resolver applies to every answer it is about to dial
+/// (audit S5-F8): the address that is connected to is the address that was judged, not a second
+/// lookup's. Installed through `fuigo_extra_ca::build_reqwest_client_checked`.
+pub(crate) fn address_check(allow_local: bool) -> fuigo_extra_ca::egress::AddressCheck {
+    std::sync::Arc::new(move |host, addrs| {
+        match addrs
+            .iter()
+            .find(|addr| is_blocked_for_host(addr.ip(), host, allow_local))
+        {
+            Some(addr) => Err(WebFetchError::SsrfBlocked {
+                host: host.to_string(),
+                ip: addr.ip(),
+            }
+            .to_string()),
+            None => Ok(()),
+        }
+    })
 }
 
 /// Resolve hostname via DNS and verify none of the resolved addresses are
@@ -196,6 +166,50 @@ fn literal_refused_under(allowance: &fuigo_extra_ca::egress::UpstreamAllowance) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── IPv6 transition and special ranges (audit S5-F9) ───────────────
+
+    /// Every prefix that can carry a private IPv4 address, or is itself special-purpose, is
+    /// refused; the same list the egress proxy applies.
+    #[test]
+    fn blocks_ipv6_transition_and_special_ranges() {
+        for value in [
+            "64:ff9b::10.0.0.1",
+            "64:ff9b::169.254.169.254",
+            "64:ff9b:1::a00:1",
+            "::10.0.0.1",
+            "::127.0.0.1",
+            "2002:a00:1::1",
+            "2002:7f00:1::1",
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+            "fec0::1",
+            "2001:db8::1",
+            "::ffff:10.0.0.1",
+        ] {
+            let ip: IpAddr = value.parse().unwrap();
+            assert!(is_non_public_ip(ip), "{value} must be treated as non-public");
+            assert!(is_blocked_for_host(ip, "example.com", true), "{value}");
+        }
+        for value in ["2606:4700:4700::1111", "64:ff9b::8.8.8.8", "::ffff:8.8.8.8"] {
+            let ip: IpAddr = value.parse().unwrap();
+            assert!(!is_non_public_ip(ip), "{value} is public");
+        }
+    }
+
+    #[test]
+    fn address_check_blocks_a_private_address_among_public_ones() {
+        let check = address_check(false);
+        let public: std::net::SocketAddr = "8.8.8.8:0".parse().unwrap();
+        let private: std::net::SocketAddr = "10.0.0.1:0".parse().unwrap();
+        assert!(check("example.com", &[public]).is_ok());
+        let err = check("example.com", &[public, private]).unwrap_err();
+        assert!(err.contains("10.0.0.1"), "{err}");
+        let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        assert!(check("example.com", &[loopback]).is_err());
+        assert!(check("localhost", &[loopback]).is_err());
+        assert!(address_check(true)("localhost", &[loopback]).is_ok());
+        assert!(address_check(true)("example.com", &[loopback]).is_err());
+    }
 
     // ── IPv4 blocking ───────────────────────────────────────────────────
 

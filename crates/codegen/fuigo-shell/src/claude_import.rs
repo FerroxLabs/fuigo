@@ -98,13 +98,11 @@ fn settings_snapshot(path: &Path) -> Option<ClaudeSettingsSnapshot> {
 /// - `~/.claude/{skills,rules}` and `<repo>/.claude/{skills,rules}` directories
 pub fn scan_importable_settings(cwd: &Path) -> ImportPlan {
     let settings_paths = find_claude_settings_paths(cwd);
-    // TODO: project-specific servers are incorrectly classified as global here
-    // `load_claude_json_mcp_servers_as_configs()` merges the top-level `mcpServers` in `~/.claude.json` with `projects.<cwd>.mcpServers` into one map
-    // The fix: call `load_claude_json_mcp_servers_from()` twice (user-level entries, then project entries), or expose a split variant in `config.rs`
-    let claude_json_servers =
-        crate::util::config::load_claude_json_mcp_servers_as_configs_unfiltered(cwd)
-            .into_iter()
-            .collect();
+    // `~/.claude.json` carries user-level servers and a per-project entry; they import into different scopes.
+    let (user_servers, project_servers) =
+        crate::util::config::load_claude_json_mcp_servers_split_unfiltered(cwd);
+    let claude_json_servers = user_servers.into_iter().collect();
+    let claude_json_project_servers = project_servers.into_iter().collect();
     let mcp_json_servers = crate::util::config::load_mcp_json_servers_as_configs_unfiltered(cwd)
         .into_iter()
         .collect();
@@ -113,6 +111,7 @@ pub fn scan_importable_settings(cwd: &Path) -> ImportPlan {
         &settings_paths,
         settings_snapshot,
         claude_json_servers,
+        claude_json_project_servers,
         mcp_json_servers,
     )
 }

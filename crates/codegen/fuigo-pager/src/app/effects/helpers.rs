@@ -1762,6 +1762,16 @@ pub(super) fn parse_auto_topup_response(
         Err(_) => AutoTopupFetch::Unchanged,
     }
 }
+/// Runs on the event-loop thread, so it must not wait on the registry lock: the registry is
+/// best-effort and a registration that cannot take the lock promptly is skipped with a warning.
+pub(super) fn register_active_session_best_effort_in(
+    root: &Path,
+    session: fuigo_active_sessions::ActiveSession,
+) {
+    if let Err(e) = fuigo_active_sessions::register_in(root, session) {
+        tracing::warn!(?e, "Failed to register active session");
+    }
+}
 /// A blocking flock on the shared, possibly-network `~/.fuigo` lock must never
 /// stall the event-loop thread (and would hang exit on `/quit`); the registry
 /// is best-effort, so skip on contention.

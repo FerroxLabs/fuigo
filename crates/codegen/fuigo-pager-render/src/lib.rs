@@ -1,4 +1,5 @@
 pub mod appearance;
+pub mod bounded_command;
 pub mod clipboard;
 pub mod glyphs;
 pub mod host;

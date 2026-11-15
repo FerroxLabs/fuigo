@@ -38,6 +38,23 @@ const INLINE_MEDIA_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Largest file the negative cache will read for a content digest. Above it the digest is `None`.
 const MEDIA_DIGEST_MAX_BYTES: u64 = INLINE_MEDIA_CACHE_MAX_BYTES as u64;
 
+/// Read an inline image into memory only when it is a regular file smaller than the byte cache, and never past that
+/// size. A file at or above it could not be cached anyway and would be read again on every frame; a device or a huge
+/// file named like an image would stall the draw thread (audit S9-F2). `None` is negative-cached like any failed load.
+fn read_inline_image_capped(path: &std::path::Path, meta: &std::fs::Metadata) -> Option<Vec<u8>> {
+    use std::io::Read;
+    if !meta.is_file() || meta.len() >= MEDIA_DIGEST_MAX_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    std::fs::File::open(path)
+        .ok()?
+        .take(MEDIA_DIGEST_MAX_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    ((bytes.len() as u64) < MEDIA_DIGEST_MAX_BYTES).then_some(bytes)
+}
+
 impl MediaFileStamp {
     /// `None` when the platform reports no mtime: a `(len, no-mtime)` marker would match every future rewrite of the same length.
     /// Such failures are never negative-cached (the load is retried instead).
@@ -361,7 +378,7 @@ impl AgentView {
                 );
                 (loaded, digest)
             } else {
-                let raw = std::fs::read(path).ok();
+                let raw = read_inline_image_capped(path, &meta);
                 let loaded = raw
                     .as_deref()
                     .and_then(crate::terminal::image::prepare_overlay_image_bytes);

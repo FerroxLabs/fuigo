@@ -9,6 +9,8 @@ authors = ["Ferrox Labs"]
 [dependencies]
 async-trait = { workspace = true }
 http = { workspace = true }
+# The HTTP library's own proxy matcher, so the signed-URL proxy decision is the one its clients make (delta review D2-03).
+hyper-util = { version = "0.1.20", default-features = false, features = ["client-proxy"] }
 reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls", "stream"] }
 reqwest-middleware05 = { package = "reqwest-middleware", version = "0.5" }
 anyhow = { workspace = true }

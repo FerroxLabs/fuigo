@@ -192,8 +192,27 @@ fn resolve_agent_profile_path(path: &std::path::Path) -> std::path::PathBuf {
         }
     }
 }
+/// The warning for a `--bind` that is not loopback, or `None` for a loopback bind.
+/// The server speaks plain `ws://` with no TLS, so on a reachable address anyone on the network path sees the
+/// secret (it can travel in the URL) and can then drive the agent as this user.
+fn serve_bind_warning(bind_addr: SocketAddr) -> Option<String> {
+    if bind_addr.ip().is_loopback() {
+        return None;
+    }
+    Some(format!(
+        "WARNING: binding {bind_addr}, which is not a loopback address. The agent server uses plain ws:// \
+         (no TLS), so the secret and every prompt, tool call and file write cross the network in cleartext and \
+         anyone who can reach this address and learns the secret controls this agent as you. Use 127.0.0.1 \
+         (the default) with an SSH tunnel or a TLS-terminating proxy instead."
+    ))
+}
+
 /// Print startup information for the serve command.
 fn print_serve_startup_info(bind_addr: SocketAddr, secret: &str) {
+    if let Some(warning) = serve_bind_warning(bind_addr) {
+        fuigo_tty_utils::cli_eprintln!();
+        fuigo_tty_utils::cli_eprintln!("   {warning}");
+    }
     fuigo_tty_utils::cli_eprintln!();
     fuigo_tty_utils::cli_eprintln!("   Fuigo agent server starting...");
     fuigo_tty_utils::cli_eprintln!();
@@ -3364,6 +3383,17 @@ async fn stop_leaders_after_downgrade(installed_version: &str) {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn serve_bind_warns_only_off_loopback() {
+        for loopback in ["127.0.0.1:2419", "[::1]:2419"] {
+            assert!(super::serve_bind_warning(loopback.parse().unwrap()).is_none(), "{loopback}");
+        }
+        for open in ["0.0.0.0:9000", "192.168.1.5:2419", "[::]:2419"] {
+            let warning = super::serve_bind_warning(open.parse().unwrap()).expect(open);
+            assert!(warning.contains("cleartext") && warning.contains("ws://"), "{warning}");
+        }
+    }
+
     /// P181 (Grok r3, tracing): tracing-subscriber 0.3.23 escapes ESC, BEL and C1 in a field value and a message, and
     /// the layer's record filter removes what it leaves (CR, LF inside the record, bidi, line separators). Asserts on
     /// the bytes written.

@@ -109,6 +109,19 @@ impl HunkTrackerActor {
         }
 
         let task_result = tokio::task::spawn_blocking(move || {
+            // The in-process status scan can run repository-configured content filters, so it sits behind the same
+            // folder-trust judge as the git/jj/direnv subprocesses (audit S2-F2). An undiscovered repo stays `Unknown`
+            // (not cached as `NotARepo`) so the scan starts once the folder is trusted.
+            if matches!(cached_state, GitRepoState::Unknown)
+                && !fuigo_tty_utils::repo_exec_allowed(&working_dir)
+            {
+                tracing::debug!("folder not trusted, skipping in-process git status");
+                return GitResult {
+                    dirty_files: HashSet::new(),
+                    staged_files: HashSet::new(),
+                    discovered: None,
+                };
+            }
             let Some((repo, prefix, discovered)) = open_or_discover(&cached_state, &working_dir)
             else {
                 return GitResult {

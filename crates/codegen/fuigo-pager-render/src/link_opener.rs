@@ -178,19 +178,57 @@ fn spawn_url_opener(url: &str) -> bool {
     }
 }
 
+/// Whether the platform opener would run or launch `path` rather than show it (audit S9-F3): launcher-type documents
+/// and bundles (shell-command documents, application bundles, installer packages, terminal profiles, scripts and
+/// installers by extension) and any regular file with an execute bit. Such a file is revealed in the file manager
+/// instead of opened, so a modifier-click on a painted path never executes repo content.
+fn opens_by_launching(path: &std::path::Path) -> bool {
+    const LAUNCHER_EXTENSIONS: &[&str] = &[
+        "command", "tool", "terminal", "app", "pkg", "mpkg", "dmg", "scpt", "scptd", "workflow", "action", "webloc",
+        "inetloc", "jar", "desktop", "appimage", "run", "exe", "bat", "cmd", "com", "msi", "ps1", "vbs", "lnk",
+    ];
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| LAUNCHER_EXTENSIONS.iter().any(|k| e.eq_ignore_ascii_case(k)))
+    {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Build the `open`/`xdg-open` opener command (macOS, Linux, BSD); Windows uses [`reveal_in_explorer`] instead.
 ///
 /// [`fuigo_tty_utils::detach_std_command`] (`setsid`/`setpgid`) keeps the spawned GUI helper and its children from grabbing the TUI's `/dev/tty`.
 /// Split from [`open_path`] so it can be unit-tested without spawning.
 /// The path is passed as a single argument, never interpolated into a shell string.
+/// A launcher-type or executable file is revealed (`open -R`; the parent directory with `xdg-open`), not opened.
 #[cfg(not(target_os = "windows"))]
 fn build_open_path_command(path: &std::path::Path) -> std::process::Command {
     #[cfg(target_os = "macos")]
     let mut command = std::process::Command::new("open");
     #[cfg(not(target_os = "macos"))]
     let mut command = std::process::Command::new("xdg-open");
+    if opens_by_launching(path) {
+        #[cfg(target_os = "macos")]
+        command.arg("-R").arg(path);
+        #[cfg(not(target_os = "macos"))]
+        command.arg(
+            path.parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new(".")),
+        );
+    } else {
+        command.arg(path);
+    }
     command
-        .arg(path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -205,7 +243,7 @@ fn build_open_path_command(path: &std::path::Path) -> std::process::Command {
 ///
 /// - **Windows**: `explorer.exe /select,<path>` reveals and highlights the file in Explorer.
 ///   We avoid `cmd /c start`: its `%VAR%` expansion would corrupt the percent-encoded session-directory segment in imagine media paths.
-/// - **macOS / Linux**: `open` / `xdg-open` open the file in its default app.
+/// - **macOS / Linux**: `open` / `xdg-open` open the file in its default app; launcher-type and executable files are revealed instead.
 pub fn open_path(path: &std::path::Path) -> bool {
     // Never launch a real GUI app in tests.
     #[cfg(test)]
@@ -339,6 +377,48 @@ mod tests {
         let command = build_open_path_command(path);
         let args: Vec<_> = command.get_args().map(|a| a.to_os_string()).collect();
         assert!(args.contains(&path.as_os_str().to_os_string()));
+    }
+
+    /// Audit S9-F3: launcher-type and executable files are revealed, never handed to the opener; ordinary files open.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn launcher_and_executable_files_are_revealed_not_opened() {
+        let dir = std::env::temp_dir().join(format!("fuigo-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let args_of = |p: &std::path::Path| -> Vec<std::ffi::OsString> {
+            build_open_path_command(p).get_args().map(|a| a.to_os_string()).collect()
+        };
+        let revealed = |p: &std::path::Path| -> Vec<std::ffi::OsString> {
+            #[cfg(target_os = "macos")]
+            {
+                vec!["-R".into(), p.as_os_str().to_os_string()]
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                vec![p.parent().unwrap().as_os_str().to_os_string()]
+            }
+        };
+        let command_doc = dir.join("run me.command");
+        let bundle = dir.join("Tool.app");
+        std::fs::write(&command_doc, "#!/bin/sh\n").unwrap();
+        std::fs::create_dir_all(&bundle).unwrap();
+        for p in [&command_doc, &bundle] {
+            assert_eq!(args_of(p), revealed(p), "{}", p.display());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let exec = dir.join("plain-name");
+            std::fs::write(&exec, "x").unwrap();
+            std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(args_of(&exec), revealed(&exec), "execute bit");
+        }
+        for name in ["main.rs", "shot.png"] {
+            let p = dir.join(name);
+            std::fs::write(&p, "x").unwrap();
+            assert_eq!(args_of(&p), vec![p.as_os_str().to_os_string()], "{name} still opens");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Each opener child is waited for: a finished child must not linger as a zombie in this process.

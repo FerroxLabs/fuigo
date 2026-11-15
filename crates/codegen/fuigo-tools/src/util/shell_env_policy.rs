@@ -404,6 +404,10 @@ pub(crate) fn install_policy_base_env(
     cmd: &mut tokio::process::Command,
     active: Option<&ShellEnvironmentPolicy>,
 ) {
+    // `fuigo wrap` hands its own child a nonce that authorises image-paste requests. A command Fuigo runs (a tool
+    // shell, a hook, an MCP server) is a grandchild of the wrap and must not be able to read it and forge a request
+    // (audit L21): it is scrubbed here, on every spawn path, whatever the policy.
+    scrub_wrap_nonce(cmd);
     if let Some(policy) = active {
         // Not `env_clear()`: a clear is invisible to `Command::get_envs`, so the per-command
         // sandbox (which rebuilds the command from its program, args, dir and env edits, and
@@ -413,6 +417,16 @@ pub(crate) fn install_policy_base_env(
         // same set either way.
         let base = create_env(policy);
         install_base_env_for(cmd, std::env::vars_os().map(|(name, _)| name), base, EnvPlatform::host());
+        scrub_wrap_nonce(cmd);
+    }
+}
+
+/// The names `fuigo wrap` uses for its per-session image-paste nonce (the `LC_` twin is the one an SSH hop forwards).
+pub(crate) const WRAP_NONCE_ENV_NAMES: [&str; 2] = ["FUIGO_WRAP_NONCE", "LC_FUIGO_WRAP_NONCE"];
+
+fn scrub_wrap_nonce(cmd: &mut tokio::process::Command) {
+    for name in WRAP_NONCE_ENV_NAMES {
+        cmd.env_remove(name);
     }
 }
 

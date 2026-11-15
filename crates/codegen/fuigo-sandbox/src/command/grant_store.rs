@@ -525,6 +525,15 @@ fn refused_subject(subject: &GrantSubject, rules: &RowRules) -> Option<GrantErro
     }
 }
 
+/// A Deny row on an absolute path that was refused only for a symlink in its spelling.
+fn is_lexical_deny(grant: &Grant, rules: &RowRules) -> bool {
+    grant.decision == GrantDecision::Deny
+        && matches!(
+            refused_subject(&grant.subject, rules),
+            Some(GrantError::Root(_))
+        )
+}
+
 /// A path subject in its canonical spelling (canonicalised once at the grant
 /// boundary); the other subjects unchanged.
 pub fn canonical_subject(subject: GrantSubject) -> GrantSubject {
@@ -751,14 +760,18 @@ fn parse_rows(
     // A row with a subject this version does not know (a `cmd_prefix` from an older file) fails
     // the parse above: the file loads as empty and no write replaces it
     // Checked as spelled on disk, so a root since swapped for a symlink is dropped, not followed
-    let (kept, dropped): (Vec<Grant>, Vec<Grant>) = file
-        .grants
-        .into_iter()
-        .partition(|g| refused_subject(&g.subject, rules).is_none());
+    // A Deny row whose only fault is a symlink in its spelling is kept as a lexical deny (never
+    // canonicalised, so it is not followed): dropping it would silently lift the user's "never"
+    // and let a broader stored Allow apply again
+    let (kept, dropped): (Vec<Grant>, Vec<Grant>) = file.grants.into_iter().partition(|g| {
+        refused_subject(&g.subject, rules).is_none() || is_lexical_deny(g, rules)
+    });
     let kept: Vec<Grant> = kept
         .into_iter()
         .map(|mut g| {
-            g.subject = canonical_subject(g.subject);
+            if refused_subject(&g.subject, rules).is_none() {
+                g.subject = canonical_subject(g.subject);
+            }
             g
         })
         .collect();

@@ -255,6 +255,43 @@ impl Resolve for ExactHostException {
     }
 }
 
+/// A check on the addresses a name resolved to, run before the client dials any of them.
+/// `Err` carries the refusal text; the connection is not made.
+pub type AddressCheck =
+    std::sync::Arc<dyn Fn(&str, &[std::net::SocketAddr]) -> Result<(), String> + Send + Sync>;
+
+/// [`EgressGuard`] that also judges the addresses it returns, so a caller's address policy
+/// binds the very answer the connection uses rather than a separate earlier lookup.
+#[derive(Clone)]
+pub struct CheckedEgressGuard {
+    check: AddressCheck,
+}
+
+impl std::fmt::Debug for CheckedEgressGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CheckedEgressGuard").finish_non_exhaustive()
+    }
+}
+
+impl CheckedEgressGuard {
+    pub fn new(check: AddressCheck) -> Self {
+        Self { check }
+    }
+}
+
+impl Resolve for CheckedEgressGuard {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_owned();
+        let check = self.check.clone();
+        let inner = guarded_resolve(host.clone(), None);
+        Box::pin(async move {
+            let addrs: Vec<std::net::SocketAddr> = inner.await?.collect();
+            check(&host, &addrs).map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
+            Ok(Box::new(addrs.into_iter()) as Addrs)
+        })
+    }
+}
+
 /// The guard for a client that may resolve `host`, and no other blocked name.
 pub(crate) fn resolver_allowing_exactly(host: &'static str) -> std::sync::Arc<ExactHostException> {
     std::sync::Arc::new(ExactHostException { host })

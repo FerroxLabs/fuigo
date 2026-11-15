@@ -1096,6 +1096,7 @@ fn register_session_in(root: &std::path::Path, id: &str) -> acp::SessionId {
                 pid: std::process::id(),
                 cwd: "/tmp/test".into(),
                 opened_at: chrono::Utc::now(),
+                start_time: None,
             },
         )
         .expect("register");
@@ -1152,6 +1153,43 @@ fn unregister_best_effort_is_nonblocking_under_lock_contention() {
             1,
             "contended unregister must leave the entry for collect_crashed",
         );
+}
+/// Audit R05: registering a session on the event-loop thread must not wait on a registry lock
+/// another process holds (stopped, or stuck on a hung home); it gives up promptly and skips.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn register_best_effort_is_bounded_under_lock_contention() {
+    use std::os::unix::io::AsRawFd;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.path().join("active_sessions.lock"))
+        .expect("open lock");
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let (tx, rx) = mpsc::channel();
+    let root = dir.path().to_path_buf();
+    let worker = std::thread::spawn(move || {
+        register_active_session_best_effort_in(
+            &root,
+            fuigo_active_sessions::ActiveSession {
+                session_id: acp::SessionId::new("s1"),
+                pid: std::process::id(),
+                cwd: "/tmp/test".into(),
+                opened_at: chrono::Utc::now(),
+                start_time: None,
+            },
+        );
+        let _ = tx.send(());
+    });
+    let returned = rx.recv_timeout(Duration::from_secs(5)).is_ok();
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
+    worker.join().expect("worker thread");
+    assert!(returned, "contended register blocked on the shared flock instead of skipping");
 }
 /// A real I/O error (uncreatable registry root) is swallowed: the best-effort helper logs and returns instead of panicking.
 #[test]

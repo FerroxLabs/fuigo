@@ -3341,3 +3341,30 @@ async fn f5c_ct10_resident_load_with_a_torn_line_writes_no_corrupt_copy() {
         .unwrap();
     assert!(quarantine.exists(), "an unowned reader of a free session keeps 1.0.40's quarantine copy");
 }
+
+/// Audit S12-F5: the turn-completion record is appended durably, and the chat history it describes is flushed with it, so
+/// a power loss cannot leave a durable turn end over chat lines that never reached the disk. Plain chat appends stay
+/// buffered (nothing is flushed per message).
+#[tokio::test]
+async fn s12_f5_a_durable_turn_boundary_flushes_the_chat_history() {
+    use crate::session::storage::StorageAdapter as _;
+    let root = tempfile::tempdir().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let info = crate::session::info::Info {
+        id: agent_client_protocol::SessionId::new("s12-f5"),
+        cwd: "/work".to_string(),
+    };
+    adapter.init_session(&info, crate::session::persistence::default_model_id()).await.unwrap();
+    let chat = adapter.chat_file(&info);
+    adapter.append_chat_message(&info, &ConversationItem::user("hello")).await.unwrap();
+    adapter.append_chat_message(&info, &ConversationItem::assistant("hi there")).await.unwrap();
+    assert_eq!(fuigo_session_writer::seams::sync_count(&chat), 0, "chat appends are buffered");
+    let update = SessionUpdate::Acp(Box::new(agent_client_protocol::SessionNotification::new(
+        agent_client_protocol::SessionId::new("s12-f5"),
+        agent_client_protocol::SessionUpdate::UserMessageChunk(agent_client_protocol::ContentChunk::new(
+            agent_client_protocol::ContentBlock::Text(agent_client_protocol::TextContent::new("turn done".to_string())),
+        )),
+    )));
+    adapter.append_update_durable_commit_aware(&info, &update).await.unwrap();
+    assert_eq!(fuigo_session_writer::seams::sync_count(&chat), 1, "the durable turn boundary flushes the chat file");
+}

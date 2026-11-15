@@ -11,6 +11,7 @@ use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, CONTENT_TYPE, USER_AGENT};
 use url::Url;
 
 use super::cache::FetchCache;
+use super::domain::DomainMatcher;
 use super::config::{MAX_REDIRECTS, MAX_URL_LENGTH, USER_AGENT_STRING, WebFetchParams};
 use super::error::WebFetchError;
 use super::http::HttpClient;
@@ -18,7 +19,8 @@ use super::overflow::{OverflowHandler, RecoveryTools, inline_budget};
 use super::ssrf;
 use crate::implementations::fuigo_build::storage::SessionFileWriter;
 use crate::types::output::{WebFetchContent, WebFetchOutput, WebFetchSourceArtifact};
-use scraper::{Html, Selector};
+use html5ever::tree_builder::{NodeOrText, TreeSink};
+use scraper::{Html, HtmlTreeSink, Selector};
 
 const DEFAULT_DOWNLOAD_DIR: &str = "downloads";
 
@@ -29,6 +31,8 @@ pub struct WebFetchClient {
     cache: Arc<parking_lot::RwLock<FetchCache>>,
     converter: Arc<htmd::HtmlToMarkdown>,
     params: WebFetchParams,
+    /// The static allowlist, built once (review L10).
+    allowed: Arc<DomainMatcher>,
     download_writer: SessionFileWriter,
     image_writer: SessionFileWriter,
     video_writer: SessionFileWriter,
@@ -51,6 +55,7 @@ impl WebFetchClient {
                 .skip_tags(vec![
                     "script", "style", "noscript", "svg", "iframe", "object", "embed",
                 ])
+                .add_handler(vec!["table"], unpadded_table_handler)
                 .build(),
         );
 
@@ -63,6 +68,7 @@ impl WebFetchClient {
             ))),
             converter,
             params: params.clone(),
+            allowed: Arc::new(DomainMatcher::new(&params.allowed_domains())),
             download_writer: SessionFileWriter::new(DEFAULT_DOWNLOAD_DIR, "pdf"),
             image_writer: SessionFileWriter::new("images", "jpg"),
             video_writer: SessionFileWriter::new("videos", "mp4"),
@@ -101,12 +107,17 @@ impl WebFetchClient {
         ssrf::check_ssrf(&url, self.params.allow_local()).await?;
 
         // Make request and build output.
-        let http = self.http.get_or_rebuild()?;
-        let result = match fetch_url(
+        let http = self.http.get_or_rebuild_for(&url)?;
+        // A URL the static allowlist pre-approves stays inside it across redirects (audit S5-F10):
+        // a same-host redirect out of an allowed path prefix comes back as a redirect to approve.
+        let matcher = &*self.allowed;
+        let scope = matcher.check(&url).is_none().then_some(matcher);
+        let result = match fetch_url_scoped(
             &http,
             &url,
             self.params.max_content_length(),
             self.params.allow_local(),
+            scope,
         )
         .await
         {
@@ -361,11 +372,25 @@ enum FetchResult {
 /// Re-runs SSRF checks on every hop so DNS rebinding between redirects cannot
 /// sneak a previously-blocked address past the initial check (partial TOCTOU
 /// mitigation; peer IP on the live TCP connection is not available from reqwest).
+#[cfg(test)]
 async fn fetch_url(
     client: &reqwest::Client,
     url: &Url,
     max_content_length: usize,
     allow_local: bool,
+) -> Result<FetchResult, WebFetchError> {
+    fetch_url_scoped(client, url, max_content_length, allow_local, None).await
+}
+
+/// [`fetch_url`] with an optional `scope`: when set, a same-host redirect to a URL the scope does
+/// not allow (a path outside the pre-approved prefix) is returned as a redirect needing approval,
+/// like a cross-host one.
+async fn fetch_url_scoped(
+    client: &reqwest::Client,
+    url: &Url,
+    max_content_length: usize,
+    allow_local: bool,
+    scope: Option<&DomainMatcher>,
 ) -> Result<FetchResult, WebFetchError> {
     let mut current_url = url.clone();
     let mut hops = 0;
@@ -402,7 +427,9 @@ async fn fetch_url(
                 let mut next_url = current_url
                     .join(location_str)
                     .map_err(|e| WebFetchError::InvalidRedirect(format!("{e}")))?;
-                if is_same_host(&current_url, &next_url) {
+                if is_same_host(&current_url, &next_url)
+                    && scope.is_none_or(|scope| scope.check(&next_url).is_none())
+                {
                     // Re-apply https upgrade on every hop: Location may be
                     // absolute `http://…` and would otherwise silently
                     // downgrade an https fetch. Local hosts still skip TLS.
@@ -461,11 +488,15 @@ async fn read_body_capped(
     Ok(body)
 }
 
-/// Exact host equality — no `www.` stripping. Distinct DNS labels (even when
+/// Host equality, ASCII case ignored — no `www.` stripping. Distinct DNS labels (even when
 /// one is a `www` subdomain of the other) have independent A records and must
 /// surface as cross-host redirects rather than auto-follow.
 fn is_same_host(a: &Url, b: &Url) -> bool {
-    a.host_str() == b.host_str()
+    match (a.host_str(), b.host_str()) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -725,16 +756,537 @@ async fn save_video(
     }))
 }
 
+/// Deepest element nesting a fetched page may have before it skips the HTML
+/// parser and the markdown converter. Browsers cap parser depth at the same
+/// value, so pages that rely on deeper nesting already render flattened. The
+/// parser's scope checks are linear in depth and the converter recurses per
+/// level, so an unbounded page could stall the call or overflow the stack.
+const MAX_HTML_NESTING_DEPTH: usize = 512;
+
+/// Most nodes (elements, comments, processing instructions) a fetched page may
+/// build before it falls back to plain text. Far above ordinary pages; it
+/// bounds the parser's own work when misnested formatting makes it clone many
+/// elements per input byte.
+const MAX_HTML_NODES: usize = 300_000;
+
+/// Most attributes the parser may create, counted across every element it
+/// builds (rebuilt formatting elements copy all of theirs). Bounds memory where
+/// the node count alone does not.
+const MAX_HTML_ATTRIBUTES: usize = 1_000_000;
+
+/// Attribute bytes (names and values) the parser may create beyond the page's
+/// own length. Rebuilt formatting elements copy their attributes, and the
+/// cleaned markup writes every copy out, so the copies are bounded in bytes.
+const HTML_ATTRIBUTE_BYTE_SLACK: usize = 1024 * 1024;
+
+/// Longest one parse of a fetched page may take before it falls back to plain
+/// text. A real page parses in well under a second; this bounds the parser's
+/// work on markup no node or depth count sees (the tokenizer's per-tag scans).
+const HTML_PARSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Input is fed to the parser in pieces this size, so a page that passes a
+/// limit (or the deadline) is abandoned within one piece.
+const HTML_PARSE_CHUNK: usize = 1024;
+
 fn html_to_markdown(converter: &htmd::HtmlToMarkdown, html: &str) -> String {
-    let cleaned = clean_html(html);
-    converter
-        .convert(&cleaned)
-        .unwrap_or_else(|_| html.to_string())
+    let Some(document) = parse_html_bounded(html) else {
+        return html_to_plain_text(html);
+    };
+    let cleaned = clean_document(document);
+    // The converter parses the cleaned markup again with its own parser, and
+    // serialising then re-parsing does not always rebuild the same tree, so the
+    // cleaned markup is held to the same bounds.
+    let Some(reparsed) = parse_html_bounded(&cleaned) else {
+        return html_to_plain_text(html);
+    };
+    if markdown_expansion_cost(&reparsed) > html.len().saturating_mul(8).saturating_add(MARKDOWN_EXPANSION_SLACK) {
+        return html_to_plain_text(html);
+    }
+    convert_bounded(converter, &cleaned, html, MAX_HTML_NESTING_DEPTH, MAX_HTML_NODES)
+}
+
+/// Converts `cleaned` with the converter, after checking the tree the converter itself builds. The gate above reads
+/// the page with the parser `scraper` is built on; the converter parses with its own (a different `html5ever`
+/// version, review L11), so the tree it walks is held to the same depth and node bounds here, and a page over them
+/// falls back to plain text like any other. `html` is the original page, for the fallbacks.
+fn convert_bounded(converter: &htmd::HtmlToMarkdown, cleaned: &str, html: &str, max_depth: usize, max_nodes: usize) -> String {
+    let Ok(tree) = converter.html_to_tree(cleaned) else {
+        return html.to_string();
+    };
+    if htmd::HtmlToMarkdown::tree_exceeds(&tree, max_depth, max_nodes) {
+        return html_to_plain_text(html);
+    }
+    converter.tree_to_markdown(&tree)
+}
+
+/// Converter output (beyond eight times the page's length) a page may cost
+/// before it falls back to plain text. See [`markdown_expansion_cost`].
+const MARKDOWN_EXPANSION_SLACK: usize = 8 * 1024 * 1024;
+
+/// Upper bound on the converter's output beyond the page's own text: quotes
+/// and lists are re-indented once per level, so each output line inside `n`
+/// containers costs about `n * (n + 1) / 2` prefixes (counted as four bytes;
+/// lines counted high: each element two plus the newlines in its attribute
+/// values, each text node its newlines plus one). Tables do not add to it:
+/// [`unpadded_table_handler`] renders each cell once. Every other construct
+/// adds a bounded number of bytes per element, and the converter's own loops
+/// are linear (its vendored copy, `third_party/htmd-0.5.4`).
+///
+/// Linear in the tree size.
+fn markdown_expansion_cost(document: &Html) -> usize {
+    use scraper::Node;
+    let mut output = 0usize;
+    let mut stack = vec![(document.tree.root(), 0usize)];
+    while let Some((node, outer)) = stack.pop() {
+        let nest = match node.value() {
+            Node::Element(e) if matches!(e.name(), "blockquote" | "ul" | "ol" | "li" | "dl" | "dd") => outer + 1,
+            _ => outer,
+        };
+        if nest > 0 {
+            let lines = match node.value() {
+                Node::Text(text) => text.matches('\n').count() + 1,
+                Node::Element(e) => e.attrs().map(|(_, value)| value.matches('\n').count()).sum::<usize>() + 2,
+                _ => 2,
+            };
+            output = output.saturating_add(lines.saturating_mul(nest.saturating_mul(nest + 1).saturating_mul(2)));
+        }
+        stack.extend(node.children().map(|child| (child, nest)));
+    }
+    output
+}
+
+/// The tag name of a converter tree node, if it is an element.
+fn converter_tag(node: &htmd::Node) -> Option<&str> {
+    match &node.data {
+        markup5ever_rcdom::NodeData::Element { name, .. } => Some(name.local.as_ref()),
+        _ => None,
+    }
+}
+
+/// Table handler for the markdown converter: a pipe table with no column
+/// padding, each caption and cell rendered exactly once. The converter's own
+/// handler pads every row to each column's widest cell and renders a table
+/// that yields no rows a second time, so its output can grow far faster than
+/// the page (exponentially for tables nested in captions). Which tables become
+/// pipe tables is unchanged: in the default mode, those with explicit headers
+/// (`th` or `thead`, not counting nested tables) that are not inside a cell.
+fn unpadded_table_handler(
+    handlers: &dyn htmd::element_handler::Handlers,
+    element: htmd::Element,
+) -> Option<htmd::element_handler::HandlerResult> {
+    use htmd::options::TranslationMode;
+    let table = element.node;
+    if handlers.options().translation_mode == TranslationMode::Pure {
+        let mut inside_cell = false;
+        let mut ancestor = table.parent.take();
+        table.parent.set(ancestor.clone());
+        while let Some(weak) = ancestor {
+            let Some(parent) = weak.upgrade() else { break };
+            if matches!(converter_tag(&parent), Some("td" | "th")) {
+                inside_cell = true;
+                break;
+            }
+            ancestor = parent.parent.take();
+            parent.parent.set(ancestor.clone());
+        }
+        let mut explicit_headers = false;
+        let mut pending: Vec<std::rc::Rc<htmd::Node>> = table.children.borrow().iter().cloned().collect();
+        while let Some(node) = pending.pop() {
+            match converter_tag(&node) {
+                Some("th" | "thead") => {
+                    explicit_headers = true;
+                    break;
+                }
+                Some("table") => continue,
+                _ => pending.extend(node.children.borrow().iter().cloned()),
+            }
+        }
+        if inside_cell || !explicit_headers {
+            // What the stock handler's own fallback does in this mode, without entering it (review L17).
+            return Some(handlers.walk_children(table));
+        }
+    }
+    // The stock handler's cell normalisation: one line, `|` as an entity (an escape that cannot compound when a
+    // cell holds another table).
+    let one_line = |content: &str| content.replace('\n', " ").replace('\r', "").replace('|', "&#124;").trim().to_string();
+    let row_cells = |row: &std::rc::Rc<htmd::Node>| -> Vec<String> {
+        let cells: Vec<std::rc::Rc<htmd::Node>> = row
+            .children
+            .borrow()
+            .iter()
+            .filter(|cell| matches!(converter_tag(cell), Some("td" | "th")))
+            .cloned()
+            .collect();
+        cells.iter().map(|cell| one_line(&handlers.walk_children(cell).content)).collect()
+    };
+    let mut captions = Vec::new();
+    let mut header: Option<Vec<String>> = None;
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut other = String::new();
+    let children: Vec<std::rc::Rc<htmd::Node>> = table.children.borrow().iter().cloned().collect();
+    for child in &children {
+        match converter_tag(child) {
+            // A caption keeps its own lines (it is not a cell).
+            Some("caption") => captions.push(handlers.walk_children(child).content.trim().to_string()),
+            Some("tr") => rows.push(row_cells(child)),
+            Some(section_tag @ ("thead" | "tbody" | "tfoot")) => {
+                let section: Vec<std::rc::Rc<htmd::Node>> = child.children.borrow().iter().cloned().collect();
+                for row in &section {
+                    match converter_tag(row) {
+                        // The first row of the (first) header section is the header, wherever it sits.
+                        Some("tr") if section_tag == "thead" && header.is_none() => header = Some(row_cells(row)),
+                        Some("tr") => rows.push(row_cells(row)),
+                        Some(_) => other.push_str(&handlers.handle(row).map(|r| r.content).unwrap_or_default()),
+                        None => {}
+                    }
+                }
+            }
+            Some(_) => other.push_str(&handlers.handle(child).map(|r| r.content).unwrap_or_default()),
+            None => {}
+        }
+    }
+    rows.retain(|row| !row.is_empty());
+    let header = match header.filter(|h| !h.is_empty()) {
+        Some(header) => Some(header),
+        None if rows.is_empty() => None,
+        None => Some(rows.remove(0)),
+    };
+    let mut out = String::from("\n\n");
+    for caption in captions.iter().filter(|c| !c.is_empty()) {
+        out.push_str(caption);
+        out.push('\n');
+    }
+    let push_row = |out: &mut String, row: &[String]| {
+        out.push('|');
+        for cell in row {
+            out.push(' ');
+            out.push_str(cell);
+            out.push_str(" |");
+        }
+        out.push('\n');
+    };
+    if let Some(header) = &header {
+        // The separator matches the header (a valid pipe table); longer body rows keep their extra cells.
+        push_row(&mut out, header);
+        out.push('|');
+        for _ in 0..header.len() {
+            out.push_str(" --- |");
+        }
+        out.push('\n');
+        for row in &rows {
+            push_row(&mut out, row);
+        }
+    }
+    let other = other.trim_matches('\n');
+    if !other.is_empty() {
+        out.push_str(other);
+        out.push('\n');
+    }
+    if out.trim().is_empty() {
+        return None;
+    }
+    out.push('\n');
+    Some(out.into())
+}
+
+/// Parses `html` with the real tree builder, fed in [`HTML_PARSE_CHUNK`]
+/// pieces, and gives up (`None`) as soon as the tree nests deeper than
+/// [`MAX_HTML_NESTING_DEPTH`], holds more than [`MAX_HTML_NODES`] nodes or
+/// [`MAX_HTML_ATTRIBUTES`] attributes, or the parse runs past
+/// [`HTML_PARSE_DEADLINE`]. The depth is measured on the tree itself as each
+/// node is inserted, so it holds whatever rules the parser applies; an exact
+/// walk after the parse covers subtrees the parser moved.
+fn parse_html_bounded(html: &str) -> Option<Html> {
+    parse_html_bounded_within(html, HTML_PARSE_DEADLINE)
+}
+
+fn parse_html_bounded_within(html: &str, deadline: std::time::Duration) -> Option<Html> {
+    use html5ever::tendril::TendrilSink;
+    let started = std::time::Instant::now();
+    let sink = BoundedTreeSink {
+        inner: HtmlTreeSink::new(Html::new_document()),
+        nodes: std::cell::Cell::new(0),
+        attributes: std::cell::Cell::new(0),
+        attribute_bytes: std::cell::Cell::new(0),
+        max_attribute_bytes: html.len().saturating_add(HTML_ATTRIBUTE_BYTE_SLACK),
+        over: std::rc::Rc::new(std::cell::Cell::new(false)),
+    };
+    let over = std::rc::Rc::clone(&sink.over);
+    let mut parser = html5ever::driver::parse_document(sink, Default::default());
+    let mut rest = html;
+    while !rest.is_empty() {
+        let mut cut = rest.len().min(HTML_PARSE_CHUNK);
+        while !rest.is_char_boundary(cut) {
+            cut += 1;
+        }
+        parser.process(rest[..cut].into());
+        if over.get() || started.elapsed() > deadline {
+            return None;
+        }
+        rest = &rest[cut..];
+    }
+    let document = parser.finish();
+    if over.get() || tree_deeper_than(&document, MAX_HTML_NESTING_DEPTH) {
+        return None;
+    }
+    Some(document)
+}
+
+/// Exact depth check of a parsed tree, without recursion (the document node is depth 0).
+fn tree_deeper_than(document: &Html, limit: usize) -> bool {
+    let mut stack = vec![(document.tree.root(), 0usize)];
+    while let Some((node, depth)) = stack.pop() {
+        if depth > limit {
+            return true;
+        }
+        stack.extend(node.children().map(|child| (child, depth + 1)));
+    }
+    false
+}
+
+/// The HTML document builder, with a running bound on how deep and how large the
+/// tree gets. Every call is delegated unchanged; inserting a node under a parent
+/// already at [`MAX_HTML_NESTING_DEPTH`], or creating more than [`MAX_HTML_NODES`]
+/// nodes or [`MAX_HTML_ATTRIBUTES`] attributes, sets `over`, which the feeding
+/// loop checks after each piece. Once `over` is set, new attributes are dropped,
+/// so the rest of the current piece cannot grow the tree's memory.
+struct BoundedTreeSink {
+    inner: HtmlTreeSink,
+    nodes: std::cell::Cell<usize>,
+    attributes: std::cell::Cell<usize>,
+    attribute_bytes: std::cell::Cell<usize>,
+    max_attribute_bytes: usize,
+    over: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl BoundedTreeSink {
+    /// Flags `over` when a node placed directly under `parent` would be deeper
+    /// than the limit. Walks at most the limit's worth of ancestors.
+    fn check_child_of(&self, parent: &<Self as TreeSink>::Handle) {
+        if self.over.get() {
+            return;
+        }
+        let html = self.inner.0.borrow();
+        let ancestors = html
+            .tree
+            .get(*parent)
+            .map_or(0, |node| node.ancestors().take(MAX_HTML_NESTING_DEPTH).count());
+        if ancestors >= MAX_HTML_NESTING_DEPTH {
+            self.over.set(true);
+        }
+    }
+
+    fn check_node(&self, parent: &<Self as TreeSink>::Handle, child: &NodeOrText<<Self as TreeSink>::Handle>) {
+        if matches!(child, NodeOrText::AppendNode(_)) {
+            self.check_child_of(parent);
+        }
+    }
+
+    fn count_node(&self) {
+        let nodes = self.nodes.get() + 1;
+        self.nodes.set(nodes);
+        if nodes > MAX_HTML_NODES {
+            self.over.set(true);
+        }
+    }
+
+    /// Counts `attrs` against the attribute budgets (count and bytes); past either (or past any bound) they are
+    /// dropped.
+    fn admit_attributes(&self, attrs: Vec<html5ever::Attribute>) -> Vec<html5ever::Attribute> {
+        let attributes = self.attributes.get().saturating_add(attrs.len());
+        self.attributes.set(attributes);
+        let bytes = attrs
+            .iter()
+            .fold(self.attribute_bytes.get(), |n, a| n.saturating_add(a.name.local.len() + a.value.len()));
+        self.attribute_bytes.set(bytes);
+        if attributes > MAX_HTML_ATTRIBUTES || bytes > self.max_attribute_bytes {
+            self.over.set(true);
+        }
+        if self.over.get() { Vec::new() } else { attrs }
+    }
+}
+
+impl TreeSink for BoundedTreeSink {
+    type Handle = <HtmlTreeSink as TreeSink>::Handle;
+    type Output = Html;
+    type ElemName<'a>
+        = std::cell::Ref<'a, html5ever::QualName>
+    where
+        Self: 'a;
+
+    fn finish(self) -> Html {
+        self.inner.finish()
+    }
+
+    fn parse_error(&self, msg: std::borrow::Cow<'static, str>) {
+        self.inner.parse_error(msg);
+    }
+
+    fn get_document(&self) -> Self::Handle {
+        self.inner.get_document()
+    }
+
+    fn elem_name<'a>(&'a self, target: &'a Self::Handle) -> Self::ElemName<'a> {
+        self.inner.elem_name(target)
+    }
+
+    fn create_element(
+        &self,
+        name: html5ever::QualName,
+        attrs: Vec<html5ever::Attribute>,
+        flags: html5ever::tree_builder::ElementFlags,
+    ) -> Self::Handle {
+        self.count_node();
+        let attrs = self.admit_attributes(attrs);
+        self.inner.create_element(name, attrs, flags)
+    }
+
+    fn create_comment(&self, text: html5ever::tendril::StrTendril) -> Self::Handle {
+        self.count_node();
+        self.inner.create_comment(text)
+    }
+
+    fn create_pi(&self, target: html5ever::tendril::StrTendril, data: html5ever::tendril::StrTendril) -> Self::Handle {
+        self.count_node();
+        self.inner.create_pi(target, data)
+    }
+
+    fn append(&self, parent: &Self::Handle, child: NodeOrText<Self::Handle>) {
+        self.check_node(parent, &child);
+        self.inner.append(parent, child);
+    }
+
+    fn append_based_on_parent_node(
+        &self,
+        element: &Self::Handle,
+        prev_element: &Self::Handle,
+        child: NodeOrText<Self::Handle>,
+    ) {
+        // The node goes beside `element` or under `prev_element`; judging it as a child of either errs deep.
+        self.check_node(element, &child);
+        self.check_node(prev_element, &child);
+        self.inner.append_based_on_parent_node(element, prev_element, child);
+    }
+
+    fn append_doctype_to_document(
+        &self,
+        name: html5ever::tendril::StrTendril,
+        public_id: html5ever::tendril::StrTendril,
+        system_id: html5ever::tendril::StrTendril,
+    ) {
+        self.inner.append_doctype_to_document(name, public_id, system_id);
+    }
+
+    fn mark_script_already_started(&self, node: &Self::Handle) {
+        self.inner.mark_script_already_started(node);
+    }
+
+    fn pop(&self, node: &Self::Handle) {
+        self.inner.pop(node);
+    }
+
+    fn get_template_contents(&self, target: &Self::Handle) -> Self::Handle {
+        self.inner.get_template_contents(target)
+    }
+
+    fn same_node(&self, x: &Self::Handle, y: &Self::Handle) -> bool {
+        self.inner.same_node(x, y)
+    }
+
+    fn set_quirks_mode(&self, mode: html5ever::tree_builder::QuirksMode) {
+        self.inner.set_quirks_mode(mode);
+    }
+
+    fn append_before_sibling(&self, sibling: &Self::Handle, new_node: NodeOrText<Self::Handle>) {
+        // A sibling's depth; judging the node as its child errs one deep.
+        self.check_node(sibling, &new_node);
+        self.inner.append_before_sibling(sibling, new_node);
+    }
+
+    fn add_attrs_if_missing(&self, target: &Self::Handle, attrs: Vec<html5ever::Attribute>) {
+        let attrs = self.admit_attributes(attrs);
+        self.inner.add_attrs_if_missing(target, attrs);
+    }
+
+    fn associate_with_form(
+        &self,
+        target: &Self::Handle,
+        form: &Self::Handle,
+        nodes: (&Self::Handle, Option<&Self::Handle>),
+    ) {
+        self.inner.associate_with_form(target, form, nodes);
+    }
+
+    fn remove_from_parent(&self, target: &Self::Handle) {
+        self.inner.remove_from_parent(target);
+    }
+
+    fn reparent_children(&self, node: &Self::Handle, new_parent: &Self::Handle) {
+        self.check_child_of(new_parent);
+        self.inner.reparent_children(node, new_parent);
+    }
+
+    fn is_mathml_annotation_xml_integration_point(&self, handle: &Self::Handle) -> bool {
+        self.inner.is_mathml_annotation_xml_integration_point(handle)
+    }
+
+    fn set_current_line(&self, line_number: u64) {
+        self.inner.set_current_line(line_number);
+    }
+
+    fn complete_script(&self, node: &Self::Handle) -> html5ever::tree_builder::NextParserState {
+        self.inner.complete_script(node)
+    }
+
+    fn allow_declarative_shadow_roots(&self, intended_parent: &Self::Handle) -> bool {
+        self.inner.allow_declarative_shadow_roots(intended_parent)
+    }
+
+    fn attach_declarative_shadow(
+        &self,
+        location: &Self::Handle,
+        attrs: Vec<html5ever::Attribute>,
+    ) -> Result<(), String> {
+        self.inner.attach_declarative_shadow(location, attrs)
+    }
+}
+
+/// Text of a page with every tag removed, for pages too deeply nested to
+/// parse. Linear; script and style bodies are dropped.
+fn html_to_plain_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() / 2);
+    let lower = html.to_ascii_lowercase();
+    let mut rest = html;
+    let mut rest_lower = lower.as_str();
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let after = &rest_lower[open..];
+        let skip_to = if after.starts_with("<script") {
+            after.find("</script").unwrap_or(after.len())
+        } else if after.starts_with("<style") {
+            after.find("</style").unwrap_or(after.len())
+        } else {
+            0
+        };
+        let tail_lower = &after[skip_to..];
+        let close = tail_lower.find('>').map_or(tail_lower.len(), |c| c + 1);
+        let next = open + skip_to + close;
+        out.push(' ');
+        rest = &rest[next..];
+        rest_lower = &rest_lower[next..];
+    }
+    out.push_str(rest);
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Remove common noisy elements from HTML before markdown conversion.
+#[cfg(test)]
 fn clean_html(html: &str) -> String {
-    let mut document = Html::parse_document(html);
+    clean_document(Html::parse_document(html))
+}
+
+/// Remove common noisy elements from a parsed page and serialise it.
+fn clean_document(mut document: Html) -> String {
 
     // Never detach the root element itself - the broad selectors below can match
     // attributes on <html> (e.g. class="...advert..."), which would leave the
@@ -787,7 +1339,8 @@ fn clean_html(html: &str) -> String {
 /// Strip base64 data URIs from content to prevent token bloat.
 ///
 /// Uses manual scanning (`find` + byte matching) instead of regex for
-/// lower overhead — no compilation cost and O(n) linear scanning.
+/// lower overhead — no compilation cost and O(n) linear scanning (the comma
+/// search is bounded by the header limit).
 fn strip_base64_data_uris(content: String) -> String {
     // A valid base64 quantum is 4 characters; anything shorter is noise.
     const MIN_BASE64_PAYLOAD: usize = 4;
@@ -814,7 +1367,11 @@ fn strip_base64_data_uris(content: String) -> String {
             continue;
         }
 
-        if let Some(rel_comma) = s[start..].find(',') {
+        // A valid header is at most MAX_HEADER_LEN bytes, so look for its
+        // comma only that far; searching the whole tail made the scan
+        // quadratic on input with many comma-less "data:" tokens.
+        let window_end = (start + 5 + MAX_HEADER_LEN + 1).min(s.len());
+        if let Some(rel_comma) = s.as_bytes()[start..window_end].iter().position(|&b| b == b',') {
             let comma = start + rel_comma;
             let header = &s[start + 5..comma];
 
@@ -871,11 +1428,390 @@ fn strip_base64_data_uris(content: String) -> String {
 mod tests {
     use super::*;
 
+    /// A fallback is bounded by the parse deadlines: up to three bounded parses (the page, the cleaned markup,
+    /// and slack for cleaning and the plain-text pass), whatever the build profile or the host load.
+    /// Review L16: shapes that fall back at a structural limit (depth, nodes, attributes) or convert in linear
+    /// time are held to this much of the test thread's own CPU time, so a loaded host cannot fail them and a
+    /// slow conversion cannot hide under the deadline-sized limit below. Measured: the slowest shape (the rebuilt
+    /// formatting one) takes about 6 s in a debug build on an idle host and 10.5 s on a loaded gate host (the
+    /// 10 s limit this replaces failed there, audit gate 20261115T020003Z), well under a second in release. The
+    /// limit sits above two parse deadlines, so only work that stays slow past the deadlines fails it; a quadratic
+    /// regression on these 100 000-element shapes runs for minutes, far past it.
+    const QUICK_LIMIT: std::time::Duration = std::time::Duration::from_secs(25);
+
+    const FALLBACK_TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(3 * HTML_PARSE_DEADLINE.as_secs() + 10);
+
+    /// Structural checks must not depend on how fast this host parses (debug builds under a loaded test run are
+    /// far slower than a release build), so they get a deadline no test reaches.
+    fn parse_structure(html: &str) -> Option<Html> {
+        parse_html_bounded_within(html, std::time::Duration::from_secs(3600))
+    }
+
+    #[test]
+    fn a45_deeply_nested_html_converts_without_overflow_or_stall() {
+        // A fetched page may nest elements arbitrarily deep; conversion must
+        // neither overflow the session thread's stack nor take long.
+        let depth = 100_000;
+        let html = format!(
+            "<html><body>{}deep text{}</body></html>",
+            "<div>".repeat(depth),
+            "</div>".repeat(depth)
+        );
+        let started = std::time::Instant::now();
+        let out = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || html_to_markdown(&test_converter(), &html))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(out.contains("deep text"), "text lost: {}", &out[..out.len().min(200)]);
+        assert!(started.elapsed() < std::time::Duration::from_secs(15), "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a45_nesting_at_the_limit_still_converts_on_a_small_stack() {
+        let depth = MAX_HTML_NESTING_DEPTH - 12;
+        let html = format!(
+            "<html><body>{}<b>kept</b>{}</body></html>",
+            "<div>".repeat(depth),
+            "</div>".repeat(depth)
+        );
+        assert!(parse_structure(&html).is_some());
+        let out = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || html_to_markdown(&test_converter(), &html))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(out.contains("**kept**"), "{out}");
+    }
+
+    #[test]
+    fn a45_void_and_optional_end_tags_do_not_count_as_nesting() {
+        let html = "<p>a<br><img src=x><li>b<!-- <div><div> --><script>if(a<b){}</script><input/>"
+            .repeat(2000);
+        assert!(parse_structure(&html).is_some());
+        assert_eq!(html_to_plain_text("<style>x{}</style><b>a</b>  b<script>c<d</script>e"), "a b e");
+    }
+
+    /// Review r1/r2 on S5-F1/F2: markup shapes whose real nesting (or node count) grows while a scan of the raw
+    /// markup can stay flat. The bound is measured on the parser's own tree, so every one must fall back, fast.
+    #[test]
+    fn a45_deep_or_node_flooding_shapes_fall_back_to_plain_text() {
+        let n = 20_000;
+        let distinct_formatting = |k: usize| format!("<div><b a={k}></div>");
+        let shapes = [
+            "<div><p>a</p>".repeat(n),
+            "<div/>".repeat(n),
+            "<div></x>".repeat(n),
+            "<rt>".repeat(n),
+            format!("<math>{}", "<td>".repeat(n)),
+            format!("{}<textarea>{}</textarea>", "<div>".repeat(1000), "</div>".repeat(1000)),
+            format!("{}<table>{}", "<div>".repeat(600), "</div>".repeat(600)),
+            format!("{}<!--><!--->{}", "<span>".repeat(600), "x"),
+            "<li><section>".repeat(n),
+            "<option><b>".repeat(n),
+            "<div><p>".repeat(n),
+            "<p><div>".repeat(n),
+            "<div></ </div>".repeat(n),
+            "<svg><div></svg>".repeat(n),
+            format!("<svg>{}", "<g a=b/>".repeat(n)),
+            "<span><div></span>".repeat(n),
+            "<b><div></b>".repeat(n),
+            "<li><ul></li>".repeat(n),
+            format!("<div>{}", "<div></body></html>".repeat(n)),
+            (0..n).map(distinct_formatting).collect::<String>(),
+            format!("<select><title></select>{}", "<div>".repeat(n)),
+            format!("<svg><desc>{}", "<div><style></div></style>".repeat(n)),
+            "<div><script><!--<script></script></div></script>".repeat(n),
+            "<svg><title><span></svg>".repeat(n),
+            format!("<svg>{}", "<g><![CDATA[></g>]]>".repeat(n)),
+            // Formatting elements left open in a closed block are rebuilt under every new paragraph.
+            format!(
+                "<div>{}</div>{}",
+                (0..500).map(|k| format!("<b a={k}>")).collect::<String>(),
+                "<p>x".repeat(n * 5)
+            ),
+        ];
+        for (k, html) in shapes.iter().enumerate() {
+            let started = thread_time();
+            assert!(parse_structure(html).is_none(), "shape {k} stayed under the bounds");
+            let out = html_to_markdown(&test_converter(), html);
+            assert!(out.len() <= html.len(), "shape {k}");
+            assert!(thread_time().saturating_sub(started) < QUICK_LIMIT, "shape {k} took {:?}", thread_time().saturating_sub(started));
+        }
+    }
+
+    /// Review r3 on S5-F2: a never-closed formatting element is rebuilt, with a full copy of its attributes, under
+    /// every new paragraph; the attribute budget stops it long before memory grows.
+    #[test]
+    fn a45_rebuilt_formatting_attributes_spend_the_attribute_budget() {
+        let attrs: String = (0..1000).map(|k| format!("a{k}=x ")).collect();
+        let html = format!("<div><b {attrs}></div>{}", "<p>x".repeat(5_000));
+        let started = thread_time();
+        assert!(parse_structure(&html).is_none());
+        assert!(thread_time().saturating_sub(started) < QUICK_LIMIT, "took {:?}", thread_time().saturating_sub(started));
+    }
+
+    /// Review r4 on S5-F2: one long attribute on a rebuilt formatting element is copied (and later written out)
+    /// once per paragraph; the attribute byte budget stops it.
+    #[test]
+    fn a45_rebuilt_long_attribute_spends_the_attribute_byte_budget() {
+        let value = "v".repeat(64 * 1024);
+        for name in ["data-x", "class"] {
+            let html = format!("<div><b {name}=\"{value}\"></div>{}", "<p>x".repeat(20_000));
+            let started = thread_time();
+            assert!(parse_structure(&html).is_none(), "{name}");
+            let out = html_to_markdown(&test_converter(), &html);
+            assert!(out.len() <= html.len(), "{name}");
+            assert!(thread_time().saturating_sub(started) < QUICK_LIMIT, "{name} took {:?}", thread_time().saturating_sub(started));
+        }
+    }
+
+    /// Review r4 U1: the converter repeats quote and list prefixes on every line and re-indents per level
+    /// (measured: 226 KB nested 250 deep became 20 MB); deep containers with many lines fall back to plain text,
+    /// while ordinary nesting keeps converting.
+    #[test]
+    fn a45_nested_containers_do_not_amplify_the_output() {
+        for (open, close) in [("<blockquote>", "</blockquote>"), ("<ul><li>", "</li></ul>"), ("<ol><li>", "</li></ol>")] {
+            let html = format!("{}{}{}", open.repeat(250), "<p>line</p>".repeat(20_000), close.repeat(250));
+            let started = thread_time();
+            let out = html_to_markdown(&test_converter(), &html);
+            assert!(out.len() <= html.len(), "{open}: {} > {}", out.len(), html.len());
+            assert!(thread_time().saturating_sub(started) < QUICK_LIMIT, "{open} took {:?}", thread_time().saturating_sub(started));
+            let shallow = format!("{}{}{}", open.repeat(4), "<p>line</p>".repeat(20_000), close.repeat(4));
+            let document = parse_structure(&shallow).unwrap();
+            assert!(markdown_expansion_cost(&document) <= shallow.len() * 8 + MARKDOWN_EXPANSION_SLACK, "{open} shallow");
+        }
+    }
+
+    /// Review r4/r5: tables are rendered by [`unpadded_table_handler`]: one huge header cell over many rows, or
+    /// tables nested in captions, cost linear output and time; ordinary tables still become pipe tables.
+    #[test]
+    fn a45_tables_render_each_cell_once() {
+        for header in ["th", "td"] {
+            let html = format!(
+                "<table><thead><tr><{header}>{}</{header}></tr></thead>{}</table>",
+                "h".repeat(1024 * 1024),
+                "<tr><td>x</td></tr>".repeat(20_000)
+            );
+            let started = thread_time();
+            let out = html_to_markdown(&test_converter(), &html);
+            assert!(out.len() <= html.len(), "{header}: {} > {}", out.len(), html.len());
+            assert!(thread_time().saturating_sub(started) < QUICK_LIMIT, "{header} took {:?}", thread_time().saturating_sub(started));
+        }
+        // A table inside a caption, nested: the stock handler renders each level twice.
+        let mut nested = String::from("x");
+        for _ in 0..40 {
+            nested = format!("<table><caption>{nested}</caption><thead></thead></table>");
+        }
+        let started = thread_time();
+        let out = html_to_markdown(&test_converter(), &nested);
+        assert!(out.len() <= nested.len(), "{} > {}", out.len(), nested.len());
+        assert!(thread_time().saturating_sub(started) < QUICK_LIMIT, "nested captions took {:?}", thread_time().saturating_sub(started));
+        let ordinary = format!(
+            "<table><caption>Items</caption><thead><tr><th>name</th><th>description</th></tr></thead><tbody>{}</tbody></table>",
+            "<tr><td>item</td><td>a short <a href=\"https://example.com/x\">description</a> | piped</td></tr>".repeat(2_000)
+        );
+        let md = html_to_markdown(&test_converter(), &ordinary);
+        assert!(md.contains("Items\n| name | description |\n| --- | --- |\n| item | a short [description](https://example.com/x) &#124; piped |"), "{}", &md[..md.len().min(400)]);
+        // The header section's row is the header wherever it sits; the separator matches the header.
+        let late = html_to_markdown(
+            &test_converter(),
+            "<table><tbody><tr><td>1</td><td>2</td></tr></tbody><thead><tr><th colspan=2>Group</th></tr></thead></table>",
+        );
+        assert!(late.contains("| Group |\n| --- |\n| 1 | 2 |"), "{late}");
+        // Cell text keeps its inner spacing.
+        assert!(html_to_markdown(&test_converter(), "<table><tr><th>c</th></tr><tr><td><code>a  b</code></td></tr></table>").contains("`a  b`"));
+        // Header-less tables keep the converter's plain rendering.
+        assert!(!html_to_markdown(&test_converter(), "<table><tr><td>a</td><td>b</td></tr></table>").contains("---"));
+    }
+
+    /// Review r5-r7: the converter combines adjacent similar inline siblings and checks the newlines ending its
+    /// output on every append; upstream did both in quadratic time (minutes for these pages). The vendored copy is
+    /// linear, so the converter itself takes seconds. Measured as this thread's CPU time where the platform has
+    /// it, so a loaded host does not skew it; called directly, since the production parse deadline may (rightly)
+    /// send a page to the plain-text fallback on a loaded host.
+    const LINEAR_TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+    fn thread_time() -> std::time::Duration {
+        #[cfg(target_os = "linux")]
+        {
+            let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            // SAFETY: clock_gettime writes one timespec through a valid, exclusive pointer.
+            if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } == 0 {
+                return std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32);
+            }
+        }
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed()
+    }
+
+    fn convert_timed(html: &str) -> String {
+        let started = thread_time();
+        let out = test_converter().convert(html).expect("converts");
+        let took = thread_time().saturating_sub(started);
+        assert!(took < LINEAR_TIME_LIMIT, "took {took:?}");
+        out
+    }
+
+    /// Runs just under the node cap: a few seconds here in a debug build, about 30 s on upstream's quadratic loop.
+    #[test]
+    fn a45_long_inline_runs_convert_in_linear_time() {
+        let text = "x".repeat(25);
+        for run in [
+            format!("<p>{}</p>", format!("<b>{text}</b>").repeat(280_000)),
+            format!("<p>{}</p>", format!("<i>{text}</i><em>{text}</em>").repeat(140_000)),
+            format!("<math>{}</math>", format!("<template>{text}</template>").repeat(280_000)),
+        ] {
+            let out = convert_timed(&run);
+            // Combined into one run of text.
+            assert!(out.len() <= 280_000 * 25 + 8 && out.contains(&text), "{}", out.len());
+        }
+    }
+
+    /// The combining rule itself is upstream's: equal attributes, one text child, i/em and b/strong alike, never
+    /// links; the run's texts land in its first element.
+    #[test]
+    fn a45_sibling_combining_keeps_the_converter_output() {
+        let md = |html: &str| html_to_markdown(&test_converter(), html);
+        assert_eq!(md("<p><b>a</b><strong>b</strong><b>c</b> d</p>"), "**abc** d");
+        assert_eq!(md("<p><i>a</i><em>b</em></p>"), "*ab*");
+        assert_eq!(md("<p><a href=x>a</a><a href=x>b</a></p>"), "[a](x)[b](x)");
+        assert_eq!(md("<p><b class=p>a</b><b class=q>b</b></p>"), "**a****b**");
+        assert_eq!(md("<p><b>a</b><b>b</b>, <b>c</b><b><i>d</i></b></p>"), "**ab**, **c*****d***");
+    }
+
+    #[test]
+    fn a45_long_newline_runs_convert_in_linear_time() {
+        for page in [
+            format!("<pre>x{}{}</pre>", "\n".repeat(1024 * 1024), "<span></span><wbr>".repeat(20_000)),
+            format!("<pre>x{}</pre>", "\n<wbr>".repeat(200_000)),
+            format!("<pre>x{}</pre>", format!("{}<wbr>", "\n".repeat(28)).repeat(30_000)),
+        ] {
+            let out = convert_timed(&page);
+            assert!(out.starts_with('x') && out.len() <= page.len(), "{}", &out[..out.len().min(80)]);
+        }
+    }
+
+    /// Review r6 P1: a caption holding a pipe table is not pipe-escaped once per level.
+    #[test]
+    fn a45_captions_are_not_pipe_escaped() {
+        let mut nested = "<table><thead><tr><th>a|b</th></tr></thead></table>".to_string();
+        for _ in 0..50 {
+            nested = format!("<table><caption>{nested}</caption><thead><tr><th>h</th></tr></thead></table>");
+        }
+        let out = html_to_markdown(&test_converter(), &nested);
+        assert!(out.len() <= nested.len(), "{} > {}", out.len(), nested.len());
+        assert!(!out.contains("\\\\|"), "escapes compound: {}", &out[..out.len().min(300)]);
+    }
+
+    /// Review r5 N1: newlines inside attribute values become output lines; they count toward the indent bound.
+    #[test]
+    fn a45_attribute_newlines_count_as_lines() {
+        let alt = "a\n".repeat(50_000);
+        let html = format!("{}<img src=x alt=\"{alt}\">{}", "<blockquote>".repeat(200), "</blockquote>".repeat(200));
+        let started = thread_time();
+        let out = html_to_markdown(&test_converter(), &html);
+        assert!(out.len() <= html.len(), "{} > {}", out.len(), html.len());
+        assert!(thread_time().saturating_sub(started) < QUICK_LIMIT, "took {:?}", thread_time().saturating_sub(started));
+    }
+
+    /// Review r3 on S5-F2: one tag with a huge attribute list costs the tokenizer quadratic time before any node
+    /// exists; the deadline (checked after every piece) bounds it.
+    #[test]
+    fn a45_parse_deadline_bounds_tokenizer_work_inside_one_tag() {
+        let attrs: String = (0..100_000).map(|k| format!("a{k} ")).collect();
+        let html = format!("<div {attrs}>x</div>");
+        let started = thread_time();
+        assert!(parse_html_bounded_within(&html, std::time::Duration::from_millis(500)).is_none());
+        assert!(thread_time().saturating_sub(started) < QUICK_LIMIT, "took {:?}", thread_time().saturating_sub(started));
+        // An ordinary page is nowhere near the deadline.
+        assert!(parse_html_bounded_within("<p>a<p>b", std::time::Duration::from_secs(5)).is_some());
+    }
+
+    /// Ordinary pages (unclosed paragraphs and list items, tables without cell end tags, SVG sprites, comments,
+    /// scripts, misnested formatting) must stay on the markdown path.
+    #[test]
+    fn a45_ordinary_page_stays_under_the_bounds() {
+        let block = concat!(
+            "<div class=card><p>para<p>para two<ul><li>a<li>b</ul>",
+            "<table><tr><td>c<td>d<tr><td>e</table>",
+            "<svg><use href=\"#i\"/><path d=\"M0 0\"/><path/></svg><img src=x><br>",
+            "<!-- note --><script>if (a<b && c>d) {}</script><select><option>1<option>2</select>",
+            "<dl><dt>t<dd>d</dl><b>bold <i>both</b> italic</i></div>",
+            "<ul><li><p>item<li><p>item<li><div><p>item</div></ul>",
+        );
+        let page = |blocks: usize| {
+            format!("<!doctype html><html><head><title>t</title></head><body>{}</body></html>", block.repeat(blocks))
+        };
+        assert!(parse_structure(&page(2000)).is_some());
+        // Converted through the production deadline: a page small enough for any host to parse well inside it.
+        assert!(html_to_markdown(&test_converter(), &page(100)).contains("para two"));
+    }
+
+    #[test]
+    fn a45_data_uri_strip_is_linear_without_commas() {
+        let mut body = "-data:".repeat(1024 * 1024 / 6);
+        let started = std::time::Instant::now();
+        let out = strip_base64_data_uris(body.clone());
+        assert_eq!(out, body);
+        body.push_str(",AAAA");
+        let _ = strip_base64_data_uris(body);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "took {:?}", started.elapsed());
+    }
+
+    /// Review L11: the converter's own tree is held to the bounds, whatever the gate's parser made of the page.
+    #[test]
+    fn review_l11_converter_tree_past_the_bounds_falls_back_to_plain_text() {
+        let html = format!("{}<b>x</b>{}", "<div>".repeat(100), "</div>".repeat(100));
+        let cleaned = clean_document(parse_structure(&html).unwrap());
+        let converter = test_converter();
+        assert_eq!(convert_bounded(&converter, &cleaned, &html, 50, MAX_HTML_NODES), html_to_plain_text(&html));
+        assert_eq!(convert_bounded(&converter, &cleaned, &html, MAX_HTML_NESTING_DEPTH, 50), html_to_plain_text(&html));
+        assert_eq!(convert_bounded(&converter, &cleaned, &html, MAX_HTML_NESTING_DEPTH, MAX_HTML_NODES), "**x**");
+        assert_ne!(html_to_plain_text(&html), "**x**");
+    }
+
+    /// Review V1: inline code nested to the depth limit around a large text is scanned once per level, by byte.
+    #[test]
+    fn review_v1_nested_inline_code_converts_in_bounded_time() {
+        let html = format!("{}{}{}", "<code>".repeat(500), "a ".repeat(512 * 1024), "</code>".repeat(500));
+        let out = convert_timed(&html);
+        assert!(out.starts_with('`') && out.len() >= 1024 * 1024, "{}", out.len());
+    }
+
+    /// Review L12: content is copied, and `<pre>`/`<code>` ancestry walked, once per ancestor level; at the depth
+    /// and node limits that is bounded work.
+    #[test]
+    fn review_l12_deep_nesting_with_many_nodes_converts_in_bounded_time() {
+        let html = format!("{}{}{}", "<div>".repeat(500), "<i>x</i>".repeat(140_000), "</div>".repeat(500));
+        let out = convert_timed(&html);
+        assert!(out.starts_with('*') && out.len() == 140_002, "{}", out.len());
+    }
+
+    /// Review L17: a table the handler does not turn into a pipe table renders as the stock converter renders it.
+    #[test]
+    fn review_l17_plain_tables_render_as_the_stock_converter_does() {
+        let stock = htmd::HtmlToMarkdown::builder().skip_tags(vec!["script", "style", "noscript", "svg", "iframe", "object", "embed"]).build();
+        for html in [
+            "<table><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table>",
+            "<table><tbody><tr><td>x</td></tr></tbody></table><p>after</p>",
+            "<table><tr><td><table><tr><td>in</td></tr></table></td></tr></table>",
+            "<table></table>",
+        ] {
+            assert_eq!(test_converter().convert(html).unwrap(), stock.convert(html).unwrap(), "{html}");
+        }
+        let source = include_str!("client.rs");
+        assert!(!source.contains(concat!("handlers.", "fallback(element)")), "plain path must not enter the stock handler");
+    }
+
     fn test_converter() -> htmd::HtmlToMarkdown {
         htmd::HtmlToMarkdown::builder()
             .skip_tags(vec![
                 "script", "style", "noscript", "svg", "iframe", "object", "embed",
             ])
+            .add_handler(vec!["table"], unpadded_table_handler)
             .build()
     }
 
@@ -892,7 +1828,7 @@ mod tests {
         let url = Url::parse(&format!("{url}/big.bin")).unwrap();
         // Bounded: reading the body to the end would wait on the stalled server forever
         let outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            FALLBACK_TIME_LIMIT,
             fetch_url(&reqwest::Client::new(), &url, 1024, true),
         )
         .await
@@ -928,6 +1864,50 @@ mod tests {
         );
         let within = fetch_url(&reqwest::Client::new(), &url, 4096, true).await;
         assert!(matches!(within, Ok(FetchResult::Content { .. })), "a body within the limit is returned");
+    }
+
+    /// A same-host redirect that leaves the allowlisted path prefix is handed back for approval
+    /// instead of followed (audit S5-F10); one that stays inside is still followed.
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // plain client: the server is a loopback test server, no TLS policy applies
+    async fn same_host_redirect_out_of_a_path_scope_needs_approval() {
+        let base = fuigo_test_support::counting_server::spawn_http_server(|head| {
+            let first = head.lines().next().unwrap_or("").to_owned();
+            if first.contains("/v1/docs/in") {
+                b"HTTP/1.1 302 Found\r\nLocation: /v1/docs/ok\r\nContent-Length: 0\r\n\r\n".to_vec()
+            } else if first.contains("/v1/docs/out") {
+                b"HTTP/1.1 302 Found\r\nLocation: /v1/private/secret\r\nContent-Length: 0\r\n\r\n".to_vec()
+            } else {
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok".to_vec()
+            }
+        })
+        .await;
+        let scope = DomainMatcher::new(&["127.0.0.1/v1/docs".to_owned()]);
+        // As in production: the client never follows a redirect itself.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let out = Url::parse(&format!("{base}/docs/out")).unwrap();
+        assert!(scope.check(&out).is_none());
+        let outcome = fetch_url_scoped(&client, &out, 4096, true, Some(&scope)).await;
+        assert!(
+            matches!(outcome, Ok(FetchResult::CrossHostRedirect { .. })),
+            "a redirect out of the prefix must need approval, got {}",
+            match &outcome {
+                Ok(FetchResult::Content { final_url, status_code, .. }) => format!("content {status_code} from {final_url}"),
+                Ok(FetchResult::CrossHostRedirect { .. }) => "redirect".to_owned(),
+                Err(error) => error.to_string(),
+            }
+        );
+
+        let inside = Url::parse(&format!("{base}/docs/in")).unwrap();
+        let outcome = fetch_url_scoped(&client, &inside, 4096, true, Some(&scope)).await;
+        assert!(matches!(outcome, Ok(FetchResult::Content { .. })), "inside the prefix is followed");
+
+        let unscoped = fetch_url_scoped(&client, &out, 4096, true, None).await;
+        assert!(matches!(unscoped, Ok(FetchResult::Content { .. })), "no scope: unchanged");
     }
 
     #[tokio::test]
@@ -1050,6 +2030,40 @@ mod tests {
         let a = Url::parse("https://example.com/a").unwrap();
         let b = Url::parse("https://example.com/b").unwrap();
         assert!(is_same_host(&a, &b));
+    }
+
+    /// Review L10: a fetch reuses the client's allowlist matcher instead of building one per call.
+    #[tokio::test]
+    async fn fetches_reuse_one_domain_matcher() {
+        let base = fuigo_test_support::counting_server::spawn_http_server(|_head| {
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok".to_vec()
+        })
+        .await;
+        let client = WebFetchClient::new(&WebFetchParams {
+            allow_local: Some(true),
+            ..WebFetchParams::default()
+        })
+        .unwrap();
+        let built = super::super::domain::MATCHERS_BUILT.with(std::cell::Cell::get);
+        for page in ["a", "b", "c"] {
+            let out = client.fetch(&format!("{base}/{page}"), None, None, None).await;
+            assert!(out.is_ok(), "{out:?}");
+        }
+        assert_eq!(
+            super::super::domain::MATCHERS_BUILT.with(std::cell::Cell::get),
+            built,
+            "the matcher is built once with the client, not once per fetch"
+        );
+    }
+
+    /// Review L10: host comparison for a redirect ignores ASCII case (a non-special scheme keeps its host as written).
+    #[test]
+    fn same_host_ignores_ascii_case() {
+        let a = Url::parse("foo://Example.COM/a").unwrap();
+        let b = Url::parse("foo://example.com/b").unwrap();
+        assert!(is_same_host(&a, &b));
+        let other = Url::parse("foo://other.com/b").unwrap();
+        assert!(!is_same_host(&a, &other));
     }
 
     #[test]

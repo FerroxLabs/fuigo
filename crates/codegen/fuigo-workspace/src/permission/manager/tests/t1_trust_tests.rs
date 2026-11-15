@@ -478,3 +478,69 @@ async fn t2_yolo_runs_outside_a_trusted_folder_after_auto() {
         })
         .await;
 }
+
+/// Audit X2-F1: a Task child whose `cwd` is a trusted folder is judged in its parent's launch folder too, so a session
+/// opened in an untrusted folder cannot borrow a trusted folder's shell rules by naming it as the child's `cwd`.
+#[tokio::test]
+async fn x2_f1_a_child_in_a_trusted_folder_is_judged_in_its_untrusted_parent_folder_too() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_r_tmp, r) = repo();
+            let (_u_tmp, u) = repo();
+            let _trust = TestFolderTrust::only(&[r.as_path()]);
+            let mgr = manager_with_recording_client_remember(&u, None, SelectingClient::new(true), ClientType::Generic, true).0;
+            mgr.set_auto_mode(true);
+            let (clf, _seen) = capturing_classifier(ClassifierVerdict::Allow);
+            mgr.set_classifier(Some(clf));
+            let child_request = |parent: Option<&AbsPathBuf>| PermissionRequest {
+                path_context: Some(crate::permission::types::RequestPathContext {
+                    real_cwd: r.as_path().to_path_buf(),
+                    display_cwd: None,
+                }),
+                parent_run_dir: parent.map(|dir| dir.as_path().to_path_buf()),
+                ..PermissionRequest::new(AccessKind::Bash("cargo test".into()), tool_call())
+            };
+            // No new friction: the parent's folder is trusted too (or there is no parent), the command runs unasked.
+            assert_eq!(outcome(&mgr.request(child_request(None)).await), 'R', "no parent folder");
+            assert_eq!(outcome(&mgr.request(child_request(Some(&r))).await), 'R', "trusted parent folder");
+            // The parent's folder is untrusted: the child is asked.
+            assert_eq!(outcome(&mgr.request(child_request(Some(&u))).await), 'P', "untrusted parent folder");
+        })
+        .await;
+}
+
+/// Audit S3-F2: a persistent shell that an earlier command left in a folder that is not trusted starts the next command
+/// there, so that folder is judged too: the command is asked, not approved without a grant (sandbox auto-allow keys on
+/// the same folder trust, D1). No new friction while the shell stays in trusted folders.
+#[tokio::test]
+async fn s3_f2_a_persistent_shell_in_an_untrusted_folder_is_judged_there() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_r_tmp, r) = repo();
+            let (_u_tmp, u) = repo();
+            let _trust = TestFolderTrust::only(&[r.as_path()]);
+            let mgr = manager_with_recording_client_remember(&r, None, SelectingClient::new(true), ClientType::Generic, true).0;
+            mgr.set_auto_mode(true);
+            let (clf, _seen) = capturing_classifier(ClassifierVerdict::Allow);
+            mgr.set_classifier(Some(clf));
+            let request = |shell_dir: Option<&AbsPathBuf>| PermissionRequest {
+                path_context: Some(crate::permission::types::RequestPathContext {
+                    real_cwd: r.as_path().to_path_buf(),
+                    display_cwd: None,
+                }),
+                shell_run_dir: shell_dir.map(|dir| dir.as_path().to_path_buf()),
+                ..PermissionRequest::new(AccessKind::Bash("cargo test".into()), tool_call())
+            };
+            assert_eq!(outcome(&mgr.request(request(None)).await), 'R', "no persistent shell");
+            assert_eq!(outcome(&mgr.request(request(Some(&r))).await), 'R', "shell in the trusted folder");
+            let mut evaluation = evaluate_bash("cargo test", &PermissionState::default(), true);
+            evaluation.untrusted_folder =
+                !crate::permission::run_dirs::run_dirs_trust(&[r.as_path().to_path_buf(), u.as_path().to_path_buf()])
+                    .is_trusted();
+            assert!(!sandbox_may_auto_allow_bash(Some(&evaluation), true), "sandbox auto-allow refuses there");
+            assert_eq!(outcome(&mgr.request(request(Some(&u))).await), 'P', "shell moved into an untrusted folder");
+        })
+        .await;
+}

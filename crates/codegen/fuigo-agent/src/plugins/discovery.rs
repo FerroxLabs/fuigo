@@ -530,6 +530,13 @@ pub fn discover_plugins(
         });
     }
 
+    // An untrusted Project candidate is inactive, so it must not displace a same-named plugin that can run (audit S7-F2).
+    drop_untrusted_project_shadows(&mut candidates);
+
+    // A bare name in `enabled` is the user's word for THEIR plugin of that name; it must not also switch on, and
+    // hand the name to, a repository's same-named plugin (audit S7-F9).
+    drop_project_shadows_of_bare_enabled(&mut candidates, &config.enabled);
+
     // Within the same plugin_name, the highest-priority scope wins; within same scope, first-found (alphabetical by canonical path) wins
     resolve_name_conflicts(&mut candidates);
 
@@ -855,6 +862,78 @@ fn collect_plugin_in(
         lsp_config_path,
         conflict: None,
     });
+}
+
+/// Drop an untrusted `Project` candidate when a same-named candidate other than an untrusted `Project` one exists.
+/// Without it the name-conflict pass lets the (inactive) project plugin win and removes the user's plugin.
+/// Untrusted project plugins that shadow nothing stay in the list so they are still shown as blocked.
+fn drop_untrusted_project_shadows(candidates: &mut Vec<DiscoveredPlugin>) {
+    let inert = |p: &DiscoveredPlugin| p.scope == PluginScope::Project && !p.trusted;
+    let live: HashSet<String> = candidates
+        .iter()
+        .filter(|p| !inert(p))
+        .map(|p| p.manifest.name.clone())
+        .collect();
+    candidates.retain(|p| {
+        let shadows = inert(p) && live.contains(&p.manifest.name);
+        if shadows {
+            tracing::warn!(
+                name = %p.manifest.name,
+                root = %p.root.display(),
+                "untrusted project plugin ignored: it would shadow a same-named plugin"
+            );
+        }
+        !shadows
+    });
+}
+
+/// Drop a `Project` candidate that shares its name with a non-`Project` plugin when `enabled` lists that name bare
+/// and does not list the project plugin's full id. The user who wrote `enabled = ["x"]` meant their own "x"; the
+/// repository's "x" would otherwise be enabled by the same entry and, as the higher-priority scope, replace theirs
+/// with only a `conflict` string. A project plugin with no same-named plugin elsewhere is unaffected, and a full
+/// id still enables it. The surviving plugin carries a `conflict` note naming the plugin left out.
+fn drop_project_shadows_of_bare_enabled(candidates: &mut Vec<DiscoveredPlugin>, enabled: &[String]) {
+    let elsewhere: HashSet<String> = candidates
+        .iter()
+        .filter(|p| p.scope != PluginScope::Project)
+        .map(|p| p.manifest.name.clone())
+        .collect();
+    let mut notes: Vec<(String, String)> = Vec::new();
+    candidates.retain(|p| {
+        if p.scope != PluginScope::Project || !elsewhere.contains(&p.manifest.name) {
+            return true;
+        }
+        let bare = enabled.iter().any(|e| e == &p.manifest.name);
+        let by_id = enabled.iter().any(|e| e == &p.id.0);
+        if !bare || by_id {
+            return true;
+        }
+        tracing::warn!(
+            name = %p.manifest.name,
+            id = %p.id.0,
+            root = %p.root.display(),
+            "project plugin not enabled by the bare name in `enabled`: a plugin of that name exists in another scope; list the full id to enable it"
+        );
+        notes.push((
+            p.manifest.name.clone(),
+            format!(
+                "Project plugin \"{}\" at {} was not loaded: \"{}\" in `enabled` names your own plugin; add the id {} to enable the project one",
+                p.manifest.name,
+                p.root.display(),
+                p.manifest.name,
+                p.id.0
+            ),
+        ));
+        false
+    });
+    for (name, note) in notes {
+        if let Some(keeper) = candidates
+            .iter_mut()
+            .find(|p| p.manifest.name == name && p.conflict.is_none())
+        {
+            keeper.conflict = Some(note);
+        }
+    }
 }
 
 /// Within each name group, keep only the highest-priority candidate (lowest scope ordinal).
@@ -1660,6 +1739,97 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].scope, PluginScope::CliOverride);
+    }
+
+    #[test]
+    fn untrusted_project_plugin_does_not_displace_user_plugin() {
+        // audit S7-F2: Project (ordinal 1) beats User (ordinal 2) in the name-conflict pass.
+        let tmp = tempfile::tempdir().unwrap();
+        let user_plugin = make_manifest_plugin(&tmp.path().join("user"), "x");
+        let proj_plugin = make_manifest_plugin(&tmp.path().join("proj"), "x");
+        let trust = TrustStore::load_from(tmp.path().join("trust"));
+        let build = || {
+            let mut seen = HashSet::new();
+            let mut candidates = Vec::new();
+            collect_plugin(
+                &proj_plugin,
+                PluginScope::Project,
+                PluginOrigin::ProjectFuigo,
+                &trust,
+                false,
+                &mut seen,
+                &mut candidates,
+            );
+            collect_plugin(
+                &user_plugin,
+                PluginScope::User,
+                PluginOrigin::UserFuigo,
+                &trust,
+                false,
+                &mut seen,
+                &mut candidates,
+            );
+            candidates
+        };
+        // The defect: the conflict pass alone lets the inactive project plugin win and removes the user's.
+        let mut unfiltered = build();
+        resolve_name_conflicts(&mut unfiltered);
+        assert_eq!(unfiltered[0].scope, PluginScope::Project);
+        assert!(!unfiltered[0].trusted);
+        // With the drop in front, the user's plugin survives and is trusted.
+        let mut candidates = build();
+        drop_untrusted_project_shadows(&mut candidates);
+        resolve_name_conflicts(&mut candidates);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].scope, PluginScope::User);
+        assert!(candidates[0].trusted);
+    }
+
+    #[test]
+    fn bare_enabled_name_does_not_hand_the_name_to_a_project_plugin() {
+        // audit S7-F9
+        let tmp = tempfile::tempdir().unwrap();
+        let user_plugin = make_manifest_plugin(&tmp.path().join("user"), "x");
+        let proj_plugin = make_manifest_plugin(&tmp.path().join("proj"), "x");
+        let trust = TrustStore::load_from(tmp.path().join("trust"));
+        let build = || {
+            let mut seen = HashSet::new();
+            let mut candidates = Vec::new();
+            collect_plugin(&proj_plugin, PluginScope::Project, PluginOrigin::ProjectFuigo, &trust, true, &mut seen, &mut candidates);
+            collect_plugin(&user_plugin, PluginScope::User, PluginOrigin::UserFuigo, &trust, true, &mut seen, &mut candidates);
+            candidates
+        };
+        // The defect: the project plugin wins the conflict pass and the user's "x" disappears.
+        let mut unfiltered = build();
+        resolve_name_conflicts(&mut unfiltered);
+        assert_eq!(unfiltered[0].scope, PluginScope::Project);
+
+        // Bare "x" in `enabled`: the user's plugin survives and says what was left out.
+        let mut candidates = build();
+        drop_project_shadows_of_bare_enabled(&mut candidates, &["x".to_string()]);
+        resolve_name_conflicts(&mut candidates);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].scope, PluginScope::User);
+        assert!(candidates[0].conflict.as_deref().unwrap_or("").contains("Project plugin"));
+
+        // The project plugin's full id still enables it.
+        let mut candidates = build();
+        let proj_id = candidates
+            .iter()
+            .find(|p| p.scope == PluginScope::Project)
+            .unwrap()
+            .id
+            .0
+            .clone();
+        drop_project_shadows_of_bare_enabled(&mut candidates, &["x".to_string(), proj_id]);
+        resolve_name_conflicts(&mut candidates);
+        assert_eq!(candidates[0].scope, PluginScope::Project);
+
+        // With no same-named plugin elsewhere, a bare name still enables the project plugin.
+        let mut alone = build();
+        alone.retain(|p| p.scope == PluginScope::Project);
+        drop_project_shadows_of_bare_enabled(&mut alone, &["x".to_string()]);
+        assert_eq!(alone.len(), 1);
     }
 
     #[test]

@@ -431,9 +431,28 @@ pub fn repo_workdir(repo: &Repository, start: &Path) -> Option<PathBuf> {
     if let Some(workdir) = &reported
         && workdir.join(".git").exists()
     {
-        return reported;
+        if fuigo_agent::repo::git_dir_lives_at(workdir, repo) {
+            return reported;
+        }
+        // Audit 1.0.44 S2-F1 (review r1): `core.worktree` names a tree whose `.git` belongs to another repository (an
+        // ancestor checkout); the repository's own checkout is where its git directory physically lives.
+        return gitlink_checkout(start, repo).or_else(|| own_checkout(repo));
     }
-    gitlink_checkout(start, repo).or(reported)
+    gitlink_checkout(start, repo).or_else(|| match (reported, own_checkout(repo)) {
+        // Review r2/r4 on S2-F1: a repository whose git directory physically lives as `<dir>/.git` is checked out at
+        // `<dir>`; a tree named elsewhere by `core.worktree` (an ancestor or any other folder) does not stand for it.
+        // A bare repository (no reported tree) stays bare, whatever the name of its directory.
+        (Some(_), Some(own)) => Some(own),
+        (None, Some(_)) => None,
+        (reported, None) => reported,
+    })
+}
+/// The directory `repo`'s git directory physically lives in as its `.git`, if it does.
+fn own_checkout(repo: &Repository) -> Option<PathBuf> {
+    repo.path()
+        .parent()
+        .filter(|own| fuigo_agent::repo::git_dir_lives_at(own, repo))
+        .map(|own| own.components().collect())
 }
 /// The directory above `start` whose `.git` FILE points at `repo`'s git directory.
 fn gitlink_checkout(start: &Path, repo: &Repository) -> Option<PathBuf> {
@@ -3817,5 +3836,54 @@ mod p120_tests {
             probe::assert_kept(&dump, REGISTERED);
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod a45_workdir_tests {
+    #[test]
+    fn a45_core_worktree_naming_an_ancestor_checkout_is_not_the_workdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = dunce::canonicalize(tmp.path()).unwrap();
+        git2::Repository::init(&parent).unwrap();
+        let nested = parent.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let repo = git2::Repository::init(&nested).unwrap();
+        repo.config().unwrap().set_str("core.worktree", parent.to_str().unwrap()).unwrap();
+        let repo = git2::Repository::discover(&nested).unwrap();
+        assert_eq!(super::repo_workdir(&repo, &nested), Some(nested.clone()));
+    }
+    #[test]
+    fn a45_core_worktree_naming_a_sibling_folder_is_not_the_workdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = dunce::canonicalize(tmp.path()).unwrap();
+        let (nested, sibling) = (parent.join("nested"), parent.join("sibling"));
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        let repo = git2::Repository::init(&nested).unwrap();
+        repo.config().unwrap().set_str("core.worktree", sibling.to_str().unwrap()).unwrap();
+        let repo = git2::Repository::discover(&nested).unwrap();
+        assert_eq!(super::repo_workdir(&repo, &nested), Some(nested.clone()));
+    }
+    #[test]
+    fn a45_core_worktree_naming_a_plain_ancestor_is_not_the_workdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = dunce::canonicalize(tmp.path()).unwrap();
+        let nested = parent.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let repo = git2::Repository::init(&nested).unwrap();
+        repo.config().unwrap().set_str("core.worktree", parent.to_str().unwrap()).unwrap();
+        let repo = git2::Repository::discover(&nested).unwrap();
+        assert_eq!(super::repo_workdir(&repo, &nested), Some(nested.clone()));
+    }
+    /// Review F2-d: a bare repository stored as `<dir>/.git` has no working tree, so it is not "checked out at `<dir>`".
+    #[test]
+    fn review_f2d_bare_repository_stored_as_dot_git_has_no_workdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = dunce::canonicalize(tmp.path()).unwrap();
+        git2::Repository::init_bare(dir.join(".git")).unwrap();
+        let repo = git2::Repository::open(dir.join(".git")).unwrap();
+        assert!(repo.is_bare());
+        assert_eq!(super::repo_workdir(&repo, &dir), None);
     }
 }

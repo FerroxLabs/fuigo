@@ -58,6 +58,11 @@ pub struct SignedPayload {
     /// `default` empty keeps pre-nonce sidecars verifiable.
     #[serde(default)]
     pub nonce: String,
+    /// Monotonic policy revision, in the signed bytes. A client records the highest it has accepted and refuses a lower
+    /// one, so an older authentic envelope cannot be replayed over a newer one. `default` 0 for a server that does not
+    /// send it (nothing is then enforced beyond what the client already recorded).
+    #[serde(default)]
+    pub revision: u64,
     /// Identifies the signing key, so a rotation can be distinguished.
     pub key_id: String,
 }
@@ -161,6 +166,7 @@ mod tests {
             fail_closed: false,
             expires_at: 4_000_000_000,
             nonce: "9f86d081884c7d6594a85abf0f0cf96b".into(),
+            revision: 0,
             key_id: "v1".into(),
         };
         let json = serde_json::to_string(&versioned).unwrap();

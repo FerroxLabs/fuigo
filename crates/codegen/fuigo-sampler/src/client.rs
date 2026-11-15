@@ -1702,7 +1702,7 @@ impl SamplingClient {
         // Strip UTF-8 BOM if present: eventsource-stream 0.2.3 incorrectly slices BOM at byte 1 instead of 3.
         const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
         let mut is_first = true;
-        let byte_stream = response.bytes_stream().map(move |result| {
+        let byte_stream = limit_stream_bytes(response.bytes_stream(), MAX_STREAM_BYTES).map(move |result| {
             result.map(|bytes| {
                 if is_first {
                     is_first = false;
@@ -2097,7 +2097,7 @@ impl SamplingClient {
         // Strip UTF-8 BOM if present
         const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
         let mut is_first = true;
-        let byte_stream = response.bytes_stream().map(move |result| {
+        let byte_stream = limit_stream_bytes(response.bytes_stream(), MAX_STREAM_BYTES).map(move |result| {
             result.map(|bytes| {
                 if is_first {
                     is_first = false;
@@ -2426,7 +2426,7 @@ impl SamplingClient {
         // Strip UTF-8 BOM if present
         const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
         let mut is_first = true;
-        let byte_stream = response.bytes_stream().map(move |result| {
+        let byte_stream = limit_stream_bytes(response.bytes_stream(), MAX_STREAM_BYTES).map(move |result| {
             result.map(|bytes| {
                 if is_first {
                     is_first = false;
@@ -2827,6 +2827,61 @@ fn stream_collect_error(info: SamplingErrorInfo) -> SamplingError {
         upstream_type: info.upstream_type,
         upstream_details: info.upstream_details,
     }
+}
+
+/// The most bytes Fuigo reads from one streaming model reply (audit S1-F11). The idle and no-progress timers only
+/// bound the time between chunks, so a provider that never stops sending, or sends one enormous line, would grow
+/// memory until the process dies. The budget is on the raw SSE bytes, so it also bounds every accumulator the stream
+/// parsers keep (text, reasoning, tool-call arguments, the number of tool calls) and any single event. Ordinary replies
+/// are a few hundred KiB.
+pub(crate) const MAX_STREAM_BYTES: u64 = 256 * 1024 * 1024;
+
+#[derive(Debug)]
+pub(crate) enum StreamBytesError {
+    Transport(String),
+    TooLarge(u64),
+}
+
+impl std::fmt::Display for StreamBytesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(message) => f.write_str(message),
+            Self::TooLarge(max) => write!(f, "provider stream exceeded the {max} byte response limit"),
+        }
+    }
+}
+
+impl std::error::Error for StreamBytesError {}
+
+/// Pass `stream` through until more than `max` bytes have been seen; then yield one [`StreamBytesError::TooLarge`] and end.
+pub(crate) fn limit_stream_bytes<S, B, E>(
+    stream: S,
+    max: u64,
+) -> impl futures_util::Stream<Item = std::result::Result<B, StreamBytesError>>
+where
+    S: futures_util::Stream<Item = std::result::Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    use futures_util::StreamExt as _;
+    stream.scan((0u64, false), move |(seen, done), item| {
+        if *done {
+            return std::future::ready(None);
+        }
+        let out = match item {
+            Ok(chunk) => {
+                *seen = seen.saturating_add(chunk.as_ref().len() as u64);
+                if *seen > max {
+                    *done = true;
+                    Err(StreamBytesError::TooLarge(max))
+                } else {
+                    Ok(chunk)
+                }
+            }
+            Err(e) => Err(StreamBytesError::Transport(e.to_string())),
+        };
+        std::future::ready(Some(out))
+    })
 }
 
 #[cfg(test)]
@@ -5006,3 +5061,37 @@ fn parse_boundary_stream_error(data: &str, flux_routed: bool, gate: Option<&dyn 
 // Request provenance is captured before transport dispatch, independently of response URLs.
 #[derive(Clone, Copy)]
 struct RequestRoute(bool);
+
+#[cfg(test)]
+mod s1_f11_stream_limit_tests {
+    use super::*;
+    use eventsource_stream::Eventsource as _;
+    use futures_util::StreamExt as _;
+
+    /// Audit S1-F11: a stream that never ends stops at the byte budget with an error instead of growing forever.
+    #[tokio::test]
+    async fn an_endless_stream_stops_at_the_byte_budget() {
+        let endless = futures_util::stream::repeat_with(|| Ok::<Vec<u8>, std::io::Error>(b"data: x\n\n".to_vec()));
+        let events: Vec<_> = limit_stream_bytes(endless, 1024).eventsource().collect().await;
+        assert!(events.iter().filter(|e| e.is_ok()).count() > 0);
+        let last = events.last().unwrap().as_ref().unwrap_err().to_string();
+        assert!(last.contains("exceeded"), "{last}");
+    }
+
+    /// One SSE line with no end is cut off the same way.
+    #[tokio::test]
+    async fn one_endless_line_is_cut_off() {
+        let line = futures_util::stream::repeat_with(|| Ok::<Vec<u8>, std::io::Error>(vec![b'a'; 64 * 1024]));
+        let events: Vec<_> = limit_stream_bytes(line, 1024 * 1024).eventsource().collect().await;
+        assert_eq!(events.len(), 1);
+        assert!(events[0].is_err());
+    }
+
+    #[tokio::test]
+    async fn a_normal_stream_passes_untouched() {
+        let chunks = futures_util::stream::iter(vec![Ok::<Vec<u8>, std::io::Error>(b"data: hi\n\n".to_vec())]);
+        let events: Vec<_> = limit_stream_bytes(chunks, MAX_STREAM_BYTES).eventsource().collect().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].as_ref().unwrap().data, "hi");
+    }
+}

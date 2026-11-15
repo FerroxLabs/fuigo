@@ -741,7 +741,7 @@ impl StagedReplacement {
     /// The `rename` error; the temp is then removed and the target left as it was.
     pub fn commit(mut self) -> std::io::Result<()> {
         if let Some(contents) = self.in_place.take() {
-            return std::fs::write(&self.target, contents);
+            return write_in_place(&self.target, &contents);
         }
         let Some(tmp) = self.tmp.take() else {
             return Ok(());
@@ -770,6 +770,67 @@ impl Drop for StagedReplacement {
             self.remove_temp(&tmp);
         }
         drop(self.keep_alive.take());
+    }
+}
+
+/// How long [`write_in_place`] waits for a reader to take more data before it gives up.
+#[cfg(unix)]
+const WRITE_STALL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Write `contents` into a target that is not a regular file (a device, a FIFO), as `std::fs::write` would, except
+/// that the open never blocks: opening a FIFO for writing waits for a reader, which hung the file tools (audit S4-F6).
+/// With no reader within a second the open fails (ENXIO) and the caller sees an error; with one, the descriptor stays
+/// non-blocking and a full pipe is polled, giving up after [`WRITE_STALL`] without progress.
+fn write_in_place(target: &Path, contents: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // A reader that is just starting (a FIFO opened a moment later) is waited for, briefly; none by then is an error.
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut file = loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+                .open(target)
+            {
+                Err(e) if e.raw_os_error() == Some(libc::ENXIO) && std::time::Instant::now() < give_up => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                other => break other?,
+            }
+        };
+        // The descriptor stays non-blocking: a reader that stops reading cannot hang the write. A full pipe is polled
+        // until the reader drains it, and the write gives up after `WRITE_STALL` without progress (review L17).
+        let mut rest = contents;
+        let mut last_progress = std::time::Instant::now();
+        while !rest.is_empty() {
+            match file.write(rest) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(n) => {
+                    rest = &rest[n..];
+                    last_progress = std::time::Instant::now();
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if last_progress.elapsed() >= WRITE_STALL {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "the reader stopped reading; gave up writing",
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(target, contents)
     }
 }
 
@@ -3751,6 +3812,51 @@ mod tests {
             ino,
             "replaced atomically, not rewritten in place"
         );
+    }
+
+    /// Review L17: an in-place write to a FIFO whose reader stopped reading gives up after a stall deadline instead of
+    /// hanging the caller for as long as the reader lives.
+    #[cfg(unix)]
+    #[test]
+    fn write_in_place_to_a_fifo_with_a_stalled_reader_gives_up() {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        // A reader that holds the pipe open and never reads.
+        let reader = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let target = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(write_in_place(&target, &vec![b'x'; 4 * 1024 * 1024]));
+        });
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(25));
+        drop(reader); // frees a writer the assertion below found still blocked
+        let result = outcome.expect("write_in_place must not block on a reader that stopped reading");
+        assert_eq!(result.expect_err("the stalled write fails").kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    /// Review L17: a reader that does read still gets everything, even when the data is larger than the pipe.
+    #[cfg(unix)]
+    #[test]
+    fn write_in_place_to_a_fifo_with_a_live_reader_delivers_everything() {
+        use std::io::Read as _;
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let path = fifo.clone();
+        let reader = std::thread::spawn(move || {
+            let mut data = Vec::new();
+            std::fs::File::open(&path).unwrap().read_to_end(&mut data).unwrap();
+            data
+        });
+        let payload = vec![b'y'; 1024 * 1024];
+        write_in_place(&fifo, &payload).unwrap();
+        assert_eq!(reader.join().unwrap(), payload);
     }
 
     /// Many threads, many increments, none lost.

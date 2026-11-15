@@ -11,6 +11,7 @@ pub mod credential;
 pub mod decider;
 mod error;
 mod http;
+mod idle;
 mod ip;
 mod metrics;
 mod request;
@@ -18,7 +19,7 @@ mod server;
 mod tls;
 
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,7 +28,7 @@ use fuigo_sandbox::WebsitePolicy;
 use fuigo_sandbox::command::CommandTag;
 use fuigo_sandbox::command::grants::{Clock, SystemClock};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::sync::{Semaphore, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -94,6 +95,11 @@ pub struct EgressProxyOptions {
     pub dns_timeout: Duration,
     pub connect_timeout: Duration,
     pub tls_hello_timeout: Duration,
+    /// A CONNECT tunnel with no bytes in either direction for this long is closed.
+    pub tunnel_idle_timeout: Duration,
+    /// When every connection slot is taken, a peer that has sent no complete, authenticated request
+    /// for at least this long is dropped to admit the new connection.
+    pub pre_auth_grace: Duration,
     pub drain_timeout: Duration,
     /// Deadline for a request parked on [`Decision::Ask`]; a distinct state from `request_timeout`.
     pub hold_timeout: Duration,
@@ -119,6 +125,8 @@ impl Default for EgressProxyOptions {
             dns_timeout: Duration::from_secs(5),
             connect_timeout: Duration::from_secs(10),
             tls_hello_timeout: Duration::from_secs(5),
+            tunnel_idle_timeout: Duration::from_secs(600),
+            pre_auth_grace: Duration::from_secs(1),
             drain_timeout: Duration::from_secs(5),
             hold_timeout: DEFAULT_HOLD_TIMEOUT,
             max_held: DEFAULT_MAX_HELD,
@@ -143,6 +151,29 @@ pub(crate) struct ProxyState {
     /// `true` once the serve loop is stopping: every parked hold answers itself with a deny, so
     /// a drain never waits out a card.
     pub(crate) stopping: watch::Sender<bool>,
+    /// Connections that have not yet presented a valid credential, oldest first.
+    pub(crate) pre_auth: Arc<server::PreAuth>,
+}
+
+impl ProxyState {
+    fn build(
+        policy: WebsitePolicy,
+        decider: Arc<dyn Decider>,
+        options: EgressProxyOptions,
+    ) -> Result<Arc<ProxyState>, ProxyError> {
+        Ok(Arc::new(ProxyState {
+            policy,
+            decider,
+            holds: Semaphore::new(options.max_held),
+            hold_budget: decider::HoldBudget::new(options.max_held_per_call.min(options.max_held)),
+            options,
+            metrics: ProxyMetrics::default(),
+            credentials: CredentialRegistry::new(credential::ProxyToken::generate()?),
+            blocked: decider::blocked_channel(),
+            stopping: watch::Sender::new(false),
+            pre_auth: Arc::new(server::PreAuth::default()),
+        }))
+    }
 }
 
 pub struct EgressProxy;
@@ -171,25 +202,15 @@ impl EgressProxy {
         {
             return Err(ProxyError::InvalidOptions);
         }
-        let tcp = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
-        let address = tcp.local_addr()?;
+        let listeners = server::bind_loopback().await?;
+        let address = listeners.local_addr()?;
         let drain_timeout = options.drain_timeout;
-        let state = Arc::new(ProxyState {
-            policy,
-            decider,
-            holds: Semaphore::new(options.max_held),
-            hold_budget: decider::HoldBudget::new(options.max_held_per_call.min(options.max_held)),
-            options,
-            metrics: ProxyMetrics::default(),
-            credentials: CredentialRegistry::new(credential::ProxyToken::generate()?),
-            blocked: decider::blocked_channel(),
-            stopping: watch::Sender::new(false),
-        });
+        let state = ProxyState::build(policy, decider, options)?;
         #[cfg(test)]
         let task_observer = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
         let task = tokio::spawn(server::serve(
-            tcp,
+            listeners,
             state.clone(),
             #[cfg(test)]
             task_observer.clone(),

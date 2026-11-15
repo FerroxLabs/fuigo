@@ -7,7 +7,8 @@ use super::policy::{
     write_failure_is_deny,
 };
 use super::response::{
-    ApplyOutcome, ManagedConfigResponse, ManagedConfigSource, verify_signed_envelope,
+    ApplyOutcome, ManagedConfigResponse, ManagedConfigSource, VerifiedEnvelope,
+    verify_signed_envelope,
 };
 
 /// Server-synced policy artifacts; excludes the sync marker.
@@ -414,9 +415,6 @@ pub(super) fn apply_fetched(
     } else {
         None
     };
-    let signed_deployment_id = verified
-        .as_ref()
-        .and_then(|v| v.payload.deployment_id.clone());
     let home = crate::util::fuigo_home::fuigo_home();
     let Some(_lock) = try_lock_managed_config(&home) else {
         tracing::debug!("managed config locked by another process; skipping apply");
@@ -426,12 +424,51 @@ pub(super) fn apply_fetched(
         tracing::info!("credential gone since fetch started; skipping apply");
         return Ok(ApplyOutcome::Skipped);
     }
+    apply_under_lock(
+        &home,
+        body,
+        verified,
+        source,
+        new_principal,
+        new_key_fingerprint,
+        parked_at,
+    )
+}
+
+/// The half of [`apply_fetched`] that runs while it holds the managed-config lock for `home`.
+#[allow(clippy::disallowed_methods, reason = "managed config under FUIGO_HOME; not inside a session folder")]
+pub(super) fn apply_under_lock(
+    home: &std::path::Path,
+    body: &ManagedConfigResponse,
+    verified: Option<VerifiedEnvelope>,
+    source: ManagedConfigSource,
+    new_principal: Option<&str>,
+    new_key_fingerprint: Option<&str>,
+    parked_at: Option<u64>,
+) -> std::io::Result<ApplyOutcome> {
+    // Re-checked under the lock, before any policy file changes: another process may have applied a newer revision
+    // for this identity since this response was verified, and installing this one over it would leave the policy
+    // below the recorded floor, read as rolled back at every session start (audit R07).
+    if let Some(verified) = &verified
+        && let Err(e) =
+            fuigo_config::signed_policy::check_revision_floor_at(home, &verified.payload)
+    {
+        tracing::info!("a newer managed policy was applied meanwhile; skipping this one: {e}");
+        return Ok(ApplyOutcome::Skipped);
+    }
+    let home = home.to_path_buf();
+    let signed_deployment_id = verified
+        .as_ref()
+        .and_then(|v| v.payload.deployment_id.clone());
     // A parked refresh's authoritative freshness check, under the same flock as the apply.
     if let Some(parked_at) = parked_at
         && parked_at < fuigo_config::managed_config_synced_at(&home).unwrap_or(0)
     {
         return Ok(ApplyOutcome::StaleStage);
     }
+    // Delta review D2-04: a pre-upgrade marker's floor is bound to the sidecar on disk until it is written down; do
+    // that before this apply replaces or evicts the sidecar, so a first apply that switches identity keeps it.
+    fuigo_config::persist_legacy_revision_floor_at(&home);
     let identity_changed = crate::config::managed_config_identity_changed_at(
         &home,
         new_principal,

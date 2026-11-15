@@ -721,3 +721,17 @@ fn stderr_tail_keeps_the_last_bytes_on_a_char_boundary() {
     assert!(tail.ends_with('é'));
     assert_eq!("short", stderr_tail("  short \n", 512));
 }
+
+#[test]
+fn denial_text_with_unsafe_characters_is_escaped_and_never_proposed_as_a_path() {
+    let tail = stderr_tail("sh: \u{1b}[31mfake\u{202E}gnp.txt\nsecond line\tok", 512);
+    assert!(!tail.contains('\u{1b}') && !tail.contains('\u{202E}'), "{tail:?}");
+    assert!(tail.contains("%1B") && tail.contains("%E2%80%AE"), "{tail:?}");
+    assert!(tail.contains('\n') && tail.contains('\t'), "{tail:?}");
+    assert_eq!(None, super::as_path_token("/tmp/a\u{202E}b", true));
+    assert_eq!(None, super::as_path_token("/tmp/a\u{1b}[2Jb", false));
+    assert_eq!(
+        Some("/tmp/ok".to_owned()),
+        super::as_path_token("/tmp/ok", false)
+    );
+}

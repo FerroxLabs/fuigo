@@ -5209,6 +5209,32 @@ fn apply_stdio_env_resolves_first_party_references_with_the_callers_one_snapshot
     assert_eq!(without["P70A_BEARER"], "Bearer $FUIGO_API_KEY");
 }
 
+/// Audit S11-F4: header values set in MCP config are recorded as sent, so a server or gateway that echoes one has it
+/// replaced at the display, log and telemetry sinks. Plain protocol headers are not recorded.
+#[test]
+fn configured_mcp_header_values_are_recorded_as_sent() {
+    use fuigo_telemetry::sent_credentials::scrub;
+    const KEY: &str = "s11f4-config-header-FAKE-0001";
+    const BEARER: &str = "s11f4-config-bearer-FAKE-0002";
+    let headers = parse_config_headers(
+        "srv",
+        "transport",
+        [
+            ("X-Api-Key", KEY),
+            ("X-Auth", "Bearer s11f4-config-bearer-FAKE-0002"),
+            ("Accept", "application/json, text/event-stream"),
+        ]
+        .into_iter(),
+    );
+    assert_eq!(headers.len(), 3);
+    for secret in [KEY, BEARER] {
+        let echoed = format!("502 from gateway: bad header {secret}");
+        assert_ne!(scrub(&echoed).as_ref(), echoed, "{secret} was not recorded");
+    }
+    let accept = "negotiation failed: application/json, text/event-stream";
+    assert_eq!(scrub(accept).as_ref(), accept, "a protocol header was recorded");
+}
+
 /// P70a x P70b (restack s28): when late binding hands an MCP server the saved key, in an HTTP header, a stdio `env`
 /// value or a stdio arg, the key is recorded as a credential actually sent, so an echo of it in error or log text is
 /// replaced by P70b's scrub. A value without a reference, an escaped reference and a missing key record nothing.
@@ -6872,4 +6898,40 @@ fn typed_http_status_is_needs_auth_but_a_string_is_not() {
         classify_start_failure(&stringy, true, false),
         McpFailureKind::ServerRejected
     );
+}
+
+#[test]
+fn tool_list_walk_is_capped_by_pages_tools_and_repeated_cursors() {
+    // audit S6-F2: a server that always returns a fresh cursor must be cut off by the page cap, not by the time budget.
+    let mut seen = std::collections::HashSet::new();
+    let mut pages = 0usize;
+    loop {
+        pages += 1;
+        let next = format!("c{pages}");
+        if tool_list_stop_reason(pages, pages, &next, &mut seen).is_some() {
+            break;
+        }
+        assert!(pages <= MAX_TOOL_LIST_PAGES, "walk must stop at the page cap");
+    }
+    assert_eq!(pages, MAX_TOOL_LIST_PAGES);
+    let mut seen = std::collections::HashSet::new();
+    assert_eq!(
+        tool_list_stop_reason(1, MAX_TOOLS_PER_SERVER, "a", &mut seen),
+        Some("tool cap reached")
+    );
+    let mut seen = std::collections::HashSet::new();
+    assert_eq!(tool_list_stop_reason(1, 1, "a", &mut seen), None);
+    assert_eq!(tool_list_stop_reason(2, 2, "a", &mut seen), Some("cursor repeated"));
+}
+
+/// Audit S11-F4: a header value set statically in MCP config is recorded as a credential actually sent, so a server
+/// that echoes it back has it replaced at the display, log and telemetry sinks.
+#[test]
+fn s11_f4_configured_mcp_header_values_are_recorded_as_sent() {
+    use fuigo_telemetry::sent_credentials::scrub;
+    const TOKEN: &str = "s11f4-header-secret-FAKE-0001";
+    let headers = parse_config_headers("srv", "test", [("X-Api-Key", TOKEN)].into_iter());
+    assert_eq!(headers.len(), 1);
+    let echoed = format!("upstream rejected {TOKEN}");
+    assert!(!scrub(&echoed).contains(TOKEN), "the configured header value was not recorded");
 }

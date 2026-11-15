@@ -679,3 +679,24 @@ mod u35_winenv {
         assert!(edits.contains(&("DROPPED".to_string(), None)), "{edits:?}");
     }
 }
+
+/// Audit L21: the `fuigo wrap` image-paste nonce never reaches a command Fuigo runs, with or without a policy.
+#[test]
+fn wrap_nonce_is_scrubbed_from_spawned_commands() {
+    let mut set = HashMap::new();
+    set.insert("FUIGO_WRAP_NONCE".to_string(), "from-policy".to_string());
+    let policy = ShellEnvironmentPolicy { set, ..Default::default() };
+    for policy in [None, Some(&policy)] {
+        let mut cmd = tokio::process::Command::new("true");
+        cmd.env("LC_FUIGO_WRAP_NONCE", "planted");
+        apply_shell_environment_policy(&mut cmd, policy);
+        let envs: HashMap<_, _> = cmd.as_std().get_envs().collect();
+        for name in super::WRAP_NONCE_ENV_NAMES {
+            assert_eq!(
+                envs.get(std::ffi::OsStr::new(name)).copied().flatten(),
+                None,
+                "{name} must not reach the child"
+            );
+        }
+    }
+}

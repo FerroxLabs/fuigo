@@ -58,9 +58,13 @@ default = ["enforce"]
 ## above), and the enforce code is gated on `cfg(all(feature = "enforce", unix))`.
 ## On non-unix targets enabling this feature is a no-op (no kernel sandbox exists).
 enforce = []
+## Test-only: lets a test replace the fixed directories searched for `bwrap` (env `FUIGO_TEST_BWRAP_DIRS`).
+## Never in `default`; only dev-dependencies of crates whose tests simulate a host without bubblewrap enable it.
+test-bwrap-dirs = []
 
 [dev-dependencies]
 fuigo-session-writer = { workspace = true }
+fuigo-test-support = { workspace = true }
 serial_test = { workspace = true }
 tempfile = { workspace = true }
 # Compiles the hand-rolled macOS deny-glob regex in tests to assert it matches

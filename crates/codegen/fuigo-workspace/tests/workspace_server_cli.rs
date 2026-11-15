@@ -132,7 +132,9 @@ fn minimal_server_reexec_enforces_workspace_boundary() {
             .env_remove("__FUIGO_INSIDE_BWRAP")
             .env("RUST_LOG", "info");
         if missing_bwrap {
-            command.env("PATH", &home);
+            command
+                .env("PATH", &home)
+                .env(fuigo_sandbox::TEST_BWRAP_DIRS_ENV, &home);
         }
         let out = command.output().unwrap();
         let logs = format!(

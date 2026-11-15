@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::command::backend::{CallId, wrap_for_mode};
-use crate::command::canonical::{ServedRoot, VolumeRule, resolved_spellings, with_volume_rule};
+use crate::command::canonical::{ServedRoot, case_insensitive_regex_body, VolumeRule, resolved_spellings, with_volume_rule};
 use crate::command::env::EnvGlobs;
 use crate::command::git_config::GitConfigEnv;
 use crate::command::grants::{Expiry, Grant, GrantDecision, GrantId, GrantScope, GrantSubject};
@@ -2250,4 +2250,44 @@ fn scratch_dir(label: &str) -> PathBuf {
     ));
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
+}
+
+/// A floor entry that does not exist yet inside a write root is also denied by a case-folding
+/// regex on a volume that compares names without case, so creating `.FUIGO` is refused as
+/// creating `.fuigo` is. An existing entry, or one outside every write root, gets no such rule.
+/// Asserts the rendered profile text only: the kernel's matching needs a macOS host to observe.
+#[test]
+fn a_missing_floor_entry_in_a_write_root_also_denies_every_letter_case() {
+    let base = dunce::canonicalize(scratch_dir("case-variants")).expect("canonical scratch");
+    let ws = base.join("ws");
+    std::fs::create_dir_all(ws.join(".vscode")).unwrap();
+    let mut policy = fixture_policy();
+    policy.write_roots = vec![ws.clone()];
+    policy.protected = vec![
+        protected_path(ws.join(".fuigo")),
+        protected_path(ws.join(".vscode")),
+        protected_path(base.join("elsewhere/.fuigo")),
+    ];
+    let render = |rule| {
+        with_volume_rule(rule, || {
+            render_enforce(&policy, &tag()).expect("render").profile
+        })
+    };
+    let regex_of = |path: &Path| {
+        let body = case_insensitive_regex_body(path.to_str().unwrap()).unwrap();
+        format!("(regex #\"^{body}(/.*)?$\")")
+    };
+    let folded = render(VolumeRule::Apfs);
+    let missing = regex_of(&ws.join(".fuigo"));
+    assert!(
+        folded.contains(&format!("(deny file-write* file-link {missing} ")),
+        "{folded}"
+    );
+    assert!(folded.contains(&format!("(deny network-outbound (remote unix-socket {missing})")));
+    assert!(!folded.contains(&regex_of(&ws.join(".vscode"))), "exists on disk");
+    assert!(
+        !folded.contains(&regex_of(&base.join("elsewhere/.fuigo"))),
+        "outside every write root"
+    );
+    assert!(!render(VolumeRule::Exact).contains(&missing), "byte-exact volume");
 }

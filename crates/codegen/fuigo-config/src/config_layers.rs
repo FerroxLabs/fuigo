@@ -167,9 +167,13 @@ impl ConfigLayers {
         } = self;
         let mut merged = self.non_user_layer(system_managed);
         deep_merge_toml(&mut merged, &self.non_user_layer(managed));
-        deep_merge_toml(&mut merged, user);
+        let mut user = user.clone();
+        crate::config_override::strip_campaign_source_marker(&mut user);
+        deep_merge_toml(&mut merged, &user);
         if let (OverlayInclusion::Include, Some(overlay)) = (inclusion, env_overlay) {
-            deep_merge_toml(&mut merged, overlay);
+            let mut overlay = overlay.clone();
+            crate::config_override::strip_campaign_source_marker(&mut overlay);
+            deep_merge_toml(&mut merged, &overlay);
         }
         if let Some(r) = self.merged_requirements() {
             deep_merge_toml(&mut merged, &r);
@@ -182,6 +186,7 @@ impl ConfigLayers {
     fn non_user_layer(&self, layer: &toml::Value) -> toml::Value {
         let mut layer = layer.clone();
         crate::config_override::strip_subscription_authority(&mut layer, &self.user);
+        crate::config_override::strip_campaign_source_marker(&mut layer);
         layer
     }
 
@@ -228,7 +233,7 @@ impl ConfigLayers {
     }
 
     /// Re-merge the requirements layers so an admin's `requirements.toml` always wins over a campaign overlay, whatever the campaign's source layer.
-    /// Campaigns are full-power (any field), so this is the structural guarantee that a lower-trust campaign can't override an admin-set field.
+    /// A campaign patch is confined to the campaign allowlist before it merges; this is the structural guarantee that a lower-trust campaign can't override an admin-set field either.
     fn reapply_requirements(&self, merged: &mut toml::Value) {
         if let Some(r) = self.merged_requirements() {
             deep_merge_toml(merged, &r);
@@ -254,7 +259,9 @@ impl ConfigLayers {
     ) {
         crate::campaigns::apply_active_campaign_patches(merged, active);
         if let Some(overlay) = &self.env_overlay {
-            deep_merge_toml(merged, overlay);
+            let mut overlay = overlay.clone();
+            crate::config_override::strip_campaign_source_marker(&mut overlay);
+            deep_merge_toml(merged, &overlay);
         }
         self.reapply_requirements(merged);
     }

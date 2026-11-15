@@ -41,10 +41,13 @@ pub enum GitInvocation {
 impl GitInvocation {
     /// The git command to run in `dir` (reader flavour): judged for `Background`, as typed for `UserInvoked`.
     fn command_in(self, dir: &Path) -> Result<std::process::Command, String> {
-        match self {
-            Self::UserInvoked => Ok(fuigo_tty_utils::git_command_user_invoked(dir)),
-            Self::Background => fuigo_tty_utils::git_command_in(dir).map_err(|e| e.to_string()),
-        }
+        let mut cmd = match self {
+            Self::UserInvoked => fuigo_tty_utils::git_command_user_invoked(dir),
+            Self::Background => fuigo_tty_utils::git_command_in(dir).map_err(|e| e.to_string())?,
+        };
+        // Marketplace sync only ever needs the plain transports (audit S7-F6).
+        fuigo_agent::plugins::git_install::restrict_git_protocols(&mut cmd);
+        Ok(cmd)
     }
 }
 
@@ -367,6 +370,7 @@ pub fn probe_git_remote(url: &str) -> Result<(), String> {
     let outside = outside_every_repository();
     let mut cmd = fuigo_tty_utils::git_command_user_invoked(&outside);
     cmd.env("GIT_CEILING_DIRECTORIES", &outside);
+    fuigo_agent::plugins::git_install::restrict_git_protocols(&mut cmd);
     cmd.args(["ls-remote", "--", url, "HEAD"]);
     run_git_timed(&mut cmd, "ls-remote", NETWORK_OP_TIMEOUT)
 }
@@ -788,6 +792,25 @@ fn fetch_reset_cached_repo(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Marketplace sync refuses a helper-transport `remote_url` at run time for both invocation kinds
+    /// (audit S7-F6).
+    #[test]
+    fn ext_transport_remote_is_refused_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("helper-ran");
+        let url = format!("ext::touch {}", marker.display());
+        for invocation in [GitInvocation::UserInvoked, GitInvocation::Background] {
+            let dest = dir.path().join("cache-entry");
+            let mut cmd = match clone_cli_command(invocation, &url, None, &dest) {
+                Ok(cmd) => cmd,
+                Err(_) => continue,
+            };
+            let out = cmd.output().unwrap();
+            assert!(!out.status.success(), "{invocation:?} cloned an ext:: source");
+            assert!(!marker.exists(), "{invocation:?} ran the ext helper");
+        }
+    }
 
     #[test]
     fn a_held_cache_lock_times_out_with_the_timeout_message_not_a_lock_error() {

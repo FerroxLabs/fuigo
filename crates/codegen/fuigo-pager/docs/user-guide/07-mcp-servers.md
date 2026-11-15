@@ -138,6 +138,8 @@ By default `fuigo mcp add` writes to `~/.fuigo/config.toml` (`--scope user`). Us
 
 `fuigo mcp enable` / `disable` persist the personal on/off state to user `~/.fuigo/config.toml` (`disabled_mcp_servers`, and `[mcp_servers.<name>].enabled` when that entry exists). Scope:
 
+- **Campaign stdio servers:** a stdio server added by a campaign is listed as off and does not start until you turn it on (`/mcp` or `fuigo mcp enable <name>`). Turning it on approves its current command, arguments and working directory (`[approved_campaign_mcp_servers]` in your own `config.toml`); if the campaign later changes any of them, the server is off again until you turn it on again. Turning it off withdraws the approval.
+
 - **Known names:** user/project Fuigo TOML, names already on the disabled list, compat sources (`.mcp.json`, Claude, Cursor), and **plugin** MCP servers (same discovery as doctor/`/mcps`).
 - **Enable only:** if the cwd-nearest project definition has sticky `enabled = false`, that single key is cleared (comments preserved); disable never rewrites project configs.
 - **Not full `/mcps` parity:** gateway connectors (`managed_gateway:…`, stored under `disabled_mcp_tools.__managed_gateway_connectors`) stay Space-only in the TUI. Idempotent; unknown names exit 1.

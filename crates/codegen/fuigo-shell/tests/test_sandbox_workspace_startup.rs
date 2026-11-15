@@ -50,7 +50,7 @@ fn unavailable_bwrap_refuses(profile: &str) {
     )
     .unwrap();
     // Reproduce hosts without /data even when the test host has that directory.
-    // The outer namespace is only a fixture; PATH prevents production re-exec.
+    // The outer namespace is only a fixture; the empty PATH and the empty bwrap directory list (the system one holds a real bwrap) prevent re-exec.
     let mut command = Command::new("bwrap");
     command.args(["--die-with-parent", "--tmpfs", "/"]);
     for entry in fs::read_dir("/").unwrap() {
@@ -81,6 +81,7 @@ fn unavailable_bwrap_refuses(profile: &str) {
         .env("HOME", root.path())
         .env("FUIGO_HOME", &state)
         .env(CHILD, profile)
+        .env(fuigo_sandbox::TEST_BWRAP_DIRS_ENV, &empty_bin)
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);

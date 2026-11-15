@@ -15,9 +15,17 @@
 // workspace print deny (R077) is waived here.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+#[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
 use fuigo_sandbox::{ProfileName, SandboxManager};
 
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("sandbox_smoke_test is only available on unix platforms");
+}
+
+#[cfg(unix)]
 fn main() {
     // Parse profile from args (default: workspace).
     let profile_name = std::env::args()
@@ -124,6 +132,7 @@ fn main() {
     println!("\n✅ Smoke test complete");
 }
 
+#[cfg(unix)]
 fn test_read(label: &str, path: &Path) {
     if path.is_file() {
         match std::fs::read(path) {
@@ -153,6 +162,7 @@ fn test_read(label: &str, path: &Path) {
     }
 }
 
+#[cfg(unix)]
 fn test_write(label: &str, path: &Path) {
     match std::fs::write(path, b"sandbox-test") {
         Ok(()) => {

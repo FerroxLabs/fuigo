@@ -37,6 +37,15 @@ struct ManagedConfigCache {
     /// As forgeable as the rest of the marker: defeats a passive clock change, not a file edit.
     #[serde(default)]
     rollback_floor: u64,
+    /// The revision floor of the policy identity the last sync applied, also read by older binaries (audit S12-F2).
+    /// A marker without [`Self::revision_floors`] has only this, and it then binds its recorded `principal` alone.
+    #[serde(default)]
+    highest_revision: u64,
+    /// Highest signed-policy `revision` accepted per policy identity (the payload's `deployment_id`, else `team_id`;
+    /// "" for neither). A lower one is a replay of a superseded policy; another identity's history never counts
+    /// (audit R06). Kept across syncs (only ever raised); empty in a pre-upgrade marker.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    revision_floors: std::collections::BTreeMap<String, u64>,
     /// Fields written by newer binaries, preserved when this binary rewrites only the floor.
     /// A full sync rewrites the marker from scratch.
     #[serde(flatten)]
@@ -95,6 +104,66 @@ fn managed_deployment_id_at(home: &Path, key_fingerprint: &str) -> Option<String
     normalize_identity(cache.principal.as_deref())
 }
 
+/// The highest signed-policy revision `home`'s marker records for the policy identity `identity` (0 when none).
+pub(crate) fn accepted_revision_floor(home: &Path, identity: Option<&str>) -> u64 {
+    read_managed_config_cache(home)
+        .and_then(|cache| {
+            let key = identity_key(identity);
+            revision_floors_of(&cache).get(&key).copied().or_else(|| old_floor_of_served_policy(&cache, home, &key))
+        })
+        .unwrap_or(0)
+}
+
+/// The key of a policy identity in [`ManagedConfigCache::revision_floors`].
+fn identity_key(identity: Option<&str>) -> String {
+    normalize_identity(identity).unwrap_or_default()
+}
+
+/// The per-identity floors; a pre-upgrade marker's single floor belongs to its recorded principal.
+fn revision_floors_of(cache: &ManagedConfigCache) -> std::collections::BTreeMap<String, u64> {
+    if !cache.revision_floors.is_empty() || cache.highest_revision == 0 {
+        return cache.revision_floors.clone();
+    }
+    let principal = identity_key(cache.principal.as_deref());
+    std::collections::BTreeMap::from([(principal, cache.highest_revision)])
+}
+
+/// A pre-upgrade team-path marker's single floor also belongs to the identity of the policy on disk it was set for:
+/// the team path records the serving team as principal, while a payload counts against its `deployment_id`, else its
+/// `team_id`, else no identity (`""`). Read, not written: the first apply after the upgrade records that identity's
+/// own floor. (A deploy-key marker records the payload's deployment id itself, so its spelling cannot differ.)
+fn old_floor_of_served_policy(cache: &ManagedConfigCache, home: &Path, key: &str) -> Option<u64> {
+    let old_team_marker = cache.revision_floors.is_empty() && cache.highest_revision > 0 && cache.key_fingerprint.is_none();
+    let served = old_team_marker.then(|| crate::signed_policy::on_disk_sidecar_identity(home)).flatten()?;
+    (identity_key(served.as_deref()) == key).then_some(cache.highest_revision)
+}
+
+/// Delta review D2-04: write a pre-upgrade marker's single floor down under every identity it covers, the marker's
+/// principal and (for a team-path marker) the identity of the policy on disk ([`old_floor_of_served_policy`]), before
+/// an apply replaces or evicts that policy's sidecar. Read from the sidecar alone, that floor lasted only as long as
+/// the sidecar: a first apply that switched identity dropped it, and the old identity's older revisions passed again.
+/// The caller holds the apply lock. A marker that already records per-identity floors is left as it is.
+pub fn persist_legacy_revision_floor_at(home: &Path) {
+    let Some(mut cache) = read_managed_config_cache(home) else {
+        return;
+    };
+    if !cache.revision_floors.is_empty() || cache.highest_revision == 0 {
+        return;
+    }
+    let mut floors = revision_floors_of(&cache);
+    if cache.key_fingerprint.is_none()
+        && let Some(served) = crate::signed_policy::on_disk_sidecar_identity(home)
+    {
+        let floor = floors.entry(identity_key(served.as_deref())).or_default();
+        *floor = (*floor).max(cache.highest_revision);
+    }
+    cache.revision_floors = floors;
+    match serde_json::to_string(&cache) {
+        Ok(json) => write_marker_atomically(home, &json),
+        Err(e) => tracing::warn!("failed to serialize managed config cache: {e}"),
+    }
+}
+
 /// [`mark_managed_config_synced`] for an explicit `home` (apply-lock holder: same dir as lock).
 pub fn mark_managed_config_synced_at(home: &Path, marker: SyncMarker<'_>) {
     let SyncMarker {
@@ -108,6 +177,19 @@ pub fn mark_managed_config_synced_at(home: &Path, marker: SyncMarker<'_>) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .ok();
+    // The sidecar the apply just wrote is the policy now served; its identity's record only ever rises.
+    let mut revision_floors = read_managed_config_cache(home)
+        .map(|prior| revision_floors_of(&prior))
+        .unwrap_or_default();
+    let served_identity = match crate::signed_policy::on_disk_signed_revision(home) {
+        Some((identity, revision)) => {
+            let floor = revision_floors.entry(identity_key(identity.as_deref())).or_default();
+            *floor = (*floor).max(revision);
+            identity_key(identity.as_deref())
+        }
+        None => identity_key(principal),
+    };
+    let highest_revision = revision_floors.get(&served_identity).copied().unwrap_or(0);
     let cache = ManagedConfigCache {
         synced_at,
         // Blank becomes None: the marker must never record "unknown" as a tenant
@@ -122,6 +204,8 @@ pub fn mark_managed_config_synced_at(home: &Path, marker: SyncMarker<'_>) {
         // A rolled-back clock plus a still-valid replayed envelope can reinstate a superseded policy and reset the floor
         // That path does not self-heal online
         rollback_floor: synced_at.unwrap_or(0),
+        highest_revision,
+        revision_floors,
         extra: Default::default(),
     };
     match serde_json::to_string(&cache) {

@@ -78,6 +78,9 @@ SHIM
 }
 make_shim "$WORK/shim" "$FX"
 
+# The fixture executables are plain text, not signed: skip the signature identity check except in
+# the dedicated tests below.
+export FUIGO_ALLOW_UNSIGNED=1
 # A caller whose environment and project/user npm config all point somewhere hostile.
 export npm_config_registry=https://evil.example/ NPM_CONFIG_REGISTRY=https://evil.example/
 export NODE_AUTH_TOKEN=sekret-token HTTPS_PROXY=http://evil.example:3128
@@ -111,6 +114,35 @@ echo "sha512-AAAA" > "$WORK/registry-lie/fuigo-linux-x64-$VERSION.integrity"
 make_shim "$WORK/shim-lie" "$WORK/registry-lie"
 refuses "refuses a tarball that does not match dist.integrity" "the registry says sha512-AAAA" \
   env PATH="$WORK/shim-lie:$PATH" "$HERE/registry-release-inputs.sh" "$VERSION" "$WORK/lie/bin" "$WORK/lie/npm"
+
+# audit S8-F7: registry bytes are checked for the release signature identity, and the manifest's
+# sourceCommit is the stamp read from the binaries, not this run's commit.
+refuses "refuses unsigned macOS and Windows registry binaries" "not signed with the release identity" \
+  env -u FUIGO_ALLOW_UNSIGNED "$HERE/registry-release-inputs.sh" "$VERSION" "$WORK/unsigned/bin" "$WORK/unsigned/npm"
+cp -R "$FX" "$WORK/registry-stamp"
+# shellcheck disable=SC2016 # JavaScript, not shell: the ${...} are template literals
+node -e '
+  const fs = require("fs"), path = require("path"), zlib = require("zlib"), crypto = require("crypto");
+  const {execFileSync} = require("child_process");
+  const [fx, version] = process.argv.slice(1);
+  const base = `fuigo-linux-x64-${version}`;
+  const stage = path.join(fx, "stage", "package");
+  fs.mkdirSync(path.join(stage, "bin"), {recursive: true});
+  fs.writeFileSync(path.join(stage, "package.json"), JSON.stringify({name: "@fuigo/linux-x64", version}));
+  fs.writeFileSync(path.join(stage, "bin", "fuigo.br"),
+    zlib.brotliCompressSync(Buffer.from(`#!/bin/sh\necho "fuigo ${version} (aaaaaaaaaaaa)"\n`)));
+  execFileSync("tar", ["-czf", path.join(fx, base + ".tgz"), "-C", path.dirname(stage), "package"]);
+  fs.writeFileSync(path.join(fx, base + ".integrity"),
+    "sha512-" + crypto.createHash("sha512").update(fs.readFileSync(path.join(fx, base + ".tgz"))).digest("base64"));
+' "$WORK/registry-stamp" "$VERSION"
+make_shim "$WORK/shim-stamp" "$WORK/registry-stamp"
+check "layout with a stamped linux binary succeeds" \
+  env PATH="$WORK/shim-stamp:$PATH" GITHUB_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$HERE/registry-release-inputs.sh" "$VERSION" "$WORK/stamp/bin" "$WORK/stamp/npm"
+check "sourceCommit is the binary stamp, not this run's GITHUB_SHA" \
+  test "$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).sourceCommit)' "$WORK/stamp/npm/release-manifest.json")" = aaaaaaaaaaaa
+check "sourceCommit is null when no stamp can be read" \
+  test "$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).sourceCommit)' "$WORK/ok/npm/release-manifest.json")" = null
 
 echo "verify-release-digests.js on that layout"
 mkdir -p "$WORK/verified"

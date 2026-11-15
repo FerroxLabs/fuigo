@@ -29,7 +29,11 @@ pub fn owner_only(options: &mut OpenOptions) -> &mut OpenOptions {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
+        // O_NOFOLLOW: a link planted at a session file's name is refused (ELOOP), never followed to its target
+        // (audit S12-F7). Only the final component; the session folder itself may live behind a link.
+        // O_NONBLOCK: opening a FIFO planted at the name fails (ENXIO) instead of waiting for a reader; on a regular
+        // file it changes nothing (review L18).
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     options
 }
@@ -126,6 +130,13 @@ pub(crate) mod test_seam {
 /// Open `path` with `options` (0600 on creation) and tighten it.
 pub fn open(options: &mut OpenOptions, path: &Path) -> io::Result<File> {
     let file = owner_only(options).open(path)?;
+    // Only a regular file is ours to write and tighten (a FIFO or device planted at the name is refused).
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
     tighten(&file, path)?;
     Ok(file)
 }
@@ -211,6 +222,26 @@ mod tests {
             );
         }
         assert_eq!(warnings.load(Ordering::SeqCst), 1, "one warning for the process, not one per open");
+    }
+
+    /// Review L18: a FIFO planted at a session file's name is refused without blocking the open on a reader.
+    #[test]
+    fn l18_opening_a_fifo_for_writing_does_not_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("updates.jsonl");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let target = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(open(OpenOptions::new().append(true).create(true), &target).map(|_| ()));
+        });
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(5));
+        // Free a blocked open so the test thread does not outlive the test.
+        let _ = std::fs::OpenOptions::new().read(true).write(true).open(&fifo);
+        let result = outcome.expect("the open must not wait for a reader");
+        assert!(result.is_err(), "a FIFO is not a session file");
     }
 
     #[test]

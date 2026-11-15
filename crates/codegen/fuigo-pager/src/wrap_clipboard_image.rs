@@ -6,8 +6,9 @@
 //! # Trust model
 //!
 //! Answering the private request OSC is effectively an image clipboard *read* for the wrapped session.
-//! Any process that can write to the PTY (not only the inner `fuigo`) can solicit the host pasteboard.
-//! That is intentional and acceptable for `fuigo wrap`: the user opted into wrap on their own host, and the answer stays inside their session.
+//! `fuigo wrap` hands the program it runs a per-session nonce (`FUIGO_WRAP_NONCE`, and `LC_FUIGO_WRAP_NONCE` for an SSH hop) and
+//! answers only a request that echoes it, so another writer to the PTY cannot solicit the host pasteboard. The reply is a bracketed
+//! paste frame with no trailing newline, so it never submits what it pastes.
 //! The remote also only requests when `osc52_sink_active()` (wrap already set `FUIGO_OSC52_SINK` / `LC_FUIGO_OSC52_SINK`).
 //! Do not generalize this pattern to untrusted multiplexers without an explicit allowlist.
 
@@ -17,14 +18,34 @@ use fuigo_pager_render::clipboard::{ImageData, osc52_sink_active};
 /// OSC body after `ESC ]` for a host image request.
 pub const REQUEST_BODY: &[u8] = b"999;FuigoWrapClipboardImage?";
 
-/// Full request sequence written to stderr by the remote pager (`ESC ]` body `BEL`).
+/// Env var (and its `LC_` twin, which default OpenSSH configs forward) carrying the per-session
+/// nonce `fuigo wrap` hands to the program it runs. A request must echo it to be answered.
+pub const NONCE_ENV: &str = "FUIGO_WRAP_NONCE";
+pub const NONCE_ENV_LC: &str = "LC_FUIGO_WRAP_NONCE";
+
+/// Full request sequence without a nonce (`ESC ]` body `BEL`).
 pub fn request_osc_bytes() -> Vec<u8> {
-    let mut v = Vec::with_capacity(2 + REQUEST_BODY.len() + 1);
+    request_osc_bytes_with_nonce(None)
+}
+
+/// Full request sequence: the body, then the session nonce when there is one.
+pub fn request_osc_bytes_with_nonce(nonce: Option<&str>) -> Vec<u8> {
+    let nonce = nonce.unwrap_or_default().as_bytes();
+    let mut v = Vec::with_capacity(2 + REQUEST_BODY.len() + nonce.len() + 1);
     v.push(0x1b);
     v.push(b']');
     v.extend_from_slice(REQUEST_BODY);
+    v.extend_from_slice(nonce);
     v.push(0x07);
     v
+}
+
+/// The session nonce this process was started with, if any.
+fn session_nonce() -> Option<String> {
+    [NONCE_ENV, NONCE_ENV_LC]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok())
+        .filter(|v| !v.is_empty())
 }
 
 /// Successful host image frame: `FUIGO_WRAP_IMG\n<mime>\n<base64>`.
@@ -81,7 +102,7 @@ fn maybe_request_wrap_host_image_with(
 fn write_request_osc() -> std::io::Result<()> {
     use std::io::Write;
     fuigo_shell::util::with_locked_stderr(|stderr| {
-        stderr.write_all(&request_osc_bytes())?;
+        stderr.write_all(&request_osc_bytes_with_nonce(session_nonce().as_deref()))?;
         stderr.flush()
     })
 }

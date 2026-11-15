@@ -753,4 +753,23 @@ mod tests {
             "Do not store passwords. Use environment variables."
         ));
     }
+
+    /// Review M1: ordinary engineering lines that mention a token or key name are kept; real values are not.
+    #[test]
+    fn variable_references_types_and_field_access_are_not_credentials() {
+        for line in [
+            "GITHUB_TOKEN=$GITHUB_TOKEN",
+            "auth_token: Option<String>,",
+            "next_page_token = resp.next_page_token",
+        ] {
+            assert!(is_safe_memory(line), "{line:?} was dropped");
+        }
+        for line in [
+            "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "api_token = Zk3j9QxV7mPq2LwR8sTn",
+            "db_password = hunter2hunter2",
+        ] {
+            assert!(!is_safe_memory(line), "{line:?} was kept");
+        }
+    }
 }

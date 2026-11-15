@@ -148,6 +148,7 @@ fn repo_paths_that_differ_only_in_edge_whitespace_or_odd_bytes_stay_distinct() {
     assert!(!DisabledHooks::from_file(&file, false).blocks(&spaced));
 }
 
+#[cfg(unix)]
 #[test]
 fn the_scope_encoding_is_injective_for_odd_bytes_and_keeps_the_old_form() {
     use std::os::unix::ffi::OsStrExt;

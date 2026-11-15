@@ -93,14 +93,16 @@ pub(crate) fn execute(
     match effect {
         Effect::RegisterActiveSession { session_id, cwd } => {
             crate::app::signal_handler::set_current_session_id(Some(session_id.clone()));
-            if let Err(e) = fuigo_active_sessions::register(fuigo_active_sessions::ActiveSession {
-                session_id,
-                pid: std::process::id(),
-                cwd,
-                opened_at: chrono::Utc::now(),
-            }) {
-                tracing::warn!(?e, "Failed to register active session");
-            }
+            register_active_session_best_effort_in(
+                &fuigo_config::fuigo_home(),
+                fuigo_active_sessions::ActiveSession {
+                    session_id,
+                    pid: std::process::id(),
+                    cwd,
+                    opened_at: chrono::Utc::now(),
+                    start_time: None,
+                },
+            );
         }
         Effect::UnregisterActiveSession { session_id } => {
             crate::app::signal_handler::set_current_session_id(None);

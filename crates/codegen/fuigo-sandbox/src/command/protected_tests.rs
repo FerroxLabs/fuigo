@@ -64,6 +64,9 @@ fn protected_table_is_pinned() {
         "/opt/ws-fixture/ws/.claude",
         "/opt/ws-fixture/ws/.vscode",
         "/opt/ws-fixture/ws/.idea",
+        // the MCP server configs the daemon starts servers from, hot-reloaded
+        "/opt/ws-fixture/ws/.mcp.json",
+        "/opt/ws-fixture/ws/.claude.json",
         // the top-level git directory
         "/opt/ws-fixture/ws/.git/hooks",
         "/opt/ws-fixture/ws/.git/config",
@@ -1486,4 +1489,17 @@ fn protected_entries_round_trip_through_serde() {
     assert!(text.contains("\"kind\":\"tree_except\""), "{text}");
     let back: Vec<Protected> = serde_json::from_str(&text).unwrap();
     assert_eq!(entries, back);
+}
+
+/// A missing workspace `.mcp.json` and `.claude.json` are pinned, so a confined command cannot
+/// create them: the daemon hot-reloads both and starts what they name outside the sandbox.
+#[test]
+fn workspace_mcp_configs_are_protected_even_when_absent() {
+    let ws = Path::new("/opt/ws-fixture/ws");
+    let fuigo_home = Path::new("/opt/ws-fixture/u/.fuigo");
+    let home = Path::new("/opt/ws-fixture/u");
+    let got = floor(&inputs(&ServedRoot::pin(ws), fuigo_home, home));
+    assert!(is_protected(&ws.join(".mcp.json"), &got));
+    assert!(is_protected(&ws.join(".claude.json"), &got));
+    assert!(!is_protected(&ws.join("src/main.rs"), &got));
 }

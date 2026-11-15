@@ -269,19 +269,14 @@ fn server_sandbox_profile(cwd: &std::path::Path) -> fuigo_sandbox::ProfileName {
             let parsed = val
                 .parse::<ProfileName>()
                 .expect("ProfileName::from_str is infallible");
-            let selected = if parsed == ProfileName::Minimal {
+            // A custom profile resolves as it does in the main binary (user-global, then project); it is
+            // never swapped for `workspace`, which would drop its deny list and read-only launch folder.
+            if parsed == ProfileName::Minimal {
                 parsed
                     .selected(&fuigo_sandbox::load_sandbox_config(cwd))
                     .into_owned()
             } else {
                 parsed
-            };
-            if matches!(selected, ProfileName::Custom(_)) {
-                tracing::warn!(value = %val,
-                        "Unrecognized FUIGO_SANDBOX_PROFILE, defaulting to workspace");
-                ProfileName::Workspace
-            } else {
-                selected
             }
         }
         None if fuigo_sandbox::trust_bwrap_marker_for_devbox() => ProfileName::Devbox,
@@ -289,12 +284,40 @@ fn server_sandbox_profile(cwd: &std::path::Path) -> fuigo_sandbox::ProfileName {
     }
 }
 
+/// Whether the server must not run without this profile applied: the built-in `minimal` and any profile that
+/// makes the launch folder read-only (`workspace_write = false`). Others warn loudly instead of refusing.
+fn profile_requires_boundary(profile: &fuigo_sandbox::ProfileName, cwd: &std::path::Path) -> bool {
+    *profile == fuigo_sandbox::ProfileName::Minimal
+        || profile.denies_workspace_write(&fuigo_sandbox::load_sandbox_config(cwd))
+}
+
+/// What a failed sandbox apply means: refusal where the boundary is required, otherwise a stderr warning
+/// (not only a log line) that the server continues without it.
+fn sandbox_apply_failure(
+    profile_name: &str,
+    refuse: bool,
+    error: &dyn std::fmt::Display,
+) -> anyhow::Result<()> {
+    if refuse {
+        anyhow::bail!(
+            "could not apply the '{profile_name}' sandbox: {error}; refusing to start with its protections missing"
+        );
+    }
+    fuigo_tty_utils::cli_eprintln!(
+        "WARNING: could not apply the '{}' sandbox: {}; the workspace server is running WITHOUT it",
+        fuigo_tty_utils::untrusted(&profile_name),
+        fuigo_tty_utils::untrusted(&error)
+    );
+    tracing::warn!(error = %error, "Sandbox apply returned error, continuing unsandboxed");
+    Ok(())
+}
+
 /// Prepare the subtractive boundary before daemonization and the async runtime.
 #[cfg(all(target_os = "linux", feature = "sandbox-enforce"))]
 fn prepare_workspace_boundary(cwd: &std::path::Path) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt;
     let profile = server_sandbox_profile(cwd);
-    if profile != fuigo_sandbox::ProfileName::Minimal {
+    if !profile_requires_boundary(&profile, cwd) {
         return Ok(());
     }
     if !fuigo_sandbox::is_inside_bwrap() {
@@ -350,8 +373,8 @@ fn main() -> anyhow::Result<()> {
     prepare_workspace_boundary(&cwd)?;
     #[cfg(all(target_os = "linux", not(feature = "sandbox-enforce")))]
     anyhow::ensure!(
-        server_sandbox_profile(&cwd) != fuigo_sandbox::ProfileName::Minimal,
-        "the 'minimal' sandbox requires a build with sandbox-enforce; refusing to start with its protections missing"
+        !profile_requires_boundary(&server_sandbox_profile(&cwd), &cwd),
+        "this sandbox profile requires a build with sandbox-enforce; refusing to start with its protections missing"
     );
     let oom_protection = fuigo_tty_utils::protect_from_oom_kill();
     let _pidfile_guard = if args.daemonize {
@@ -452,19 +475,20 @@ async fn run(
                 feature = "sandbox-enforce",
                 any(target_os = "linux", target_os = "macos")
             ))]
-            let requires_boundary = profile == ProfileName::Minimal;
+            let requires_boundary = profile_requires_boundary(&profile, &cwd);
             let mut sandbox = SandboxManager::new(profile, &cwd);
             if let Err(e) = sandbox.apply(&cwd) {
                 #[cfg(all(
                     feature = "sandbox-enforce",
                     any(target_os = "linux", target_os = "macos")
                 ))]
-                if requires_boundary {
-                    anyhow::bail!(
-                        "could not apply the '{profile_name}' sandbox: {e}; refusing to start with its protections missing"
-                    );
-                }
-                tracing::warn!(error = %e, "Sandbox apply returned error, continuing unsandboxed");
+                let refuse = requires_boundary;
+                #[cfg(not(all(
+                    feature = "sandbox-enforce",
+                    any(target_os = "linux", target_os = "macos")
+                )))]
+                let refuse = false;
+                sandbox_apply_failure(&profile_name, refuse, &e)?;
             } else if !sandbox.is_applied() {
                 tracing::warn!("Sandbox could not be applied (unsupported platform)");
             }
@@ -682,40 +706,58 @@ mod tests {
         let Ok(expected) = std::env::var("FUIGO_SERVER_PROFILE_TEST") else {
             return;
         };
+        let cwd = std::env::current_dir().unwrap();
+        let profile = server_sandbox_profile(&cwd);
+        assert_eq!(profile.to_string(), expected);
         assert_eq!(
-            server_sandbox_profile(&std::env::current_dir().unwrap()).to_string(),
-            expected
+            profile_requires_boundary(&profile, &cwd).to_string(),
+            std::env::var("FUIGO_SERVER_REQUIRES_BOUNDARY").unwrap()
         );
         println!("SERVER_PROFILE_CHECKED");
     }
 
     #[test]
-    fn custom_server_profiles_keep_workspace_fallback() {
+    fn custom_server_profiles_resolve_as_the_main_binary_does() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("state");
         let workspace = root.path().join("workspace");
         std::fs::create_dir(&home).unwrap();
         std::fs::create_dir_all(workspace.join(".fuigo")).unwrap();
-        for (profile, global, project, expected) in [
+        for (profile, global, project, expected, requires_boundary) in [
+            // a custom profile is kept, not swapped for `workspace`
             (
                 "mine",
                 "",
                 "[profiles.mine]\nextends = \"strict\"\n",
-                "workspace",
+                "mine",
+                false,
             ),
+            // one that makes the launch folder read-only must be refused if it cannot apply
+            (
+                "mine",
+                "",
+                "[profiles.mine]\nextends = \"strict\"\nworkspace_write = false\n",
+                "mine",
+                true,
+            ),
+            // a user-global `minimal` shadows the built-in and keeps its own `workspace_write`
             (
                 "minimal",
                 "[profiles.minimal]\nextends = \"strict\"\nworkspace_write = false\n",
                 "",
-                "workspace",
+                "minimal",
+                true,
             ),
             (
                 "minimal",
                 "",
                 "[profiles.minimal]\nextends = \"devbox\"\n",
                 "minimal",
+                true,
             ),
-            ("minimal", "", "", "minimal"),
+            ("minimal", "", "", "minimal", true),
+            // built-in names fold case
+            ("Strict", "", "[profiles.Strict]\nextends = \"devbox\"\n", "strict", false),
         ] {
             std::fs::write(home.join("sandbox.toml"), global).unwrap();
             std::fs::write(workspace.join(".fuigo/sandbox.toml"), project).unwrap();
@@ -729,6 +771,7 @@ mod tests {
                 .env("FUIGO_HOME", &home)
                 .env("FUIGO_SANDBOX_PROFILE", profile)
                 .env("FUIGO_SERVER_PROFILE_TEST", expected)
+                .env("FUIGO_SERVER_REQUIRES_BOUNDARY", requires_boundary.to_string())
                 .output()
                 .unwrap();
             assert!(output.status.success(), "{output:?}");
@@ -1340,5 +1383,14 @@ mod tests {
         assert!(tracker.snapshot().idle_since_ms.is_none());
         sink.note_preview_status_activity();
         assert!(tracker.snapshot().idle_since_ms.is_none());
+    }
+
+    /// A failed apply refuses where the boundary is required and otherwise only warns and goes on.
+    #[test]
+    fn a_failed_sandbox_apply_refuses_only_where_the_boundary_is_required() {
+        let error = anyhow::anyhow!("no bwrap");
+        let refused = sandbox_apply_failure("minimal", true, &error).unwrap_err();
+        assert!(refused.to_string().contains("refusing to start"), "{refused}");
+        sandbox_apply_failure("strict", false, &error).expect("warn and continue");
     }
 }

@@ -994,13 +994,19 @@ impl JsonlStorageAdapter {
         update: &super::SessionUpdate,
         durability: AppendDurability,
     ) -> Result<(), super::AppendUpdateError> {
-        self.append_update_to_file(
-            self.owner(info).map_err(super::AppendUpdateError::NotCommitted)?,
-            self.updates_file(info),
-            update,
-            durability,
-        )
+        let w = self.owner(info).map_err(super::AppendUpdateError::NotCommitted)?;
+        self.append_update_to_file(w.clone(), self.updates_file(info), update, durability)
             .await?;
+        if matches!(durability, AppendDurability::Durable) {
+            // A durable update is a turn boundary (turn completed, activation): flush the chat history it describes
+            // with it, one flush per boundary and none per message, so a power loss cannot leave a durable boundary over
+            // chat lines that never reached the disk (audit S12-F5). Best effort: the update itself is committed.
+            if let Err(error) = Self::sync_file_path_durable(w, self.chat_file(info)).await
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                tracing::warn!(%error, "could not flush chat_history.jsonl at a turn boundary");
+            }
+        }
         self.apply_summary_patch(
             info,
             super::summary_write::SummaryPatch {
@@ -2122,6 +2128,9 @@ impl StorageAdapter for JsonlStorageAdapter {
             compaction_witness::recover_unapplied_compaction(&self.session_dir(info))
         {
             chat_history = recovered.history;
+            // The same repair the normal reader applies: an invalid image appended after the compaction must not
+            // reject every request of the resumed run (audit S12-F4).
+            strip_invalid_images(&mut chat_history);
             skipped_chat_lines = recovered.skipped_lines;
         }
         let plan_state = self.read_optional_json_sync::<TodoState>(&self.plan_file(info))?;

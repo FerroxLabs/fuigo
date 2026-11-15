@@ -42,6 +42,55 @@ pub(crate) fn mcp_server_name(s: &acp::McpServer) -> &str {
     }
 }
 
+/// An argument with a per-run number (a fresh port, a pid) replaced by `#`, so a server launched with a new port each
+/// time keeps one fingerprint (review L9). Only a value that is clearly such a number counts: the whole argument, a
+/// `--flag=` value, or the port of a `host:port` (optionally followed by a path), each of four or more digits. Digits
+/// anywhere else, such as in a script path or name (`server-2025.js`), are part of the program (delta review D2-06).
+fn stable_arg(arg: &str) -> String {
+    let per_run = |s: &str| s.len() >= 4 && s.bytes().all(|b| b.is_ascii_digit());
+    if per_run(arg) {
+        return "#".to_owned();
+    }
+    if let Some((flag, value)) = arg.split_once('=')
+        && flag.starts_with('-')
+        && per_run(value)
+    {
+        return format!("{flag}=#");
+    }
+    if let Some((host, rest)) = arg.rsplit_once(':') {
+        let (port, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+        if !host.is_empty() && per_run(port) {
+            return format!("{host}:#{path}");
+        }
+    }
+    arg.to_owned()
+}
+
+/// Audit S6-F4: a fingerprint of what an MCP server definition runs or reaches: its transport, then the command and its
+/// arguments (per-run numbers such as ports ignored, see [`stable_arg`]), or the URL's origin. Recorded with an "always allow" grant so a different definition under the granted
+/// name is noticed. A digest, so the grant file stores no arguments or URLs. `None` for a transport it does not know.
+pub(crate) fn mcp_definition_fingerprint(s: &acp::McpServer) -> Option<String> {
+    use sha2::Digest as _;
+    let target = match s {
+        acp::McpServer::Stdio(acp::McpServerStdio { command, args, .. }) => {
+            let mut target = command.to_string_lossy().into_owned();
+            for arg in args {
+                target.push('\0');
+                target.push_str(&stable_arg(arg));
+            }
+            target
+        }
+        acp::McpServer::Http(acp::McpServerHttp { url, .. })
+        | acp::McpServer::Sse(acp::McpServerSse { url, .. }) => url::Url::parse(url)
+            .map(|parsed| parsed.origin().ascii_serialization())
+            .unwrap_or_else(|_| url.clone()),
+        // TODO(acp-0.10): `McpServer` is #[non_exhaustive].
+        _ => return None,
+    };
+    let transport = crate::session::mcp_servers::mcp_transport_str(s);
+    Some(format!("{:x}", sha2::Sha256::digest(format!("{transport}\0{target}").as_bytes())))
+}
+
 /// Merge/discovery map key: server NAME is the sole merge identity (two names sharing one URL are distinct servers).
 /// Every name-keyed map in this module must derive its key through this helper so merge and discovery keying cannot desynchronize.
 fn mcp_merge_key(s: &acp::McpServer) -> String {
@@ -120,7 +169,13 @@ pub(crate) fn admit_client_mcp_servers(
     compat: &fuigo_tools::types::compat::CompatConfig,
 ) -> Vec<acp::McpServer> {
     let entries = client_mcp_servers.into_iter().map(|s| (s, None)).collect();
-    admit_client_mcp_servers_tracked(entries, &vendor_blocked_keys(cwd, compat), &disk_mcp_definitions(cwd, compat)).0
+    admit_client_mcp_servers_tracked(
+        entries,
+        &vendor_blocked_keys(cwd, compat),
+        &disk_mcp_definitions(cwd, compat),
+        untrusted_project_names(cwd).as_ref(),
+    )
+    .0
 }
 
 /// A session's hot-reload seed: the client's servers as admitted at ingress, each with the disk definition it is a
@@ -180,7 +235,12 @@ pub(crate) fn admit_client_mcp_servers_for_seed(
     plugin_registry: Option<&fuigo_agent::plugins::PluginRegistry>,
 ) -> AdmittedClientServers {
     let entries = client_mcp_servers.into_iter().map(|s| (s, None)).collect();
-    let (admitted, copies) = admit_client_mcp_servers_tracked(entries, &vendor_blocked_keys(cwd, compat), &disk_mcp_definitions(cwd, compat));
+    let (admitted, copies) = admit_client_mcp_servers_tracked(
+        entries,
+        &vendor_blocked_keys(cwd, compat),
+        &disk_mcp_definitions(cwd, compat),
+        untrusted_project_names(cwd).as_ref(),
+    );
     let seed = ClientMcpSeed { entries: admitted.into_iter().zip(copies).collect() };
     let merged = merge_managed_mcp_servers(seed.clone(), cwd, plugin_registry, compat);
     AdmittedClientServers { seed, merged }
@@ -264,6 +324,7 @@ fn admit_client_mcp_servers_tracked(
     entries: Vec<(acp::McpServer, Option<String>)>,
     blocked: &std::collections::HashSet<String>,
     disk: &DiskMcpDefinitions,
+    untrusted_project: Option<&std::collections::HashSet<String>>,
 ) -> (Vec<acp::McpServer>, Vec<Option<String>>) {
     let unblocked = |s: &acp::McpServer| blocked.is_empty() || !blocked.contains(&mcp_vendor_block_key(s));
     // Block by the raw name first: a vendor entry is matched on what the client sent, not on the projected name.
@@ -284,9 +345,38 @@ fn admit_client_mcp_servers_tracked(
                 None => refuse_saved_key_in_server(s, "supplied by the ACP client").map(|s| (s, None)),
             },
         })
+        // Audit 1.0.44 S6-F1 (review r1/r2): in an untrusted folder, a client server that is not a marked copy and is
+        // named like a project-declared server (either spelling) is dropped before names are normalised; otherwise
+        // it would arrive renamed (`proj-srv-2`), past every later name check. Marked copies stay (in the seed too):
+        // the merge holds them back by provenance while the folder is untrusted, and a trust grant brings them back.
+        .filter(|(s, copy_of)| {
+            let name = mcp_server_name(s);
+            let collides = copy_of.is_none()
+                && untrusted_project.is_some_and(|project| {
+                    project.contains(name) || project.contains(&fuigo_mcp::servers::sanitize_mcp_server_name(name))
+                });
+            if collides {
+                tracing::warn!(server = %name, "folder untrusted: skipping a client MCP server named like a repo-local one");
+            }
+            !collides
+        })
         .collect();
     let (servers, copies): (Vec<_>, Vec<_>) = admitted.into_iter().unzip();
     (normalize_client_mcp_server_names(servers), copies)
+}
+
+/// In an untrusted folder, every spelling (as declared and sanitised) of the project-declared MCP names; `None` when
+/// the folder is trusted or declares none. See [`admit_client_mcp_servers_tracked`].
+fn untrusted_project_names(cwd: &std::path::Path) -> Option<std::collections::HashSet<String>> {
+    if crate::agent::folder_trust::project_scope_allowed(cwd) {
+        return None;
+    }
+    let project = crate::agent::folder_trust::project_scoped_mcp_names(cwd);
+    if project.is_empty() {
+        return None;
+    }
+    let sanitized: Vec<String> = project.iter().map(|n| fuigo_mcp::servers::sanitize_mcp_server_name(n)).collect();
+    Some(project.into_iter().chain(sanitized).collect())
 }
 
 /// The vendor kill-switch keys (see [`mcp_vendor_block_key`]) of every disk server of a vendor whose `mcps` switch is off.
@@ -381,8 +471,32 @@ pub(crate) fn merge_managed_mcp_servers_with_policy(
     // and is dropped once that name is gone from disk. In the client's order, so the last of two same-named servers wins.
     let disk = disk_mcp_definitions(cwd, compat);
     let blocked = vendor_blocked_keys(cwd, compat);
-    let (admitted, _) = admit_client_mcp_servers_tracked(client_mcp_servers.into().entries, &blocked, &disk);
-    for server in admitted {
+    let untrusted_project = untrusted_project_names(cwd);
+    let (admitted, copies) =
+        admit_client_mcp_servers_tracked(client_mcp_servers.into().entries, &blocked, &disk, untrusted_project.as_ref());
+    // Audit 1.0.44 S6-F1: decide by provenance, not by name. A forwarded copy of a project-declared definition is that
+    // project definition even when the ingress renamed it (`proj.srv` arrives as `proj-srv`), so an untrusted folder
+    // drops it here; the name-based gate below cannot see through the rename.
+    let untrusted_project_names = (!crate::agent::folder_trust::project_scope_allowed(cwd))
+        .then(|| crate::agent::folder_trust::project_scoped_mcp_names(cwd));
+    let disabled = crate::util::config::disabled_mcp_server_names(cwd);
+    for (server, copy_of) in admitted.into_iter().zip(copies) {
+        // Review M-1 (C7-02): the same by provenance for a disabled definition, an unapproved campaign stdio server
+        // included: a forwarded copy the ingress renamed (`acme.tools` as `acme-tools`) is that definition.
+        if let Some(disk_name) = &copy_of
+            && disabled.contains(disk_name)
+        {
+            continue;
+        }
+        if let (Some(project), Some(disk_name)) = (&untrusted_project_names, &copy_of)
+            && project.contains(disk_name)
+        {
+            tracing::warn!(
+                server = %disk_name,
+                "folder untrusted: skipping a forwarded copy of a repo-local (project-scoped) MCP server"
+            );
+            continue;
+        }
         // P136 (Astra r1 #1): a client server never overwrites a TRUSTED disk definition of its name that it is not a
         // copy of (P141 / Astra r1: a forwarded copy the ingress renamed onto that name included). The user's own definition runs; this also keeps a stale forwarded copy (the seed a hot reload
         // re-merges after the user edited the server) from replacing the edited definition with a scrubbed one.
@@ -406,8 +520,6 @@ pub(crate) fn merge_managed_mcp_servers_with_policy(
         }
         servers.insert(mcp_merge_key(&server), server);
     }
-
-    let disabled = crate::util::config::disabled_mcp_server_names(cwd);
 
     let mut merged: Vec<acp::McpServer> = servers.into_values().collect();
     // This list comes from a HashMap, and the downstream equality checks (`mcp_servers_equal`) are order-sensitive
@@ -1787,6 +1899,101 @@ url = \"https://toml.example.test/mcp\"\n",
         );
     }
 
+
+    /// Audit 1.0.44 S6-F1: the pager forwards every disk MCP definition (no trust filter) in `session/new`; the
+    /// ingress renames a copy whose name needs sanitising (`proj.srv` -> `proj-srv`) and the untrusted-folder gate
+    /// matches raw project names, so the renamed copy must still be dropped in an untrusted folder.
+    #[test]
+    fn a45_untrusted_folder_drops_renamed_forwarded_project_mcp_copy() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
+        fn repo() -> tempfile::TempDir {
+            let cwd = tempfile::tempdir().unwrap();
+            git2::Repository::init(cwd.path()).unwrap();
+            std::fs::write(
+                cwd.path().join(".mcp.json"),
+                r#"{"mcpServers": {"proj.srv": {"url": "https://proj.example.com/mcp"}}}"#,
+            )
+            .unwrap();
+            cwd
+        }
+        let compat = fuigo_tools::types::compat::CompatConfig::default();
+        let is_proj = |s: &acp::McpServer| matches!(mcp_server_name(s), "proj.srv" | "proj-srv");
+
+        let untrusted = repo();
+        crate::agent::folder_trust::record_for_test(untrusted.path(), false);
+        // What the pager forwards in session/new (effects/mod.rs discover_mcp_servers).
+        let forwarded = crate::util::config::load_mcp_servers(untrusted.path(), &compat);
+        let admitted = admit_client_mcp_servers_for_seed(forwarded, untrusted.path(), &compat, None);
+        let names: Vec<String> = admitted.merged.iter().map(|s| mcp_server_name(s).to_string()).collect();
+        assert!(!admitted.merged.iter().any(is_proj), "untrusted folder kept a project MCP server at session/new: {names:?}");
+        // Hot reload re-merges the seed.
+        let reloaded = merge_managed_mcp_servers(admitted.seed.clone(), untrusted.path(), None, &compat);
+        assert!(!reloaded.iter().any(is_proj), "untrusted folder kept a project MCP server on reload");
+
+        // The feature stays: a trusted folder keeps it.
+        let trusted = repo();
+        crate::agent::folder_trust::record_for_test(trusted.path(), true);
+        let forwarded = crate::util::config::load_mcp_servers(trusted.path(), &compat);
+        let admitted = admit_client_mcp_servers_for_seed(forwarded, trusted.path(), &compat, None);
+        assert!(admitted.merged.iter().any(is_proj), "trusted folder must keep its project MCP server");
+    }
+
+    /// Review r1 on S6-F1: a forwarded server named like a project server but differing from the disk definition is not
+    /// marked a copy; with `proj-srv` already taken it arrives as `proj-srv-2`. It must still be dropped.
+    #[test]
+    fn a45_untrusted_folder_drops_differing_project_named_server_renamed_with_suffix() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
+        let compat = fuigo_tools::types::compat::CompatConfig::default();
+        let repo_with = |json: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            git2::Repository::init(dir.path()).unwrap();
+            std::fs::write(dir.path().join(".mcp.json"), json).unwrap();
+            dir
+        };
+        let untrusted = repo_with(r#"{"mcpServers": {"proj.srv": {"url": "https://proj.example.com/mcp"}}}"#);
+        crate::agent::folder_trust::record_for_test(untrusted.path(), false);
+        let differing = repo_with(r#"{"mcpServers": {"proj.srv": {"url": "https://other.example.com/mcp"}}}"#);
+        let occupant = repo_with(r#"{"mcpServers": {"proj-srv": {"url": "https://third.example.com/mcp"}}}"#);
+        let mut forwarded = crate::util::config::load_mcp_servers(occupant.path(), &compat);
+        forwarded.extend(crate::util::config::load_mcp_servers(differing.path(), &compat));
+        assert_eq!(forwarded.len(), 2);
+        let admitted = admit_client_mcp_servers_for_seed(forwarded, untrusted.path(), &compat, None);
+        let names: Vec<String> = admitted.merged.iter().map(|s| mcp_server_name(s).to_string()).collect();
+        assert!(!names.iter().any(|n| n.starts_with("proj")), "untrusted folder kept a project-named server: {names:?}");
+        let reloaded = merge_managed_mcp_servers(admitted.seed.clone(), untrusted.path(), None, &compat);
+        assert!(!reloaded.iter().any(|s| mcp_server_name(s).starts_with("proj")), "kept on reload");
+    }
+
+    /// Review r2 on S6-F1: an untrusted session keeps the pager's forwarded copy of a project server in its seed
+    /// (held back, not started), so a trust grant later in the session brings it back without a restart.
+    #[test]
+    fn a45_untrusted_seed_keeps_a_forwarded_project_copy_for_a_later_trust_grant() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
+        let compat = fuigo_tools::types::compat::CompatConfig::default();
+        let dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        std::fs::write(dir.path().join(".mcp.json"), r#"{"mcpServers": {"proj.srv": {"url": "https://proj.example.com/mcp"}}}"#)
+            .unwrap();
+        crate::agent::folder_trust::record_for_test(dir.path(), false);
+        let forwarded = crate::util::config::load_mcp_servers(dir.path(), &compat);
+        assert_eq!(forwarded.len(), 1);
+        let admitted = admit_client_mcp_servers_for_seed(forwarded, dir.path(), &compat, None);
+        assert!(!admitted.merged.iter().any(|s| mcp_server_name(s).starts_with("proj")), "started while untrusted");
+        assert_eq!(admitted.seed.disk_copy_names().len(), 1, "the forwarded copy left the seed");
+        crate::agent::folder_trust::record_for_test(dir.path(), true);
+        let reloaded = merge_managed_mcp_servers(admitted.seed.clone(), dir.path(), None, &compat);
+        assert!(reloaded.iter().any(|s| mcp_server_name(s).starts_with("proj")), "missing after the trust grant");
+    }
+
     #[test]
     fn load_plugin_mcp_creates_stdio_server_with_env_substitution() {
         let config: crate::util::config::McpConfig = serde_json::from_value(serde_json::json!({
@@ -2255,3 +2462,7 @@ mod p141_tests;
 #[cfg(test)]
 #[path = "managed_mcp_c6_order_tests.rs"]
 mod c6_order_tests;
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[cfg(test)]
+#[path = "managed_mcp_lowsc_tests.rs"]
+mod lowsc_tests;

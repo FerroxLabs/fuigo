@@ -158,6 +158,8 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 # `write_through`'s fault seams, for the worktree-apply replacement tests.
 fuigo-config = { workspace = true, features = ["test-seams"] }
+# Test seam: lets a test make bwrap unavailable (dev-dependency ONLY, resolver 2 keeps it out of shipped builds).
+fuigo-sandbox = { path = "../fuigo-sandbox", default-features = false, features = ["test-bwrap-dirs"] }
 
 [package.metadata.cargo-shear]
 ignored = ["tokio-tungstenite"]

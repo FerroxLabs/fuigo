@@ -467,6 +467,14 @@ test('Windows signing retries once and the Authenticode gate follows every attem
     assert(gate > signing[1][1], 'the Authenticode gate does not follow the retry');
     assert(!/continue-on-error/.test(steps[gate]), 'the Authenticode gate may not swallow a failure');
 });
+test('the publish job starts with a guard that refuses a real publish off a tag or unsigned', () => {
+    const steps = jobs.publish.split(/\n(?= {6}- )/);
+    const first = steps.find(x => /^ {6}- /.test(x));
+    assert(/name: Refuse a real publish/.test(first), 'first publish step is not the release guard');
+    assert(/REF_TYPE: \$\{\{ github\.ref_type \}\}/.test(first) && /MAC_SIGN:/.test(first) && /DRY_RUN:/.test(first), 'guard lacks inputs');
+    assert(/exit 1/.test(first) && /\$REF_TYPE" = tag/.test(first) && /\$MAC_SIGN" = true/.test(first), 'guard does not require a tag and MAC_SIGN');
+    assert(!/uses: actions\/checkout/.test(first), 'guard must come before checkout');
+});
 test('verify-published records digests and github-release compares them with the assets', () => {
     assert(/verify-published-platform\.js[^\n]*\\\n\s*--digest-out /.test(jobs['verify-published']));
     assert(/name: verified-\$\{\{ matrix\.platform \}\}/.test(jobs['verify-published']));
@@ -475,6 +483,81 @@ test('verify-published records digests and github-release compares them with the
     const layout = rel.indexOf('registry-release-inputs.sh'), cmp = rel.indexOf('verify-release-digests.js'),
         create = rel.indexOf('name: Create or complete the release');
     assert(layout > 0 && layout < cmp && cmp < create, 'compare must run after layout and before the release is created');
+});
+
+// audit S8-F6: every action is pinned to a full commit SHA, and a real release (tag push or dry_run == false)
+// never restores a build cache.
+test('every uses: in release.yml is pinned to a 40-hex commit SHA', () => {
+    const uses = [...wf.matchAll(/^\s*(?:- )?uses: (\S+)/gm)].map(m => m[1]);
+    assert(uses.length > 10, `found only ${uses.length} uses: lines`);
+    for (const u of uses) assert(/@[0-9a-f]{40}$/.test(u), `action is not pinned to a commit SHA: ${u}`);
+});
+// Reviewed table of action -> commit SHA (each resolved as a commit, not a tag object, through the GitHub API).
+// A pin that is 40 hex but not in this table (an annotated tag object, a typo) fails. Update it on review.
+const REVIEWED_ACTION_COMMITS = {
+    'actions/checkout': ['11d5960a326750d5838078e36cf38b85af677262'],
+    'actions/download-artifact': ['d3f86a106a0bac45b974a628896c90dbdf5c8093'],
+    'actions/setup-node': ['49933ea5288caeca8642d1e84afbd3f7d6820020'],
+    'actions/upload-artifact': ['ea165f8d65b6e75b540449e92b4886f43607fa02'],
+    'azure/artifact-signing-action': ['c7ab2a863ab5f9a846ddb8265964877ef296ee82'],
+    'azure/login': ['f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca'],
+    'dtolnay/rust-toolchain': ['b725eda525362e7cf34af9a7243cac1e3f01a7ec'],
+    'Swatinem/rust-cache': ['d1527c8f67ef9af357290475d4af4b0fab8f12e0'],
+};
+function unreviewedPins(text) {
+    const bad = [];
+    for (const m of text.matchAll(/^\s*(?:- )?uses: ([^@\s]+)@([0-9a-f]{40})\b/gm)) {
+        const ok = REVIEWED_ACTION_COMMITS[m[1]];
+        if (!ok || !ok.includes(m[2])) bad.push(`${m[1]}@${m[2]}`);
+    }
+    return bad;
+}
+test('every pinned action matches the reviewed action-to-commit table', () => {
+    assert.deepEqual(unreviewedPins(wf), []);
+});
+test('the reviewed-pin check rejects the annotated tag object that once stood for rust-cache', () => {
+    const old = 'Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c';
+    assert.deepEqual(unreviewedPins(`      - uses: ${old} # v2.9.3\n`), [old]);
+});
+test('the build job restores no target cache on a tag push or a real dispatch', () => {
+    const steps = jobs.build.split(/\n(?= {6}- )/).filter(st => /Swatinem\/rust-cache@/.test(st));
+    assert.equal(steps.length, 1, 'expected exactly one cache step in the build job');
+    const cond = /^ {8}if: (.*)$/m.exec(steps[0]);
+    assert(cond, 'the cache step is unconditional');
+    assert.equal(cond[1], "github.event_name == 'workflow_dispatch' && inputs.dry_run",
+        `cache condition does not exclude real releases: ${cond[1]}`);
+});
+
+// audit S8-F7: the published packages' registry signatures and provenance attestations are checked after publish,
+// on real releases only, without touching what or how anything is published.
+test('verify-published runs npm audit signatures on the installed packages and only on a real release', () => {
+    const job = jobs['verify-published'];
+    assert(/^ {4}if: github\.event_name == 'push' \|\| inputs\.dry_run == false$/m.test(job), 'verify-published runs on a dry run');
+    const steps = job.split(/\n(?= {6}- )/).filter(st => /^\s+npm audit signatures\s*$/m.test(st));
+    assert.equal(steps.length, 1, 'expected exactly one npm audit signatures step in verify-published');
+    assert(!/^ {8}if:/m.test(steps[0]) || !/dry_run/.test(steps[0]), 'the step carries its own dry-run condition');
+    assert(/npm install[^\n]*--ignore-scripts[^\n]*fuigo@/.test(steps[0]), 'it must install the just-published meta package without running scripts');
+    assert(!/npm publish|npm dist-tag/.test(steps[0]), 'the audit step must not publish or tag');
+    // audit review L1: one check covers the published packages; the other platforms (unrehearsed on Windows) skip it.
+    assert(/^ {8}if: matrix\.platform == 'linux-x64'\s*$/m.test(steps[0]), 'the audit step must run on the linux-x64 entry only');
+    for (const [n, body] of Object.entries(jobs)) {
+        if (n !== 'verify-published') assert(!/^\s+npm audit signatures\s*$/m.test(body), `${n} runs npm audit signatures`);
+    }
+});
+
+// audit S8-F5: the runbook must describe the pipeline that exists.
+test('RELEASE.md does not contradict the code on SHA256SUMS, signing or the update CDN', () => {
+    const doc = fs.readFileSync(path.join(REPO_ROOT, 'RELEASE.md'), 'utf8');
+    const updater = fs.readFileSync(path.join(REPO_ROOT, 'crates/codegen/fuigo-update/src/auto_update.rs'), 'utf8');
+    if (/fn verify_gh_asset\b/.test(updater)) {
+        assert(!/does not check SHA256SUMS/i.test(doc), 'RELEASE.md says the installer does not check SHA256SUMS');
+    }
+    if (/Developer ID/.test(wf) && /artifact-signing-action@/.test(wf)) {
+        assert(!/only the linker's ad-hoc signature/i.test(doc), 'RELEASE.md says raw binaries are only ad-hoc signed');
+        assert(!/linker already applies an ad-hoc signature/i.test(doc), 'RELEASE.md describes ad-hoc signing as the release posture');
+    }
+    assert(!/update CDN/i.test(doc), 'RELEASE.md refers to an update CDN that does not exist');
+    assert(!/the build job's binary/i.test(doc), 'RELEASE.md says release assets come from the build job');
 });
 
 for (const d of tmpDirs) fs.rmSync(d, {recursive: true, force: true});

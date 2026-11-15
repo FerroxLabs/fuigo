@@ -294,11 +294,17 @@ pub(crate) fn filter_untrusted_project_mcp(
         return merged;
     }
     let project = project_scoped_mcp_names(cwd);
+    // Audit 1.0.44 S6-F1: a client copy of a project server can arrive under its sanitised name (`proj.srv` as
+    // `proj-srv`), so a collision is judged on both spellings.
+    let sanitized: HashSet<String> = project
+        .iter()
+        .map(|n| fuigo_mcp::servers::sanitize_mcp_server_name(n))
+        .collect();
     merged
         .into_iter()
         .filter(|server| {
             let name = mcp_server_name(server);
-            if project.contains(name) {
+            if project.contains(name) || sanitized.contains(name) {
                 tracing::warn!(
                     server = %name,
                     "folder untrusted: skipping repo-local (project-scoped) MCP server"
@@ -312,7 +318,7 @@ pub(crate) fn filter_untrusted_project_mcp(
 }
 
 /// Drop repo-local (project-scoped) LSP servers from a sourced LSP map when `cwd`'s workspace is untrusted.
-/// Mirrors the MCP session gate; user- and plugin-scoped servers are retained.
+/// Audit X2-F3: an untrusted folder starts no language server (user- and plugin-scoped ones included).
 /// No-op when project scope is allowed.
 ///
 /// Thin cwd-to-verdict wrapper over the shared [`fuigo_tools::implementations::lsp::config::filter_project_lsp_when_untrusted`] predicate.
@@ -328,10 +334,14 @@ pub(crate) fn filter_untrusted_project_lsp(
     >,
 ) -> std::collections::BTreeMap<String, fuigo_tools::implementations::lsp::config::LspServerConfig>
 {
-    fuigo_tools::implementations::lsp::config::filter_project_lsp_when_untrusted(
-        sourced,
-        project_scope_allowed(cwd),
-    )
+    let allowed = project_scope_allowed(cwd);
+    if !allowed && !sourced.is_empty() {
+        // Audit X2-F3: one visible line, not a refusal; the folder's own trust decision turns it back on.
+        fuigo_tty_utils::cli_eprintln!(
+            "Code intelligence (language servers) is off until this folder is trusted."
+        );
+    }
+    fuigo_tools::implementations::lsp::config::filter_project_lsp_when_untrusted(sourced, allowed)
 }
 
 #[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
@@ -1088,14 +1098,12 @@ mod tests {
             m
         }
 
-        // Untrusted workspace: only the project-scoped server is dropped.
+        // Untrusted workspace: every server is dropped (audit X2-F3).
         // `repo_tmp` git-inits so `workspace_key` yields a unique per-dir key even when `$TMPDIR` itself lives inside a git checkout
         let untrusted = repo_tmp();
         record_for_test(untrusted.path(), false);
         let kept = filter_untrusted_project_lsp(untrusted.path(), sourced());
-        assert_eq!(kept.len(), 1);
-        assert!(kept.contains_key("usr"));
-        assert!(!kept.contains_key("proj"));
+        assert!(kept.is_empty(), "audit X2-F3: user-scoped servers are not started either");
 
         // Trusted workspace (a different temp-dir key): both are retained.
         let trusted = repo_tmp();

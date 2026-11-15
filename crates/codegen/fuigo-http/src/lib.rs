@@ -342,12 +342,15 @@ pub fn shared_upload_client() -> reqwest::Client {
     static UPLOAD_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     UPLOAD_CLIENT
         .get_or_init(|| {
+            let user_agent = process_user_agent_string();
+            // Signed-URL requests that go through the address-checked client send the same User-Agent.
+            fuigo_file_utils::storage_client::set_signed_url_user_agent(&user_agent);
             fuigo_extra_ca::build_reqwest_client(|builder| {
                 builder
                     .http1_only()
                     .pool_max_idle_per_host(2)
                     .pool_idle_timeout(std::time::Duration::from_secs(10))
-                    .user_agent(process_user_agent_string())
+                    .user_agent(user_agent.clone())
             })
             .expect("failed to build shared upload HTTP client")
         })
@@ -995,5 +998,17 @@ mod tests {
             2,
             "stops at the first success"
         );
+    }
+}
+
+#[cfg(test)]
+mod signed_url_user_agent_tests {
+    /// Fable delta-2 Low 5: building the upload client records its User-Agent, which the address-checked signed-URL
+    /// client then sends too.
+    #[test]
+    fn the_upload_client_records_its_user_agent_for_signed_urls() {
+        let _ = super::shared_upload_client();
+        let expected = super::process_user_agent_string();
+        assert_eq!(fuigo_file_utils::storage_client::signed_url_user_agent(), Some(expected.as_str()));
     }
 }

@@ -1614,9 +1614,7 @@ impl SessionActor {
                     if objects.is_empty() {
                         json!({ "raw": call.function.arguments.clone() })
                     } else {
-                        let best_match = objects[0].clone();
-                        let mut selected_index = 0;
-                        let mut matched_tool = false;
+                        let mut first_match = None;
                         let bridge = self.agent.borrow().tool_bridge().clone();
                         for (idx, obj) in objects.iter().enumerate() {
                             if bridge
@@ -1624,11 +1622,16 @@ impl SessionActor {
                                 .await
                                 .is_ok()
                             {
-                                selected_index = idx;
-                                matched_tool = true;
+                                first_match = Some(idx);
                                 break;
                             }
                         }
+                        let matched_tool = first_match.is_some();
+                        let (selected_index, best_match) =
+                            crate::session::helpers::tool_input_parsing::select_concatenated_object(
+                                &objects,
+                                first_match,
+                            );
                         tracing::warn!(
                             tool_name = %call.function.name,
                             call_id = %call.id,
@@ -1891,6 +1894,24 @@ impl SessionActor {
                     .get()
                     .map(|cwd| std::path::PathBuf::from(cwd.as_str())),
             });
+            // Audit S6-F4: the definition of the MCP server the call goes to, for the grant's definition check. Read here,
+            // so the MCP state lock is not held while the permission check runs.
+            let mcp_definition = match &access_kind {
+                fuigo_workspace::permission::AccessKind::MCPTool { name, .. } => {
+                    match crate::session::mcp_servers::parse_mcp_tool_name(name) {
+                        Some((server, _)) => self
+                            .mcp_state
+                            .lock()
+                            .await
+                            .configs
+                            .iter()
+                            .find(|s| crate::session::managed_mcp::mcp_server_name(s) == server)
+                            .and_then(crate::session::managed_mcp::mcp_definition_fingerprint),
+                        None => None,
+                    }
+                }
+                _ => None,
+            };
             let resolution = {
                 let _pending_guard =
                     crate::session::pending_interaction::PendingInteractionGuard::new(
@@ -1910,11 +1931,24 @@ impl SessionActor {
                         // P174: every file a multi-file read reads, judged as a Read each.
                         read_targets: fuigo_workspace::permission::read_targets_for(&tool_input),
                         peer_note: None,
+                        mcp_definition,
+                        // Audit S3-F2: where a persistent shell will really start the command (its tracked directory).
+                        shell_run_dir: if matches!(access_kind, fuigo_workspace::permission::AccessKind::Bash(_)) {
+                            self.rebuild_spec.terminal_backend.get_shell_cwd().await
+                        } else {
+                            None
+                        },
                         // u35 g11 (Astra r10 High): the directory the bash tool really runs the command in.
                         exec_cwd: fuigo_workspace::permission::bash_exec_cwd_for(
                             &tool_input,
                             std::path::Path::new(self.session_info.cwd.as_str()),
                         ),
+                        // Audit X2-F1: a Task child is judged in its parent's launch folder too.
+                        parent_run_dir: self
+                            .startup_hints
+                            .parent_cwd
+                            .clone()
+                            .filter(|_| self.startup_hints.is_subagent),
                         ..PermissionRequest::new(access_kind.clone(), tool_call_update)
                     })
                     .await

@@ -17,6 +17,9 @@ use crate::theme::system_appearance::SystemAppearance;
 use crate::wrap_filter::Osc52Filter;
 use crate::wrap_restore::ModeTracker;
 
+/// Queued PTY-input chunks before senders block (stdin) or drop (host-image frames); bounds memory (audit S9-F5).
+const WRITE_QUEUE_BOUND: usize = 64;
+
 /// Sets the OSC 52 sink markers and, when known, the local appearance (`LC_*` survives SSH).
 fn apply_wrap_child_env(
     cmd: &mut portable_pty::CommandBuilder,
@@ -43,6 +46,14 @@ fn apply_wrap_child_env(
         cmd.env("FUIGO_APPEARANCE", value);
         cmd.env("LC_FUIGO_APPEARANCE", value);
     }
+}
+
+/// Give the wrapped program a fresh per-session nonce (and its `LC_` twin, which an SSH hop forwards).
+fn apply_session_nonce(cmd: &mut portable_pty::CommandBuilder) -> String {
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    cmd.env(crate::wrap_clipboard_image::NONCE_ENV, &nonce);
+    cmd.env(crate::wrap_clipboard_image::NONCE_ENV_LC, &nonce);
+    nonce
 }
 
 /// Run an arbitrary command inside a local PTY with OSC 52 output filtering.
@@ -73,6 +84,8 @@ pub(crate) fn run_wrapped_command(program: &str, args: &[String]) -> Result<i32>
     args.iter().for_each(|arg| cmd.arg(arg));
 
     apply_wrap_child_env(&mut cmd, crate::theme::system_appearance::detect_desktop());
+    // Per-session nonce: only a host-image request that echoes it is answered
+    let nonce = apply_session_nonce(&mut cmd);
 
     // Not session-scoped: this is the wrapped process itself.
     #[allow(clippy::disallowed_methods)]
@@ -123,7 +136,7 @@ pub(crate) fn run_wrapped_command(program: &str, args: &[String]) -> Result<i32>
         }
     }
 
-    let (write_tx, write_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (write_tx, write_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE_BOUND);
     {
         let mut writer = pair.master.take_writer()?;
         std::thread::spawn(move || {
@@ -173,17 +186,21 @@ pub(crate) fn run_wrapped_command(program: &str, args: &[String]) -> Result<i32>
 
     // Output forwarding with OSC 52 filtering: the PTY reader feeds the filter, which feeds stdout
     // Host-image requests spawn a short-lived worker for the clipboard I/O (osascript can take hundreds of ms)
-    // The worker then enqueues the bracketed-paste frame on the writer thread, plus a newline so ICANON slaves deliver it without another key
-    // Paste mashing can spawn multiple workers; fine for a short-lived wrap process
+    // The worker then enqueues the bracketed-paste frame on the writer thread, with no trailing newline
+    // The filter admits one worker at a time, at most one per interval, and the queue to the writer is bounded
     {
         let mut stdout = std::io::stdout().lock();
         let mut filter = Osc52Filter::new()
-            .with_wrap_image_handler(move || {
+            .with_wrap_nonce(nonce)
+            .with_wrap_image_handler(move |ticket| {
                 let tx = write_tx.clone();
                 std::thread::spawn(move || {
-                    let mut bytes = crate::wrap_filter::host_clipboard_image_frame();
-                    bytes.push(b'\n');
-                    let _ = tx.send(bytes);
+                    // The ticket ends the filter's in-flight state when this worker is done (audit S9-F5)
+                    let _ticket = ticket;
+                    // No trailing newline: the frame pastes, it never submits
+                    let bytes = crate::wrap_filter::host_clipboard_image_frame();
+                    // A full queue means the wrapped program is not reading: drop the frame, never block or grow
+                    let _ = tx.try_send(bytes);
                 });
             })
             .with_mode_tracker(Arc::clone(&tracker));
@@ -380,6 +397,20 @@ fn terminate_signal_loop(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wrapped_child_gets_a_session_nonce_and_the_reply_has_no_trailing_newline() {
+        let mut cmd = portable_pty::CommandBuilder::new("true");
+        let nonce = apply_session_nonce(&mut cmd);
+        assert!(nonce.len() >= 32);
+        assert_eq!(env_str(&cmd, "FUIGO_WRAP_NONCE").as_deref(), Some(nonce.as_str()));
+        assert_eq!(env_str(&cmd, "LC_FUIGO_WRAP_NONCE").as_deref(), Some(nonce.as_str()));
+        // Source guard: the reply worker never appends a newline to the frame
+        let source = include_str!("pty_wrap.rs");
+        let worker = &source[source.find("host_clipboard_image_frame()").unwrap()..];
+        let worker = &worker[..worker.find("try_send").unwrap()];
+        assert!(!worker.contains(".push("), "{worker}");
+    }
+
     use super::*;
 
     #[test]

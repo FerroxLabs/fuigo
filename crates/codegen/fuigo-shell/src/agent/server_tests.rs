@@ -211,3 +211,46 @@ fn p82_agent_serve_compares_the_secret_in_constant_time() {
         assert!(flat.contains(pinned), "{pinned}");
     }
 }
+
+/// Audit S10-F2: a failed handshake is answered with 401, but only after the fixed delay.
+#[tokio::test]
+async fn failed_handshake_is_delayed() {
+    let addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+    let start = std::time::Instant::now();
+    let response = super::reject_unauthorized(addr).await;
+    assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    assert!(
+        start.elapsed() >= super::FAILED_AUTH_DELAY,
+        "answered after only {:?}",
+        start.elapsed()
+    );
+}
+
+/// Audit S10-F5: the queue between one WebSocket and the agent has a fixed depth, so a peer that sends faster than
+/// the agent drains waits instead of growing memory.
+#[tokio::test]
+async fn inbound_queue_applies_back_pressure() {
+    let (tx, rx) = mpsc::channel::<String>(super::INBOUND_QUEUE_DEPTH);
+    for i in 0..super::INBOUND_QUEUE_DEPTH {
+        tx.try_send(format!("frame {i}")).expect("room in the queue");
+    }
+    assert!(tx.try_send("one too many".into()).is_err(), "queue must be bounded");
+    drop(rx);
+}
+
+/// Audit S10-F5: source guard. The read task must wait for room (`send(..).await`) rather than use an unbounded queue.
+#[test]
+fn connection_handler_uses_a_bounded_inbound_queue() {
+    let src = include_str!("server.rs");
+    let body = src
+        .split("async fn handle_connection(")
+        .nth(1)
+        .and_then(|rest| rest.split("\nasync fn ").next())
+        .expect("handle_connection body");
+    assert!(
+        !body.contains("(to_agent_tx, to_agent_rx) = mpsc::unbounded_channel"),
+        "inbound queue must be bounded"
+    );
+    assert!(body.contains("mpsc::channel::<String>(INBOUND_QUEUE_DEPTH)"));
+    assert!(!body.contains("to_agent_tx.send(trimmed.to_string()).is_err()"));
+}

@@ -286,6 +286,8 @@ impl SessionWriter {
                         *state = HoldState::Unlockable;
                         return Ok(());
                     }
+                    // Left unattached: the first mutating call retries (audit S12-F1).
+                    Attempt::Transient => return Ok(()),
                     Attempt::Contended => {}
                 }
             }
@@ -373,6 +375,9 @@ impl SessionWriter {
                     *state = HoldState::Unlockable;
                     return Ok(());
                 }
+                // A passing error: this call goes ahead without the hold and the state stays `Unattached`, so the
+                // next mutating call tries again instead of running unlocked for good (audit S12-F1).
+                Attempt::Transient => return Ok(()),
                 Attempt::Contended if std::time::Instant::now() >= retry_until => {
                     tracing::info!(dir = %dir.display(), "session is open in another process; not writing to it");
                     return Err(refused(Refusal::HeldElsewhere));
@@ -693,7 +698,14 @@ impl SessionWriter {
     /// Flush an existing file `rel` to stable storage (a durability barrier, no content change). Never creates the
     /// folder or the file: a missing one is `NotFound`.
     pub fn sync_existing_sync(&self, rel: impl AsRef<Path>) -> io::Result<()> {
-        self.mutate(rel.as_ref(), false, |path| durable::sync_file(&OpenOptions::new().write(true).open(path)?))
+        self.mutate(rel.as_ref(), false, |path| {
+            let result = durable::sync_file(&OpenOptions::new().write(true).open(path)?);
+            #[cfg(any(test, feature = "test-support"))]
+            if result.is_ok() {
+                crate::seams::note_sync(path);
+            }
+            result
+        })
     }
 
     /// [`sync_existing_sync`](Self::sync_existing_sync) on the blocking pool.

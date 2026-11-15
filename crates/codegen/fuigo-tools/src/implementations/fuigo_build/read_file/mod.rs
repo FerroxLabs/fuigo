@@ -77,6 +77,21 @@ pub(crate) async fn read_tool_source(
         fs.read_file(path).await
     }
 }
+/// The refusal for a write or edit whose pre-read hit the source cap (audit S4-F7), else `None`. A FIFO or device is
+/// not refused here: writing one is allowed, and the read only fails to snapshot it.
+pub(crate) fn source_too_large_message(
+    error: &crate::computer::types::ComputerError,
+    file_path: &str,
+    tool: &str,
+) -> Option<String> {
+    use crate::computer::types::ComputerError;
+    matches!(error, ComputerError::IOError(_, Some(std::io::ErrorKind::FileTooLarge))).then(|| {
+        format!(
+            "Error: {file_path} is larger than 256 MB, which is more than {tool} will load. \
+             Edit it with a shell command (sed, patch) instead."
+        )
+    })
+}
 /// P166/S7: whether `.gitignore` refuses a path, judged on BOTH the logical path the model named (before any symlink in
 /// it resolves) and its physical target. Every read and edit tool that honours `.gitignore` goes through this one
 /// check (Grok r4 MEDIUM 5: `search_replace`, the codex and OpenCode reads had the physical check or none).

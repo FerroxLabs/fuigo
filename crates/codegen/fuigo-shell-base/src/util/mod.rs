@@ -199,7 +199,9 @@ impl TrustedApiOrigins {
         if parsed.scheme() != "https" {
             return false;
         }
-        if is_loopback_host(&parsed) {
+        // The one "is this machine" predicate of the service-endpoint class (`localhost.`, `*.localhost`, `0.0.0.0`,
+        // `::`, IPv4-mapped loopback included), so both trust classes refuse the same hosts
+        if fuigo_extra_ca::service_trust::is_local_host(&parsed) {
             return false;
         }
         if is_trusted_cli_chat_proxy_url(url) {
@@ -1024,6 +1026,27 @@ mod tests {
     const TEST_ORIGIN: &str = "https://api.fluxrouter.ai";
     fn init_test_origins() {
         set_trusted_api_origins([TEST_ORIGIN.to_string()]);
+    }
+
+    /// Audit S1-F9: every spelling of "this machine" in the destination-trust policy is refused for the session
+    /// bearer, even when a user-configured origin names it.
+    #[test]
+    fn s1_f9_every_local_spelling_is_refused_as_a_bearer_destination() {
+        for origin in [
+            "https://localhost./",
+            "https://app.localhost/",
+            "https://0.0.0.0/",
+            "https://[::]/",
+            "https://[::ffff:127.0.0.1]/",
+            "https://127.0.0.2/",
+            "https://[::1]/",
+            "https://localhost/",
+        ] {
+            let set = TrustedApiOrigins::new([origin.to_string()]);
+            assert!(!set.is_trusted_fuigo_https_url(origin), "{origin} was admitted");
+        }
+        let set = TrustedApiOrigins::new(["https://gw.example/".to_string()]);
+        assert!(set.is_trusted_fuigo_https_url("https://gw.example/v1"));
     }
 
     /// Two instances resolve independently, in one process, in any order.

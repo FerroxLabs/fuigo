@@ -676,7 +676,7 @@ impl NoticeScope {
         let ScopeNotes { mut notes, more, .. } = open.remove(at);
         if more > 0 {
             notes.push(format!(
-                "{more} more references to {FIRST_PARTY_KEY_ENV_VAR}, the saved API key, were refused and removed; the log lists them."
+                "{more} more notices were not shown; the log lists them."
             ));
         }
         notes
@@ -763,6 +763,27 @@ impl RefusedKeyReference {
             name = FIRST_PARTY_KEY_ENV_VAR
         )
     }
+}
+
+impl RefusedKeyReference {
+    /// The note for a reference in a campaign's change. A campaign-added server has no entry in the user's file, so
+    /// the file-oriented remedy of [`Self::note`] would not apply. Never holds a value.
+    pub fn note_for_campaign(&self) -> String {
+        format!(
+            "{file}: `{key}` names {name}, the saved API key, which a campaign may not use, so the reference was removed \
+             from the campaign's setting. Your own config.toml is not changed. To give a server the key, add that server \
+             to $FUIGO_HOME/config.toml (usually ~/.fuigo/config.toml) yourself.",
+            file = self.file,
+            key = self.key,
+            name = FIRST_PARTY_KEY_ENV_VAR
+        )
+    }
+}
+
+/// [`report_refusals`] for a campaign's change: the notes give the remedy that fits a campaign
+/// ([`RefusedKeyReference::note_for_campaign`]).
+pub fn report_campaign_refusals(refusals: &[RefusedKeyReference]) {
+    record_notes(refusals.iter().map(RefusedKeyReference::note_for_campaign));
 }
 
 /// [`report_refusals`] for a server added through `/mcps` or an ACP client's `mcp/upsert`: the notes say so and give

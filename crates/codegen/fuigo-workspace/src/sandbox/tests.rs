@@ -797,6 +797,24 @@ async fn a_call_admitted_under_enforce_stays_enforced_through_a_mode_flip() {
     );
 }
 
+/// A duplicate call id pinned first under `observe` and dispatched again under `enforce` is
+/// refused at the pin: the second dispatch's approval was decided for a mode the call does not
+/// hold, so it must not run under the earlier one (audit S5-F15).
+#[tokio::test]
+async fn a_second_pin_under_a_different_mode_is_refused() {
+    let fx = Fixture::new();
+    fx.set_user_mode("enforce");
+    let sandbox = fx.open_with_backend().await;
+    let call = CallId::tool("duplicate");
+    sandbox.pin_mode_exact(&call, SandboxMode::Observe).unwrap();
+    assert!(matches!(
+        sandbox.pin_mode_exact(&call, SandboxMode::Enforce),
+        Err(WorkspaceSandboxError::PinModeConflict)
+    ));
+    assert_eq!(Some(SandboxMode::Observe), sandbox.held_mode(&call));
+    sandbox.pin_mode_exact(&call, SandboxMode::Observe).unwrap();
+}
+
 /// The call's mode outlives the violation: the replay after the user's answer on the card is
 /// enforced too, even when the folder's mode flipped while the card was up.
 #[tokio::test]

@@ -209,6 +209,8 @@ impl fuigo_tool_runtime::Tool for EditTool {
 
         // Resolve the model-provided path.
         let path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+        // Serialised with `apply_patch` on the same file (audit S4-F9).
+        let _edit_lock = crate::util::lock_path::lock_edit_paths(&[&path], &cwd).await;
 
         // ── Validate input ──────────────────────────────────────────
         if path.is_dir() {
@@ -280,10 +282,17 @@ async fn handle_new_file_creation(
     path: &std::path::Path,
 ) -> Result<SearchReplaceOutput, fuigo_tool_runtime::ToolError> {
     // Check if file already exists and is non-empty.
-    let file_exists = match fs.read_file(path).await {
-        Ok(bytes) => !bytes.is_empty(),
-        Err(_) => false,
-    };
+    let read = crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), path).await;
+    if let Err(e) = &read
+        && let Some(msg) = crate::implementations::fuigo_build::read_file::source_too_large_message(
+            e,
+            &input.file_path,
+            "edit",
+        )
+    {
+        return Ok(SearchReplaceOutput::InvalidInput(msg));
+    }
+    let file_exists = read.is_ok_and(|bytes| !bytes.is_empty());
 
     if file_exists {
         return Ok(SearchReplaceOutput::FileAlreadyExists(
@@ -364,8 +373,25 @@ async fn handle_replacement(
     replace_all: bool,
 ) -> Result<SearchReplaceOutput, fuigo_tool_runtime::ToolError> {
     // Read current file content.
-    let bytes = match fs.read_file(path).await {
+    let bytes = match crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), path).await {
         Ok(bytes) => bytes,
+        Err(e)
+            if crate::implementations::fuigo_build::read_file::source_too_large_message(
+                &e,
+                &input.file_path,
+                "edit",
+            )
+            .is_some() =>
+        {
+            return Ok(SearchReplaceOutput::InvalidInput(
+                crate::implementations::fuigo_build::read_file::source_too_large_message(
+                    &e,
+                    &input.file_path,
+                    "edit",
+                )
+                .unwrap_or_default(),
+            ));
+        }
         Err(_) if !path.exists() => {
             return Ok(SearchReplaceOutput::FileNotFound(format!(
                 "File not found: {}. Please check the path and try again.",
@@ -379,7 +405,18 @@ async fn handle_replacement(
             ));
         }
     };
-    let old_text = String::from_utf8_lossy(&bytes).into_owned();
+    // Refuse non-UTF-8 content: a lossy decode plus a whole-file rewrite would replace every invalid byte in the
+    // file, not only the edited region (audit S4-F5).
+    let old_text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) => {
+            return Ok(SearchReplaceOutput::InvalidInput(format!(
+                "Error: {} is not valid UTF-8, so edit cannot change it without corrupting the other bytes. \
+                 Edit it with a shell command (sed, patch) instead.",
+                input.file_path
+            )));
+        }
+    };
 
     // Find all match positions.
     let positions: Vec<usize> = old_text
@@ -1183,5 +1220,19 @@ mod tests {
             other => panic!("expected the gitignore refusal, got {other:?}"),
         }
         assert_eq!(std::fs::read_to_string(outside.path().join("key.txt")).unwrap(), "TOP SECRET\n");
+    }
+
+    #[tokio::test]
+    async fn non_utf8_file_is_refused_and_leaves_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let original: &[u8] = b"one\n\xff\nthree\n";
+        std::fs::write(tmp.path().join("l.txt"), original).unwrap();
+        let shared = test_resources(tmp.path()).into_shared();
+        let input = make_input(&tmp.path().join("l.txt").to_string_lossy(), "one", "uno");
+        let result = fuigo_tool_runtime::Tool::run(&EditTool, test_ctx(shared), input)
+            .await
+            .unwrap();
+        assert!(matches!(result, SearchReplaceOutput::InvalidInput(_)), "{result:?}");
+        assert_eq!(std::fs::read(tmp.path().join("l.txt")).unwrap(), original);
     }
 }

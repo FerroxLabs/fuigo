@@ -624,6 +624,21 @@ fn subagent_bypass_permission_mode_gated_by_policy_pin() {
             PermissionMode::Default,
         );
 }
+/// audit S7-F8: a bypass child under an asking parent produces a notice; nothing else does.
+#[test]
+fn subagent_bypass_under_asking_parent_produces_a_notice() {
+    use fuigo_agent::config::PermissionMode;
+    let note = subagent_bypass_notice("reviewer", &PermissionMode::BypassPermissions, false)
+        .expect("a bypass child of an asking parent must be announced");
+    assert!(note.contains("reviewer") && note.contains("bypassPermissions"), "{note}");
+    assert_eq!(
+        subagent_bypass_notice("reviewer", &PermissionMode::BypassPermissions, true),
+        None,
+        "a parent that already approves everything needs no notice"
+    );
+    assert_eq!(subagent_bypass_notice("reviewer", &PermissionMode::Default, false), None);
+    assert_eq!(subagent_bypass_notice("reviewer", &PermissionMode::AcceptEdits, false), None);
+}
 /// The subagent emitter's persist hop (`SessionCommand`) and live broadcast must carry the SAME `eventId`, minted before the fork.
 /// Divergent or missing ids degrade cursor reconnects to full replays or re-applied lines.
 #[tokio::test]

@@ -500,7 +500,8 @@ pub struct ServeArgs {
     /// Address for the server to listen on
     #[arg(long, default_value = "127.0.0.1:2419")]
     pub bind: SocketAddr,
-    /// Secret token for client authentication (auto-generated if not provided)
+    /// Secret token for client authentication (auto-generated if not provided). Prefer the `FUIGO_AGENT_SECRET`
+    /// environment variable: a value given as a flag is visible to other local users in the process list.
     #[arg(long, env = "FUIGO_AGENT_SECRET", hide_env_values = true)]
     pub secret: Option<String>,
     /// Remote agent URL for proxy mode
@@ -532,11 +533,17 @@ impl std::fmt::Debug for ServeArgs {
 impl ServeArgs {
     /// Get the secret, generating a random one if not provided.
     pub fn get_secret(&self) -> String {
-        self.secret
+        let secret = self
+            .secret
             .clone()
-            .unwrap_or_else(|| generate_random_key(12))
+            .unwrap_or_else(|| generate_random_key(SERVE_SECRET_LEN));
+        // Clients present it to the server, so a log line or error that echoes it is scrubbed (audit X1-F5).
+        fuigo_telemetry::sent_credentials::record(&secret);
+        secret
     }
 }
+/// Length of the auto-generated serve secret: 32 hex characters, the whole of a v4 UUID's random bits (audit S10-F2).
+const SERVE_SECRET_LEN: usize = 32;
 /// Generate a random alphanumeric key of the given length.
 fn generate_random_key(len: usize) -> String {
     let raw = uuid::Uuid::new_v4().to_string().replace('-', "");
@@ -1302,6 +1309,45 @@ pub(crate) use fuigo_tty_utils::render_clap_error;
 
 #[cfg(test)]
 mod tests {
+    /// Audit X1-F5: the serve secret, given or generated, is recorded as a sent credential so an exact-value scrub
+    /// replaces it in logs, errors and uploads.
+    #[test]
+    fn serve_secret_is_recorded_as_a_sent_credential() {
+        use super::{HeadlessArgs, ServeArgs};
+        let args = |secret: Option<&str>| ServeArgs {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            secret: secret.map(str::to_owned),
+            remote: None,
+            headless: HeadlessArgs::default(),
+        };
+        let recorded = |secret: &str| {
+            let echoed = format!("client sent bad secret {secret}");
+            fuigo_telemetry::sent_credentials::scrub(&echoed).as_ref() != echoed
+        };
+        const GIVEN: &str = "x1f5-serve-given-FAKE-0001";
+        assert!(!recorded(GIVEN));
+        assert_eq!(args(Some(GIVEN)).get_secret(), GIVEN);
+        assert!(recorded(GIVEN), "a --secret value was not recorded");
+        let generated = args(None).get_secret();
+        assert!(recorded(&generated), "the generated secret was not recorded");
+    }
+
+    /// Audit S10-F2: the auto-generated serve secret carries at least 128 bits (32 hex characters), not 48.
+    #[test]
+    fn generated_serve_secret_is_32_hex_characters() {
+        use super::{HeadlessArgs, ServeArgs};
+        let args = ServeArgs {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            secret: None,
+            remote: None,
+            headless: HeadlessArgs::default(),
+        };
+        let secret = args.get_secret();
+        assert!(secret.len() >= 32, "{} characters", secret.len());
+        assert!(secret.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(secret, args.get_secret());
+    }
+
     use super::*;
     /// `--help` is user-reachable copy. Fuigo ships no upstream-vendor login host and no
     /// upstream-vendor relay, so no flag may describe itself in terms of one. Walks every

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -129,6 +129,7 @@ impl WorkflowRegistry {
         // Project/user still cannot override a compiled-in name
         let mut bundled_entries = scan_directory(&bundled_workflow_dir(), "bundled");
         reject_same_scope_duplicates(&mut bundled_entries, "bundled", &mut duplicate_names);
+        warn_unmanaged_shadows(&bundled_entries);
         merge_scope(&mut entries, bundled_entries);
 
         let mut builtin_entries = cached_builtin_entries();
@@ -291,6 +292,49 @@ fn scan_directory_in(
             })
         })
         .collect()
+}
+
+/// Names of bundled workflows that replace a compiled-in workflow without being the bundle updater's own
+/// unedited copy (audit S7-F10). The unedited copy is the normal update channel and is kept quiet.
+fn unmanaged_shadows(entries: &[RegistryEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|entry| entry.source_label == "bundled" && is_compiled_in_builtin(&entry.meta.name))
+        .map(|entry| entry.meta.name.clone())
+        .collect()
+}
+
+/// The names in `names` not announced before; records them in `seen`.
+fn fresh_names(seen: &mut BTreeSet<String>, names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| seen.insert((*name).clone()))
+        .cloned()
+        .collect()
+}
+
+/// Say, once per process and name, that a bundled file replaces a compiled-in workflow. The bundle is the
+/// runtime-update channel for built-in workflows and stays in force (upstream behaviour); an edited or
+/// unrecorded copy gets a loud warning rather than a refusal.
+fn warn_unmanaged_shadows(entries: &[RegistryEntry]) {
+    static SEEN: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
+    let shadows = unmanaged_shadows(entries);
+    if shadows.is_empty() {
+        return;
+    }
+    let fresh = match SEEN.lock() {
+        Ok(mut seen) => fresh_names(&mut seen, &shadows),
+        Err(_) => return,
+    };
+    if fresh.is_empty() {
+        return;
+    }
+    let names = fresh.join(", ");
+    tracing::warn!(workflows = %names, "bundled workflow files replace compiled-in workflows");
+    fuigo_tty_utils::cli_eprintln!(
+        "warning: workflow file(s) in {} replace the built-in workflow(s) {names} and are not the unedited bundle copy; delete them to use the built-in version",
+        bundled_workflow_dir().display()
+    );
 }
 
 fn is_compiled_in_builtin(name: &str) -> bool {
@@ -863,6 +907,34 @@ mod tests {
         assert_eq!(hit.source_label, "builtin");
         assert_eq!(hit.source, WorkflowSource::Builtin);
         assert_eq!(hit.meta.description, "from-bundle");
+    }
+
+    #[test]
+    fn bundled_shadow_of_compiled_in_name_is_reported_once_unless_managed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("bundled");
+        let workflows = root.join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        let script = "let meta = #{ name: \"deep-research\", description: \"from-bundle\" };\ncomplete(\"ok\");";
+        std::fs::write(workflows.join("deep-research.rhai"), script).unwrap();
+        std::fs::write(workflows.join("bundle-only.rhai"), self::script("bundle-only")).unwrap();
+
+        // No manifest record: an unmanaged file shadowing a compiled-in name is named; a bundle-only one is not.
+        let entries = scan_directory(&workflows, "bundled");
+        let shadows = unmanaged_shadows(&entries);
+        assert_eq!(shadows, ["deep-research"]);
+
+        // The warning is one-time per name.
+        let mut seen = BTreeSet::new();
+        assert_eq!(fresh_names(&mut seen, &shadows), ["deep-research"]);
+        assert!(fresh_names(&mut seen, &shadows).is_empty());
+
+        // The updater's own unedited copy is the normal channel: quiet.
+        let path = workflows.join("deep-research.rhai");
+        let checksum = crate::bundle::checksum_file(&path).unwrap();
+        let manifest = serde_json::json!({ "version": "test", "checksums": { "workflows/deep-research.rhai": checksum } });
+        std::fs::write(root.join("manifest.json"), manifest.to_string()).unwrap();
+        assert!(unmanaged_shadows(&scan_directory(&workflows, "bundled")).is_empty());
     }
 
     #[test]

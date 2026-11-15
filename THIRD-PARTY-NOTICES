@@ -5558,7 +5558,8 @@ Copyright notice:
 License text: see Part II — Apache-2.0
 
 Additional requirements / notices:
-  Apache-2.0 additional terms: this package is used unmodified from its upstream source/crates.io (or git) release for this product build. Any NOTICE file shipped with the package (if present) is reproduced below.
+  Vendored at third_party/htmd-0.5.4/. Local modifications: src/dom_walker.rs combines similar adjacent siblings in one pass and counts at most two trailing newlines; src/element_handler/code.rs scans inline code for backticks by byte; src/lib.rs adds HtmlToMarkdown::tree_exceeds (a depth and node bound check on the converter's own tree; no existing function changed). Output unchanged; each change is marked `fuigo:`. See Cargo.toml footer.
+  Apache-2.0 change notice: this package was modified as described above. Modified files remain under the Apache License 2.0.
 
 --------------------------------------------------------------------------------
 html-escape 0.2.13

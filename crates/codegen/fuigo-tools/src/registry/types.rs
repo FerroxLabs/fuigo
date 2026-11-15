@@ -1690,9 +1690,11 @@ impl FinalizedToolset {
     ) -> Result<crate::types::output::ToolOutput, fuigo_tool_runtime::ToolError> {
         let (registry_id, output_converter, reverse_params) = {
             let tools = self.tools.read();
+            // Only MCP-namespace entries are reachable here (the target of `use_tool`): a native tool is never
+            // dispatched by name shape alone, whatever its client name looks like.
             let entry = tools
                 .iter()
-                .find(|t| t.client_name == tool_name)
+                .find(|t| t.client_name == tool_name && t.namespace == ToolNamespace::MCP.to_string())
                 .ok_or_else(|| Self::tool_not_found_error(tool_name))?;
             (
                 entry.registry_id.clone(),
@@ -3773,6 +3775,63 @@ mod tests {
         ) -> Result<String, fuigo_tool_runtime::ToolError> {
             Ok("ok".into())
         }
+    }
+    #[derive(Debug, Default)]
+    struct FakeNativeTool;
+    impl crate::types::tool_metadata::ToolMetadata for FakeNativeTool {
+        fn kind(&self) -> ToolKind {
+            ToolKind::Other
+        }
+        fn tool_namespace(&self) -> crate::types::tool::ToolNamespace {
+            crate::types::tool::ToolNamespace::FuigoBuild
+        }
+        fn description_template(&self) -> &str {
+            "a native tool"
+        }
+    }
+    impl fuigo_tool_runtime::Tool for FakeNativeTool {
+        type Args = serde_json::Value;
+        type Output = crate::types::output::ToolOutput;
+        fn id(&self) -> fuigo_tool_protocol::ToolId {
+            fuigo_tool_protocol::ToolId::new("fake_native").expect("valid")
+        }
+        fn description(
+            &self,
+            _ctx: &::fuigo_tool_runtime::ListToolsContext,
+        ) -> fuigo_tool_types::ToolDescription {
+            fuigo_tool_types::ToolDescription::new("fake_native", "a native tool")
+        }
+        async fn run(
+            &self,
+            _ctx: fuigo_tool_runtime::ToolCallContext,
+            _input: serde_json::Value,
+        ) -> Result<crate::types::output::ToolOutput, fuigo_tool_runtime::ToolError> {
+            Ok(crate::types::output::ToolOutput::Text("native ran".into()))
+        }
+    }
+    #[tokio::test]
+    async fn use_tool_refuses_a_native_tool_whose_name_contains_double_underscore() {
+        let tmp = TempDir::new().unwrap();
+        let mut builder = ToolRegistryBuilder::new();
+        builder.register::<FakeNativeTool>();
+        let config = ToolServerConfig {
+            tools: vec![
+                ToolConfig::for_tool::<crate::implementations::use_tool::UseTool>(),
+                ToolConfig::for_tool::<FakeNativeTool>().with_name("odd__native"),
+            ],
+            behavior_preset: None,
+        };
+        let ctx = test_session_context(&tmp);
+        let toolset = Arc::new(builder.finalize(config, ctx).unwrap());
+        let result = toolset
+            .call(
+                "use_tool",
+                serde_json::json!({"tool_name": "odd__native", "tool_input": {}}),
+                "call-native",
+                None,
+            )
+            .await;
+        assert!(result.is_err(), "a native tool must not run through use_tool: {result:?}");
     }
     #[tokio::test]
     async fn call_sets_effective_tool_name_for_use_tool_dispatch() {

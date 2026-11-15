@@ -209,6 +209,54 @@ pub struct FileWritten {
     pub is_new_file: bool,
 }
 
+/// What a file held before a tool overwrote it, in the terms a rewind snapshot can use.
+///
+/// `FileWritten.previous_content` is text, so only valid UTF-8 can be snapshotted. A file that existed with bytes
+/// (or an error) the snapshot cannot hold must not be reported as new (a rewind would delete it) and must not be
+/// reported as lossy text (a rewind would write U+FFFD back): it is reported as existing with no snapshot, so a
+/// rewind leaves it alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PriorContent {
+    /// The path did not exist.
+    Absent,
+    /// The path existed and held this valid UTF-8 text.
+    Text(String),
+    /// The path existed but its content cannot be stored as text (non-UTF-8 bytes, or an unreadable file).
+    Unrestorable,
+}
+
+impl PriorContent {
+    /// Classify the result of reading the path before the write. Only `NotFound` means "did not exist".
+    pub fn from_read(read: Result<Vec<u8>, crate::computer::types::ComputerError>) -> Self {
+        match read {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => Self::Text(text),
+                Err(_) => Self::Unrestorable,
+            },
+            Err(e) if e.io_error_kind() == Some(std::io::ErrorKind::NotFound) => Self::Absent,
+            Err(_) => Self::Unrestorable,
+        }
+    }
+
+    /// The `previous_content` to report: `None` for both a new file and an unrestorable one.
+    pub fn previous_content(&self) -> Option<String> {
+        match self {
+            Self::Text(text) => Some(text.clone()),
+            Self::Absent | Self::Unrestorable => None,
+        }
+    }
+
+    /// Whether the write created the file.
+    pub fn is_new_file(&self) -> bool {
+        matches!(self, Self::Absent)
+    }
+
+    /// Whether the path existed before the write.
+    pub fn existed(&self) -> bool {
+        !self.is_new_file()
+    }
+}
+
 /// Notification that the agent has entered plan mode.
 ///
 /// Sent by the `EnterPlanMode` tool so the gateway / client can transition

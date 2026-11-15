@@ -44,6 +44,7 @@ fn scan_builds_a_plan_from_snapshots_hooks_and_server_lists() {
         &paths,
         |path| (path == with_hooks).then(|| snapshot("ls", &[("A", "1"), ("B", "2")])),
         vec![("claude-json-srv".into(), server("one"))],
+        vec![],
         vec![("mcp-json-srv".into(), server("two"))],
     );
 
@@ -83,7 +84,7 @@ fn scan_builds_a_plan_from_snapshots_hooks_and_server_lists() {
 #[test]
 fn an_empty_scan_is_an_empty_plan() {
     let dir = tempfile::tempdir().unwrap();
-    let plan = scan_importable_settings(dir.path(), &[], |_| None, vec![], vec![]);
+    let plan = scan_importable_settings(dir.path(), &[], |_| None, vec![], vec![], vec![]);
     assert!(plan.global_items.iter().all(|i| matches!(i, ImportableItem::PathEntry { .. })),
         "only a real ~/.claude/{{skills,rules}} on this machine could appear");
     assert!(plan.project_items.is_empty());
@@ -150,6 +151,7 @@ fn m5_project_settings_hooks_linked_outside_the_repository_are_not_imported() {
         |_| Some(ClaudeSettingsSnapshot::default()),
         vec![],
         vec![],
+        vec![],
     );
     assert!(
         !plan.project_items.iter().any(|i| matches!(i, ImportableItem::Hook { .. })),
@@ -165,6 +167,32 @@ fn m5_project_settings_hooks_linked_outside_the_repository_are_not_imported() {
         |_| Some(ClaudeSettingsSnapshot::default()),
         vec![],
         vec![],
+        vec![],
     );
     assert!(plan.project_items.iter().any(|i| matches!(i, ImportableItem::Hook { .. })));
+}
+
+/// audit S7-F11: a server `~/.claude.json` records for this project lands in the project scope, not the global one.
+#[test]
+fn per_project_claude_json_servers_are_project_items() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = scan_importable_settings(
+        dir.path(),
+        &[],
+        |_| None,
+        vec![("user-srv".into(), server("one"))],
+        vec![("project-srv".into(), server("two"))],
+        vec![],
+    );
+    let names = |items: &[ImportableItem]| {
+        items
+            .iter()
+            .filter_map(|i| match i {
+                ImportableItem::McpServer { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&plan.global_items), vec!["user-srv"]);
+    assert_eq!(names(&plan.project_items), vec!["project-srv"]);
 }

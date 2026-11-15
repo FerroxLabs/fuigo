@@ -475,6 +475,15 @@ impl ShellState {
         // which clears CLOEXEC on the target fd (3/4), so the child keeps
         // them across exec. The originals are closed on exec by CLOEXEC.
 
+        // The dump pipe is closed around the user command, so no program it runs inherits it (audit L3).
+        // Bash: the wrapper first moves the pipe from fd 4 to fd 200 (`exec`, a plain dup that programs WOULD
+        // inherit) and closes it around the user command with `200>&-`; fd 4 is closed throughout. Zsh keeps it on
+        // fd 4 and closes it with `4>&-` (zsh cannot name a descriptor above 9 in a redirection, and `{var}>&-`
+        // closes for good). Accepted limit: while the command runs, the shell keeps a saved copy of the pipe to
+        // restore afterwards; a builtin in the same shell can reach its own descriptors (bash: the copy at fd 10+;
+        // bash 3 also hands that copy to the programs it runs), which only lets the command alter state it could
+        // set directly anyway. (Plain `exec`: `builtin exec` would apply the redirections to the `builtin` command
+        // only and undo them.)
         // The wrapper command:
         // 1. Read prior snapshot from fd 3, eval it (restores env/funcs/aliases/opts)
         // 2. Run the user's command (passed as $1)
@@ -513,10 +522,10 @@ impl ShellState {
                 //
                 // u35: the restore guard runs first after the snapshot eval (shadowing functions and aliases out,
                 // parse-affecting options forced); the rest runs only if it succeeded. See `restore_guard`.
-                "{dump_script} \
+                "exec 200>&4 4>&-; {dump_script} \
                  snap=$(command cat <&3) && builtin shopt -s extglob && builtin eval -- \"$snap\" && \
                  {{ {guarded}}}; \
-                 COMMAND_EXIT_CODE=$?; builtin unset __fuigo_user_cmd 2>/dev/null; {dump_fn} >&4; builtin exit $COMMAND_EXIT_CODE",
+                 COMMAND_EXIT_CODE=$?; builtin unset __fuigo_user_cmd 2>/dev/null; {dump_fn} >&200; builtin exit $COMMAND_EXIT_CODE",
                 guarded = super::restore_guard::bash_guarded(&format!(
                     "builtin set +u 2>/dev/null || true; \
                      builtin export FUIGO_AGENT=1; \
@@ -524,7 +533,7 @@ impl ShellState {
                      builtin shopt -s expand_aliases 2>/dev/null; {sudo_inject}{search_inject}\
                      builtin printf '%s' \"${{2:-}}\"; \
                      __fuigo_user_cmd=\"$1\"; builtin declare +x __fuigo_user_cmd 2>/dev/null; builtin set --; \
-                     builtin eval \"$__fuigo_user_cmd\" 2>&1; "
+                     builtin eval \"$__fuigo_user_cmd\" 2>&1 200>&-; "
                 )),
             ),
             // After snapshot restore: force nonomatch so login dumps cannot re-arm NOMATCH for model globs.
@@ -547,7 +556,7 @@ impl ShellState {
                      builtin setopt aliases 2>/dev/null; {sudo_inject}{search_inject}\
                      builtin printf '%s' \"${{2:-}}\"; \
                      __fuigo_user_cmd=\"$1\"; builtin typeset +x __fuigo_user_cmd 2>/dev/null; builtin set --; \
-                     builtin eval \"$__fuigo_user_cmd\" 2>&1; "
+                     builtin eval \"$__fuigo_user_cmd\" 2>&1 4>&-; "
                 )),
             ),
         };
@@ -1520,6 +1529,59 @@ mod tests {
         let code = output.status.code().unwrap_or(-1);
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         (code, stdout)
+    }
+
+    /// The user command must not hold the state-out descriptor: whatever it writes there would be read ahead of the
+    /// shell's own dump.
+    #[tokio::test]
+    async fn user_command_cannot_write_the_state_dump_descriptor() {
+        if !bash_available() {
+            return;
+        }
+        let cwd = std::env::current_dir().unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None).await.unwrap();
+        let (_, stdout) = run_command(&mut state, "echo forged >&4").await;
+        assert!(
+            stdout.to_lowercase().contains("bad file descriptor"),
+            "fd 4 must be closed for the user command, got: {stdout:?}"
+        );
+        let (code, stdout) = run_command(&mut state, "echo still-works").await;
+        assert_eq!(code, 0);
+        assert_eq!(stdout.trim(), "still-works");
+    }
+
+    /// Audit L3 (delta review): no program the user command runs inherits the state-dump pipe, under any descriptor.
+    /// An external program writes a complete forged dump to every descriptor from 3 to 255; had one reached the pipe,
+    /// its END marker would cut the shell's own dump short and the state set in the same command would be lost.
+    #[tokio::test]
+    async fn external_programs_cannot_reach_the_state_dump() {
+        for (kind, available, start, end) in [
+            (ShellKind::Bash, bash_available(), BASH_STATE_START_MARKER, BASH_STATE_END_MARKER),
+            (ShellKind::Zsh, zsh_available(), ZSH_STATE_START_MARKER, ZSH_STATE_END_MARKER),
+        ] {
+            if !available || !bash_available() {
+                continue;
+            }
+            let cwd = std::env::current_dir().unwrap();
+            let mut state = ShellState::init(kind, &cwd, None, None, None).await.unwrap();
+            if kind == ShellKind::Bash {
+                // Bash 3 hands the saved copy of a descriptor closed around a compound command to the programs it
+                // runs; the accepted limit recorded at the wrapper.
+                let (_, major) = run_command(&mut state, "echo ${BASH_VERSINFO[0]}").await;
+                if major.trim() == "3" {
+                    continue;
+                }
+            }
+            // A separate bash process (`/bin/sh` may be dash, which cannot name a descriptor above 9).
+            let bash = ShellKind::Bash.binary_path();
+            let forge = format!(
+                "export L3_KEPT=yes; {bash} -c 'i=3; while [ $i -le 255 ]; do \
+                 (printf \"%s\\nexport L3_FORGED=1\\n%s\\n\" {start} {end} >&$i) 2>/dev/null; i=$((i+1)); done'"
+            );
+            run_command(&mut state, &forge).await;
+            let (_, stdout) = run_command(&mut state, "echo ${L3_KEPT:-lost} ${L3_FORGED:-clean}").await;
+            assert_eq!(stdout.trim(), "yes clean", "{kind:?}: an external program reached the dump pipe");
+        }
     }
 
     #[tokio::test]

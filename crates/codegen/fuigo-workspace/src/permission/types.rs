@@ -256,6 +256,19 @@ pub struct PermissionRequest {
     /// `workdir`, absolute or relative to the request's directory); every repository check runs there as well as in
     /// the request's directory. Build it with [`bash_exec_cwd_for`] from the same input that runs.
     pub exec_cwd: Option<std::path::PathBuf>,
+    /// Audit X2-F1: for a subagent, the folder its parent session was launched in. Judged as a run directory as well
+    /// as the request's own, so a child whose `cwd` is a trusted folder is Trusted only when the parent's folder is
+    /// too. `None` for a top-level session; no effect when the parent's folder is the request's.
+    pub parent_run_dir: Option<std::path::PathBuf>,
+    /// Audit S3-F2: the directory a persistent shell has moved to (its tracked working directory), where the next
+    /// command really starts. Judged as a run directory as well as the request's own, so a command the shell would
+    /// start in a folder that is not trusted gets that folder's treatment (sandbox auto-allow and the other no-grant
+    /// approvals do not apply). `None` for every other backend; no effect when it is the request's directory.
+    pub shell_run_dir: Option<std::path::PathBuf>,
+    /// Audit S6-F4: for an MCP tool call, a fingerprint of the definition of the server it goes to (transport, then the
+    /// command and arguments or the URL's origin), so a remembered "always allow" grant can notice that a different
+    /// definition now carries the granted name. `None` when the caller does not know it (no check).
+    pub mcp_definition: Option<String>,
 }
 /// u35 g11 (Astra r10 High): the working directory a bash tool input names (OpenCode bash `workdir`), resolved as the
 /// tool resolves it (absolute, or under `session_cwd`); `None` when the tool runs in the session directory.
@@ -281,6 +294,9 @@ impl PermissionRequest {
             read_targets: None,
             peer_note: None,
             exec_cwd: None,
+            parent_run_dir: None,
+            shell_run_dir: None,
+            mcp_definition: None,
         }
     }
 }

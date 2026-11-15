@@ -546,6 +546,32 @@ mod imp {
         Ok(())
     }
 
+    /// Whether `fd` is a regular file owned by the effective user.
+    // `st_mode` and `S_IFMT` are `u16` on macOS and `u32` on Linux: the conversions are needed on one and identity on the other.
+    #[allow(clippy::useless_conversion)]
+    fn is_own_regular_file(fd: libc::c_int) -> bool {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        let ok = unsafe { libc::fstat(fd, &mut st) } == 0;
+        ok && u32::from(st.st_mode) & u32::from(libc::S_IFMT) == u32::from(libc::S_IFREG)
+            && st.st_uid == unsafe { libc::geteuid() }
+    }
+
+    /// Say once (to `out`) that crash reporting is off because the slot is not a regular file owned by this user
+    /// (a planted link, a device, or a file of another uid), instead of disabling it silently.
+    pub(super) fn report_slot_refused_once(
+        out: &mut dyn std::io::Write,
+        reported: &std::sync::atomic::AtomicBool,
+        slot: &Path,
+    ) {
+        if !reported.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            let _ = writeln!(
+                out,
+                "fuigo: crash reporting is off: {} is not a regular file owned by this user",
+                slot.display()
+            );
+        }
+    }
+
     /// Install the crash handler. Must be called early in `main()`, before any
     /// terminal initialization or async runtime setup.
     ///
@@ -571,11 +597,27 @@ mod imp {
         let fd = unsafe {
             libc::open(
                 c_path.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                 0o600,
             )
         };
         if fd < 0 {
+            return false;
+        }
+        // Never follow or adopt a planted link, device or foreign file (audit S11-F5): the slot must be a regular
+        // file owned by this user. Truncation waits until it has been checked (no O_TRUNC on the open).
+        if !is_own_regular_file(fd) {
+            unsafe {
+                libc::close(fd);
+            }
+            static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            report_slot_refused_once(&mut std::io::stderr(), &REPORTED, &crash_file);
+            return false;
+        }
+        if unsafe { libc::ftruncate(fd, 0) } != 0 {
+            unsafe {
+                libc::close(fd);
+            }
             return false;
         }
         // open's mode is create-only; tighten a preexisting file.
@@ -1155,6 +1197,18 @@ mod tests {
     static SIGNAL_STATE_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn slot_refusal_is_reported_once() {
+        let reported = std::sync::atomic::AtomicBool::new(false);
+        let mut out = Vec::new();
+        let slot = std::path::Path::new("/crash/slot.bin");
+        super::imp::report_slot_refused_once(&mut out, &reported, slot);
+        super::imp::report_slot_refused_once(&mut out, &reported, slot);
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.contains("crash reporting is off") && text.contains("/crash/slot.bin"), "{text}");
+    }
+
+    #[test]
     fn install_terminal_restore_only_registers_handlers() {
         let _guard = SIGNAL_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         super::install_terminal_restore_only();
@@ -1287,6 +1341,27 @@ mod tests {
         let mode = std::fs::metadata(&target).expect("meta").permissions().mode();
         assert_eq!(mode & 0o777, 0o755, "symlink target must be untouched");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Audit S11-F5: a symlink planted at the slot name is not followed; the open is refused and the target is untouched.
+    #[test]
+    fn install_refuses_a_symlinked_slot() {
+        let _guard = SIGNAL_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "fuigo-crash-handler-test-slotlink-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create");
+        let pid = std::process::id();
+        let token = crate::process::start_token(pid).unwrap_or(0);
+        let sentinel = dir.join("sentinel");
+        std::fs::write(&sentinel, b"keep me").expect("seed");
+        std::os::unix::fs::symlink(&sentinel, dir.join(crate::slot_file_name(pid, token)))
+            .expect("symlink");
+        assert!(!super::install(&dir, "test-version"), "the symlinked slot is refused");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep me");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -17,6 +17,10 @@ pub struct ActiveSession {
     pub pid: u32,
     pub cwd: String,
     pub opened_at: DateTime<Utc>,
+    /// The process's start time (platform ticks) when it registered, so a pid later reused by another process is not
+    /// mistaken for this session. `None` from an older version or where it cannot be read: pid-only, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<u64>,
 }
 
 const DATA_FILENAME: &str = "active_sessions.json";
@@ -43,7 +47,10 @@ pub fn collect_crashed() -> io::Result<Vec<ActiveSession>> {
 
 // -- Injectable-root variants (`_in`) for testing ---------------------------
 
-pub fn register_in(root: &Path, session: ActiveSession) -> io::Result<()> {
+pub fn register_in(root: &Path, mut session: ActiveSession) -> io::Result<()> {
+    if session.start_time.is_none() {
+        session.start_time = process_start_time(session.pid);
+    }
     with_locked_state(root, |sessions| {
         sessions.retain(|s| s.session_id != session.session_id);
         sessions.push(session);
@@ -63,12 +70,28 @@ pub fn try_unregister_in(root: &Path, session_id: &acp::SessionId) -> io::Result
     .map(|opt| opt.is_some())
 }
 
+/// How long the startup sweep waits for the registry lock before skipping the sweep (audit S12-F6).
+const SWEEP_LOCK_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub fn collect_crashed_in(root: &Path) -> io::Result<Vec<ActiveSession>> {
-    with_locked_state(root, |sessions| {
-        let (alive, dead): (Vec<_>, Vec<_>) = sessions.drain(..).partition(|s| is_pid_alive(s.pid));
-        *sessions = alive;
-        dead
-    })
+    let deadline = std::time::Instant::now() + SWEEP_LOCK_WINDOW;
+    loop {
+        let swept = try_with_locked_state(root, |sessions| {
+            let (alive, dead): (Vec<_>, Vec<_>) = sessions.drain(..).partition(is_session_alive);
+            *sessions = alive;
+            dead
+        })?;
+        if let Some(dead) = swept {
+            return Ok(dead);
+        }
+        if std::time::Instant::now() >= deadline {
+            // Another process holds the lock (stopped, or stuck on a slow home): launching must not wait on it. The
+            // crashed entries stay and the next launch sweeps them.
+            tracing::info!("active-sessions registry is busy; skipping the crash sweep");
+            return Ok(Vec::new());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 pub fn list_in(root: &Path) -> io::Result<Vec<ActiveSession>> {
@@ -78,6 +101,12 @@ pub fn list_in(root: &Path) -> io::Result<Vec<ActiveSession>> {
 
 // -- Internal: locked read-modify-write -------------------------------------
 
+/// How long registering (or unregistering) waits for the registry lock before giving up (audit R05). The pager
+/// registers on its event-loop thread, so a lock held by a stopped process must cost a moment, not the session.
+const REGISTER_LOCK_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Locked read-modify-write that waits at most [`REGISTER_LOCK_WINDOW`] for the lock; a registry still busy then is
+/// reported as `WouldBlock` and left untouched. The registry is best-effort crash-recovery bookkeeping.
 fn with_locked_state<F, R>(root: &Path, mutate: F) -> io::Result<R>
 where
     F: FnOnce(&mut Vec<ActiveSession>) -> R,
@@ -88,7 +117,22 @@ where
 
     fs::create_dir_all(root)?;
     let lock_file = open_lock_file(&lock_path)?;
-    lock_file.lock_exclusive()?;
+    let deadline = std::time::Instant::now() + REGISTER_LOCK_WINDOW;
+    loop {
+        match lock_file.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(e) if lock_is_contended(&e) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "active-sessions registry is busy",
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => return Err(e),
+        }
+    }
 
     let result = locked_mutate(&data_path, &tmp_path, mutate);
 
@@ -285,10 +329,67 @@ fn write_data_file_atomic(
         )
         .open(tmp_path)?;
         tmp.write_all(json.as_bytes())?;
+        // Synced before the rename, so power loss cannot leave an empty registry (read as "no sessions").
+        tmp.sync_all()?;
     }
     fs::rename(tmp_path, data_path).inspect_err(|_| {
         let _ = fs::remove_file(tmp_path);
     })
+}
+
+/// Live only if the pid exists and, when both a recorded and a current start time are known, they match (a reused pid
+/// has a different start time). An entry without a start time, or a platform that cannot read one, is pid-only.
+fn is_session_alive(session: &ActiveSession) -> bool {
+    if !is_pid_alive(session.pid) {
+        return false;
+    }
+    match (session.start_time, process_start_time(session.pid)) {
+        (Some(recorded), Some(current)) => recorded == current,
+        _ => true,
+    }
+}
+
+/// The process's start time in platform ticks, `None` when unavailable.
+fn process_start_time(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        // Field 22 of /proc/<pid>/stat; the command name (field 2) may contain spaces and parens, so split after the last ')'.
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let rest = &stat[stat.rfind(')')? + 2..];
+        rest.split(' ').nth(19)?.parse().ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+        let got = unsafe {
+            libc::proc_pidinfo(
+                i32::try_from(pid).ok()?,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&raw mut info).cast(),
+                size,
+            )
+        };
+        (got == size).then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+    }
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{CloseHandle, FILETIME};
+        use windows::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+        let (mut created, mut exited, mut kernel, mut user) =
+            (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+        let times = unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) };
+        let _ = unsafe { CloseHandle(handle) };
+        times.ok()?;
+        Some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = pid;
+        None
+    }
 }
 
 fn is_pid_alive(pid: u32) -> bool {
@@ -338,8 +439,76 @@ mod tests {
         assert!(matches!(out, Ok(None)), "expected Ok(None) while another handle holds the lock, got {out:?}");
     }
 
+    /// Audit S12-F6: the startup sweep must not wait forever on a lock another process holds (stopped, or stuck on a
+    /// hung home): it gives up after a short window and skips the sweep.
+    #[test]
+    fn the_startup_sweep_gives_up_on_a_held_lock_instead_of_blocking() {
+        let dir = TempDir::new().unwrap();
+        register_in(dir.path(), make_session("dead", 2_000_000_000)).unwrap();
+        let holder = open_lock_file(&dir.path().join(LOCK_FILENAME)).unwrap();
+        holder.lock_exclusive().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let root = dir.path().to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(collect_crashed_in(&root));
+        });
+        let out = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("collect_crashed_in must not block on a held lock");
+        assert!(out.is_ok_and(|crashed| crashed.is_empty()), "a skipped sweep reports nothing");
+        holder.unlock().unwrap();
+        assert_eq!(list_in(dir.path()).unwrap().len(), 1, "the skipped sweep left the registry alone");
+    }
+
+    /// Audit R05: registration must not wait forever on a lock another process holds; it gives up
+    /// after a short window and reports the registry busy, leaving the registry untouched.
+    #[test]
+    fn register_gives_up_on_a_held_lock_instead_of_blocking() {
+        let dir = TempDir::new().unwrap();
+        let holder = open_lock_file(&dir.path().join(LOCK_FILENAME)).unwrap();
+        holder.lock_exclusive().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let root = dir.path().to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(register_in(&root, make_session("s1", std::process::id())));
+        });
+        let out = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("register_in must not block on a held lock");
+        assert!(out.is_err(), "a skipped registration reports the busy registry, got {out:?}");
+        holder.unlock().unwrap();
+        assert!(list_in(dir.path()).unwrap().is_empty(), "the skipped registration wrote nothing");
+    }
+
+    /// Audit S12-F6 (pid reuse): an entry whose pid now belongs to a process with a different start time is stale; one with
+    /// the matching start time, or none recorded (an older version), stays live by pid alone.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reused_pid_with_another_start_time_is_a_crashed_session() {
+        let dir = TempDir::new().unwrap();
+        let pid = std::process::id();
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let start: u64 = stat[stat.rfind(')').unwrap() + 2..].split(' ').nth(19).unwrap().parse().unwrap();
+        let entry = |id: &str, start: Option<u64>| {
+            let mut v = serde_json::json!({
+                "session_id": id, "pid": pid, "cwd": "/tmp/x", "opened_at": "2026-01-01T00:00:00Z"
+            });
+            if let Some(start) = start {
+                v["start_time"] = serde_json::json!(start);
+            }
+            v
+        };
+        let data = serde_json::json!([entry("recycled", Some(start + 1)), entry("same", Some(start)), entry("legacy", None)]);
+        std::fs::write(dir.path().join(DATA_FILENAME), data.to_string()).unwrap();
+        let crashed = collect_crashed_in(dir.path()).unwrap();
+        let ids: Vec<&str> = crashed.iter().map(|s| &*s.session_id.0).collect();
+        assert_eq!(ids, ["recycled"]);
+        assert_eq!(list_in(dir.path()).unwrap().len(), 2);
+    }
+
     fn make_session(id: &str, pid: u32) -> ActiveSession {
         ActiveSession {
+            start_time: None,
             session_id: acp::SessionId::new(id),
             pid,
             cwd: "/tmp/test".into(),
@@ -376,7 +545,17 @@ mod tests {
             for i in 0..10 {
                 let p = path.clone();
                 s.spawn(move || {
-                    register_in(&p, make_session(&format!("s{i}"), std::process::id())).unwrap()
+                    // Registering waits at most REGISTER_LOCK_WINDOW and then reports `WouldBlock` (R05). Ten
+                    // writers on a loaded host can outlast one window, so retry "busy"; corruption is what this
+                    // test checks, not the wait.
+                    let session = make_session(&format!("s{i}"), std::process::id());
+                    for _ in 0..60 {
+                        match register_in(&p, session.clone()) {
+                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                            other => return other.unwrap(),
+                        }
+                    }
+                    panic!("registry stayed busy for 60 lock windows");
                 });
             }
         });
@@ -474,6 +653,7 @@ mod recovery_tests {
 
     fn session(id: &str) -> ActiveSession {
         ActiveSession {
+            start_time: None,
             session_id: acp::SessionId::new(id),
             pid: std::process::id(),
             cwd: "/tmp/test".into(),

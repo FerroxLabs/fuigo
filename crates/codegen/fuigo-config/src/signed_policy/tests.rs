@@ -35,6 +35,7 @@ fn payload() -> SignedPayload {
         fail_closed: false,
         expires_at: 4_000_000_000,
         nonce: String::new(),
+        revision: 0,
         key_id: "v1".into(),
     }
 }
@@ -74,7 +75,7 @@ fn server_wire_format_is_client_verifiable() {
         key_id: "v1".into(),
     };
     let payload =
-        verify_fetched_with_keys(&sidecar, &keyset("v1", &pubkey), Some("team-007"), 1_000)
+        verify_fetched_with_keys(&sidecar, &keyset("v1", &pubkey), Some("team-007"), 1_000, None)
             .expect("server format must verify");
     assert_eq!(payload.team_id.as_deref(), Some("team-007"));
     assert_eq!(payload.requirements.as_deref(), Some("[features]\n"));
@@ -99,7 +100,7 @@ fn missing_fail_closed_defaults_false() {
         key_id: "v1".into(),
     };
     let payload =
-        verify_fetched_with_keys(&sidecar, &keyset("v1", &pubkey), Some("team-007"), 1_000)
+        verify_fetched_with_keys(&sidecar, &keyset("v1", &pubkey), Some("team-007"), 1_000, None)
             .expect("must verify");
     assert!(!payload.fail_closed);
 }
@@ -1105,4 +1106,248 @@ fn remote_kill_switch_with_keys_disarms_and_rearms() {
         apply_remote_managed_config_signature_verification(None, true);
         assert!(verification_active());
     });
+}
+
+/// A signed payload as a server would send it, with a `revision` (the wire shape of audit S12-F2).
+fn revision_envelope(kp: &ring::signature::Ed25519KeyPair, revision: u64) -> SignatureEnvelope {
+    let signed_payload = serde_json::json!({
+        "typ": "fuigo.managed_policy.v1",
+        "team_id": "team-007",
+        "managed_config": "[cli]\ntheme = \"dark\"\n",
+        "requirements": "[features]\nweb_fetch = false\n",
+        "fail_closed": true,
+        "expires_at": 4_000_000_000u64,
+        "revision": revision,
+        "key_id": "v1",
+    })
+    .to_string();
+    let sig = kp.sign(signed_payload.as_bytes());
+    SignatureEnvelope {
+        signed_payload,
+        signature: base64::engine::general_purpose::STANDARD.encode(sig.as_ref()),
+        key_id: "v1".into(),
+    }
+}
+
+/// Audit S12-F2: an older, authentic, unexpired envelope restored over a newer one reads compromised once the marker
+/// has recorded the newer revision; the marker's record is untouched.
+#[test]
+fn a_replayed_older_revision_reads_compromised_at_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let (kp, pubkey) = test_keypair();
+    let r1 = revision_envelope(&kp, 1);
+    write_policy(home, &payload());
+    write_sidecar(home, &r1).unwrap();
+    let marker = serde_json::json!({ "synced_at": 1u64, "principal": "team-007", "fail_closed": true, "highest_revision": 2u64 });
+    std::fs::write(home.join(crate::managed_cache::MANAGED_CONFIG_CACHE_FILE), marker.to_string()).unwrap();
+    assert_eq!(
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        SignedVerdict::Compromised,
+        "revision 1 is older than the recorded revision 2"
+    );
+    let after = std::fs::read_to_string(home.join(crate::managed_cache::MANAGED_CONFIG_CACHE_FILE)).unwrap();
+    assert!(after.contains("\"highest_revision\":2"), "{after}");
+    // The newest revision itself is still trusted.
+    write_sidecar(home, &revision_envelope(&kp, 2)).unwrap();
+    assert_eq!(
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        SignedVerdict::Trusted
+    );
+}
+
+/// Audit S12-F2: the fetch-apply check refuses an older revision than the one recorded, and takes an equal or newer one.
+#[test]
+fn a_fetched_older_revision_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = Some(dir.path());
+    let marker = serde_json::json!({ "synced_at": 1u64, "principal": "team-007", "highest_revision": 2u64 });
+    std::fs::write(dir.path().join(crate::managed_cache::MANAGED_CONFIG_CACHE_FILE), marker.to_string()).unwrap();
+    let (kp, pubkey) = test_keypair();
+    let keys = keyset("v1", &pubkey);
+    let older = revision_envelope(&kp, 1);
+    let err = verify_fetched_with_keys(&older, &keys, Some("team-007"), 1_000, home).unwrap_err();
+    assert!(matches!(err, SigError::RolledBack { got: 1, highest: 2 }), "{err:?}");
+    assert!(verify_fetched_with_keys(&revision_envelope(&kp, 2), &keys, Some("team-007"), 1_000, home).is_ok());
+    assert!(verify_fetched_with_keys(&revision_envelope(&kp, 3), &keys, Some("team-007"), 1_000, home).is_ok());
+}
+
+/// A deployment-signed payload (the deploy-key path) with the same policy as [`revision_envelope`].
+fn deployment_revision_envelope(
+    kp: &ring::signature::Ed25519KeyPair,
+    deployment_id: &str,
+    revision: u64,
+) -> SignatureEnvelope {
+    let signed_payload = serde_json::json!({
+        "typ": "fuigo.managed_policy.v1",
+        "deployment_id": deployment_id,
+        "managed_config": "[cli]\ntheme = \"dark\"\n",
+        "requirements": "[features]\nweb_fetch = false\n",
+        "fail_closed": true,
+        "expires_at": 4_000_000_000u64,
+        "revision": revision,
+        "key_id": "v1",
+    })
+    .to_string();
+    let sig = kp.sign(signed_payload.as_bytes());
+    SignatureEnvelope {
+        signed_payload,
+        signature: base64::engine::general_purpose::STANDARD.encode(sig.as_ref()),
+        key_id: "v1".into(),
+    }
+}
+
+/// The marker deployment A leaves after accepting its revision 20.
+fn write_deployment_a_marker(home: &std::path::Path) {
+    let marker = serde_json::json!({
+        "synced_at": 1u64,
+        "principal": "dep-A",
+        "key_fingerprint": "fp-A",
+        "fail_closed": true,
+        "had_managed_config": true,
+        "had_requirements": true,
+        "highest_revision": 20u64,
+    });
+    std::fs::write(home.join(crate::managed_cache::MANAGED_CONFIG_CACHE_FILE), marker.to_string()).unwrap();
+}
+
+/// Audit R06: revision floors belong to the deployment that set them. Switching to another legitimately signed
+/// deployment whose revisions are lower is accepted; deployment A's own older revisions are still refused.
+#[test]
+fn another_deployment_at_a_lower_revision_is_accepted_at_fetch() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = Some(dir.path());
+    write_deployment_a_marker(dir.path());
+    let (kp, pubkey) = test_keypair();
+    let keys = keyset("v1", &pubkey);
+    let b1 = deployment_revision_envelope(&kp, "dep-B", 1);
+    let accepted = verify_fetched_with_keys(&b1, &keys, None, 1_000, home);
+    assert!(accepted.is_ok(), "deployment B starts its own history: {accepted:?}");
+    let a19 = deployment_revision_envelope(&kp, "dep-A", 19);
+    let err = verify_fetched_with_keys(&a19, &keys, None, 1_000, home).unwrap_err();
+    assert!(matches!(err, SigError::RolledBack { got: 19, highest: 20 }), "{err:?}");
+}
+
+/// Audit R06: after the switch to deployment B is applied, B's policy is trusted at session start; deployment A's
+/// recorded revision does not make it read rolled back, and the apply records B's own floor beside A's.
+#[test]
+fn a_switched_deployment_at_a_lower_revision_is_trusted_at_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    write_deployment_a_marker(home);
+    let (kp, pubkey) = test_keypair();
+    write_policy(home, &payload());
+    write_sidecar(home, &deployment_revision_envelope(&kp, "dep-B", 1)).unwrap();
+    // The apply verifies the sidecar with the embedded keys, so the generated key must be installed for the marker
+    // to record B's floor.
+    test_seam::with_keys(&[("v1", &pubkey)], || {
+        crate::managed_cache::mark_managed_config_synced_at(
+            home,
+            crate::managed_cache::SyncMarker {
+                principal: Some("dep-B"),
+                had_managed_config: true,
+                had_requirements: true,
+                key_fingerprint: Some("fp-B"),
+                fail_closed: true,
+            },
+        );
+    });
+    assert_eq!(crate::managed_cache::accepted_revision_floor(home, Some("dep-B")), 1, "B's floor is recorded");
+    assert_eq!(crate::managed_cache::accepted_revision_floor(home, Some("dep-A")), 20, "A's floor is kept");
+    assert_eq!(
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-B"), 1_000),
+        SignedVerdict::Trusted,
+        "deployment B's revision 1 is its newest"
+    );
+    let keys = keyset("v1", &pubkey);
+    let b0 = deployment_revision_envelope(&kp, "dep-B", 0);
+    let err = verify_fetched_with_keys(&b0, &keys, None, 1_000, Some(home)).unwrap_err();
+    assert!(matches!(err, SigError::RolledBack { got: 0, highest: 1 }), "B revision 0 is refused: {err:?}");
+    let a19 = deployment_revision_envelope(&kp, "dep-A", 19);
+    let err = verify_fetched_with_keys(&a19, &keys, None, 1_000, Some(home)).unwrap_err();
+    assert!(matches!(err, SigError::RolledBack { got: 19, highest: 20 }), "A revision 19 after A20 -> B1: {err:?}");
+}
+
+/// A team-path payload carrying `identity` (merged into the payload: a `deployment_id`, a `team_id`, or nothing).
+fn identity_envelope(kp: &ring::signature::Ed25519KeyPair, identity: serde_json::Value, revision: u64) -> SignatureEnvelope {
+    let mut payload = serde_json::json!({
+        "typ": "fuigo.managed_policy.v1",
+        "managed_config": "[cli]\ntheme = \"dark\"\n",
+        "requirements": "[features]\nweb_fetch = false\n",
+        "fail_closed": true,
+        "expires_at": 4_000_000_000u64,
+        "revision": revision,
+        "key_id": "v1",
+    });
+    if let (Some(payload), Some(identity)) = (payload.as_object_mut(), identity.as_object()) {
+        payload.extend(identity.clone());
+    }
+    let signed_payload = payload.to_string();
+    let sig = kp.sign(signed_payload.as_bytes());
+    SignatureEnvelope {
+        signed_payload,
+        signature: base64::engine::general_purpose::STANDARD.encode(sig.as_ref()),
+        key_id: "v1".into(),
+    }
+}
+
+/// Delta review (old-marker upgrade): a pre-upgrade marker's single floor is bound to its `principal`, which on the
+/// team path can differ from the signed identity of the policy it accepted (`deployment_id`, else `team_id`, or none
+/// at all). The old floor counts under both, so the first fetch after the upgrade still refuses an older revision.
+#[test]
+fn an_old_marker_floor_also_binds_the_accepted_policys_identity() {
+    for identity in [
+        serde_json::json!({ "team_id": "team-007", "deployment_id": "dep-X" }),
+        serde_json::json!({}),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let (kp, pubkey) = test_keypair();
+        let keys = keyset("v1", &pubkey);
+        write_policy(home, &payload());
+        write_sidecar(home, &identity_envelope(&kp, identity.clone(), 2)).unwrap();
+        let marker = serde_json::json!({ "synced_at": 1u64, "principal": "team-007", "fail_closed": true, "highest_revision": 2u64 });
+        std::fs::write(home.join(crate::managed_cache::MANAGED_CONFIG_CACHE_FILE), marker.to_string()).unwrap();
+        let err = verify_fetched_with_keys(&identity_envelope(&kp, identity.clone(), 1), &keys, Some("team-007"), 1_000, Some(home))
+            .unwrap_err();
+        assert!(matches!(err, SigError::RolledBack { got: 1, highest: 2 }), "{identity}: {err:?}");
+        assert!(verify_fetched_with_keys(&identity_envelope(&kp, identity.clone(), 2), &keys, Some("team-007"), 1_000, Some(home)).is_ok());
+    }
+}
+
+/// Delta review D2-04: the first apply after the upgrade may switch identities. An old team-path marker records one
+/// floor (team-007 at 20) for the policy of deployment A on disk; the apply writes that floor under A before A's
+/// sidecar is replaced (`apply_under_lock` order: legacy floor, new sidecar, marker), so after the switch to
+/// deployment B at revision 1, deployment A's revision 19 is still refused.
+#[test]
+fn an_old_marker_floor_survives_an_identity_switch_on_the_first_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let (kp, pubkey) = test_keypair();
+    let keys = keyset("v1", &pubkey);
+    write_policy(home, &payload());
+    write_sidecar(home, &deployment_revision_envelope(&kp, "dep-A", 20)).unwrap();
+    let marker = serde_json::json!({ "synced_at": 1u64, "principal": "team-007", "fail_closed": true, "highest_revision": 20u64 });
+    std::fs::write(home.join(crate::managed_cache::MANAGED_CONFIG_CACHE_FILE), marker.to_string()).unwrap();
+
+    crate::managed_cache::persist_legacy_revision_floor_at(home);
+    write_sidecar(home, &deployment_revision_envelope(&kp, "dep-B", 1)).unwrap();
+    test_seam::with_keys(&[("v1", &pubkey)], || {
+        crate::managed_cache::mark_managed_config_synced_at(
+            home,
+            crate::managed_cache::SyncMarker {
+                principal: Some("team-007"),
+                had_managed_config: true,
+                had_requirements: true,
+                key_fingerprint: None,
+                fail_closed: true,
+            },
+        );
+    });
+    let a19 = deployment_revision_envelope(&kp, "dep-A", 19);
+    let err = verify_fetched_with_keys(&a19, &keys, None, 1_000, Some(home)).unwrap_err();
+    assert!(matches!(err, SigError::RolledBack { got: 19, highest: 20 }), "A19 after A20 -> B1: {err:?}");
+    let b1 = deployment_revision_envelope(&kp, "dep-B", 1);
+    assert!(verify_fetched_with_keys(&b1, &keys, None, 1_000, Some(home)).is_ok(), "B's own revision stays accepted");
+    assert_eq!(crate::managed_cache::accepted_revision_floor(home, Some("team-007")), 20, "the marker principal's floor");
 }

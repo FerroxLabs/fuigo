@@ -196,9 +196,14 @@ fn le_u64(d: &[u8], at: usize) -> u64 {
     b.copy_from_slice(&d[at..at + 8]);
     u64::from_le_bytes(b)
 }
+/// A NUL-padded text field, restricted to printable ASCII: the blob is untrusted input, and a newline or escape
+/// sequence in a version or thread name would add lines to the crash notice (audit S11-F6).
 fn padded_str(d: &[u8]) -> String {
     let end = d.iter().position(|&b| b == 0).unwrap_or(d.len());
-    String::from_utf8_lossy(&d[..end]).into_owned()
+    d[..end]
+        .iter()
+        .map(|&b| if (0x20..=0x7e).contains(&b) { b as char } else { '?' })
+        .collect()
 }
 
 impl CrashBlob {

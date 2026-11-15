@@ -1572,6 +1572,9 @@ pub struct AgentView {
     /// The card (`PermissionRequestState::id`) and time a plain text key last arrived at its option rows (P152). Keys inside such a burst are the
     /// user's next message typed straight through the prompt, so they must not answer it (see `permission_typing_guard`).
     pub(crate) permission_typed_at: Option<(usize, Instant)>,
+    /// When a plain text, edit or Enter key last reached the composer with no card open. A permission card that opens
+    /// inside the typing window of this key starts with the typing guard on (audit S9-F4).
+    pub(crate) composer_key_at: Option<Instant>,
     /// Queue of pending permission requests. Only the front request is rendered
     /// and interactive. Subsequent requests wait until the front is resolved.
     /// Matches the TUI's `VecDeque<PermissionRequest>` behavior.

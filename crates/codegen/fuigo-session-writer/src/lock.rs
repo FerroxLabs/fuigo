@@ -36,6 +36,16 @@ leader (`--leader`) to use it from several windows.";
 /// this only rides out a momentary hold, such as a starting window's `session_open_elsewhere` check.
 pub(crate) const CONTENDED_RETRY: Duration = Duration::from_millis(300);
 pub(crate) const CONTENDED_POLL: Duration = Duration::from_millis(10);
+/// How many passing lock errors in a row one session folder may have before its lock is given up for the process
+/// (as for a filesystem without locks), so an error that never clears is not retried, with a failing open, on every write.
+const MAX_TRANSIENT_FAILURES: u32 = 8;
+
+/// Consecutive passing lock errors, by session directory.
+static TRANSIENT: LazyLock<Mutex<HashMap<PathBuf, u32>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn transient_failures() -> MutexGuard<'static, HashMap<PathBuf, u32>> {
+    TRANSIENT.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 struct Held {
     file: std::fs::File,
@@ -79,7 +89,21 @@ pub(crate) fn key_for(session_dir: &Path) -> PathBuf {
     dunce::canonicalize(session_dir).unwrap_or_else(|_| session_dir.to_path_buf())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test seam: the next this-many lock-file opens on this thread fail with EMFILE.
+    pub(crate) static FAIL_LOCK_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn open_lock_file(session_dir: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(test)]
+    if FAIL_LOCK_OPENS.with(|n| {
+        let left = n.get();
+        n.set(left.saturating_sub(1));
+        left > 0
+    }) {
+        return Err(std::io::Error::from_raw_os_error(24));
+    }
     // Owner-only like every session file: a lock file other users can open is a lock they can hold.
     crate::owner_only::open(
         std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false),
@@ -101,7 +125,8 @@ pub async fn acquire(session_dir: &Path) -> Result<Option<SessionWriterLock>, He
     loop {
         match try_acquire(session_dir, &key) {
             Attempt::Held(lock) => return Ok(Some(lock)),
-            Attempt::Unlockable => return Ok(None),
+            // Nothing held now; the writer's own attach retries a transient failure on its next mutating call.
+            Attempt::Unlockable | Attempt::Transient => return Ok(None),
             Attempt::Contended if tokio::time::Instant::now() >= deadline => {
                 tracing::info!(dir = %session_dir.display(), "session is open in another process; not opening it");
                 return Err(HeldElsewhere);
@@ -114,7 +139,44 @@ pub async fn acquire(session_dir: &Path) -> Result<Option<SessionWriterLock>, He
 pub(crate) enum Attempt {
     Held(SessionWriterLock),
     Contended,
+    /// This filesystem cannot lock at all (see [`locking_unsupported`]): the session opens unlocked for good.
     Unlockable,
+    /// A passing error (descriptor limit, no space, a momentary EACCES or EIO): nothing is held this time, and the
+    /// next attempt tries again (audit S12-F1).
+    Transient,
+}
+
+/// Whether `error` says the filesystem has no advisory locks (ENOLCK, ENOSYS, ENOTSUP/EOPNOTSUPP, Windows
+/// `ERROR_INVALID_FUNCTION`), as opposed to a passing failure.
+fn locking_unsupported(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::Unsupported {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    const UNSUPPORTED: &[i32] = &[37, 38, 95];
+    #[cfg(target_os = "macos")]
+    const UNSUPPORTED: &[i32] = &[77, 78, 45];
+    #[cfg(windows)]
+    const UNSUPPORTED: &[i32] = &[1];
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    const UNSUPPORTED: &[i32] = &[];
+    error.raw_os_error().is_some_and(|code| UNSUPPORTED.contains(&code))
+}
+
+fn classify(session_dir: &Path, key: &Path, error: &std::io::Error) -> Attempt {
+    report_unlockable(session_dir, error);
+    if locking_unsupported(error) {
+        return Attempt::Unlockable;
+    }
+    let mut failures = transient_failures();
+    let count = failures.entry(key.to_path_buf()).or_insert(0);
+    *count += 1;
+    if *count >= MAX_TRANSIENT_FAILURES {
+        failures.remove(key);
+        tracing::warn!(dir = %session_dir.display(), %error, "session writer lock keeps failing; giving up on it for this session");
+        return Attempt::Unlockable;
+    }
+    Attempt::Transient
 }
 
 pub(crate) fn try_acquire(session_dir: &Path, key: &Path) -> Attempt {
@@ -125,21 +187,16 @@ pub(crate) fn try_acquire(session_dir: &Path, key: &Path) -> Attempt {
     }
     let file = match open_lock_file(session_dir) {
         Ok(file) => file,
-        Err(error) => {
-            report_unlockable(session_dir, &error);
-            return Attempt::Unlockable;
-        }
+        Err(error) => return classify(session_dir, key, &error),
     };
     match file.try_lock() {
         Ok(()) => {
+            transient_failures().remove(key);
             held.insert(key.to_path_buf(), Held { file, holders: 1 });
             Attempt::Held(SessionWriterLock { key: key.to_path_buf() })
         }
         Err(std::fs::TryLockError::WouldBlock) => Attempt::Contended,
-        Err(std::fs::TryLockError::Error(error)) => {
-            report_unlockable(session_dir, &error);
-            Attempt::Unlockable
-        }
+        Err(std::fs::TryLockError::Error(error)) => classify(session_dir, key, &error),
     }
 }
 

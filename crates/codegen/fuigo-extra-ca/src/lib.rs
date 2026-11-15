@@ -14,6 +14,7 @@ use rustls::pki_types::pem::PemObject;
 pub mod dispatch;
 pub mod egress;
 pub mod fluxrouter;
+pub mod ip;
 pub mod public_download;
 pub mod service_trust;
 mod redirect;
@@ -68,6 +69,24 @@ pub fn ensure_default_crypto_provider() {
 pub fn build_reqwest_client(
     configure: impl Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
 ) -> reqwest::Result<reqwest::Client> {
+    build_with_resolver(configure, egress::resolver())
+}
+
+/// [`build_reqwest_client`] whose resolver also runs `check` on every answer before it is dialled
+/// (the caller's address policy then binds the connection, not just an earlier lookup).
+#[allow(clippy::disallowed_methods)] // the approved async build path
+pub fn build_reqwest_client_checked(
+    configure: impl Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+    check: egress::AddressCheck,
+) -> reqwest::Result<reqwest::Client> {
+    build_with_resolver(configure, Arc::new(egress::CheckedEgressGuard::new(check)))
+}
+
+#[allow(clippy::disallowed_methods)] // the approved async build path
+fn build_with_resolver<R: reqwest::dns::Resolve + 'static>(
+    configure: impl Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+    resolver: Arc<R>,
+) -> reqwest::Result<reqwest::Client> {
     ensure_default_crypto_provider();
     // The egress guard is installed AFTER `configure` so a caller cannot
     // replace it with its own resolver by accident.
@@ -75,7 +94,7 @@ pub fn build_reqwest_client(
         .use_rustls_tls()
         .tls_built_in_native_certs(false)
         .tls_built_in_webpki_certs(true)
-        .dns_resolver(egress::resolver());
+        .dns_resolver(resolver);
     for cert in shared_reqwest_roots() {
         builder = builder.add_root_certificate(cert);
     }

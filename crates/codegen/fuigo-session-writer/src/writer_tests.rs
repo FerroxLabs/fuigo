@@ -389,6 +389,63 @@ fn ct_w4b_a_folder_held_by_another_process_is_never_written() {
     writer.copy_in_sync(&src, "chat_history.jsonl").expect("now writes");
 }
 
+/// Audit S12-F1: a transient error opening the lock file (here EMFILE) must not turn the session's lock off for the
+/// life of the process: the next mutating call attaches the hold, and a second process is then refused.
+#[cfg(unix)]
+#[test]
+fn a_transient_lock_file_error_does_not_disable_the_lock_for_good() {
+    let dir = tempfile::tempdir().expect("dir");
+    let id = unique_id("s12f1");
+    let session = dir.path().join(&id);
+    std::fs::create_dir_all(&session).expect("mkdir");
+    let writer = SessionWriter::try_claim(&id, &session).expect("slot");
+    crate::lock::FAIL_LOCK_OPENS.with(|n| n.set(1));
+    writer.append_sync("updates.jsonl", b"one\n").expect("the write goes through");
+    assert!(foreign_could_take(&session), "the failed attach held nothing");
+    writer.append_sync("updates.jsonl", b"two\n").expect("second write");
+    assert!(!foreign_could_take(&session), "the next mutating call must take the hold");
+    assert_eq!(std::fs::read(session.join("updates.jsonl")).expect("read"), b"one\ntwo\n");
+}
+
+/// Review L18: a lock error that never clears (here EMFILE on every open) is retried a bounded number of times, not on
+/// every write for the life of the session; the writes themselves still go through.
+#[cfg(unix)]
+#[test]
+fn a_lasting_lock_file_error_stops_being_retried() {
+    let dir = tempfile::tempdir().expect("dir");
+    let id = unique_id("l18");
+    let session = dir.path().join(&id);
+    std::fs::create_dir_all(&session).expect("mkdir");
+    let writer = SessionWriter::try_claim(&id, &session).expect("slot");
+    crate::lock::FAIL_LOCK_OPENS.with(|n| n.set(1000));
+    for _ in 0..30 {
+        writer.append_sync("updates.jsonl", b"x\n").expect("the write goes through unlocked");
+    }
+    let tried = 1000 - crate::lock::FAIL_LOCK_OPENS.with(|n| n.replace(0));
+    assert!(tried <= 8, "the lock open was retried {tried} times over 30 writes");
+    assert_eq!(std::fs::read(session.join("updates.jsonl")).expect("read").len(), 60);
+}
+
+/// Audit S12-F7: a symlink planted at a session file name is refused: the append fails and the link's target keeps its
+/// bytes and its mode.
+#[cfg(unix)]
+#[test]
+fn an_append_through_a_planted_symlink_is_refused_and_the_target_is_untouched() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().expect("dir");
+    let id = unique_id("s12f7");
+    let session = dir.path().join(&id);
+    std::fs::create_dir_all(&session).expect("mkdir");
+    let outside = dir.path().join("outside.txt");
+    std::fs::write(&outside, b"precious").expect("outside");
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o644)).expect("mode");
+    std::os::unix::fs::symlink(&outside, session.join("updates.jsonl")).expect("symlink");
+    let writer = SessionWriter::try_claim(&id, &session).expect("slot");
+    writer.append_sync("updates.jsonl", b"injected\n").expect_err("the append must fail");
+    assert_eq!(std::fs::read(&outside).expect("read"), b"precious");
+    assert_eq!(mode_of(&outside) & 0o777, 0o644, "the link target's mode must not change");
+}
+
 /// F5-C8: `ensure_folder_owner_only_sync` makes a folder that already existed with a wider mode (an earlier, failed
 /// import) owner-only again, not only a folder it creates.
 #[cfg(unix)]

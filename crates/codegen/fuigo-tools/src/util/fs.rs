@@ -119,6 +119,16 @@ pub async fn try_resolve_unicode_filename(path: &Path) -> Option<UnicodePathMatc
         })
 }
 
+/// Edit-tool variant of [`try_resolve_unicode_filename`]: a look-alike match
+/// is used only when it is a regular file, never a symlink. The write
+/// permission check judges the typed path, so following a symlink here would
+/// write to a file that check never saw.
+pub async fn try_resolve_unicode_filename_for_edit(path: &Path) -> Option<UnicodePathMatch> {
+    let found = try_resolve_unicode_filename(path).await?;
+    let meta = tokio::fs::symlink_metadata(&found.resolved_path).await.ok()?;
+    meta.file_type().is_file().then_some(found)
+}
+
 async fn try_resolve_unicode_filename_inner(path: &Path) -> Option<UnicodePathMatch> {
     let file_name = path.file_name()?.to_str()?;
     let parent = path.parent()?;
@@ -207,6 +217,21 @@ mod tests {
     }
 
     // ── try_resolve_unicode_filename ───────────────────────────────────
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a45_edit_fallback_refuses_a_symlinked_look_alike() {
+        let dir = tempfile::tempdir().unwrap();
+        let protected = dir.path().join("protected.toml");
+        tokio::fs::write(&protected, b"x").await.unwrap();
+        std::os::unix::fs::symlink(&protected, dir.path().join("notes\u{202F}1.md")).unwrap();
+        tokio::fs::write(dir.path().join("plain\u{202F}2.md"), b"y").await.unwrap();
+        let typed_link = dir.path().join("notes 1.md");
+        assert!(try_resolve_unicode_filename(&typed_link).await.is_some());
+        assert!(try_resolve_unicode_filename_for_edit(&typed_link).await.is_none());
+        let typed_plain = dir.path().join("plain 2.md");
+        assert!(try_resolve_unicode_filename_for_edit(&typed_plain).await.is_some());
+    }
 
     #[tokio::test]
     async fn unicode_fallback_resolves_nnbsp_filename() {

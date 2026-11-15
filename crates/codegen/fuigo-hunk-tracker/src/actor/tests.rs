@@ -5317,3 +5317,75 @@ async fn test_reject_hunk_does_not_overwrite_when_saved_edit_changed_the_hunk() 
     let content = std::fs::read_to_string(harness.working_dir.join("moved.rs")).unwrap();
     assert_eq!(content, "a\nMINE\nc\n", "an edit the tracker missed must never be overwritten");
 }
+
+// =========================================================================
+// Folder-trust gate on the in-process status scan (audit S2-F2)
+// =========================================================================
+
+/// Refuses any directory whose path contains `untrusted-fixture`, so other tests in this process are unaffected.
+fn fixture_judge(dir: &Path) -> bool {
+    !dir.to_string_lossy().contains("untrusted-fixture")
+}
+
+/// A repo with a clean filter that touches a marker file, and a tracked file whose stat differs from the index.
+/// Returns `(temp dir, marker path, tracked file)`.
+fn filter_repo(prefix: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let temp = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+    let dir = temp.path().to_path_buf();
+    git(&dir, &["init"]);
+    git(&dir, &["config", "user.name", "Test User"]);
+    git(&dir, &["config", "user.email", "test@test.com"]);
+    let file = dir.join("a.txt");
+    std::fs::write(&file, "one\n").unwrap();
+    std::fs::write(dir.join(".gitattributes"), "*.txt filter=probe\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-m", "init"]);
+    let marker = temp.path().join("..").join(format!(
+        "{}-marker",
+        temp.path().file_name().unwrap().to_string_lossy()
+    ));
+    let _ = std::fs::remove_file(&marker);
+    let clean = format!("touch {}; cat", marker.display());
+    git(&dir, &["config", "filter.probe.clean", &clean]);
+    std::fs::write(&file, "two\n").unwrap(); // same size: only a content compare (the filter) can tell
+    (temp, marker, file)
+}
+
+async fn scan_all_dirty(dir: &Path) -> (crate::handle::HunkTrackerHandle, Vec<PathBuf>) {
+    fuigo_tty_utils::install_repo_exec_judge(fixture_judge);
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = HunkTrackerActor::spawn(
+        "test-session".to_string(),
+        dir.to_path_buf(),
+        event_tx,
+        TrackingMode::AllDirty,
+        tokio_util::sync::CancellationToken::new(),
+    );
+    handle.refresh_git_dirty_cache();
+    let _ = handle.get_all_hunks().await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let _ = handle.get_all_hunks().await;
+    let tracked = handle.get_all_tracked_paths().await;
+    (handle, tracked.into_iter().collect())
+}
+
+#[tokio::test]
+async fn test_untrusted_folder_status_scan_runs_no_repo_filter() {
+    let (temp, marker, _file) = filter_repo("untrusted-fixture-");
+    let (_handle, _tracked) = scan_all_dirty(temp.path()).await;
+    assert!(
+        !marker.exists(),
+        "an untrusted folder's configured filter driver must not run during the in-process scan"
+    );
+}
+
+#[tokio::test]
+async fn test_trusted_folder_status_scan_still_tracks_dirty_files() {
+    let (temp, _marker, file) = filter_repo("trusted-fixture-");
+    let (_handle, tracked) = scan_all_dirty(temp.path()).await;
+    let canon = dunce::canonicalize(&file).unwrap();
+    assert!(
+        tracked.iter().any(|p| dunce::canonicalize(p).ok().as_ref() == Some(&canon)),
+        "trusted folder scan must still find the dirty file, got {tracked:?}"
+    );
+}

@@ -365,8 +365,34 @@ fn write_bundle_file(absolute_path: &Path, content: &[u8]) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    std::fs::write(absolute_path, content)
-        .with_context(|| format!("failed to write {}", absolute_path.display()))?;
+    // Never write through a symlink at the destination, and never leave a half-written file in place: write a
+    // fresh temp file next to it (create_new, so a planted link there is not followed) and rename it over
+    // the destination (audit S7-F10).
+    if std::fs::symlink_metadata(absolute_path).is_ok_and(|m| m.file_type().is_symlink()) {
+        anyhow::bail!(
+            "refusing to write {}: it is a symlink",
+            absolute_path.display()
+        );
+    }
+    let file_name = absolute_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = absolute_path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    let written = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, absolute_path)
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("failed to write {}", absolute_path.display()));
+    }
     Ok(())
 }
 
@@ -549,6 +575,30 @@ mod tests {
 
     fn cache_root(tmp: &TempDir) -> PathBuf {
         tmp.path().join("bundled")
+    }
+
+    /// audit S7-F10: a symlink at the destination is refused, not written through; a normal write leaves no temp file.
+    #[cfg(unix)]
+    #[test]
+    fn write_bundle_file_refuses_a_symlink_and_leaves_no_temp_file() {
+        let tmp = TempDir::new().unwrap();
+        let victim = tmp.path().join("victim");
+        std::fs::write(&victim, "keep me").unwrap();
+        let link = tmp.path().join("persona.toml");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        assert!(write_bundle_file(&link, b"new").is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+
+        let fresh = tmp.path().join("sub").join("fresh.toml");
+        write_bundle_file(&fresh, b"hello").unwrap();
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "hello");
+        write_bundle_file(&fresh, b"again").unwrap();
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "again");
+        let leftovers: Vec<_> = std::fs::read_dir(fresh.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers.len(), 1, "no temp file left: {leftovers:?}");
     }
 
     #[test]

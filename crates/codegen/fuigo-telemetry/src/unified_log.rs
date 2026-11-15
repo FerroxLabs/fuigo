@@ -228,7 +228,7 @@ fn open_writer() -> Option<LogWriter> {
 /// That also makes the healing path testable against a temp directory.
 fn open_writer_at(path: PathBuf) -> Option<LogWriter> {
     if let Some(parent) = path.parent()
-        && let Err(e) = fs::create_dir_all(parent)
+        && let Err(e) = crate::appender::create_private_dir_all(parent)
     {
         tracing::warn!("[unified_log] failed to create log dir: {e}");
         return None;
@@ -238,7 +238,7 @@ fn open_writer_at(path: PathBuf) -> Option<LogWriter> {
         trim_file(&path);
     }
 
-    match OpenOptions::new().create(true).append(true).open(&path) {
+    match crate::appender::open_private_append(&path) {
         Ok(file) => Some(LogWriter {
             file,
             identity: path_identity(&path),
@@ -828,6 +828,36 @@ mod tests {
         // And it is only deferred, not lost: the next trim proceeds.
         trim_file(&path);
         assert!(fs::read_to_string(&path).unwrap().len() < content.len());
+    }
+
+    /// Audit S11-F3: a log opened inside a home that already existed with wide permissions is owner-only, and a log
+    /// file that was already there with a loose mode is tightened.
+    #[cfg(unix)]
+    #[test]
+    fn logs_are_created_owner_only_in_a_wide_home() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = tempfile::tempdir().unwrap();
+        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let path = home.path().join("logs").join("unified.jsonl");
+        let writer = open_writer_at(path.clone()).expect("open log");
+        drop(writer);
+        let mode = |p: &std::path::Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(path.parent().unwrap()), 0o700, "logs dir");
+        assert_eq!(mode(&path), 0o600, "log file");
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        drop(open_writer_at(path.clone()).expect("reopen log"));
+        assert_eq!(mode(&path), 0o600, "existing log tightened");
+
+        let debug = home.path().join("logs").join("debug.log");
+        fs::write(&debug, b"x").unwrap();
+        fs::set_permissions(&debug, fs::Permissions::from_mode(0o644)).unwrap();
+        crate::appender::non_blocking_file_writer(&debug).expect("debug log");
+        assert_eq!(mode(&debug), 0o600, "debug log");
+        let fresh = home.path().join("deep").join("dir").join("debug.log");
+        crate::appender::non_blocking_file_writer(&fresh).expect("fresh debug log");
+        assert_eq!(mode(&fresh), 0o600, "fresh debug log");
+        assert_eq!(mode(fresh.parent().unwrap()), 0o700, "fresh debug dir");
     }
 
     /// The reopen can itself fail: a log directory replaced by a file, a full disk, exhausted descriptors.

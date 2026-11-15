@@ -353,6 +353,7 @@ impl AgentView {
             hovered_permission_item: None,
             last_permission_click: None,
             permission_typed_at: None,
+            composer_key_at: None,
             permission_queue: VecDeque::new(),
             next_perm_req_id: 0,
             permission_stashed_prompt: None,

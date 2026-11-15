@@ -108,8 +108,14 @@ pub mod test_seam {
 
     /// Runs `f` with dark keys on this thread only.
     pub fn with_dark<R>(f: impl FnOnce() -> R) -> R {
+        with_keys(&[], f)
+    }
+
+    /// Runs `f` with exactly `keys` as the embedded keys on this thread only.
+    pub fn with_keys<R>(keys: &[(&str, &[u8])], f: impl FnOnce() -> R) -> R {
+        let owned = to_owned_keys(Some(keys));
         LOCAL_OVERRIDE.with(|cell| {
-            let prev = cell.replace(Some(Some(Vec::new())));
+            let prev = cell.replace(Some(owned));
             struct Restore(Option<KeyOverride>);
             impl Drop for Restore {
                 fn drop(&mut self) {
@@ -176,6 +182,8 @@ pub enum SigError {
     PrincipalMismatch,
     #[error("signed policy has expired")]
     Expired,
+    #[error("signed policy is older than one already accepted (revision {got} < {highest})")]
+    RolledBack { got: u64, highest: u64 },
     #[error("on-disk {0} does not match the signed policy")]
     ContentMismatch(&'static str),
     /// The file exists but can't be read (EACCES etc., never plain absence).
@@ -306,14 +314,61 @@ pub fn check_fetch_identity(
     Ok(())
 }
 
+/// Refuse a payload whose `revision` is below the highest this machine has accepted (audit S12-F2).
+pub fn check_not_rolled_back(payload: &SignedPayload, highest_accepted: u64) -> Result<(), SigError> {
+    if payload.revision < highest_accepted {
+        return Err(SigError::RolledBack { got: payload.revision, highest: highest_accepted });
+    }
+    Ok(())
+}
+
+/// The policy identity and `revision` of the verified sidecar on disk; `None` when there is none, it does not verify,
+/// or verification is off.
+pub(crate) fn on_disk_signed_revision(home: &std::path::Path) -> Option<(Option<String>, u64)> {
+    if !verification_active() {
+        return None;
+    }
+    let SidecarRead::Present(sidecar) = read_sidecar(home) else {
+        return None;
+    };
+    with_embedded_keys(|keys| verify_signed_payload(&sidecar.signed_payload, &sidecar.signature, keys))
+        .ok()
+        .map(|payload| (signed_identity(&payload).map(str::to_owned), payload.revision))
+}
+
+/// The policy identity the sidecar on disk names (`Some(None)`: none), read WITHOUT verifying it; `None` when there is
+/// no readable sidecar. Only for seeding a pre-upgrade marker's floor, which can only refuse older revisions.
+pub(crate) fn on_disk_sidecar_identity(home: &std::path::Path) -> Option<Option<String>> {
+    let SidecarRead::Present(sidecar) = read_sidecar(home) else {
+        return None;
+    };
+    let payload: serde_json::Value = serde_json::from_str(&sidecar.signed_payload).ok()?;
+    let named = |key: &str| payload.get(key).and_then(serde_json::Value::as_str).map(str::to_owned);
+    Some(named("deployment_id").or_else(|| named("team_id")))
+}
+
+/// The identity a payload's revisions count against: its effective principal (`deployment_id`, else `team_id`).
+fn signed_identity(payload: &SignedPayload) -> Option<&str> {
+    payload.deployment_id.as_deref().or(payload.team_id.as_deref())
+}
+
+/// The revision floor `home`'s marker records for the payload's own identity (audit R06).
+fn revision_floor_for(home: &std::path::Path, payload: &SignedPayload) -> u64 {
+    crate::managed_cache::accepted_revision_floor(home, signed_identity(payload))
+}
+
+/// Refuse a verified payload below the floor `home` records for its identity. The apply re-checks this while it holds
+/// the managed-config lock, so a revision verified before another process applied a newer one is never installed
+/// over it (audit R07).
+pub fn check_revision_floor_at(home: &std::path::Path, payload: &SignedPayload) -> Result<(), SigError> {
+    check_not_rolled_back(payload, revision_floor_for(home, payload))
+}
+
 /// Whether the payload's effective principal (`deployment_id`, else `team_id`) matches ours.
 /// This is the at-rest identity rule, so another tenant's cache reads foreign. Lenient when either side is unknown.
 /// Deliberately expiry-free: the gate orders identity BEFORE the `fail_closed` short-circuit and expiry after it (see [`SignedCacheFacts`]).
 fn signed_principal_matches(payload: &SignedPayload, expected_principal: Option<&str>) -> bool {
-    let signed = payload
-        .deployment_id
-        .as_deref()
-        .or(payload.team_id.as_deref());
+    let signed = signed_identity(payload);
     !matches!(
         (signed, expected_principal),
         (Some(signed), Some(expected)) if signed != expected
@@ -326,7 +381,10 @@ pub fn verify_fetched(
     active_team_id: Option<&str>,
     now_unix: u64,
 ) -> Result<SignedPayload, SigError> {
-    with_embedded_keys(|keys| verify_fetched_with_keys(sidecar, keys, active_team_id, now_unix))
+    let home = crate::paths::user_fuigo_home();
+    with_embedded_keys(|keys| {
+        verify_fetched_with_keys(sidecar, keys, active_team_id, now_unix, home.as_deref())
+    })
 }
 
 /// Fetch-time claim verification (signature and expiry; binding is the caller's rule).
@@ -357,9 +415,13 @@ fn verify_fetched_with_keys(
     trusted_keys: &[(&str, &[u8])],
     active_team_id: Option<&str>,
     now_unix: u64,
+    home: Option<&std::path::Path>,
 ) -> Result<SignedPayload, SigError> {
     let payload = verify_signed_payload(&sidecar.signed_payload, &sidecar.signature, trusted_keys)?;
     check_fetch_identity(&payload, active_team_id, now_unix)?;
+    if let Some(home) = home {
+        check_revision_floor_at(home, &payload)?;
+    }
     Ok(payload)
 }
 
@@ -591,6 +653,8 @@ struct SignedCacheFacts {
     /// The payload's effective principal matches ours ([`signed_principal_matches`]).
     identity_ok: bool,
     expired: bool,
+    /// The payload's `revision` is below the highest the marker recorded: an older envelope restored over a newer one.
+    rolled_back: bool,
     /// The SIGNED opt-in, read from the payload, never the forgeable marker.
     fail_closed: bool,
     disk: DiskStatus,
@@ -625,6 +689,7 @@ fn evaluate_signed_cache(
     SignedCacheEvaluation::Facts(SignedCacheFacts {
         identity_ok: signed_principal_matches(&payload, expected_principal),
         expired: now_unix > payload.expires_at,
+        rolled_back: check_revision_floor_at(home, &payload).is_err(),
         fail_closed: payload.fail_closed,
         disk: match check_on_disk_matches(home, &payload) {
             Ok(()) => DiskStatus::Match,
@@ -689,6 +754,8 @@ fn signed_cache_compromised_with_keys(
         Eval::SidecarUnreadable => SignedVerdict::SidecarUnreadable,
         // Identity precedes the fail_closed short-circuit: a foreign-bound but permissive policy can't be replayed to escape a strict one offline
         Eval::Facts(f) if !f.identity_ok => SignedVerdict::Compromised,
+        // A superseded policy, even a looser one that never opted into fail-closed: replaying it is the attack
+        Eval::Facts(f) if f.rolled_back => SignedVerdict::Compromised,
         Eval::Facts(f) if !f.fail_closed => SignedVerdict::Trusted,
         // Opted-in and bound to us: expired or tampered-on-disk refuses; an Unreadable blip does not
         Eval::Facts(f) if f.expired || f.disk == DiskStatus::Mismatch => SignedVerdict::Compromised,

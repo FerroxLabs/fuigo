@@ -582,7 +582,7 @@ fn a_flood_of_refusals_in_one_scope_does_not_evict_another_scopes_notes() {
     assert!(na[0].starts_with("/p136e/a/config.toml"));
     let nb = b.notes();
     assert_eq!(nb.len(), MAX_NOTES_PER_SCOPE + 1, "bounded, plus one summary");
-    assert!(nb.last().unwrap().starts_with(&format!("{} more references", 5000 - MAX_NOTES_PER_SCOPE)), "{:?}", nb.last());
+    assert!(nb.last().unwrap().starts_with(&format!("{} more notices", 5000 - MAX_NOTES_PER_SCOPE)), "{:?}", nb.last());
     // Collected: closed, later refusals in it are only logged.
     a.run(|| report_refusals(&[p136_refusal("/p136e/a/late.toml")]));
     assert!(a.notes().is_empty());

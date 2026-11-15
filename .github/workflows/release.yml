@@ -94,12 +94,12 @@ jobs:
             bin: fuigo-pager.exe
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Present only to guarantee rustup exists on every image; windows-11-arm
       # is new enough that its preinstalled tooling is not worth assuming.
       # Deliberately no `targets:` input -- see the next step for why.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable (action default toolchain: stable)
 
       # rust-toolchain.toml pins channel 1.94.0, and rustup honours that file
       # for any cargo invoked inside the repo. So installing a target into
@@ -202,7 +202,10 @@ jobs:
               "$RUNNER_TEMP/protoc/bin/protoc" --version ;;
           esac
 
-      - uses: Swatinem/rust-cache@v2
+      # No restored target directory under a real release (tag push or dry_run == false): release
+      # bytes must be compiled from source, not on top of a cache entry. Dry runs keep the cache.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
         with:
           # Linux builds run in the glibc-2.28 container (P199); their cache must not mix
           # with the old ubuntu-24.04 build-script binaries, which need glibc 2.39 and
@@ -425,7 +428,7 @@ jobs:
 
       - name: Preserve memory smoke evidence
         if: always() && matrix.npm_platform == 'darwin-arm64'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: memory-smoke-evidence
           path: |
@@ -439,14 +442,14 @@ jobs:
       # `fuigo-*` download pattern matches; the `sign` job re-uploads them as `fuigo-<platform>`.
       # Linux binaries are not signed and keep their final name.
       # Debug symbols for crash symbolication: workflow artifact only (see "Extract debug symbols").
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: debug-symbols-${{ matrix.npm_platform }}-${{ steps.dbg.outputs.version }}
           path: ${{ runner.temp }}/debug-symbols/
           retention-days: 90
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ runner.os == 'Linux' && format('fuigo-{0}', matrix.npm_platform) || format('unsigned-fuigo-{0}', matrix.npm_platform) }}
           path: target/${{ matrix.target }}/release-dist/${{ matrix.bin }}
@@ -485,9 +488,9 @@ jobs:
           - {runner: macos-15, os: macos, npm_platform: darwin-arm64, bin: fuigo-pager, arch: arm64}
           - {runner: macos-15, os: macos, npm_platform: darwin-x64, bin: fuigo-pager, arch: x86_64}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: unsigned-fuigo-${{ matrix.npm_platform }}
           path: bin
@@ -627,7 +630,7 @@ jobs:
         shell: bash
         run: sha256sum "bin/${{ matrix.bin }}" 2>/dev/null || shasum -a 256 "bin/${{ matrix.bin }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: fuigo-${{ matrix.npm_platform }}
           path: bin/${{ matrix.bin }}
@@ -646,8 +649,8 @@ jobs:
       CARGO_BUILD_JOBS: "4"
       CARGO_TARGET_DIR: target/security-checks
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable (action default toolchain: stable)
       - name: Prepare pinned test tools
         shell: bash
         run: |
@@ -707,14 +710,30 @@ jobs:
       # Only this job gets the token.
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      # A real publish is permanent (npm versions are immutable), so refuse it unless the run is a
+      # dry run, or it is a tag run with macOS signing on. The tag-equals-version check follows in
+      # "Resolve version". Nothing here runs a checkout: it needs only the event context.
+      - name: Refuse a real publish off a tag or without macOS signing
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+          MAC_SIGN: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_sign == false && 'false' || 'true' }}
+        run: |
+          if [ "$DRY_RUN" = true ]; then exit 0; fi
+          [ "$REF_TYPE" = tag ] || {
+            echo "::error::a real publish needs a tag ref, not $REF_TYPE"; exit 1; }
+          [ "$MAC_SIGN" = true ] || {
+            echo "::error::a real publish needs mac_sign=true"; exit 1; }
 
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
           pattern: fuigo-*
@@ -823,7 +842,7 @@ jobs:
           cat "$RUNNER_TEMP/gh-release-check/SHA256SUMS"
           rm -rf "$RUNNER_TEMP/gh-release-check"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: npm-packages-${{ steps.v.outputs.version }}
           path: ${{ runner.temp }}/fuigo-release-packages/
@@ -972,8 +991,8 @@ jobs:
           - { runner: windows-latest, platform: win32-x64 }
           - { runner: windows-11-arm, platform: win32-arm64 }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
       # The publish job already waited for the platform packages, but each
@@ -1008,8 +1027,30 @@ jobs:
           node crates/codegen/fuigo-pager/npm/fuigo/scripts/verify-published-platform.js '${{ matrix.platform }}' \
             --digest-out '${{ runner.temp }}/verified-${{ matrix.platform }}.json'
 
+      # Registry signatures and npm provenance attestations of what was just published (audit S8-F7). Installs
+      # the meta package (and this runner's platform package) with scripts off into a scratch project, then
+      # `npm audit signatures` checks every installed package against the registry's keys and its attestation.
+      # Linux x64 only: one check covers the published packages. This job only runs on a real release; nothing here publishes, tags or changes what was published.
+      - name: Verify registry signatures and provenance attestations
+        if: matrix.platform == 'linux-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./crates/codegen/fuigo-pager/npm/fuigo/package.json').version")
+          audit_dir="${{ runner.temp }}/audit-signatures-${{ matrix.platform }}"
+          mkdir -p "$audit_dir"
+          cd "$audit_dir"
+          npm init -y >/dev/null
+          # The registry can lag a few minutes after publish (a 404 on a just-published version); retry, bounded.
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if npm install --ignore-scripts --no-fund --no-audit "fuigo@$VERSION"; then break; fi
+            if [ "$attempt" = 10 ]; then echo "fuigo@$VERSION did not install after 10 attempts" >&2; exit 1; fi
+            sleep 30
+          done
+          npm audit signatures
+
       # The github-release job compares these digests with the release assets.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: verified-${{ matrix.platform }}
           path: ${{ runner.temp }}/verified-${{ matrix.platform }}.json
@@ -1049,7 +1090,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Resolve version
         id: v
@@ -1061,12 +1102,12 @@ jobs:
             echo "::error::tag $REF_NAME does not match version $V"; exit 1; }
           echo "version=$V" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
 
       # Only to report drift: the release bytes come from the registry below.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
           pattern: fuigo-*
@@ -1090,7 +1131,7 @@ jobs:
       # What each verify-published job executed (tarball sha512, executable sha256) must be what
       # this release ships. A mismatch means the registry served different bytes to the verifier
       # than to this job; nothing is released.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: verified
           pattern: verified-*

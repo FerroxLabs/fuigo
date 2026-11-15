@@ -1485,11 +1485,47 @@ pub struct SandboxSettingsConfig {
     pub auto_allow_bash: Option<bool>,
 }
 impl SandboxSettingsConfig {
+    /// A config that fails to load, or a `[sandbox]` field of the wrong type, is reported on stderr and never
+    /// silently drops the settings that are fine; startup continues, as for any unreadable setting.
     pub(crate) fn from_effective_config() -> Self {
-        crate::config::load_effective_config()
-            .ok()
-            .and_then(|v| v.get("sandbox")?.clone().try_into().ok())
-            .unwrap_or_default()
+        match crate::config::load_effective_config() {
+            Ok(value) => Self::from_config_value(&value),
+            Err(error) => {
+                fuigo_tty_utils::cli_eprintln!(
+                    "error: could not load the config, so its [sandbox] settings are not applied: {}",
+                    fuigo_tty_utils::untrusted(&error)
+                );
+                Self::default()
+            }
+        }
+    }
+    /// Read `profile` and `auto_allow_bash` independently: one wrongly typed field must not discard the other.
+    pub(crate) fn from_config_value(value: &toml::Value) -> Self {
+        let mut out = Self::default();
+        let Some(section) = value.get("sandbox") else {
+            return out;
+        };
+        let Some(table) = section.as_table() else {
+            fuigo_tty_utils::cli_eprintln!(
+                "error: config field `sandbox` must be a table; the [sandbox] settings are not applied"
+            );
+            return out;
+        };
+        match table.get("profile") {
+            None => {}
+            Some(toml::Value::String(profile)) => out.profile = Some(profile.clone()),
+            Some(_) => fuigo_tty_utils::cli_eprintln!(
+                "error: config field `sandbox.profile` must be a string; the sandbox profile is not applied"
+            ),
+        }
+        match table.get("auto_allow_bash") {
+            None => {}
+            Some(toml::Value::Boolean(flag)) => out.auto_allow_bash = Some(*flag),
+            Some(_) => fuigo_tty_utils::cli_eprintln!(
+                "error: config field `sandbox.auto_allow_bash` must be true or false; it is not applied"
+            ),
+        }
+        out
     }
     /// Resolve sandbox profile: requirement > CLI > env > config > "off".
     pub fn resolve_profile(

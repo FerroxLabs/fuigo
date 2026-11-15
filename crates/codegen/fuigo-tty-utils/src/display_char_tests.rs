@@ -509,3 +509,16 @@ fn quote_and_apostrophe_lookalikes_cannot_close_a_field() {
     // Different bracket glyphs (U+3010/U+3011, U+27E6/U+27E7) are not look-alikes of `[` `]`: left as they are.
     assert_eq!(super::bracketed("a\u{3011}b", 60), "[a\u{3011}b]");
 }
+
+/// Audit S9-F8: blank-rendering fillers are scrubbed like the other invisible characters.
+#[test]
+fn invisible_filler_characters_are_unsafe_and_scrubbed() {
+    for c in [
+        '\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}', '\u{2800}', '\u{034F}', '\u{E0100}', '\u{E01EF}',
+    ] {
+        assert!(is_unsafe_display_char(c), "{:04X}", c as u32);
+        assert_eq!(scrub_unsafe_display(&format!("a{c}b"), Some(' ')), "ab");
+    }
+    assert!(!is_unsafe_display_char('\u{FE0F}'), "emoji presentation selector stays");
+    assert!(!is_unsafe_display_char('\u{AC00}'), "composed Hangul stays");
+}

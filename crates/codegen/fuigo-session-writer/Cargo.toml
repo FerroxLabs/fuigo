@@ -17,6 +17,10 @@ tokio = { workspace = true, features = ["sync", "rt", "time"] }
 # The 1.0.30 lock's warn-once and contention logs.
 tracing = { workspace = true }
 
+# O_NOFOLLOW on every session-file open (audit S12-F7).
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [features]
 # The delete-order observer (CT-DEL-O) and the pause seams (CT-W3b/W3c) for other crates' tests; never enabled in a
 # shipped build.

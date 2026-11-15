@@ -226,12 +226,33 @@ fn write_auth_json_with(
 /// Streams `to_writer_pretty` through a `BufWriter` so the entire JSON string is never held in memory, avoiding OOM under severe memory pressure.
 #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
 fn write_store_to(path: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
-    use crate::util::secure_file::open_secure_file;
+    write_store_impl(path, auth_store, false)
+}
+
+/// [`write_store_to`] for a temp file that must not exist yet: created exclusively and without following a symlink
+/// (audit S1-F7), and a failed owner-only tighten is an error, so the caller discards the file instead of publishing
+/// token bytes that other accounts may read.
+fn write_store_to_new(path: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
+    write_store_impl(path, auth_store, true)
+}
+
+#[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
+fn write_store_impl(path: &Path, auth_store: &AuthStore, fresh: bool) -> std::io::Result<()> {
+    use crate::util::secure_file::{open_secure_file, open_secure_file_new};
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file = open_secure_file(path)?;
+    let file = if fresh {
+        open_secure_file_new(path)?
+    } else {
+        open_secure_file(path)?
+    };
+    // Windows: the ACL goes on the empty file, before any token byte is written.
+    #[cfg(windows)]
+    if fresh {
+        crate::util::secure_file::ensure_owner_only_permissions(path)?;
+    }
     let mut writer = std::io::BufWriter::new(file);
     serde_json::to_writer_pretty(&mut writer, auth_store)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -245,6 +266,9 @@ fn write_store_to(path: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
     // The in-place fallback restores the prior snapshot on any `write_store_to` Err, which would discard freshly written tokens
     // The load path re-tightens on the next read
     if let Err(e) = crate::util::secure_file::ensure_owner_only_permissions(path) {
+        if fresh {
+            return Err(e);
+        }
         tracing::warn!(
             error = %e,
             path = %path.display(),
@@ -300,10 +324,12 @@ fn write_auth_json_atomic(auth_file: &Path, auth_store: &AuthStore) -> std::io::
     // Unique per write (pid and a monotonic seq): two concurrent in-process writers must not share one tmp path
     // The background mint and the proactive refresher can both write at once
     static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    // The random suffix makes the name unpredictable; the file is also created exclusively (`write_store_to_new`)
     let tmp = auth_file.with_extension(format!(
-        "json.{}.{}.tmp",
+        "json.{}.{}.{:016x}.tmp",
         std::process::id(),
-        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed),
+        rand::random::<u64>()
     ));
 
     // Reclaim the temp file on any early return (write/sync/rename failure); the unique name otherwise accumulates one orphan per failed write
@@ -318,12 +344,16 @@ fn write_auth_json_atomic(auth_file: &Path, auth_store: &AuthStore) -> std::io::
     }
     let mut tmp_reclaim = TmpReclaim(Some(&tmp));
 
-    write_store_to(&tmp, auth_store)?;
+    write_store_to_new(&tmp, auth_store)?;
+    // `std::fs::rename` replaces an existing file on every platform: never delete `auth_file` first (audit S1-F8), or a
+    // crash between the two calls leaves no login. If Windows refuses the replace (a reader holds the file open without
+    // delete sharing), fall back to the in-place writer, which keeps the old bytes until it rewrites them.
+    let renamed = std::fs::rename(&tmp, auth_file);
     #[cfg(windows)]
-    {
-        let _ = std::fs::remove_file(auth_file);
+    if renamed.is_err() {
+        return write_auth_json_in_place(auth_file, auth_store);
     }
-    std::fs::rename(&tmp, auth_file)?;
+    renamed?;
     tmp_reclaim.0 = None; // renamed into place; nothing to reclaim
     // Re-assert on the final path (covers rename edge cases and FS quirks)
     // Best-effort: rename already published the new tokens.
@@ -389,7 +419,7 @@ fn restore_prior_bytes(auth_file: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Read the API key from the `fuigo::api_key` scope in auth.json.
 pub fn read_api_key(fuigo_home: &Path) -> Option<String> {
-    let path = fuigo_home.join("auth.json");
+    let path = auth_json_path(fuigo_home);
     let map = read_auth_json(&path).ok()?;
     map.get(API_KEY_SCOPE).map(|a| a.key.clone())
 }
@@ -430,7 +460,7 @@ fn auth_state() -> &'static parking_lot::ReentrantMutex<()> {
 /// Blocks the calling thread while it waits; async callers use [`store_api_key_async`].
 #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
 pub fn store_api_key(fuigo_home: &Path, api_key: &str) -> std::io::Result<()> {
-    let path = fuigo_home.join("auth.json");
+    let path = auth_json_path(fuigo_home);
     std::fs::create_dir_all(fuigo_home)?;
     let flock =
         super::manager::lock::lock_auth_file_blocking(&path, super::manager::AUTH_LOCK_TIMEOUT)
@@ -441,7 +471,7 @@ pub fn store_api_key(fuigo_home: &Path, api_key: &str) -> std::io::Result<()> {
 /// [`store_api_key`] for async callers: waits for the cross-process lock without blocking a runtime thread.
 #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
 pub(crate) async fn store_api_key_async(fuigo_home: &Path, api_key: &str) -> std::io::Result<()> {
-    let path = fuigo_home.join("auth.json");
+    let path = auth_json_path(fuigo_home);
     std::fs::create_dir_all(fuigo_home)?;
     let flock = super::manager::lock::try_lock_auth_file_async(
         &path,
@@ -477,7 +507,7 @@ fn store_api_key_locked(path: &Path, api_key: &str, _flock: &AuthFileLock) -> st
 /// Same locking as [`store_api_key`]: the cross-process lock is held from the read through the write (or the delete
 /// of the emptied file), bounded by `AUTH_LOCK_TIMEOUT`, and never skipped. Nothing to clear when auth.json is absent.
 pub fn clear_api_key(fuigo_home: &Path) -> std::io::Result<()> {
-    let path = fuigo_home.join("auth.json");
+    let path = auth_json_path(fuigo_home);
     if !path.exists() {
         return Ok(());
     }
@@ -489,7 +519,7 @@ pub fn clear_api_key(fuigo_home: &Path) -> std::io::Result<()> {
 
 /// [`clear_api_key`] for async callers.
 pub(crate) async fn clear_api_key_async(fuigo_home: &Path) -> std::io::Result<()> {
-    let path = fuigo_home.join("auth.json");
+    let path = auth_json_path(fuigo_home);
     if !path.exists() {
         return Ok(());
     }
@@ -506,15 +536,72 @@ pub(crate) async fn clear_api_key_async(fuigo_home: &Path) -> std::io::Result<()
 #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
 fn clear_api_key_locked(path: &Path, _flock: &AuthFileLock) -> std::io::Result<()> {
     let _state = auth_state_lock();
-    if let Ok(mut map) = read_auth_json(path) {
-        map.remove(API_KEY_SCOPE);
-        if map.is_empty() {
-            let _ = std::fs::remove_file(path);
-        } else {
-            write_auth_json(path, &map)?;
+    // Only a missing file is "already cleared": an unreadable or unparsable store may still hold the key, and the
+    // caller drops its in-memory copy only on `Ok`.
+    let mut map = match read_auth_json(path) {
+        Ok(map) => map,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    map.remove(API_KEY_SCOPE);
+    if map.is_empty() {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
         }
+    } else {
+        write_auth_json(path, &map)?;
     }
     Ok(())
+}
+
+/// A temp file left by a crash is only removed by logout once it is older than this, so a write in flight in another
+/// Fuigo process is never pulled out from under it.
+const STALE_TMP_AGE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// On logout: delete the credential copies next to `auth_file` that no other path removes (audit S1-F6): corrupt
+/// backups (`<name>.corrupt.*`) and temp files a crash left behind (`<stem>.json.*.tmp`, older than
+/// [`STALE_TMP_AGE`]). Best-effort: a failure is logged and never fails the logout.
+#[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
+pub(crate) fn remove_credential_leftovers(auth_file: &Path) {
+    let dir = auth_file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let (Some(name), Some(stem)) = (
+        auth_file.file_name().map(|n| n.to_string_lossy().into_owned()),
+        auth_file.file_stem().map(|n| n.to_string_lossy().into_owned()),
+    ) else {
+        return;
+    };
+    let corrupt_prefix = format!("{name}.corrupt.");
+    let tmp_prefix = format!("{stem}.json.");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        let stale_tmp = file_name.starts_with(&tmp_prefix)
+            && file_name.ends_with(".tmp")
+            && entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age >= STALE_TMP_AGE);
+        if (file_name.starts_with(&corrupt_prefix) || stale_tmp)
+            && let Err(e) = std::fs::remove_file(entry.path())
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(error = %e, "auth: could not remove a leftover credential copy on logout");
+        }
+    }
+}
+
+/// Whether `auth_file` still holds a saved API key (the `fuigo::api_key` scope).
+pub(crate) fn saved_api_key_present(auth_file: &Path) -> bool {
+    read_auth_json(auth_file).is_ok_and(|map| map.contains_key(API_KEY_SCOPE))
 }
 
 #[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
@@ -728,5 +815,94 @@ mod p167_auth_path_tests {
             resolve_auth_json_path(Some("/elsewhere/creds.json".into()), home),
             PathBuf::from("/elsewhere/creds.json")
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create and corrupt files in test-owned temp dirs")]
+mod s1_f4_clear_api_key_tests {
+    use super::*;
+
+    #[test]
+    fn clear_api_key_errors_when_the_store_cannot_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let garbage = br#"{"fuigo::api_key": {"key": "sk-secret", "#;
+        std::fs::write(&path, garbage).unwrap();
+        let flock = super::super::manager::lock::lock_auth_file_blocking(
+            &path,
+            super::super::manager::AUTH_LOCK_TIMEOUT,
+        )
+        .into_io_result()
+        .unwrap();
+        let err = clear_api_key_locked(&path, &flock).expect_err("an unreadable store must not report the key cleared");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(&path).unwrap(), garbage, "the file is left untouched");
+    }
+
+    #[test]
+    fn clear_api_key_treats_a_missing_file_as_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let flock = super::super::manager::lock::lock_auth_file_blocking(
+            &path,
+            super::super::manager::AUTH_LOCK_TIMEOUT,
+        )
+        .into_io_result()
+        .unwrap();
+        clear_api_key_locked(&path, &flock).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod s1_f8_atomic_replace_guard {
+    /// Audit S1-F8 (source-level guard; the Windows path cannot run on the build box): the atomic writer must never
+    /// delete `auth.json` before the rename, because `std::fs::rename` already replaces an existing file on Windows.
+    #[test]
+    fn atomic_writer_does_not_delete_the_target_before_rename() {
+        let source = include_str!("storage.rs");
+        let start = source.find(concat!("fn write_auth_json", "_atomic(")).unwrap();
+        let end = source.find(concat!("fn write_auth_json", "_in_place(")).unwrap();
+        let body = &source[start..end];
+        assert!(!body.contains(concat!("remove_file(", "auth_file)")), "the target is deleted before the rename");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code: fixtures create files in test-owned temp dirs")]
+mod s1_f7_secret_file_tests {
+    use super::*;
+
+    /// Audit S1-F7: the temp file is created exclusively; a symlink or a file already at the path is never written through.
+    #[cfg(unix)]
+    #[test]
+    fn temp_file_is_never_written_through_a_symlink_or_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        let link = dir.path().join("auth.json.1.0.tmp");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        assert!(write_store_to_new(&link, &AuthStore::new()).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+
+        let existing = dir.path().join("auth.json.2.0.tmp");
+        std::fs::write(&existing, "old").unwrap();
+        let err = write_store_to_new(&existing, &AuthStore::new()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&existing).unwrap(), "old");
+    }
+
+    #[test]
+    fn atomic_write_uses_a_fresh_unpredictable_temp_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        write_auth_json_atomic(&path, &AuthStore::new()).unwrap();
+        write_auth_json_atomic(&path, &AuthStore::new()).unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
     }
 }

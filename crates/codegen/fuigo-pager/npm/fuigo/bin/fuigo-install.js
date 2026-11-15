@@ -16,7 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
-const { execSync, spawnSync } = require('child_process');
+const { spawnSync } = require('child_process');
 const os = require('os');
 const { installVendorBinary, ensureFuigoHome, STAMP_NAME, globalInstallKind } = require('./fuigo-replace.js');
 
@@ -88,11 +88,68 @@ function byVersionDescending(prefix) {
     };
 }
 
-// Best-effort cleanup of old versioned binaries for a given binary name. Keeps
-// the current version and the previous one (a process may still be running it).
-// Exact prefix + hyphen + digit, so fuigo-* never matches fuigo-pager-*.
-function cleanupOldVersions(canonicalDir, binName, version) {
+// A leftover younger than this is never pruned: it may be a concurrent install's fresh file
+// (same bound as STALE_TMP_AGE in the Rust updater).
+const CLEANUP_FRESH_MS = 60 * 60 * 1000;
+
+// Is a live process executing this file? Deleting a running binary kills it on macOS (the kernel
+// can no longer verify the code signature). Linux scans /proc; macOS asks lsof, and an lsof that
+// cannot run counts as "in use". Windows refuses to unlink a running executable, so it answers no.
+function binaryIsInUse(file) {
     try {
+        if (process.platform === 'linux') {
+            const real = fs.realpathSync(file);
+            const st = fs.statSync(file);
+            for (const pid of fs.readdirSync('/proc')) {
+                if (!/^\d+$/.test(pid)) continue;
+                let exe;
+                try { exe = fs.readlinkSync(`/proc/${pid}/exe`); } catch { continue; }
+                if (exe === real) return true;
+                try {
+                    const other = fs.statSync(`/proc/${pid}/exe`);
+                    if (other.ino === st.ino && other.dev === st.dev) return true;
+                } catch {}
+            }
+            return false;
+        }
+        if (process.platform === 'darwin') return binariesInUse([file]).has(file);
+    } catch {
+        return process.platform === 'darwin';
+    }
+    return false;
+}
+
+// macOS: ONE lsof call for every candidate (it used to be one call, up to 5 s, per old binary).
+// `-Fn` prints the name of each matching open file, so the answer is per path. An lsof that
+// cannot run or times out counts every file as in use. Returns the Set of files in use.
+function binariesInUse(files) {
+    const inUse = new Set();
+    if (files.length === 0) return inUse;
+    if (process.platform !== 'darwin') {
+        for (const f of files) if (binaryIsInUse(f)) inUse.add(f);
+        return inUse;
+    }
+    const res = spawnSync('lsof', ['-Fn', '--', ...files], { encoding: 'utf8', timeout: 2000 });
+    if (res.error) return new Set(files);
+    const named = new Set(String(res.stdout).split('\n').filter((l) => l[0] === 'n').map((l) => l.slice(1)));
+    for (const f of files) {
+        let real = f;
+        try { real = fs.realpathSync(f); } catch {}
+        if (named.has(f) || named.has(real)) inUse.add(f);
+    }
+    return inUse;
+}
+
+// Best-effort cleanup of old versioned binaries for a given binary name. Keeps
+// the current version and the previous one (a process may still be running it), and
+// follows the Rust updater's rules (cleanup_downloads.rs): symlinks, files younger than
+// CLEANUP_FRESH_MS and binaries a live process executes are left alone.
+// Exact prefix + hyphen + digit, so fuigo-* never matches fuigo-pager-*.
+// `opts` is for tests: { isInUse(file), now }.
+function cleanupOldVersions(canonicalDir, binName, version, opts = {}) {
+    try {
+        const isInUse = opts.isInUse || binaryIsInUse;
+        const now = opts.now === undefined ? Date.now() : opts.now;
         const prefix = `${binName}-`;
         const currentVersioned = `${binName}-${version}${EXE}`;
         const old = fs.readdirSync(canonicalDir)
@@ -100,11 +157,24 @@ function cleanupOldVersions(canonicalDir, binName, version) {
                 if (!e.startsWith(prefix)) return false;
                 if (e.includes('.tmp.') || e.includes('.link.')) return false;
                 if (e === currentVersioned) return false;
-                return /^\d/.test(e.slice(prefix.length));
+                if (!/^\d/.test(e.slice(prefix.length))) return false;
+                try { return !fs.lstatSync(path.join(canonicalDir, e)).isSymbolicLink(); } catch { return false; }
             })
             .sort(byVersionDescending(prefix));
+        const stale = [];
         for (const name of old.slice(1)) {
-            try { fs.unlinkSync(path.join(canonicalDir, name)); } catch {}
+            const full = path.join(canonicalDir, name);
+            try {
+                if (now - fs.lstatSync(full).mtimeMs <= CLEANUP_FRESH_MS) continue;
+                stale.push(full);
+            } catch {}
+        }
+        const busy = opts.isInUse ? new Set(stale.filter((f) => isInUse(f))) : binariesInUse(stale);
+        for (const full of stale) {
+            try {
+                if (busy.has(full)) continue;
+                fs.unlinkSync(full);
+            } catch {}
         }
     } catch {}
 }
@@ -135,8 +205,14 @@ function writeInstallerConfig(fuigoHome) {
         try {
             // cwd is the user's home, never the launch directory: a project .npmrc there must not
             // decide the registry recorded in the user's global config.
-            const resolved = execSync('npm config get registry',
-                { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], cwd: os.homedir() }).trim();
+            // No shell on Unix (audit S8-F11): the name is looked up on PATH by exec, never interpreted by sh.
+            // Windows needs one, because npm there is npm.cmd.
+            // With a shell, Node 24+ deprecates passing an args array (DEP0190): hand it one fixed command string.
+            const spawnOpts = { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], cwd: os.homedir() };
+            const res = IS_WINDOWS
+                ? spawnSync('npm config get registry', { ...spawnOpts, shell: true })
+                : spawnSync('npm', ['config', 'get', 'registry'], spawnOpts);
+            const resolved = res.status === 0 ? String(res.stdout).trim() : '';
             if (resolved && resolved !== 'undefined') return resolved;
         } catch {}
         return null;

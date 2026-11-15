@@ -47,6 +47,12 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | --- | --- | --- | --- | --- |
 | `announcements` | `array of tables` | `—` | `user` | Remote announcement payloads consumed at load. Not a user-authored table. |
 
+### `approved_campaign_mcp_servers`
+
+| Key | Type / Values | Requirements | Managed | Details |
+| --- | --- | --- | --- | --- |
+| `approved_campaign_mcp_servers` | `table` | `—` | `—` | Stdio MCP servers added by a campaign that you turned on, keyed by server name (the value is a fingerprint of the command, arguments and working directory you approved). A campaign stdio server does not start until you turn it on in `/mcp` or with `fuigo mcp enable <name>`; if the campaign later changes what it runs, it stays off until you turn it on again. Written by those commands; read from the user `config.toml` only. |
+
 ### `auth`
 
 | Key | Type / Values | Requirements | Managed | Details |
@@ -582,7 +588,7 @@ Custom profile definitions live separately in `sandbox.toml`, under `[profiles.<
 | `ui.contextual_hints.word_select` | `boolean` | `yes` | `user` | After double-click with fold/nav selection, point at Word select in settings. |
 | `ui.cursor_blink` | `boolean` | `yes` | `user` | Force blinking (true) or steady (false) block cursor. Unset inherits the terminal. |
 | `ui.default_selected_permission` | `string` | `yes` | `user` | Preselected approval row on the first prompt of a session. Also FUIGO_DEFAULT_SELECTED_PERMISSION. |
-| `ui.disable_bypass_permissions_mode` | `boolean` | `pin` | — | Lock always-approve off for yourself (default false). Read only from your own `$FUIGO_HOME/config.toml`, on every OS: a project `.fuigo/config.toml`, `FUIGO_CONFIG` / `FUIGO_CONFIG_PATH` and managed config cannot set or clear it, and console sync does not touch it. Takes effect from the next session start (the hub that authorizes tool calls applies it from the next call); `true` in `requirements.toml` locks it for everyone. |
+| `ui.disable_bypass_permissions_mode` | `boolean` | `pin` | — | Lock always-approve off for yourself (default false). Read only from your own `$FUIGO_HOME/config.toml`, on every OS: a project `.fuigo/config.toml`, a config passed through environment variables and managed config cannot set or clear it, and console sync does not touch it. Takes effect from the next session start (the hub that authorizes tool calls applies it from the next call); `true` in `requirements.toml` locks it for everyone. |
 | `ui.display_refresh.auto_cadence_enabled` | `boolean` | `yes` | `user` | Match stream/scroll cadence to display refresh rate. Also FUIGO_DISPLAY_REFRESH_AUTO_CADENCE. |
 | `ui.follow_up_behavior` | `queue / steer` | `yes` | `user` | Mid-turn follow-up routing. |
 | `ui.fork_secondary_model` | `string` | `yes` | `user` | Model for the secondary agent when forking. Defaults to the main default model. |

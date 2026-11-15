@@ -512,6 +512,7 @@ fn clone_repo_to_path(
         .map(Path::to_path_buf)
         .unwrap_or_else(std::env::temp_dir);
     let mut cmd = fuigo_tty_utils::git_command_user_invoked(&run_in);
+    git_install::restrict_git_protocols(&mut cmd);
     cmd.arg("clone").arg("--depth").arg("1");
     if let Some(r) = git_ref {
         cmd.arg("--branch").arg(r);
@@ -574,6 +575,7 @@ fn run_git_in(cwd: &Path, args: &[&str]) -> Result<(), String> {
 fn run_git_in_capture(cwd: &Path, args: &[&str]) -> Result<std::process::Output, String> {
     // The user's install of the plugin checkout it just cloned (not judged).
     let mut cmd = fuigo_tty_utils::git_command_user_invoked(cwd);
+    git_install::restrict_git_protocols(&mut cmd);
     cmd.args(args);
     let output = cmd
         .output()

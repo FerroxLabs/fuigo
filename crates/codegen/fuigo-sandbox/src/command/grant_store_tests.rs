@@ -1337,6 +1337,59 @@ async fn symlinked_and_too_broad_roots_are_refused_on_add_and_dropped_at_load() 
     assert_eq!(vec![write_root("/opt/fixture/elsewhere/fine")], subjects);
 }
 
+/// A stored Deny on a child whose folder was later replaced by a symlink is kept as a lexical
+/// deny at load, so the stored Allow on its parent does not apply again.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_deny_row_whose_child_became_a_symlink_still_denies_at_load() {
+    let home = Home::new("deny-symlink");
+    let clock = Arc::new(FixedClock::at(T0));
+    let parent = home.ws.join("area");
+    std::fs::create_dir_all(&parent).unwrap();
+    let child = parent.join("secret");
+    let elsewhere = home.ws.parent().unwrap().join("elsewhere/deep/folder");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &child).unwrap();
+    let allow = grant(
+        "0192c1a0-0000-7000-8000-0000000000a1",
+        GrantSubject::FsWriteRoot {
+            root: parent.clone(),
+        },
+        GrantScope::Global,
+        Expiry::Never,
+    );
+    let mut deny = grant(
+        "0192c1a0-0000-7000-8000-0000000000a2",
+        GrantSubject::FsWriteRoot {
+            root: child.clone(),
+        },
+        GrantScope::Global,
+        Expiry::Never,
+    );
+    deny.decision = GrantDecision::Deny;
+    let edited = GrantFile {
+        grants: vec![allow, deny],
+    };
+    std::fs::write(
+        home.fuigo_home.join(GLOBAL_GRANTS_FILENAME),
+        toml::to_string_pretty(&edited).unwrap(),
+    )
+    .unwrap();
+    let store = home.open(clock).await;
+    let live = store.live();
+    assert!(
+        live.iter().any(|g| g.decision == GrantDecision::Deny
+            && g.subject == GrantSubject::FsWriteRoot { root: child.clone() }),
+        "the deny spelling is kept: {live:?}"
+    );
+    assert!(
+        allows_not_denied(&live)
+            .iter()
+            .all(|g| g.decision == GrantDecision::Deny),
+        "the parent allow must not apply again: {live:?}"
+    );
+}
+
 #[tokio::test]
 async fn deny_rows_win_in_live_allows() {
     let home = Home::new("deny");

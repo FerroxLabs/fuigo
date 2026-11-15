@@ -3813,6 +3813,7 @@ fn resolve_effective_plugins_config_malformed_field_keeps_disabled() {
         "[plugins]\npaths = \"not-a-list\"\nenabled = 7\ndisabled = [\"noisy\"]\n",
     )
     .unwrap();
+    fuigo_workspace::folder_trust::grant_folder_trust(repo.path());
     let cfg = resolve_effective_plugins_config(repo.path());
     assert!(cfg.disabled.contains(&"noisy".to_string()), "disabled survives: {cfg:?}");
     assert!(cfg.paths.is_empty() && cfg.enabled.is_empty(), "malformed fields ignored: {cfg:?}");
@@ -3847,8 +3848,8 @@ fn resolve_effective_plugins_config_gates_project_paths_on_folder_trust() {
             "untrusted folder must NOT merge the project [plugins].paths"
         );
     assert!(
-            untrusted.disabled.contains(&proj_disabled),
-            "project [plugins].disabled must merge even when untrusted (fail-safe)"
+            !untrusted.disabled.contains(&proj_disabled),
+            "untrusted project [plugins].disabled must NOT merge (audit S7-F1: it would switch off the user's own plugins)"
         );
     fuigo_workspace::folder_trust::grant_folder_trust(cwd);
     let trusted = resolve_effective_plugins_config(cwd);

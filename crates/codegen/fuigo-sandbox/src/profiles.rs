@@ -143,7 +143,10 @@ impl std::fmt::Display for ProfileName {
 impl std::str::FromStr for ProfileName {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        // Built-in names fold case and whitespace, so `Strict` is `strict` and a project file cannot
+        // define a look-alike; a custom name keeps its spelling (config keys are case-sensitive).
+        let folded = s.trim().to_ascii_lowercase();
+        match folded.as_str() {
             "workspace" => Ok(Self::Workspace),
             "devbox" => Ok(Self::Devbox),
             "read-only" | "readonly" => Ok(Self::ReadOnly),
@@ -151,7 +154,7 @@ impl std::str::FromStr for ProfileName {
             "minimal" => Ok(Self::Minimal),
             "off" | "none" => Ok(Self::Off),
             // Validation happens when we try to load it from config.
-            other => Ok(Self::Custom(other.to_string())),
+            _ => Ok(Self::Custom(s.trim().to_string())),
         }
     }
 }
@@ -163,17 +166,51 @@ impl std::str::FromStr for ProfileName {
 /// Last-write-wins would let a malicious workspace hollow out a user/enterprise custom profile while keeping the trusted name.
 /// For example, it could empty `deny` or broaden `read_write`.
 pub fn load_sandbox_config(workspace: &Path) -> SandboxConfig {
+    let global_path = fuigo_home().join(SANDBOX_CONFIG_FILENAME);
+    load_sandbox_config_from(&global_path, workspace, project_profiles_allowed(workspace))
+}
+
+/// The folder-trust verdict for a project's `.fuigo/sandbox.toml`, installed once per process by the
+/// binary entry (`fuigo_workspace::folder_trust::install_process_judges`). Without one every
+/// folder's file loads, as for a library caller.
+static PROJECT_PROFILE_JUDGE: std::sync::OnceLock<fn(&Path) -> bool> = std::sync::OnceLock::new();
+
+/// Install the judge that says whether a folder's project sandbox profiles may load. First call wins.
+pub fn install_project_profile_judge(judge: fn(&Path) -> bool) {
+    let _ = PROJECT_PROFILE_JUDGE.set(judge);
+}
+
+fn project_profiles_allowed(workspace: &Path) -> bool {
+    PROJECT_PROFILE_JUDGE
+        .get()
+        .is_none_or(|judge| judge(workspace))
+}
+
+fn load_sandbox_config_from(
+    global_path: &Path,
+    workspace: &Path,
+    project_allowed: bool,
+) -> SandboxConfig {
     let mut config = SandboxConfig::default();
 
     // Global config: ~/.fuigo/sandbox.toml
-    let global_path = fuigo_home().join(SANDBOX_CONFIG_FILENAME);
-    if let Some(global) = load_config_file(&global_path) {
+    if let Some(global) = load_config_file(global_path) {
         config = global;
     }
 
-    // Project config: <workspace>/.fuigo/sandbox.toml (additive only)
+    // Project config: <workspace>/.fuigo/sandbox.toml (additive only, and only in a trusted folder:
+    // an untrusted repository must not supply the profile the user selected)
     let project_path = workspace.join(".fuigo").join(SANDBOX_CONFIG_FILENAME);
-    if let Some(project) = load_config_file_in(&project_path, Some(workspace)) {
+    if !project_allowed {
+        if project_path.exists()
+            && crate::startup_warnings::first(format!("untrusted-project-profiles:{project_path:?}"))
+        {
+            fuigo_tty_utils::cli_eprintln!(
+                "WARNING: ignoring the sandbox profiles in {}: the folder is not trusted",
+                fuigo_tty_utils::untrusted(&project_path.display())
+            );
+        }
+    } else if let Some(project) = load_config_file_in(&project_path, Some(workspace)) {
         merge_project_profiles(&mut config, project);
     }
 
@@ -265,6 +302,13 @@ fn load_config_file_in(path: &Path, root: Option<&Path>) -> Option<SandboxConfig
         }
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "Failed to parse sandbox config");
+            if crate::startup_warnings::first(format!("sandbox-config-parse:{path:?}")) {
+                fuigo_tty_utils::cli_eprintln!(
+                    "WARNING: could not parse the sandbox config {}: {}",
+                    fuigo_tty_utils::untrusted(&path.display()),
+                    fuigo_tty_utils::untrusted(&e)
+                );
+            }
             None
         }
     }
@@ -1526,5 +1570,62 @@ read_write = ["/tmp/ci-artifacts"]
                 "expected /dev/fd to be a directory on this platform"
             );
         }
+    }
+
+    #[test]
+    fn profile_names_are_trimmed_and_case_folded_for_built_ins_only() {
+        for name in ["Strict", " STRICT ", "strict\n"] {
+            assert_eq!(name.parse::<ProfileName>().unwrap(), ProfileName::Strict, "{name:?}");
+        }
+        assert_eq!("Read-Only".parse::<ProfileName>().unwrap(), ProfileName::ReadOnly);
+        assert_eq!("OFF".parse::<ProfileName>().unwrap(), ProfileName::Off);
+        // A custom name keeps its spelling (trimmed): config keys are case-sensitive
+        assert_eq!(
+            " Mine ".parse::<ProfileName>().unwrap(),
+            ProfileName::Custom("Mine".into())
+        );
+    }
+
+    fn scratch_workspace(tag: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "fuigo-sandbox-profiles-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(workspace.join(".fuigo")).unwrap();
+        (root, workspace)
+    }
+
+    #[test]
+    fn a_project_profile_spelled_in_another_case_cannot_stand_in_for_a_built_in() {
+        let (root, workspace) = scratch_workspace("case");
+        std::fs::write(
+            workspace.join(".fuigo").join(SANDBOX_CONFIG_FILENAME),
+            "[profiles.Strict]\nextends = \"devbox\"\n[profiles.mine]\nextends = \"workspace\"\n",
+        )
+        .unwrap();
+        let config = load_sandbox_config_from(&root.join("none.toml"), &workspace, true);
+        assert!(!config.profiles.contains_key("Strict"), "{:?}", config.profiles);
+        assert!(config.profiles.contains_key("mine"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_untrusted_folders_project_profiles_are_ignored() {
+        let (root, workspace) = scratch_workspace("untrusted");
+        std::fs::write(
+            workspace.join(".fuigo").join(SANDBOX_CONFIG_FILENAME),
+            "[profiles.mine]\nextends = \"devbox\"\n",
+        )
+        .unwrap();
+        let global = root.join("global.toml");
+        std::fs::write(&global, "[profiles.theirs]\nextends = \"strict\"\n").unwrap();
+        let config = load_sandbox_config_from(&global, &workspace, false);
+        assert!(!config.profiles.contains_key("mine"));
+        assert!(config.profiles.contains_key("theirs"), "the user's own file still loads");
+        let config = load_sandbox_config_from(&global, &workspace, true);
+        assert!(config.profiles.contains_key("mine"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

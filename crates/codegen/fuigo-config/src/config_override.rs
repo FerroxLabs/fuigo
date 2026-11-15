@@ -95,14 +95,176 @@ pub const CAMPAIGN_STRIP_KEYS: &[&str] = &[
     "model_providers",
     "auth",
     "fuigo_com_config",
+    // The trusted API origins (and so where the sign-in bearer and `FUIGO_API_KEY` may be sent) come from here.
+    "endpoints",
+    // Sandbox policy is the user's, CLI's or requirements'; the `FUIGO_CONFIG` overlay cannot set it either.
+    "sandbox",
 ];
 
-/// Dotted paths a campaign patch (remote, `[[campaigns]]` in any layer, `FUIGO_CAMPAIGNS_OVERRIDE`) may never set:
-/// `features.peer_messaging` lets sessions message each other and only the user or the machine's admin may turn it on.
+/// Dotted paths a campaign patch (remote, `[[campaigns]]` in any layer, `FUIGO_CAMPAIGNS_OVERRIDE`) may set; `*`
+/// matches any one table key. The boundary is this list, not the strip list below: [`retain_campaign_allowed`] runs
+/// first on every campaign patch and drops everything else (fail-closed, so a new config key stays out of campaigns
+/// until it is listed here). Each path is one the shipped campaign features use, and none can set a credential
+/// or widen a permission. The one that reaches further is `mcp_servers`: a campaign may add an HTTP server at a URL
+/// it chooses, or a local program it names, which is reported to the user, secret-free and untrusted (an HTTP server
+/// at a campaign-chosen URL gets no saved key, header or environment value). `tests/campaign_key_guard.rs` holds the reviewed copy with the reason for each.
+/// A length-1 path keeps that whole table (only a table); a deeper path keeps that leaf, subject to
+/// [`retain_campaign_allowed`]'s value constraints.
+pub const CAMPAIGN_ALLOW_PATHS: &[&[&str]] = &[
+    // The soft default-model nudge (`CAMPAIGN_FIELDS` in the shell), dismissed by an explicit `/model` pick. This and
+    // the two helper selectors may not name a model the config routes (`drop_campaign_routed_model_selectors`, C7-01)
+    &["models", "default"],
+    // Helper-model nudges: resolved as defaults, never as the user's own choice (P90 F6)
+    &["models", "image_description"],
+    &["models", "session_summary"],
+    // Metadata of a model the campaign nudges to or adds; its route, credential and notice keys stay stripped below
+    &["model", "*", "name"],
+    &["model", "*", "context_window"],
+    // A campaign may ADD an MCP server: `strip_campaign_mcp_servers` keeps new names only, without secret fields. An
+    // added stdio server does not start until the user turns it on for that command (`approved_campaign_mcp_servers`
+    // in the user's own config.toml, outside this list; C7-02)
+    &["mcp_servers"],
+    // Managed MCP servers may only be turned OFF (`false`): `true` would start servers the user turned off
+    &["managed_mcps", "enabled"],
+];
+
+/// Smallest and largest `model.<id>.context_window` a campaign may set (the sampler's own ceiling is 16,000,000).
+pub const CAMPAIGN_CONTEXT_WINDOW_RANGE: std::ops::RangeInclusive<i64> = 1024..=10_000_000;
+
+/// Text that comes from a campaign, cleaned for a note: control characters removed, cut to `max` characters.
+pub fn tidy_note_text(s: &str, max: usize) -> String {
+    s.chars().filter(|c| !c.is_control()).take(max).collect()
+}
+
+/// Confine a campaign `patch` to [`CAMPAIGN_ALLOW_PATHS`] and their value constraints. Returns the top-level keys
+/// whose content was dropped in whole or in part (names only, never values; cut to a short printable form because
+/// they come from the campaign), so the caller can tell the user once.
+pub fn retain_campaign_allowed(patch: &mut toml::Table) -> Vec<String> {
+    let before = patch.clone();
+    retain_allowed_paths(patch, CAMPAIGN_ALLOW_PATHS, true);
+    if let Some(toml::Value::Table(models)) = patch.get_mut("models") {
+        models.retain(|_, v| v.is_str());
+    }
+    if let Some(toml::Value::Table(by_id)) = patch.get_mut("model") {
+        for (_, entry) in by_id.iter_mut() {
+            if let toml::Value::Table(entry) = entry {
+                entry.retain(|k, v| match k {
+                    "name" => v.is_str(),
+                    "context_window" => v.as_integer().is_some_and(|n| CAMPAIGN_CONTEXT_WINDOW_RANGE.contains(&n)),
+                    _ => false,
+                });
+            }
+        }
+        by_id.retain(|_, v| v.as_table().is_some_and(|t| !t.is_empty()));
+    }
+    if let Some(toml::Value::Table(managed)) = patch.get_mut("managed_mcps") {
+        managed.retain(|_, v| *v == toml::Value::Boolean(false));
+    }
+    patch.retain(|_, v| v.as_table().is_none_or(|t| !t.is_empty()));
+    let mut removed = Vec::new();
+    removed_paths(&before, patch, "", &mut removed);
+    removed.iter().map(|p| tidy_note_text(p, 64)).collect()
+}
+
+/// Dotted paths in `before` that `after` lacks or changed, descending into tables so a kept `models.default` does not
+/// put `models` on the list.
+fn removed_paths(before: &toml::Table, after: &toml::Table, prefix: &str, out: &mut Vec<String>) {
+    for (k, v) in before {
+        let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+        match (v, after.get(k)) {
+            (_, None) => out.push(path),
+            (toml::Value::Table(b), Some(toml::Value::Table(a))) => removed_paths(b, a, &path, out),
+            (b, Some(a)) if a != b => out.push(path),
+            _ => {}
+        }
+    }
+}
+
+/// The `models.*` selectors a campaign may set (the `models` leaves of [`CAMPAIGN_ALLOW_PATHS`]).
+pub const CAMPAIGN_MODEL_SELECTORS: &[&str] = &["default", "image_description", "session_summary"];
+
+/// `[model.<id>]` keys that choose where that model's requests go or which credential they carry. A model with any of
+/// them is routed by the config (the user's or their administrator's), not by the built-in catalog (review C7-01).
+pub const MODEL_ROUTE_KEYS: &[&str] = &[
+    "base_url",
+    "api_base_url",
+    "model_provider",
+    "auth_provider",
+    "api_key",
+    "env_key",
+    "extra_headers",
+    "env_http_headers",
+    "http_headers",
+    "query_params",
+    "mtls_cert_dir",
+];
+
+/// Every name that selects a `[model.<id>]` entry in `config` that sets any [`MODEL_ROUTE_KEYS`] key: its table key,
+/// and the wire names the shell also resolves a selector by (its `id`, its `model`, each `variants[].model_id`;
+/// review M-2).
+pub fn config_routed_model_ids(config: &toml::Value) -> std::collections::HashSet<String> {
+    let Some(models) = config.get("model").and_then(toml::Value::as_table) else {
+        return Default::default();
+    };
+    let mut ids = std::collections::HashSet::new();
+    for (key, entry) in models {
+        let Some(entry) = entry.as_table().filter(|e| MODEL_ROUTE_KEYS.iter().any(|k| e.contains_key(*k))) else {
+            continue;
+        };
+        ids.insert(key.clone());
+        let variant_ids = entry
+            .get("variants")
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|variant| variant.get("model_id"));
+        for name in ["id", "model"].iter().filter_map(|k| entry.get(*k)).chain(variant_ids) {
+            if let Some(name) = name.as_str() {
+                ids.insert(name.to_owned());
+            }
+        }
+    }
+    ids
+}
+
+/// Review C7-01: drop each campaign model selector that names a model in `routed` (see [`config_routed_model_ids`]),
+/// so a campaign can nudge to a built-in or catalog model but cannot move the user's content to an endpoint or
+/// credential the user configured for something else. Returns the dropped selector names (never their values).
+pub fn drop_campaign_routed_model_selectors(
+    patch: &mut toml::Table,
+    routed: &std::collections::HashSet<String>,
+) -> Vec<&'static str> {
+    let Some(toml::Value::Table(models)) = patch.get_mut("models") else {
+        return Vec::new();
+    };
+    let dropped: Vec<&'static str> = CAMPAIGN_MODEL_SELECTORS
+        .iter()
+        .copied()
+        .filter(|k| models.get(*k).and_then(toml::Value::as_str).is_some_and(|id| routed.contains(id)))
+        .collect();
+    for key in &dropped {
+        models.remove(*key);
+    }
+    if models.is_empty() {
+        patch.remove("models");
+    }
+    dropped
+}
+
+/// Second layer behind [`CAMPAIGN_ALLOW_PATHS`] (defence in depth): paths stripped even if an allowlist entry ever
+/// came to cover them. `features.peer_messaging` lets sessions message each other and only the user or the machine's
+/// admin may turn it on.
 ///
 /// `*` matches every key of a table (MCP server names are dynamic). A campaign may never set a server's token settings
 /// (`bearer_token_file`, `bearer_token_env_var`), on any server, new or existing. What else a campaign may do to MCP
 /// servers is decided by [`strip_campaign_mcp_servers`], which also needs the pre-campaign set of server names.
+///
+/// No `[model.<id>]` (existing or added) takes a host, header, query, provider or credential field from a campaign.
+///
+/// The boundary these entries record: a campaign never sets where a credential or the user's content goes (a host,
+/// endpoint, proxy, header, token or key), or what the client executes (a command, prefix or environment policy), and
+/// never flips a switch or selector that turns one of those on. `tests/campaign_key_guard.rs` classifies every config
+/// key whose name looks like one of those and keeps a registry of the semantic switches, so this list does not rot.
 ///
 /// `model.*.notice` is text shown in a banner above the prompt: only the user's own layers may set it.
 pub const CAMPAIGN_STRIP_PATHS: &[&str] = &[
@@ -110,13 +272,105 @@ pub const CAMPAIGN_STRIP_PATHS: &[&str] = &[
     "mcp_servers.*.bearer_token_file",
     "mcp_servers.*.bearer_token_env_var",
     "model.*.notice",
+    // A campaign never sets where a model sends requests, what it sends with them, or which credential source it uses,
+    // on any `[model.<id>]` (existing or added): a credential the user already configured would follow the new host.
+    "model.*.base_url",
+    "model.*.api_base_url",
+    "model.*.extra_headers",
+    "model.*.env_http_headers",
+    "model.*.http_headers",
+    "model.*.query_params",
+    "model.*.model_provider",
+    "model.*.auth_provider",
+    "model.*.api_key",
+    "model.*.env_key",
+    "model.*.mtls_cert_dir",
+    // The global default headers land on every model.
+    "models.extra_headers",
+    "toolset.web_fetch.allow_local",
+    // Where a hub sign-in bearer goes, and what every shell command is run with or after.
+    "hub.url",
+    "shell_environment_policy",
+    "toolset.bash.cmd_prefix",
+    "toolset.web_fetch.proxy_endpoint",
+    // Web-search routing and credentials: a destination plus the key or headers sent with it.
+    "toolset.web_search.base_url",
+    "toolset.web_search.flux_base_url",
+    "toolset.web_search.api_key",
+    "toolset.web_search.extra_headers",
+    "toolset.web_search.env_http_headers",
+    "toolset.web_search.mtls_cert_dir",
+    // Telemetry: where events and traces go, the keys sent with them, the exporters, and the content gates.
+    "telemetry.events_url",
+    "telemetry.events_api_key",
+    "telemetry.mixpanel_token",
+    "telemetry.otel_endpoint",
+    "telemetry.otel_enabled",
+    "telemetry.otel_logs_exporter",
+    "telemetry.otel_metrics_exporter",
+    "telemetry.otel_protocol",
+    "telemetry.otel_log_user_prompts",
+    "telemetry.otel_log_tool_details",
+    "telemetry.otel_certificate",
+    "telemetry.otel_client_certificate",
+    "telemetry.otel_client_key",
+    // A command the client runs when the user sends feedback.
+    "feedback.user.command",
+    // The video-output bucket: an endpoint and its access keys.
+    "tools.zdr_video_output_s3",
+    // Where updates, plugins, skills and rules are loaded from, and where sessions are registered: code and
+    // instructions the client runs or reads, not a nudge.
+    "cli.installer",
+    "cli.npm_registry",
+    "cli.session_registry",
+    "paths",
+    "plugins.paths",
+    "skills.bundled_skill_dirs",
+    "skills.paths",
+    "skills.server_skill_dirs",
+    // Which agent definition (instructions and inline hooks) loads, which installed plugins run, and where the
+    // plugin catalog comes from.
+    "agent.definition",
+    "plugins.enabled",
+    "plugins.disabled",
+    "plugins.auto_discover",
+    "marketplace.sources",
+    "skills.auto_discover",
+    // Session artifacts leaving the machine, and the exporter transport under both spellings.
+    "telemetry.trace_upload",
+    "telemetry.otel_transport",
+    // Switches and selectors that turn the above on indirectly: the telemetry feature is the default for trace upload,
+    // the LSP feature starts the user's and plugins' language servers, a named agent loads that definition's hooks and
+    // servers, the disable list keeps installed MCP servers stopped, and a subagent role or persona file is read from
+    // any path a campaign names.
+    "features.telemetry",
+    "features.lsp_tools",
+    "agent.name",
+    "disabled_mcp_servers",
+    "subagents.roles.*.prompt_file",
+    "subagents.personas.*.instructions_file",
+];
+
+/// Credential and environment fields a campaign-ADDED MCP server may not carry: each either holds a secret or names an
+/// environment variable that would be read and sent to the campaign's `url`. `url`, `command` and `args` stay, so a
+/// secret-free server still loads.
+pub const CAMPAIGN_MCP_SECRET_FIELDS: &[&str] = &[
+    "env",
+    "headers",
+    "http_headers",
+    "env_http_headers",
+    "oauth",
+    "oauth_client_secret_env_var",
+    "bearer_token",
+    "bearer_token_env_var",
+    "bearer_token_file",
 ];
 
 /// A campaign patch may not modify ANY key of an MCP server that already exists before campaigns are applied
 /// (`existing`): its whole `mcp_servers.<name>` sub-table is dropped from the patch. A server the patch ADDS (a name not
-/// in `existing`) keeps every field a campaign could set before, except the token settings, which
-/// [`strip_campaign_paths`] removes. A non-table `mcp_servers` or server entry is dropped. Returns the names the strip
-/// dropped or altered, so the caller can tell the user; it is called before [`strip_campaign_paths`].
+/// in `existing`) keeps `url`, `command`, `args` and its other plain fields; [`CAMPAIGN_MCP_SECRET_FIELDS`] are dropped.
+/// A non-table `mcp_servers` or server entry is dropped. Returns the names the strip dropped or altered, so the caller
+/// can tell the user; it is called before [`strip_campaign_paths`].
 pub fn strip_campaign_mcp_servers(patch: &mut toml::Table, existing: &std::collections::HashSet<String>) -> Vec<String> {
     let mut touched = Vec::new();
     match patch.get_mut("mcp_servers") {
@@ -128,10 +382,14 @@ pub fn strip_campaign_mcp_servers(patch: &mut toml::Table, existing: &std::colle
                 if drop_whole {
                     servers.remove(&name);
                     touched.push(name);
-                } else if let Some(toml::Value::Table(entry)) = servers.get_mut(&name)
-                    && (entry.contains_key("bearer_token_file") || entry.contains_key("bearer_token_env_var"))
-                {
-                    touched.push(name);
+                } else if let Some(toml::Value::Table(entry)) = servers.get_mut(&name) {
+                    let mut hit = false;
+                    for key in CAMPAIGN_MCP_SECRET_FIELDS {
+                        hit |= entry.remove(*key).is_some();
+                    }
+                    if hit {
+                        touched.push(name);
+                    }
                 }
             }
             if servers.is_empty() {
@@ -144,6 +402,55 @@ pub fn strip_campaign_mcp_servers(patch: &mut toml::Table, existing: &std::colle
         }
     }
     touched
+}
+
+/// `(server name, program)` for every stdio server left in `patch` that has a `command`. After
+/// [`strip_campaign_mcp_servers`] those are the servers the campaign ADDS: each runs a program the campaign chose, so the
+/// caller tells the user (a warning, not a refusal: a campaign may still add a stdio server). Text is cut to one short
+/// printable line because it comes from the campaign.
+pub fn campaign_added_stdio_programs(patch: &toml::Table) -> Vec<(String, String)> {
+    fn tidy(s: &str) -> String {
+        tidy_note_text(s, 120)
+    }
+    let Some(toml::Value::Table(servers)) = patch.get("mcp_servers") else {
+        return Vec::new();
+    };
+    servers
+        .iter()
+        .filter_map(|(name, server)| {
+            let command = server.get("command")?.as_str()?;
+            Some((tidy(name), tidy(command)))
+        })
+        .collect()
+}
+
+/// Remove [`CAMPAIGN_SOURCE_MARKER`] from every `mcp_servers.<name>` of a layer that is not a campaign. Only the
+/// campaign merge may set it ([`mark_campaign_servers`]); in any other layer it would switch off the environment
+/// expansion of a definition the user or a project wrote.
+pub fn strip_campaign_source_marker(layer: &mut toml::Value) {
+    if let Some(toml::Value::Table(servers)) = layer.get_mut("mcp_servers") {
+        for (_, server) in servers.iter_mut() {
+            if let toml::Value::Table(entry) = server {
+                entry.remove(CAMPAIGN_SOURCE_MARKER);
+            }
+        }
+    }
+}
+
+/// Name of the marker [`mark_campaign_servers`] sets (`McpServerConfig::campaign_source`).
+pub const CAMPAIGN_SOURCE_MARKER: &str = "__fuigo_campaign_source";
+
+/// Mark every server left in `patch` (after [`strip_campaign_mcp_servers`] only the ones the campaign ADDS remain) as
+/// campaign-sourced, so its strings are never expanded from the environment at use. A value the campaign set for the
+/// marker itself is overwritten.
+pub fn mark_campaign_servers(patch: &mut toml::Table) {
+    if let Some(toml::Value::Table(servers)) = patch.get_mut("mcp_servers") {
+        for (_, server) in servers.iter_mut() {
+            if let toml::Value::Table(entry) = server {
+                entry.insert(CAMPAIGN_SOURCE_MARKER.to_owned(), toml::Value::Boolean(true));
+            }
+        }
+    }
 }
 
 /// Remove [`CAMPAIGN_STRIP_PATHS`] from `patch`; a table the removal leaves empty is dropped too.
@@ -251,11 +558,12 @@ pub fn retain_overlay_allowed(overlay: &mut toml::Table) {
 /// At the top level a whole-subtree entry (a length-1 path) keeps its value only when it is a table.
 /// A scalar or array there would clobber the subtree on deep-merge, so it is dropped.
 /// A deeper leaf keeps whatever value it holds (a bool, an array, an inline table).
+/// A `*` segment matches any one key (campaign paths use it; the overlay list has none).
 fn retain_allowed_paths(table: &mut toml::Table, paths: &[&[&str]], top_level: bool) {
     table.retain(|key, value| {
         let nested: Vec<&[&str]> = paths
             .iter()
-            .filter(|p| p.first().copied() == Some(key))
+            .filter(|p| p.first().is_some_and(|seg| *seg == key || *seg == "*"))
             .map(|p| &p[1..])
             .collect();
         if nested.is_empty() {

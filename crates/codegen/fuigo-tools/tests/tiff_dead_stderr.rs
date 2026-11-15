@@ -172,6 +172,14 @@ fn tiff_and_usvg_resolve_to_the_print_free_vendored_copies() {
              third_party/{name}-*: re-vendor that version without its prints (third_party/README.md)"
         );
     }
+    // web_fetch's converter: the vendored copy has its quadratic loops made linear.
+    let (total, non_local) = lock_entries(&lock, "htmd");
+    assert!(total >= 1, "htmd is no longer in Cargo.lock; drop its vendored copy");
+    assert!(
+        non_local.is_empty(),
+        "htmd {non_local:?} resolves to a registry/git source, bypassing third_party/htmd-*: \
+         re-vendor that version with its linear-time patch (third_party/README.md)"
+    );
     // The checker does see a registry entry.
     let registry = "[[package]]\nname = \"tiff\"\nversion = \"0.11.4\"\n\
                     source = \"registry+https://github.com/rust-lang/crates.io-index\"\n";
